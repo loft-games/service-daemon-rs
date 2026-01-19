@@ -106,14 +106,47 @@ sequenceDiagram
 
 ### `macros` (Development Only)
 
-Enable the `macros` feature to get compile-time dependency validation:
+Enable the `macros` feature **only during development** to get startup dependency validation.
+In production builds, it expands to nothing (zero cost).
 
-```toml
-[dependencies]
-service-daemon = { path = "service-daemon", features = ["macros"] }
+**Option 1: Enable via command line (recommended)**
+```bash
+# During development
+cargo run --features macros
+
+# Production build (no validation overhead)
+cargo build --release
 ```
 
-This enables `verify_setup!()` which scans your project and warns about missing dependencies during `cargo check`.
+**Option 2: Enable in Cargo.toml for dev builds**
+```toml
+[features]
+default = []
+macros = []
+
+[dependencies]
+service-daemon = { path = "service-daemon" }
+```
+
+Then add `verify_setup!()` inside your main function:
+
+```rust
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt::init();
+    
+    // Only runs validation when 'macros' feature is enabled
+    service_daemon::verify_setup!();
+    
+    let daemon = ServiceDaemon::auto_init();
+    daemon.run().await
+}
+```
+
+If there's a missing dependency, you'll see a warning at startup:
+```text
+⚠️  Dependency 'api_key' is required by a service but no #[provider] found for it.
+```
 
 ## Project Structure
 

@@ -18,4 +18,4 @@ pub use utils::service_daemon::ServiceDaemon;
 pub use linkme;
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{provider, service};
+pub use service_daemon_macro::{provider, service, verify_setup};

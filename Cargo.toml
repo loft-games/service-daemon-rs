@@ -7,6 +7,10 @@ edition = "2024"
 name = "service-daemon-rs"
 path = "src/main.rs"
 
+[features]
+default = []
+macros = []
+
 [dependencies]
 service-daemon = { path = "service-daemon" }
 service-daemon-macro = { path = "service-daemon-macro" }
