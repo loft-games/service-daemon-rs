@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [features]
 default = []
-macros = []
+macros = ["service-daemon/macros"]
 
 [dependencies]
 service-daemon = { path = "service-daemon" }
@@ -19,6 +19,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 futures = "0.3"
+
+[dev-dependencies.service-daemon]
+path = "service-daemon"
+features = ["macros"]
 
 [workspace]
 members = [".", "service-daemon", "service-daemon-macro"]

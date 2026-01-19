@@ -106,26 +106,18 @@ sequenceDiagram
 
 ### `macros` (Development Only)
 
-Enable the `macros` feature **only during development** to get startup dependency validation.
-In production builds, it expands to nothing (zero cost).
+The `macros` feature enables `verify_setup!()` which validates dependencies at startup.
+Use `dev-dependencies` to automatically enable it during development only:
 
-**Option 1: Enable via command line (recommended)**
-```bash
-# During development
-cargo run --features macros
-
-# Production build (no validation overhead)
-cargo build --release
-```
-
-**Option 2: Enable in Cargo.toml for dev builds**
 ```toml
 [features]
-default = []
-macros = []
+macros = ["service-daemon/macros"]
 
 [dependencies]
 service-daemon = { path = "service-daemon" }
+
+[dev-dependencies]
+service-daemon = { path = "service-daemon", features = ["macros"] }
 ```
 
 Then add `verify_setup!()` inside your main function:
@@ -135,7 +127,7 @@ Then add `verify_setup!()` inside your main function:
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     
-    // Only runs validation when 'macros' feature is enabled
+    // Validates dependencies - only runs in dev builds
     service_daemon::verify_setup!();
     
     let daemon = ServiceDaemon::auto_init();
@@ -143,7 +135,11 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-If there's a missing dependency, you'll see a warning at startup:
+**Behavior:**
+- `cargo run` / `cargo test` → validation runs (dev profile)
+- `cargo build --release` → no validation (zero cost)
+
+If there's a missing dependency, you'll see:
 ```text
 ⚠️  Dependency 'api_key' is required by a service but no #[provider] found for it.
 ```
