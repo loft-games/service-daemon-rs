@@ -1,19 +1,28 @@
 use futures::future::BoxFuture;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 pub type ServiceFn = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
 
-/// Describes a service parameter for the registry
-#[derive(Debug, Clone)]
+/// Describes a service parameter for the registry.
+///
+/// The `key` field is pre-computed at compile time by the macro to avoid
+/// runtime string allocations.
+#[derive(Debug, Clone, Copy)]
 pub struct ServiceParam {
     pub name: &'static str,
     pub type_name: &'static str,
+    /// Pre-computed container key in "name_typename" format.
+    pub key: &'static str,
 }
 
 impl ServiceParam {
-    /// Get the container key for this parameter (name_typename format)
-    pub fn container_key(&self) -> String {
-        format!("{}_{}", self.name, self.type_name)
+    /// Get the container key for this parameter.
+    ///
+    /// This returns a pre-computed static string, avoiding allocation.
+    #[inline]
+    pub fn container_key(&self) -> Cow<'static, str> {
+        Cow::Borrowed(self.key)
     }
 }
 

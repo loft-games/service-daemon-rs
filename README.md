@@ -98,7 +98,63 @@ async fn main() -> anyhow::Result<()> {
 2. **`#[service]`** generates a wrapper that calls `T::resolve()` for each `Arc<T>` dependency.
 3. **`#[trigger]`** registers a specialized service with an embedded event loop (Cron, Queue, or Custom).
 4. **`ServiceDaemon::auto_init()`** discovers all services (including triggers) via `linkme`.
-5. **`daemon.run()`** spawns all services/triggers and restarts them on failure.
+5. **`daemon.run()`** spawns all services/triggers and restarts them on failure with **exponential backoff**.
+
+## Resilience Features
+
+### Exponential Backoff & Restart Policy
+
+Services that fail are automatically restarted with exponential backoff to prevent rapid crash loops:
+
+```rust
+use service_daemon::{ServiceDaemon, RestartPolicy};
+use std::time::Duration;
+
+// Custom restart policy with builder pattern
+let policy = RestartPolicy::builder()
+    .initial_delay(Duration::from_secs(2))
+    .max_delay(Duration::from_secs(300))  // 5 minutes max
+    .multiplier(1.5)                       // Backoff multiplier
+    .reset_after(Duration::from_secs(60)) // Reset delay after stable run
+    .build();
+
+let daemon = ServiceDaemon::from_registry_with_policy(policy);
+daemon.run().await?
+```
+
+Default policy: 1s initial → 2x multiplier → 5min max.
+
+### Graceful Shutdown
+
+The daemon handles `SIGINT` (Ctrl+C) and `SIGTERM` signals for graceful shutdown:
+
+```rust
+// Press Ctrl+C or send SIGTERM to stop gracefully
+daemon.run().await?
+// After receiving signal:
+// INFO: Received SIGINT, shutting down...
+// INFO: Stopping service: my_service
+// INFO: ServiceDaemon stopped.
+```
+
+### Service Status API
+
+Monitor service health at runtime:
+
+```rust
+use service_daemon::ServiceStatus;
+
+let daemon = ServiceDaemon::auto_init();
+// ... after spawning services ...
+
+// Query status (Running, Restarting, or Stopped)
+let status = daemon.get_service_status("my_service").await;
+match status {
+    ServiceStatus::Running => println!("Service is healthy"),
+    ServiceStatus::Restarting => println!("Service is recovering"),
+    ServiceStatus::Stopped => println!("Service has stopped"),
+}
+```
 
 ```mermaid
 sequenceDiagram

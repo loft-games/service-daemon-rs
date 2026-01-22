@@ -1,4 +1,5 @@
 use proc_macro::TokenStream;
+use proc_macro_error2::{abort, proc_macro_error};
 use quote::{format_ident, quote};
 use syn::{FnArg, ItemFn, ItemStruct, Pat, Type, parse_macro_input};
 
@@ -28,6 +29,7 @@ use syn::{FnArg, ItemFn, ItemStruct, Pat, Type, parse_macro_input};
 /// daemon.run().await?;
 /// ```
 #[proc_macro_attribute]
+#[proc_macro_error]
 pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
@@ -63,9 +65,10 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                     });
                                     call_args.push(quote! { #arg_name });
 
-                                    // Build param entry for registry
+                                    // Build param entry for registry with pre-computed key
+                                    let key_str = format!("{}_{}", arg_name_str, arg_type_str);
                                     param_entries.push(quote! {
-                                        service_daemon::ServiceParam { name: #arg_name_str, type_name: #arg_type_str }
+                                        service_daemon::ServiceParam { name: #arg_name_str, type_name: #arg_type_str, key: #key_str }
                                     });
                                     continue;
                                 }
@@ -75,11 +78,12 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 // Non-Arc types are not supported for DI
-                let error = syn::Error::new_spanned(
+                abort!(
                     arg_type,
-                    "Service parameters must be Arc<T> where T implements Provided",
+                    "Service parameters must be Arc<T> where T implements Provided";
+                    help = "Wrap your type in Arc<T>, e.g., `Arc<MyType>` instead of `MyType`";
+                    note = "The DI system requires Arc<T> to manage shared ownership of providers"
                 );
-                return TokenStream::from(error.to_compile_error());
             }
         }
     }
@@ -154,6 +158,7 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
+#[proc_macro_error]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr_str = attr.to_string();
 
@@ -167,12 +172,13 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
         return generate_async_fn_provider(item_fn);
     }
 
-    // Error for unsupported items
-    let error = syn::Error::new_spanned(
+    // Error for unsupported items - use abort! for enhanced error
+    abort!(
         proc_macro2::TokenStream::from(item),
-        "#[provider] can only be applied to struct or async fn items.",
-    );
-    TokenStream::from(error.to_compile_error())
+        "#[provider] can only be applied to struct or async fn items";
+        help = "Use #[provider] on a struct definition or an async function";
+        note = "Example: #[provider(default = 8080)] pub struct Port(pub i32);"
+    )
 }
 
 /// Parsed attributes from #[provider(...)]
@@ -198,6 +204,15 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
     if attr_str.trim().is_empty() {
         return attrs;
     }
+
+    // Helper to apply a key-value pair to attrs
+    let mut apply_kv = |key: &str, val: String| match key.trim().to_lowercase().as_str() {
+        "default" | "value" => attrs.default_value = Some(val),
+        "env_name" => attrs.env_name = Some(val.trim_matches('"').to_string()),
+        "item_type" => attrs.item_type = Some(val.trim_matches('"').to_string()),
+        "capacity" => attrs.capacity = val.parse().ok(),
+        _ => {}
+    };
 
     // Parse key-value pairs, handling nested parentheses
     let mut depth = 0;
@@ -231,17 +246,7 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
             }
             ',' if depth == 0 && !in_string => {
                 // End of key-value pair
-                let key = current_key.trim().to_lowercase();
-                let val = current_value.trim().to_string();
-
-                match key.as_str() {
-                    "default" | "value" => attrs.default_value = Some(val),
-                    "env_name" => attrs.env_name = Some(val.trim_matches('"').to_string()),
-                    "item_type" => attrs.item_type = Some(val.trim_matches('"').to_string()),
-                    "capacity" => attrs.capacity = val.parse().ok(),
-                    _ => {}
-                }
-
+                apply_kv(&current_key, current_value.trim().to_string());
                 current_key.clear();
                 current_value.clear();
                 in_value = false;
@@ -258,16 +263,7 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
 
     // Handle last key-value pair
     if !current_key.is_empty() {
-        let key = current_key.trim().to_lowercase();
-        let val = current_value.trim().to_string();
-
-        match key.as_str() {
-            "default" | "value" => attrs.default_value = Some(val),
-            "env_name" => attrs.env_name = Some(val.trim_matches('"').to_string()),
-            "item_type" => attrs.item_type = Some(val.trim_matches('"').to_string()),
-            "capacity" => attrs.capacity = val.parse().ok(),
-            _ => {}
-        }
+        apply_kv(&current_key, current_value.trim().to_string());
     }
 
     attrs
@@ -295,19 +291,21 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
     let return_type = match &item_fn.sig.output {
         syn::ReturnType::Type(_, ty) => ty.clone(),
         syn::ReturnType::Default => {
-            let error = syn::Error::new_spanned(
+            abort!(
                 &item_fn.sig,
-                "#[provider] async fn must have a return type",
+                "#[provider] async fn must have a return type";
+                help = "Add a return type, e.g., `async fn config() -> MyConfig { ... }`"
             );
-            return TokenStream::from(error.to_compile_error());
         }
     };
 
     // Verify it's async
     if fn_asyncness.is_none() {
-        let error =
-            syn::Error::new_spanned(&item_fn.sig, "#[provider] on functions requires async fn");
-        return TokenStream::from(error.to_compile_error());
+        abort!(
+            &item_fn.sig,
+            "#[provider] on functions requires async fn";
+            help = "Add the `async` keyword: `async fn provider_name() -> Type { ... }`"
+        );
     }
 
     let singleton_name = format_ident!("__ASYNC_SINGLETON_{}", fn_name.to_string().to_uppercase());
@@ -636,27 +634,30 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
         quote! {}
     };
 
+    // Helper to generate the to_owned() expansion if needed
+    let dot_owned_expansion = |val: &String| {
+        if inner_is_string
+            && val.as_str().starts_with('"')
+            && val.as_str().ends_with('"')
+            && !val.contains(".to_")
+        {
+            // It's a bare string literal for a String field - add .to_owned()
+            format!("{}.to_owned()", val)
+                .parse()
+                .unwrap_or_else(|_| quote! { Default::default() })
+        } else {
+            val.parse()
+                .unwrap_or_else(|_| quote! { Default::default() })
+        }
+    };
+
     // Generate Default impl for single-element tuple structs
     let default_impl = if let Some(ref _inner) = inner_type {
         // Build the default expression
         let default_expr = if let Some(ref env_name) = provider_attrs.env_name {
             // Use env var with fallback to default
             if let Some(ref default_val) = provider_attrs.default_value {
-                // Auto-expand string literals to .to_owned() if inner type is String
-                let default_tokens: proc_macro2::TokenStream = if inner_is_string
-                    && default_val.as_str().starts_with('"')
-                    && default_val.as_str().ends_with('"')
-                    && !default_val.contains(".to_")
-                {
-                    // It's a bare string literal for a String field - add .to_owned()
-                    format!("{}.to_owned()", default_val)
-                        .parse()
-                        .unwrap_or_else(|_| quote! { Default::default() })
-                } else {
-                    default_val
-                        .parse()
-                        .unwrap_or_else(|_| quote! { Default::default() })
-                };
+                let default_tokens = dot_owned_expansion(default_val);
                 quote! {
                     std::env::var(#env_name).unwrap_or_else(|_| #default_tokens)
                 }
@@ -666,21 +667,7 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
                 }
             }
         } else if let Some(ref default_val) = provider_attrs.default_value {
-            // Auto-expand string literals to .to_owned() if inner type is String
-            let default_tokens: proc_macro2::TokenStream = if inner_is_string
-                && default_val.as_str().starts_with('"')
-                && default_val.as_str().ends_with('"')
-                && !default_val.contains(".to_")
-            {
-                // It's a bare string literal for a String field - add .to_owned()
-                format!("{}.to_owned()", default_val)
-                    .parse()
-                    .unwrap_or_else(|_| quote! { Default::default() })
-            } else {
-                default_val
-                    .parse()
-                    .unwrap_or_else(|_| quote! { Default::default() })
-            };
+            let default_tokens = dot_owned_expansion(default_val);
             quote! { #default_tokens }
         } else {
             // No default specified, skip Default impl
@@ -824,6 +811,7 @@ pub fn verify_setup(_input: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
+#[proc_macro_error]
 pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
@@ -887,11 +875,13 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let arg_name_str = arg_name.to_string();
                 let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
 
-                // Add to param entries for verification
+                // Add to param entries for verification with pre-computed key
+                let key_str = format!("{}_{}", arg_name_str, arg_type_str);
                 param_entries.push(quote! {
                     service_daemon::ServiceParam {
                         name: #arg_name_str,
                         type_name: #arg_type_str,
+                        key: #key_str,
                     }
                 });
 
@@ -916,11 +906,12 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
 
                 // Non-Arc types are not supported for DI
-                let error = syn::Error::new_spanned(
+                abort!(
                     arg_type,
-                    "Trigger DI parameters must be Arc<T> where T implements Provided",
+                    "Trigger DI parameters must be Arc<T> where T implements Provided";
+                    help = "Wrap your type in Arc<T>, e.g., `Arc<MyType>` instead of `MyType`";
+                    note = "Parameters at index 0 (payload) and 1 (trigger_id) are not injected"
                 );
-                return TokenStream::from(error.to_compile_error());
             }
         }
     }

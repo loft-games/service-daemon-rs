@@ -30,12 +30,14 @@ pub struct WorkerQueue;
 
 // --- Async Function Provider Example ---
 // This struct is initialized via an async function below.
+#[allow(dead_code)]
 pub struct AsyncConfig {
     pub connection_string: String,
     pub initialized_at: std::time::Instant,
 }
 
 // The async fn replaces the default initialization
+#[allow(dead_code)]
 #[provider]
 pub async fn async_config() -> AsyncConfig {
     // Simulate async initialization (e.g., fetching config from remote)

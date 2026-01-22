@@ -65,7 +65,8 @@ fn test_trigger_service_modules() {
         // Triggers have module like "triggers/cron", "triggers/queue", etc.
         if entry.module.starts_with("triggers/") {
             let template = entry.module.strip_prefix("triggers/").unwrap();
-            let valid_templates = ["custom", "queue", "cron"];
+            // All supported trigger templates
+            let valid_templates = ["custom", "notify", "event", "queue", "lb_queue", "cron"];
             assert!(
                 valid_templates.contains(&template),
                 "Trigger template '{}' should be one of: {:?}",
