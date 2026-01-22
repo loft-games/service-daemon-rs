@@ -792,33 +792,34 @@ pub fn verify_setup(_input: TokenStream) -> TokenStream {
 /// execute the function when the specified event occurs.
 ///
 /// # Attributes
-/// - `template`: The trigger template type. Options: "custom", "queue", "cron"
-/// - `target`: The name of a provider that supplies the event source
+/// - `template`: The trigger template type. Options: `cron`, `queue`, `lb_queue`, `event`, `notify`, `custom`.
+/// - `target`: The provider type (struct) that supplies the event source.
 ///
 /// # Template Types
-/// - `custom`: Uses `tokio::sync::Notify`. Target should provide `Arc<Notify>`.
-/// - `queue`: Uses `tokio::sync::mpsc::Receiver<T>`. Target should provide `Arc<Mutex<Receiver<T>>>`.
-/// - `cron`: Uses cron expressions. Target should provide `&'static str` (the cron expression).
+/// - `cron`: Uses cron expressions. Target should be a provider for `String` (the cron expression).
+/// - `queue`: Broadcast queue (fanout). Target should be a `#[provider(default = Queue)]`.
+/// - `lb_queue`: Load-balancing queue. Target should be a `#[provider(default = LBQueue)]`.
+/// - `event` / `notify` / `custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
 ///
 /// # Example
 /// ```rust
 /// use service_daemon::trigger;
 ///
-/// #[trigger(template = "custom", target = "my_notifier")]
-/// async fn on_custom_event(request: (), trigger_id: String) -> anyhow::Result<()> {
-///     println!("Custom event triggered! ID: {}", trigger_id);
+/// #[trigger(template = event, target = MyNotifier)]
+/// async fn on_event(payload: (), trigger_id: String) -> anyhow::Result<()> {
+///     println!("Event triggered! ID: {}", trigger_id);
 ///     Ok(())
 /// }
 ///
-/// #[trigger(template = "queue", target = "task_queue")]
+/// #[trigger(template = queue, target = TaskQueue)]
 /// async fn on_queue_item(item: String, trigger_id: String) -> anyhow::Result<()> {
 ///     println!("Received queue item: {} (trigger: {})", item, trigger_id);
 ///     Ok(())
 /// }
 ///
-/// #[trigger(template = "cron", target = "cleanup_schedule")]
+/// #[trigger(template = cron, target = CleanupSchedule)]
 /// async fn on_cron_tick(tick_time: (), trigger_id: String) -> anyhow::Result<()> {
-///     println!("Cron triggered at scheduled time! ID: {}", trigger_id);
+///     println!("Cron triggered! ID: {}", trigger_id);
 ///     Ok(())
 /// }
 /// ```
