@@ -13,11 +13,13 @@ pub struct Port(pub i32);
 
 // A wrapper type for database URL configuration.
 // Using env_name with default fallback
-#[provider(default = "mysql://localhost".to_string(), env_name = "DATABASE_URL")]
+// Note: String literals are automatically expanded to .to_owned() for String fields!
+#[provider(default = "mysql://localhost", env_name = "DATABASE_URL")]
 pub struct DbUrl(pub String);
 
 // A service that depends on Port and DbUrl.
 // If either dependency is missing, compilation will fail!
+#[allow(dead_code)]
 #[provider]
 pub struct AppConfig {
     pub port: Arc<Port>,

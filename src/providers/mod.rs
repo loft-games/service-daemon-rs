@@ -1,7 +1,6 @@
-//! Dependency providers for the application
+//! Type-based dependency providers for the application
 //!
-//! These are automatically registered at startup via #[provider]
+//! These are automatically resolved via the `Provided` trait.
 
-pub mod config;
 pub mod trigger_providers;
 pub mod typed_providers;

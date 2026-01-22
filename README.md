@@ -27,28 +27,45 @@ tracing-subscriber = "0.3"
 ### 2. Create providers
 
 ```rust
-// src/providers/config.rs
+// src/providers/typed_providers.rs
 use service_daemon::provider;
 
-#[provider(name = "port")]
-const PORT: i32 = 8080;
+#[provider(default = 8080)]
+pub struct Port(pub i32);
 
-#[provider(name = "db_url")]
-fn get_db_url() -> String {
-    std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".into())
+#[provider(default = "mysql://localhost")]  // Auto-expands to .to_owned()
+pub struct DbUrl(pub String);
+
+// --- Environment Variable Provider ---
+// Reads DATABASE_URL from environment, falls back to default if not set
+#[provider(env_name = "DATABASE_URL", default = "postgres://localhost")]
+pub struct DatabaseUrl(pub String);
+
+// --- Async Function Provider (custom initialization) ---
+pub struct AsyncConfig {
+    pub connection_string: String,
+}
+
+#[provider]
+pub async fn async_config() -> AsyncConfig {
+    // Custom async initialization (e.g., fetching from remote)
+    AsyncConfig { connection_string: "postgres://localhost".to_owned() }
 }
 ```
+
+
 
 ### 3. Create services
 
 ```rust
 // src/services/example.rs
 use service_daemon::service;
+use crate::providers::typed_providers::{Port, DbUrl};
 use std::sync::Arc;
 
 #[service]
-pub async fn my_service(port: Arc<i32>, db_url: Arc<String>) -> anyhow::Result<()> {
-    tracing::info!("Running on port {} with DB {}", port, db_url);
+pub async fn my_service(port: Arc<Port>, db_url: Arc<DbUrl>) -> anyhow::Result<()> {
+    tracing::info!("Running on port {} with DB {}", **port, **db_url);
     loop {
         // do work
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -69,7 +86,7 @@ use service_daemon::ServiceDaemon;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     
-    // auto_init() runs all providers, then registers all services
+    // Registers all services (providers are resolved lazily via OnceLock)
     let daemon = ServiceDaemon::auto_init();
     daemon.run().await
 }
@@ -77,38 +94,36 @@ async fn main() -> anyhow::Result<()> {
 
 ## How It Works
 
-1. **`#[provider]`** generates a static entry that registers values into `GLOBAL_CONTAINER` at startup
-2. **`#[service]`** generates a wrapper that resolves dependencies from `GLOBAL_CONTAINER` and a static entry for auto-discovery
-3. **`ServiceDaemon::auto_init()`** runs all providers first, then registers all discovered services
-4. **`daemon.run()`** spawns all services and restarts them on failure
+1. **`#[provider]`** implements the `Provided` trait for a struct, using `OnceLock` for thread-safe singleton resolution.
+2. **`#[service]`** generates a wrapper that calls `T::resolve()` for each `Arc<T>` dependency.
+3. **`#[trigger]`** registers a specialized service with an embedded event loop (Cron, Queue, or Custom).
+4. **`ServiceDaemon::auto_init()`** discovers all services (including triggers) via `linkme`.
+5. **`daemon.run()`** spawns all services/triggers and restarts them on failure.
 
 ```mermaid
 sequenceDiagram
     participant Main
-    participant PROVIDER_REGISTRY
-    participant GLOBAL_CONTAINER
     participant SERVICE_REGISTRY
     participant ServiceDaemon
+    participant ServiceWrapper
+    participant Provider
 
     Main->>ServiceDaemon: auto_init()
-    ServiceDaemon->>PROVIDER_REGISTRY: iterate providers
-    loop For each provider
-        PROVIDER_REGISTRY->>GLOBAL_CONTAINER: init() registers value
-    end
-    ServiceDaemon->>SERVICE_REGISTRY: iterate services
-    loop For each service
-        SERVICE_REGISTRY->>ServiceDaemon: register wrapper
-    end
+    ServiceDaemon->>SERVICE_REGISTRY: iterate services & triggers
     Main->>ServiceDaemon: run()
-    ServiceDaemon->>ServiceDaemon: spawn tasks, monitor, restart
+    ServiceDaemon->>ServiceWrapper: spawn()
+    ServiceWrapper->>Provider: T::resolve()
+    Note over Provider: Singleton (OnceLock)
+    Provider-->>ServiceWrapper: Arc<T>
+    ServiceWrapper->>ServiceWrapper: run async function
 ```
 
 ## Features
 
 ### `macros` (Development Only)
 
-The `macros` feature enables `verify_setup!()` which validates dependencies at startup.
-Use `dev-dependencies` to automatically enable it during development only:
+The `macros` feature enables `verify_setup!()` which provides diagnostic logging.
+The real power is in **Type-Based DI**, which gives you **compile-time errors** if a dependency is missing!
 
 ```toml
 [features]
@@ -121,77 +136,97 @@ service-daemon = { path = "service-daemon" }
 service-daemon = { path = "service-daemon", features = ["macros"] }
 ```
 
-Then add `verify_setup!()` inside your main function:
+### Dependency Verification
 
-```rust
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
-    
-    // Validates dependencies - only runs in dev builds
-    service_daemon::verify_setup!();
-    
-    let daemon = ServiceDaemon::auto_init();
-    daemon.run().await
-}
-```
-
-**Behavior:**
-- `cargo run` / `cargo test` → validation runs (dev profile)
-- `cargo build --release` → no validation (zero cost)
-
-If there's a missing dependency or type mismatch, you'll see:
+With Type-Based DI, missing dependencies are caught at **compile-time**:
 ```text
-⚠️  Dependency 'api_key' is required by a service but no #[provider] found for it.
-⚠️  Type mismatch for 'port' in service 'my_service': expected 'i32', provider gives 'String'
-⚠️  Trigger target 'task_queue' is required but no #[provider] found for it.
+error[E0599]: no function or associated item named `resolve` found for struct `MissingType`
 ```
 
 ## Triggers
 
-Triggers allow functions to be executed when specific events occur. Unlike services which run in a loop, triggers are passive and wait for events.
+Triggers are specialized services with built-in event loops. They register normally as services but manage an internal "Call Host".
 
 ### 1. Cron Trigger
 
-Executes a function based on a cron expression.
+Executes a function based on a cron expression string.
 
 ```rust
-#[provider(name = "cleanup_schedule")]
-const CLEANUP: &str = "0 0 * * * *"; // Hourly
+#[provider(default = "*/30 * * * * *")]
+pub struct CleanupSchedule(pub String);
 
-#[trigger(template = "cron", target = "cleanup_schedule")]
+#[trigger(template = "cron", target = CleanupSchedule)]
 async fn hourly_cleanup(_request: (), id: String) -> anyhow::Result<()> {
     tracing::info!("Cleaning up... (id: {})", id);
     Ok(())
 }
 ```
 
-### 2. Queue Trigger
+### 2. Broadcast Queue Trigger (Fanout)
 
-Executes a function when an item is received from a `tokio::mpsc::Receiver<T>`. The trigger automatically resolves the correct generic type.
+All handlers receive every message pushed to a `BroadcastQueue`.
 
 ```rust
-#[derive(serde::Deserialize)]
-struct MyTask { id: u64, cmd: String }
+// BroadcastQueue aliases: Queue, BQueue
+#[provider(default = Queue, item_type = "MyTask")]
+pub struct TaskQueue;
 
-#[trigger(template = "queue", target = "task_queue")]
-async fn process_task(item: MyTask, id: String) -> anyhow::Result<()> {
-    tracing::info!("Received task {} (id: {})", item.id, id);
-    Ok(())
+// Multiple triggers can subscribe - all receive every message!
+#[trigger(template = "queue", target = TaskQueue)]
+async fn handler1(item: MyTask, id: String) -> anyhow::Result<()> { ... }
+
+#[trigger(template = "queue", target = TaskQueue)]
+async fn handler2(item: MyTask, id: String) -> anyhow::Result<()> { ... }
+
+// Push to the queue (synchronous, not async)
+fn trigger_handlers() {
+    let _ = TaskQueue::push(MyTask { ... });
 }
 ```
 
-### 3. Custom Trigger
+### 3. Load-Balancing Queue Trigger
+
+Messages are distributed to one handler at a time with `LoadBalancingQueue`.
+
+```rust
+// LoadBalancingQueue alias: LBQueue
+#[provider(default = LBQueue, item_type = "Task")]
+pub struct WorkerQueue;
+
+#[trigger(template = "lb_queue", target = WorkerQueue)]
+async fn worker(item: Task, id: String) -> anyhow::Result<()> { ... }
+
+// Push to the queue (async)
+async fn add_work() {
+    let _ = WorkerQueue::push(Task { ... }).await;
+}
+```
+
+
+### 4. Signal Trigger (Event)
 
 Executes a function when a `tokio::sync::Notify` is triggered.
 
 ```rust
-#[trigger(template = "custom", target = "user_notifier")]
+// Provider aliases: Notify, Event
+#[provider(default = Notify)]
+pub struct EventNotifier;
+
+// Trigger template aliases: custom, notify, event
+#[trigger(template = "event", target = EventNotifier)]
 async fn on_notification(_request: (), id: String) -> anyhow::Result<()> {
     tracing::info!("Event received! (id: {})", id);
     Ok(())
 }
+
+// Trigger the signal from anywhere:
+fn unlock() {
+    EventNotifier::notify();
+}
 ```
+
+
+
 
 ## Project Structure
 

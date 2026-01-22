@@ -4,9 +4,7 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::models::{
-    PROVIDER_REGISTRY, SERVICE_REGISTRY, ServiceDescription, ServiceFn, TRIGGER_REGISTRY,
-};
+use crate::models::{SERVICE_REGISTRY, ServiceDescription, ServiceFn};
 
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
@@ -21,24 +19,12 @@ impl ServiceDaemon {
         }
     }
 
-    /// Automatically initialize the daemon by:
-    /// 1. Running all auto-registered Providers (populates GLOBAL_CONTAINER)
-    /// 2. Registering all auto-registered Services
+    /// Automatically initialize the daemon by registering all auto-registered Services.
+    ///
+    /// Note: With Type-Based DI, providers are resolved lazily via `Provided::resolve()`
+    /// when services first request them. No explicit provider initialization is needed.
     pub fn auto_init() -> Self {
-        // 1. Initialize all providers
-        info!(
-            "Initializing {} providers from registry",
-            PROVIDER_REGISTRY.len()
-        );
-        for provider in PROVIDER_REGISTRY {
-            info!(
-                "Initializing provider '{}' (type: {})",
-                provider.name, provider.type_name
-            );
-            (provider.init)();
-        }
-
-        // 2. Load services
+        // Load services - providers are resolved lazily via Provided::resolve()
         Self::from_registry()
     }
 
@@ -99,29 +85,7 @@ impl ServiceDaemon {
                 .insert(service.name.clone(), handle);
         }
 
-        // Spawn all triggers
-        info!(
-            "Initializing {} triggers from registry",
-            TRIGGER_REGISTRY.len()
-        );
-        for trigger in TRIGGER_REGISTRY {
-            info!(
-                "Starting trigger '{}' (template: {}, target: {})",
-                trigger.name, trigger.template, trigger.target
-            );
-            let name = trigger.name.to_string();
-            let run = trigger.run;
-            let handle = tokio::spawn(async move {
-                match run().await {
-                    Ok(_) => info!("Trigger {} completed", name),
-                    Err(e) => error!("Trigger {} failed: {:?}", name, e),
-                }
-            });
-            running_tasks
-                .lock()
-                .await
-                .insert(trigger.name.to_string(), handle);
-        }
+        // Note: Triggers are now registered as services, so they are handled above.
 
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;

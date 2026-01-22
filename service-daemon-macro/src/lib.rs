@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemConst, ItemFn, ItemStatic, ItemStruct, Pat, Type, parse_macro_input};
+use syn::{FnArg, ItemFn, ItemStruct, Pat, Type, parse_macro_input};
 
 /// Marks a function as a service managed by ServiceDaemon.
 ///
@@ -118,88 +118,80 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Marks a constant or function as a dependency provider.
+/// Marks a struct as a type-based dependency provider.
 ///
-/// The macro automatically registers the value in the global container
-/// using `linkme` - no manual registration needed in main()!
+/// The macro automatically implements `Provided` for the struct, enabling
+/// compile-time verified dependency injection.
 ///
-/// # Example with const
+/// # Example with default value
 /// ```rust
 /// use service_daemon::provider;
 ///
-/// #[provider(name = "port")]
-/// const PORT: i32 = 8080;
+/// #[provider(default = 8080)]
+/// pub struct Port(pub i32);
+///
+/// #[provider(default = "mysql://localhost")]  // Auto-expands to .to_owned()
+/// pub struct DbUrl(pub String);
 /// ```
 ///
-/// # Example with function
+/// # Example with environment variable
 /// ```rust
 /// use service_daemon::provider;
 ///
-/// #[provider(name = "db_url")]
-/// fn get_db_url() -> String {
-///     std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite::memory:".into())
+/// #[provider(default = "localhost:5432", env_name = "DATABASE_HOST")]
+/// pub struct DatabaseHost(pub String);
+/// ```
+///
+/// # Example with dependencies
+/// ```rust
+/// use service_daemon::provider;
+/// use std::sync::Arc;
+///
+/// #[provider]
+/// pub struct AppConfig {
+///     pub port: Arc<Port>,
+///     pub db_url: Arc<DbUrl>,
 /// }
 /// ```
 #[proc_macro_attribute]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Parse the attribute to get the name (for legacy)
     let attr_str = attr.to_string();
-    let name = parse_provider_name(&attr_str);
 
-    // Try parsing as const first
-    if let Ok(item_const) = syn::parse::<ItemConst>(item.clone()) {
-        return generate_const_provider(item_const, &name);
-    }
-
-    // Try parsing as static
-    if let Ok(item_static) = syn::parse::<ItemStatic>(item.clone()) {
-        return generate_static_provider(item_static, &name);
-    }
-
-    // Try parsing as function
-    if let Ok(item_fn) = syn::parse::<ItemFn>(item.clone()) {
-        return generate_fn_provider(item_fn, &name);
-    }
-
-    // Try parsing as struct
+    // Support struct items for type-based DI
     if let Ok(item_struct) = syn::parse::<ItemStruct>(item.clone()) {
         return generate_struct_provider(item_struct, &attr_str);
     }
 
-    // Fallback error
+    // Support async fn items for custom async initialization
+    if let Ok(item_fn) = syn::parse::<ItemFn>(item.clone()) {
+        return generate_async_fn_provider(item_fn);
+    }
+
+    // Error for unsupported items
     let error = syn::Error::new_spanned(
         proc_macro2::TokenStream::from(item),
-        "#[provider] can only be applied to const, static, fn, or struct items",
+        "#[provider] can only be applied to struct or async fn items.",
     );
     TokenStream::from(error.to_compile_error())
-}
-
-fn parse_provider_name(attr_str: &str) -> String {
-    // Parse: name = "value" or just "value"
-    if attr_str.contains("name") {
-        // name = "value"
-        attr_str
-            .split('=')
-            .nth(1)
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .unwrap_or_else(|| "unknown".to_string())
-    } else {
-        // Just "value"
-        attr_str.trim().trim_matches('"').to_string()
-    }
 }
 
 /// Parsed attributes from #[provider(...)]
 struct ProviderAttrs {
     default_value: Option<String>,
     env_name: Option<String>,
+    /// Only applies to Queue template (e.g., item_type = "MyTask")
+    item_type: Option<String>,
+    /// Capacity for Queue template (default 100)
+    capacity: Option<usize>,
 }
 
-/// Parses attributes from #[provider(default = ..., env_name = "...")]
+/// Parses attributes from #[provider(default = ..., env_name = "...", item_type = "...", capacity = N)]
 fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
     let mut attrs = ProviderAttrs {
         default_value: None,
         env_name: None,
+        item_type: None,
+        capacity: None,
     };
 
     // Handle empty attributes
@@ -245,6 +237,8 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
                 match key.as_str() {
                     "default" | "value" => attrs.default_value = Some(val),
                     "env_name" => attrs.env_name = Some(val.trim_matches('"').to_string()),
+                    "item_type" => attrs.item_type = Some(val.trim_matches('"').to_string()),
+                    "capacity" => attrs.capacity = val.parse().ok(),
                     _ => {}
                 }
 
@@ -270,6 +264,8 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
         match key.as_str() {
             "default" | "value" => attrs.default_value = Some(val),
             "env_name" => attrs.env_name = Some(val.trim_matches('"').to_string()),
+            "item_type" => attrs.item_type = Some(val.trim_matches('"').to_string()),
+            "capacity" => attrs.capacity = val.parse().ok(),
             _ => {}
         }
     }
@@ -277,98 +273,261 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
     attrs
 }
 
-fn generate_const_provider(item: ItemConst, name: &str) -> TokenStream {
-    let const_name = &item.ident;
-    let const_type = &item.ty;
-    let type_name = quote!(#const_type).to_string().replace(" ", "");
-    let entry_name = format_ident!("__PROVIDER_ENTRY_{}", const_name.to_string().to_uppercase());
-    let init_fn_name = format_ident!("__provider_init_{}", const_name.to_string().to_lowercase());
+/// Generates a provider from an async function.
+///
+/// This allows custom async initialization logic:
+/// ```rust
+/// #[provider]
+/// async fn my_config() -> AppConfig {
+///     let db = connect_db().await;
+///     AppConfig { db, port: 8080 }
+/// }
+/// ```
+///
+/// The function is called once using `tokio::sync::OnceCell` for async singleton behavior.
+fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
+    let fn_name = &item_fn.sig.ident;
+    let fn_vis = &item_fn.vis;
+    let fn_block = &item_fn.block;
+    let fn_asyncness = &item_fn.sig.asyncness;
+
+    // Extract return type
+    let return_type = match &item_fn.sig.output {
+        syn::ReturnType::Type(_, ty) => ty.clone(),
+        syn::ReturnType::Default => {
+            let error = syn::Error::new_spanned(
+                &item_fn.sig,
+                "#[provider] async fn must have a return type",
+            );
+            return TokenStream::from(error.to_compile_error());
+        }
+    };
+
+    // Verify it's async
+    if fn_asyncness.is_none() {
+        let error =
+            syn::Error::new_spanned(&item_fn.sig, "#[provider] on functions requires async fn");
+        return TokenStream::from(error.to_compile_error());
+    }
+
+    let singleton_name = format_ident!("__ASYNC_SINGLETON_{}", fn_name.to_string().to_uppercase());
 
     let expanded = quote! {
-        #item
+        // Keep the original function (private impl detail)
+        #fn_vis async fn #fn_name() -> #return_type
+            #fn_block
 
-        fn #init_fn_name() {
-            service_daemon::GLOBAL_CONTAINER.register(#name, #const_name);
+        // Generate Provided impl for the return type using OnceCell
+        impl service_daemon::Provided for #return_type {
+            fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#return_type>> = tokio::sync::OnceCell::const_new();
+
+                // Use blocking to get the value synchronously (required for Provided trait)
+                // The actual async init happens on first call.
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        #singleton_name.get_or_init(|| async {
+                            std::sync::Arc::new(#fn_name().await)
+                        }).await.clone()
+                    })
+                })
+            }
         }
-
-        #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ProviderEntry = service_daemon::ProviderEntry {
-            name: #name,
-            type_name: #type_name,
-            init: #init_fn_name,
-        };
     };
 
     TokenStream::from(expanded)
 }
 
-fn generate_static_provider(item: ItemStatic, name: &str) -> TokenStream {
-    let static_name = &item.ident;
-    let static_type = &item.ty;
-    let type_name = quote!(#static_type).to_string().replace(" ", "");
-    let entry_name = format_ident!(
-        "__PROVIDER_ENTRY_{}",
-        static_name.to_string().to_uppercase()
-    );
-    let init_fn_name = format_ident!("__provider_init_{}", static_name.to_string().to_lowercase());
+/// Generates a Signal provider using `tokio::sync::Notify`.
+
+///
+/// This is triggered by `#[provider(default = Notify)]`.
+/// The struct will have:
+/// - An inner `Arc<Notify>`
+/// - A static `notify()` method to call `notify_one()` from anywhere
+/// - `Deref` to `Notify` for direct access
+fn generate_notify_template(
+    struct_name: &syn::Ident,
+    vis: &syn::Visibility,
+    attrs: &[syn::Attribute],
+) -> TokenStream {
+    let singleton_name = format_ident!("__SINGLETON_{}", struct_name.to_string().to_uppercase());
 
     let expanded = quote! {
-        #item
+        #(#attrs)*
+        #vis struct #struct_name(pub std::sync::Arc<tokio::sync::Notify>);
 
-        fn #init_fn_name() {
-            service_daemon::GLOBAL_CONTAINER.register(#name, #static_name.clone());
+        impl Default for #struct_name {
+            fn default() -> Self {
+                Self(std::sync::Arc::new(tokio::sync::Notify::new()))
+            }
         }
 
-        #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ProviderEntry = service_daemon::ProviderEntry {
-            name: #name,
-            type_name: #type_name,
-            init: #init_fn_name,
-        };
+        impl std::ops::Deref for #struct_name {
+            type Target = tokio::sync::Notify;
+            fn deref(&self) -> &tokio::sync::Notify {
+                &self.0
+            }
+        }
+
+        impl service_daemon::Provided for #struct_name {
+            fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
+                #singleton_name.get_or_init(|| std::sync::Arc::new(Self::default())).clone()
+            }
+        }
+
+        impl #struct_name {
+            /// Trigger this signal from anywhere in the application.
+            /// This is a static shortcut that resolves the singleton and calls `notify_one()`.
+            pub fn notify() {
+                <Self as service_daemon::Provided>::resolve().notify_one();
+            }
+
+            /// Wait for a notification on this signal.
+            /// This is a static shortcut that resolves the singleton and calls `notified().await`.
+            pub async fn wait() {
+                <Self as service_daemon::Provided>::resolve().notified().await;
+            }
+        }
     };
 
     TokenStream::from(expanded)
 }
 
-fn generate_fn_provider(item: ItemFn, name: &str) -> TokenStream {
-    let fn_name = &item.sig.ident;
-    let return_type = match &item.sig.output {
-        syn::ReturnType::Default => quote!(()),
-        syn::ReturnType::Type(_, ty) => quote!(#ty),
-    };
-    let type_name = return_type.to_string().replace(" ", "");
-    let entry_name = format_ident!("__PROVIDER_ENTRY_{}", fn_name.to_string().to_uppercase());
-    let init_fn_name = format_ident!("__provider_init_{}", fn_name.to_string().to_lowercase());
+/// Generates a Load-Balancing Queue provider using `tokio::sync::mpsc`.
+///
+/// This is triggered by `#[provider(default = LoadBalancingQueue)]` or `#[provider(default = LBQueue)]`.
+/// - Uses `mpsc::channel` (single consumer).
+/// - Messages are distributed to one handler at a time.
+/// - Ideal for task distribution across workers.
+fn generate_lb_queue_template(
+    struct_name: &syn::Ident,
+    vis: &syn::Visibility,
+    attrs: &[syn::Attribute],
+    item_type_str: &str,
+    capacity: usize,
+) -> TokenStream {
+    let singleton_name = format_ident!("__SINGLETON_{}", struct_name.to_string().to_uppercase());
+    let item_type: proc_macro2::TokenStream =
+        item_type_str.parse().unwrap_or_else(|_| quote!(String));
 
     let expanded = quote! {
-        #item
-
-        fn #init_fn_name() {
-            service_daemon::GLOBAL_CONTAINER.register(#name, #fn_name());
+        #(#attrs)*
+        #vis struct #struct_name {
+            pub tx: tokio::sync::mpsc::Sender<#item_type>,
+            pub rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<#item_type>>>,
         }
 
-        #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ProviderEntry = service_daemon::ProviderEntry {
-            name: #name,
-            type_name: #type_name,
-            init: #init_fn_name,
-        };
+        impl Default for #struct_name {
+            fn default() -> Self {
+                let (tx, rx) = tokio::sync::mpsc::channel(#capacity);
+                Self {
+                    tx,
+                    rx: std::sync::Arc::new(tokio::sync::Mutex::new(rx)),
+                }
+            }
+        }
 
-        // Note: impl Provided is NOT generated for function providers
-        // because return types may be foreign types (orphan rule).
-        // Use #[provider] on a struct for Type-Based DI.
+        impl std::ops::Deref for #struct_name {
+            type Target = std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<#item_type>>>;
+            fn deref(&self) -> &Self::Target {
+                &self.rx
+            }
+        }
+
+        impl service_daemon::Provided for #struct_name {
+            fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
+                #singleton_name.get_or_init(|| std::sync::Arc::new(Self::default())).clone()
+            }
+        }
+
+        impl #struct_name {
+            /// Push an item to this queue from anywhere in the application.
+            /// This is a static shortcut that resolves the singleton and calls `tx.send(item)`.
+            pub async fn push(item: #item_type) -> Result<(), tokio::sync::mpsc::error::SendError<#item_type>> {
+                <Self as service_daemon::Provided>::resolve().tx.send(item).await
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Generates a Broadcast Queue provider using `tokio::sync::broadcast`.
+///
+/// This is triggered by `#[provider(default = BroadcastQueue)]`, `#[provider(default = Queue)]`, or `#[provider(default = BQueue)]`.
+/// - Uses `broadcast::channel` (multiple subscribers).
+/// - All triggers receive every message (fanout).
+/// - Ideal for event notification to multiple handlers.
+/// - Item type must implement `Clone`.
+fn generate_broadcast_queue_template(
+    struct_name: &syn::Ident,
+    vis: &syn::Visibility,
+    attrs: &[syn::Attribute],
+    item_type_str: &str,
+    capacity: usize,
+) -> TokenStream {
+    let singleton_name = format_ident!("__SINGLETON_{}", struct_name.to_string().to_uppercase());
+    let item_type: proc_macro2::TokenStream =
+        item_type_str.parse().unwrap_or_else(|_| quote!(String));
+
+    let expanded = quote! {
+        #(#attrs)*
+        #vis struct #struct_name {
+            pub tx: tokio::sync::broadcast::Sender<#item_type>,
+        }
+
+        impl Default for #struct_name {
+            fn default() -> Self {
+                let (tx, _) = tokio::sync::broadcast::channel(#capacity);
+                Self { tx }
+            }
+        }
+
+        impl std::ops::Deref for #struct_name {
+            type Target = tokio::sync::broadcast::Sender<#item_type>;
+            fn deref(&self) -> &Self::Target {
+                &self.tx
+            }
+        }
+
+        impl service_daemon::Provided for #struct_name {
+            fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
+                #singleton_name.get_or_init(|| std::sync::Arc::new(Self::default())).clone()
+            }
+        }
+
+        impl #struct_name {
+            /// Push an item to this queue from anywhere in the application.
+            /// All subscribed handlers will receive a copy of this item.
+            pub fn push(item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
+                <Self as service_daemon::Provided>::resolve().tx.send(item)
+            }
+
+            /// Subscribe to this queue to receive broadcast messages.
+            /// Each trigger should call this to get its own receiver.
+            pub fn subscribe() -> tokio::sync::broadcast::Receiver<#item_type> {
+                <Self as service_daemon::Provided>::resolve().tx.subscribe()
+            }
+        }
     };
 
     TokenStream::from(expanded)
 }
 
 /// Generates a provider for a struct with automatic field injection.
+
 ///
 /// For each field of type `Arc<T>`, it calls `T::resolve()` to inject dependencies.
 /// For single-element tuple structs with `default = ...`, generates Deref, Display, Default.
+/// Uses `once_cell` for singleton behavior so the same instance is returned on each resolve.
+///
+/// # Magic Templates
+/// - `#[provider(default = Notify)]` - Generates a Signal with `notify()` static method.
+/// - `#[provider(default = Queue, item_type = "T")]` - Generates a Channel with `push(item)` static method.
 fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     let struct_name = &item.ident;
     let vis = &item.vis;
@@ -377,8 +536,43 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     let fields = &item.fields;
     let semi = &item.semi_token;
 
-    // Parse attributes (default, env_name)
+    // Parse attributes (default, env_name, item_type, capacity)
     let provider_attrs = parse_provider_attrs(attr_str);
+
+    // Check for magic template defaults
+    if let Some(ref default_val) = provider_attrs.default_value {
+        match default_val.as_str() {
+            // Signal templates
+            "Notify" | "Event" => {
+                return generate_notify_template(struct_name, vis, attrs);
+            }
+            // Broadcast queue templates (fanout - all handlers receive the event)
+            "BroadcastQueue" | "Queue" | "BQueue" => {
+                let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
+                let capacity = provider_attrs.capacity.unwrap_or(100);
+                return generate_broadcast_queue_template(
+                    struct_name,
+                    vis,
+                    attrs,
+                    item_type_str,
+                    capacity,
+                );
+            }
+            // Load-balancing queue templates (single consumer)
+            "LoadBalancingQueue" | "LBQueue" => {
+                let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
+                let capacity = provider_attrs.capacity.unwrap_or(100);
+                return generate_lb_queue_template(
+                    struct_name,
+                    vis,
+                    attrs,
+                    item_type_str,
+                    capacity,
+                );
+            }
+            _ => {}
+        }
+    }
 
     // Generate struct definition with proper syntax
     let struct_def = if semi.is_some() {
@@ -409,6 +603,19 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
         None
     };
 
+    // Check if inner type is String (for auto .to_owned() expansion)
+    let inner_is_string = inner_type.as_ref().map_or(false, |ty| {
+        if let syn::Type::Path(type_path) = ty {
+            type_path
+                .path
+                .segments
+                .last()
+                .map_or(false, |seg| seg.ident == "String")
+        } else {
+            false
+        }
+    });
+
     // Generate extra traits ONLY for single-element tuple structs
     let extra_traits = if let Some(ref inner) = inner_type {
         quote! {
@@ -435,9 +642,21 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
         let default_expr = if let Some(ref env_name) = provider_attrs.env_name {
             // Use env var with fallback to default
             if let Some(ref default_val) = provider_attrs.default_value {
-                let default_tokens: proc_macro2::TokenStream = default_val
-                    .parse()
-                    .unwrap_or_else(|_| quote! { Default::default() });
+                // Auto-expand string literals to .to_owned() if inner type is String
+                let default_tokens: proc_macro2::TokenStream = if inner_is_string
+                    && default_val.as_str().starts_with('"')
+                    && default_val.as_str().ends_with('"')
+                    && !default_val.contains(".to_")
+                {
+                    // It's a bare string literal for a String field - add .to_owned()
+                    format!("{}.to_owned()", default_val)
+                        .parse()
+                        .unwrap_or_else(|_| quote! { Default::default() })
+                } else {
+                    default_val
+                        .parse()
+                        .unwrap_or_else(|_| quote! { Default::default() })
+                };
                 quote! {
                     std::env::var(#env_name).unwrap_or_else(|_| #default_tokens)
                 }
@@ -447,10 +666,21 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
                 }
             }
         } else if let Some(ref default_val) = provider_attrs.default_value {
-            // Just use the default value
-            let default_tokens: proc_macro2::TokenStream = default_val
-                .parse()
-                .unwrap_or_else(|_| quote! { Default::default() });
+            // Auto-expand string literals to .to_owned() if inner type is String
+            let default_tokens: proc_macro2::TokenStream = if inner_is_string
+                && default_val.as_str().starts_with('"')
+                && default_val.as_str().ends_with('"')
+                && !default_val.contains(".to_")
+            {
+                // It's a bare string literal for a String field - add .to_owned()
+                format!("{}.to_owned()", default_val)
+                    .parse()
+                    .unwrap_or_else(|_| quote! { Default::default() })
+            } else {
+                default_val
+                    .parse()
+                    .unwrap_or_else(|_| quote! { Default::default() })
+            };
             quote! { #default_tokens }
         } else {
             // No default specified, skip Default impl
@@ -518,6 +748,9 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
         }
     };
 
+    // Generate unique static name for singleton
+    let singleton_name = format_ident!("__SINGLETON_{}", struct_name.to_string().to_uppercase());
+
     let expanded = quote! {
         #struct_def
 
@@ -525,10 +758,13 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
 
         #default_impl
 
-        // Type-based DI: impl Provided for the struct
+        // Type-based DI: impl Provided for the struct with singleton behavior
         impl service_daemon::Provided for #struct_name {
             fn resolve() -> std::sync::Arc<Self> {
-                #constructor
+                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
+                #singleton_name.get_or_init(|| {
+                    #constructor
+                }).clone()
             }
         }
     };
@@ -536,169 +772,17 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Performs compile-time verification of service dependencies.
+/// **DEPRECATED**: This macro is a no-op.
 ///
-/// When the `macros` feature is enabled in `service-daemon`, this macro
-/// will scan the project and emit warnings if a service requires a
-/// dependency that no `#[provider]` supplies.
+/// With Type-Based DI, compile-time checks are automatic via the `Provided` trait.
+/// If a service requires `Arc<T>` but no `#[provider]` for `T` exists,
+/// you get a compile error: "Missing Provider: The type `T` cannot be injected."
 ///
-/// When the `macros` feature is NOT enabled (e.g., in production builds),
-/// this macro expands to nothing, incurring zero runtime or compile-time cost.
-///
-/// # Example
-/// ```rust
-/// // Place at the top of main.rs
-/// service_daemon::verify_setup!();
-///
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     let daemon = ServiceDaemon::auto_init();
-///     daemon.run().await
-/// }
-/// ```
-///
-/// If there's a missing dependency, you'll see:
-/// ```text
-/// warning: Service 'my_service' requires 'api_key', but no #[provider] found for it.
-/// ```
+/// No runtime verification is needed.
 #[proc_macro]
 pub fn verify_setup(_input: TokenStream) -> TokenStream {
-    // Note: This is a simplified implementation.
-    // A full implementation would scan the source files using `syn`,
-    // parse #[service] and #[provider] attributes, and compare them.
-    //
-    // For now, we provide a startup validation that runs at runtime
-    // when the daemon starts, which achieves a similar goal.
-
-    let expanded = quote! {
-        // When 'macros' feature is enabled, perform runtime validation at startup.
-        // This ensures that all dependencies are checked before services run.
-        #[cfg(feature = "macros")]
-        {
-            // Build a map of provider name -> type_name for type checking
-            let mut provider_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-            for entry in service_daemon::PROVIDER_REGISTRY.iter() {
-                provider_types.insert(entry.name.to_string(), entry.type_name.to_string());
-            }
-
-            // Check service dependencies (name and type)
-            for service in service_daemon::SERVICE_REGISTRY.iter() {
-                for param in service.params {
-                    let param_name = param.name.to_string();
-                    let expected_type = param.type_name.to_string();
-
-                    match provider_types.get(&param_name) {
-                        None => {
-                            tracing::warn!(
-                                "⚠️  Service '{}' requires '{}' but no #[provider] found for it.",
-                                service.name, param_name
-                            );
-                        }
-                        Some(provided_type) => {
-                            // Normalize types for comparison (remove common wrappers and namespaces)
-                            let normalized_expected = expected_type
-                                .trim_start_matches("Arc<")
-                                .trim_end_matches(">")
-                                .replace("tokio::sync::", "")
-                                .replace("std::sync::", "")
-                                .replace(" ", "");
-                            let normalized_provided = provided_type
-                                .replace("tokio::sync::", "")
-                                .replace("std::sync::", "")
-                                .replace(" ", "");
-
-                            if normalized_expected != normalized_provided {
-                                tracing::warn!(
-                                    "⚠️  Type mismatch for '{}' in service '{}': expected '{}', provider gives '{}'",
-                                    param_name, service.name, normalized_expected, normalized_provided
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Check trigger targets (name and type)
-            for trigger in service_daemon::TRIGGER_REGISTRY.iter() {
-                let target_name = trigger.target.to_string();
-                let expected_type = trigger.target_type.to_string();
-
-                match provider_types.get(&target_name) {
-                    None => {
-                        tracing::warn!(
-                            "⚠️  Trigger '{}' requires target '{}' but no #[provider] found for it.",
-                            trigger.name, target_name
-                        );
-                    }
-                    Some(provided_type) => {
-                        // Normalize types for comparison
-                        let normalized_expected = expected_type
-                            .replace("tokio::sync::", "")
-                            .replace("std::sync::", "")
-                            .replace(" ", "");
-                        let normalized_provided = provided_type
-                            .replace("tokio::sync::", "")
-                            .replace("std::sync::", "")
-                            .replace(" ", "");
-
-                        // Precise check first
-                        if normalized_expected != normalized_provided {
-                            // Fallback to contains check for complex generic types if they don't exactly match after normalization
-                            if !normalized_provided.contains(&normalized_expected) && !normalized_expected.contains(&normalized_provided) {
-                                tracing::warn!(
-                                    "⚠️  Type mismatch for trigger '{}' target '{}': expected '{}', provider gives '{}'",
-                                    trigger.name, target_name, normalized_expected, normalized_provided
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Check trigger DI parameters (index 2+)
-                for param in trigger.params {
-                    let param_name = param.name.to_string();
-                    let expected_type = param.type_name.to_string();
-
-                    match provider_types.get(&param_name) {
-                        None => {
-                            tracing::warn!(
-                                "⚠️  Trigger '{}' requires dependency '{}' but no #[provider] found for it.",
-                                trigger.name, param_name
-                            );
-                        }
-                        Some(provided_type) => {
-                            // Normalize types for comparison (remove Arc wrapper from expected)
-                            let normalized_expected = expected_type
-                                .trim_start_matches("Arc<")
-                                .trim_end_matches(">")
-                                .replace("tokio::sync::", "")
-                                .replace("std::sync::", "")
-                                .replace(" ", "");
-                            let normalized_provided = provided_type
-                                .replace("tokio::sync::", "")
-                                .replace("std::sync::", "")
-                                .replace(" ", "");
-
-                            if normalized_expected != normalized_provided {
-                                tracing::warn!(
-                                    "⚠️  Type mismatch for '{}' in trigger '{}': expected '{}', provider gives '{}'",
-                                    param_name, trigger.name, normalized_expected, normalized_provided
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // When 'macros' feature is NOT enabled, this expands to nothing.
-        #[cfg(not(feature = "macros"))]
-        {
-            // No-op in production
-        }
-    };
-
-    TokenStream::from(expanded)
+    // No-op - compile-time checks via Provided trait are sufficient
+    TokenStream::new()
 }
 
 /// Marks a function as an event-driven trigger.
@@ -774,7 +858,7 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
     let payload_type_str = quote!(#payload_type_token).to_string().replace(" ", "");
 
     // Compute expected target type based on template
-    let target_type_str = match template.as_str() {
+    let _target_type_str = match template.as_str() {
         "custom" => "tokio::sync::Notify".to_string(),
         "queue" => format!(
             "tokio::sync::Mutex<tokio::sync::mpsc::Receiver<{}>>",
@@ -845,18 +929,19 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Generate template-specific event loop
     let event_loop = match template.as_str() {
-        "custom" => {
+        // Signal/Notify triggers - aliases: custom, notify, event
+        "custom" | "notify" | "event" => {
             quote! {
                 // Resolve DI dependencies for additional parameters
                 #(#di_resolve_tokens)*
 
-                // Custom trigger - resolve target using Type-Based DI
+                // Signal trigger - resolve target using Type-Based DI
                 let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve();
 
                 loop {
                     notifier_wrapper.notified().await;
                     let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
-                    tracing::info!("Custom trigger '{}' fired (ID: {})", #fn_name_str, trigger_id);
+                    tracing::info!("Signal trigger '{}' fired (ID: {})", #fn_name_str, trigger_id);
                     if let Err(e) = #fn_name((), trigger_id, #(#di_call_args.clone()),*).await {
                         tracing::error!("Trigger '{}' error: {:?}", #fn_name_str, e);
                     }
@@ -868,24 +953,24 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Resolve DI dependencies for additional parameters
                 #(#di_resolve_tokens)*
 
-                // Queue trigger - resolve target using Type-Based DI
-                let queue_wrapper = <#target_type as service_daemon::Provided>::resolve();
+                // Broadcast Queue trigger - each handler subscribes independently
+                // Subscribe to get our own receiver
+                let mut receiver = #target_type::subscribe();
 
                 loop {
-                    let item = {
-                        let mut receiver = queue_wrapper.lock().await;
-                        receiver.recv().await
-                    };
-
-                    match item {
-                        Some(value) => {
+                    match receiver.recv().await {
+                        Ok(value) => {
                             let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
                             tracing::info!("Queue trigger '{}' received item (ID: {})", #fn_name_str, trigger_id);
                             if let Err(e) = #fn_name(value, trigger_id, #(#di_call_args.clone()),*).await {
                                 tracing::error!("Trigger '{}' error: {:?}", #fn_name_str, e);
                             }
                         }
-                        None => {
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Queue trigger '{}' lagged by {} messages", #fn_name_str, n);
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             tracing::warn!("Queue trigger '{}' channel closed", #fn_name_str);
                             break;
                         }
@@ -893,6 +978,38 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
+        // Load-balancing queue trigger - all triggers share one receiver
+        "lb_queue" => {
+            quote! {
+                // Resolve DI dependencies for additional parameters
+                #(#di_resolve_tokens)*
+
+                // LB Queue trigger - use shared receiver via lock
+                let queue_wrapper = <#target_type as service_daemon::Provided>::resolve();
+
+                loop {
+                    let item = {
+                        let mut receiver = queue_wrapper.rx.lock().await;
+                        receiver.recv().await
+                    };
+
+                    match item {
+                        Some(value) => {
+                            let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
+                            tracing::info!("LB Queue trigger '{}' received item (ID: {})", #fn_name_str, trigger_id);
+                            if let Err(e) = #fn_name(value, trigger_id, #(#di_call_args.clone()),*).await {
+                                tracing::error!("Trigger '{}' error: {:?}", #fn_name_str, e);
+                            }
+                        }
+                        None => {
+                            tracing::warn!("LB Queue trigger '{}' channel closed", #fn_name_str);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
         "cron" => {
             // For cron, we need to clone the Arc values into the closure
             let di_clone_for_cron: Vec<_> = di_call_args
@@ -949,7 +1066,8 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
             #body
         }
 
-        /// Auto-generated trigger wrapper - runs the event loop
+        /// Auto-generated trigger wrapper - acts as an event-loop "Call Host"
+        /// This is registered as a Service, so it benefits from ServiceDaemon's lifecycle management.
         pub fn #wrapper_name() -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 #event_loop
@@ -958,17 +1076,14 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
             })
         }
 
-        /// Auto-generated static trigger entry - collected by linkme at link time
-        #[service_daemon::linkme::distributed_slice(service_daemon::TRIGGER_REGISTRY)]
+        /// Auto-generated static registry entry - triggers are specialized services
+        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
         #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::TriggerEntry = service_daemon::TriggerEntry {
+        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
             name: #fn_name_str,
-            template: #template,
-            target: #target_str,
-            target_type: #target_type_str,
-            payload_type: #payload_type_str,
+            module: concat!("triggers/", #template),
             params: &[#(#param_entries),*],
-            run: #wrapper_name,
+            wrapper: #wrapper_name,
         };
     };
 

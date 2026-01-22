@@ -1,17 +1,17 @@
 //! Service Daemon Library
 //!
-//! Provides automatic service management, dependency injection, and monitoring
-//! for Rust applications.
+//! Provides automatic service management with Type-Based dependency injection
+//! and monitoring for Rust applications.
 
 pub mod models;
 pub mod utils;
 
 // Re-export commonly used items
 pub use models::{
-    PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceDescription, ServiceEntry,
-    ServiceFn, ServiceParam, TRIGGER_REGISTRY, TriggerEntry,
+    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam, TRIGGER_REGISTRY,
+    TriggerEntry,
 };
-pub use utils::di::{Container, GLOBAL_CONTAINER, Provided};
+pub use utils::di::Provided;
 pub use utils::service_daemon::ServiceDaemon;
 
 // Re-export linkme and other dependencies for use in macro-generated code

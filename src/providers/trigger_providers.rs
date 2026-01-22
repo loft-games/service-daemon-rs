@@ -1,62 +1,47 @@
 //! Trigger event source providers using Type-Based DI
 //!
 //! These wrapper types enable compile-time verification of trigger dependencies.
+//! Using templates, the boilerplate is handled automatically by the macro.
+//!
+//! ## Queue Types
+//! - `BroadcastQueue` (aliases: `Queue`, `BQueue`): All handlers receive every message (fanout).
+//! - `LoadBalancingQueue` (alias: `LBQueue`): Messages are distributed to one handler at a time.
 
 use service_daemon::provider;
-use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, mpsc};
 
-/// Wrapper for custom trigger notifier
-/// (Manual impl since Notify doesn't implement Display)
-pub struct UserNotifier(pub Arc<Notify>);
+// Signal provider - generates Arc<Notify> with static `notify()` and `wait()` methods
+// Aliases: Notify, Event
+#[provider(default = Notify)]
+pub struct UserNotifier;
 
-impl Default for UserNotifier {
-    fn default() -> Self {
-        Self(Arc::new(Notify::new()))
-    }
-}
-
-impl service_daemon::Provided for UserNotifier {
-    fn resolve() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-}
-
-impl std::ops::Deref for UserNotifier {
-    type Target = Arc<Notify>;
-    fn deref(&self) -> &Arc<Notify> {
-        &self.0
-    }
-}
-
-/// Wrapper for cron schedule string
-#[provider(default = "*/30 * * * * *".to_string())]
+// Cron schedule provider - simple string wrapper
+#[provider(default = "*/30 * * * * *")]
 pub struct CleanupSchedule(pub String);
 
-/// Wrapper for queue receiver
-#[provider(default = mpsc::channel(100))]
-pub struct TaskQueue(pub Arc<Mutex<mpsc::Receiver<String>>>);
+// Broadcast Queue - all handlers receive every message (fanout)
+// Aliases: BroadcastQueue, Queue, BQueue
+#[provider(default = Queue, item_type = "String")]
+pub struct TaskQueue;
 
-// TaskQueue needs special initialization, so we implement Provided manually
-impl service_daemon::Provided for TaskQueue {
-    fn resolve() -> Arc<Self> {
-        let (tx, rx) = mpsc::channel(100);
+// Load-Balancing Queue - messages are distributed to one handler at a time
+// Alias: LoadBalancingQueue, LBQueue
+#[provider(default = LBQueue, item_type = "String")]
+pub struct WorkerQueue;
 
-        // Simulate work being added to the queue
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                let _ = tx.send("Auto-generated task".to_string()).await;
-            }
-        });
-
-        Arc::new(Self(Arc::new(Mutex::new(rx))))
-    }
+// --- Async Function Provider Example ---
+// This struct is initialized via an async function below.
+pub struct AsyncConfig {
+    pub connection_string: String,
+    pub initialized_at: std::time::Instant,
 }
 
-impl std::ops::Deref for TaskQueue {
-    type Target = Arc<Mutex<mpsc::Receiver<String>>>;
-    fn deref(&self) -> &Arc<Mutex<mpsc::Receiver<String>>> {
-        &self.0
+// The async fn replaces the default initialization
+#[provider]
+pub async fn async_config() -> AsyncConfig {
+    // Simulate async initialization (e.g., fetching config from remote)
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    AsyncConfig {
+        connection_string: "postgres://localhost/db".to_owned(),
+        initialized_at: std::time::Instant::now(),
     }
 }
