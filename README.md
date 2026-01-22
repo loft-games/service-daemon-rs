@@ -5,9 +5,10 @@ A Rust library for automatic service management with dependency injection, inspi
 ## Features
 
 - **`#[service]`** - Mark async functions as managed services
+- **`#[trigger]`** - Event-driven functions (Cron, Queue, Custom)
 - **`#[provider]`** - Auto-register dependencies (no manual `register` calls!)
 - **Automatic restart** - Failed services are restarted automatically
-- **Dependency injection** - Services receive dependencies by parameter name
+- **Type-safe DI** - Services/Triggers receive dependencies by name with type verification
 - **Zero boilerplate** - Just annotate and run
 
 ## Quick Start
@@ -139,9 +140,57 @@ async fn main() -> anyhow::Result<()> {
 - `cargo run` / `cargo test` → validation runs (dev profile)
 - `cargo build --release` → no validation (zero cost)
 
-If there's a missing dependency, you'll see:
+If there's a missing dependency or type mismatch, you'll see:
 ```text
 ⚠️  Dependency 'api_key' is required by a service but no #[provider] found for it.
+⚠️  Type mismatch for 'port' in service 'my_service': expected 'i32', provider gives 'String'
+⚠️  Trigger target 'task_queue' is required but no #[provider] found for it.
+```
+
+## Triggers
+
+Triggers allow functions to be executed when specific events occur. Unlike services which run in a loop, triggers are passive and wait for events.
+
+### 1. Cron Trigger
+
+Executes a function based on a cron expression.
+
+```rust
+#[provider(name = "cleanup_schedule")]
+const CLEANUP: &str = "0 0 * * * *"; // Hourly
+
+#[trigger(template = "cron", target = "cleanup_schedule")]
+async fn hourly_cleanup(_request: (), id: String) -> anyhow::Result<()> {
+    tracing::info!("Cleaning up... (id: {})", id);
+    Ok(())
+}
+```
+
+### 2. Queue Trigger
+
+Executes a function when an item is received from a `tokio::mpsc::Receiver<T>`. The trigger automatically resolves the correct generic type.
+
+```rust
+#[derive(serde::Deserialize)]
+struct MyTask { id: u64, cmd: String }
+
+#[trigger(template = "queue", target = "task_queue")]
+async fn process_task(item: MyTask, id: String) -> anyhow::Result<()> {
+    tracing::info!("Received task {} (id: {})", item.id, id);
+    Ok(())
+}
+```
+
+### 3. Custom Trigger
+
+Executes a function when a `tokio::sync::Notify` is triggered.
+
+```rust
+#[trigger(template = "custom", target = "user_notifier")]
+async fn on_notification(_request: (), id: String) -> anyhow::Result<()> {
+    tracing::info!("Event received! (id: {})", id);
+    Ok(())
+}
 ```
 
 ## Project Structure
@@ -151,14 +200,15 @@ service-daemon-rs/
 ├── service-daemon/           # Core library
 │   └── src/
 │       ├── lib.rs            # Re-exports macros and core types
-│       ├── models/           # ServiceEntry, ProviderEntry
+│       ├── models/           # Service, Provider, Trigger registry
 │       └── utils/            # DI Container, ServiceDaemon
 ├── service-daemon-macro/     # Procedural macros
-│   └── src/lib.rs            # #[service], #[provider]
+│   └── src/lib.rs            # #[service], #[provider], #[trigger]
 └── src/                      # Example application
     ├── main.rs
     ├── providers/            # Your providers go here
-    └── services/             # Your services go here
+    ├── services/             # Your services go here
+    └── triggers/             # Your triggers go here (optional)
 ```
 
 ## License

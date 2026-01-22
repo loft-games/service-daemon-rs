@@ -1,4 +1,10 @@
 //! Configuration providers
+//!
+//! DEPRECATED: These string-based providers are replaced by Type-Based DI.
+//! See `typed_providers.rs` for the new type-safe versions.
+//! This file is kept for reference only.
+
+#![allow(dead_code)]
 
 use service_daemon::provider;
 

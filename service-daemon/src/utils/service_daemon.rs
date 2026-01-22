@@ -4,7 +4,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
-use crate::models::{PROVIDER_REGISTRY, SERVICE_REGISTRY, ServiceDescription, ServiceFn};
+use crate::models::{
+    PROVIDER_REGISTRY, SERVICE_REGISTRY, ServiceDescription, ServiceFn, TRIGGER_REGISTRY,
+};
 
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
@@ -76,6 +78,7 @@ impl ServiceDaemon {
     pub async fn run(self) -> anyhow::Result<()> {
         let running_tasks = self.running_tasks.clone();
 
+        // Spawn all services
         for service in &self.services {
             let name = service.name.clone();
             let run = service.run.clone();
@@ -94,6 +97,30 @@ impl ServiceDaemon {
                 .lock()
                 .await
                 .insert(service.name.clone(), handle);
+        }
+
+        // Spawn all triggers
+        info!(
+            "Initializing {} triggers from registry",
+            TRIGGER_REGISTRY.len()
+        );
+        for trigger in TRIGGER_REGISTRY {
+            info!(
+                "Starting trigger '{}' (template: {}, target: {})",
+                trigger.name, trigger.template, trigger.target
+            );
+            let name = trigger.name.to_string();
+            let run = trigger.run;
+            let handle = tokio::spawn(async move {
+                match run().await {
+                    Ok(_) => info!("Trigger {} completed", name),
+                    Err(e) => error!("Trigger {} failed: {:?}", name, e),
+                }
+            });
+            running_tasks
+                .lock()
+                .await
+                .insert(trigger.name.to_string(), handle);
         }
 
         loop {

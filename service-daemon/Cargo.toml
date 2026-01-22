@@ -10,6 +10,7 @@ macros = []
 [dependencies]
 service-daemon-macro = { path = "../service-daemon-macro" }
 tokio = { version = "1.40", features = ["full", "tracing"] }
+tokio-cron-scheduler = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
@@ -21,3 +22,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = "0.3"
 linkme = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
