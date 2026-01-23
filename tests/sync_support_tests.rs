@@ -1,7 +1,6 @@
 use service_daemon::{ServiceDaemon, provider, service, trigger};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
 
 // 1. Sync Provider
 pub struct SyncData {

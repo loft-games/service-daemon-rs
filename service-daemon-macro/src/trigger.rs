@@ -30,8 +30,8 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Extract the first parameter type (payload type)
     let payload_type: Option<Box<Type>> = sig.inputs.iter().find_map(|arg| {
-        if let FnArg::Typed(pat_type) = arg {
-            Some(pat_type.ty.clone())
+        if let FnArg::Typed(syn::PatType { ty, .. }) = arg {
+            Some(ty.clone())
         } else {
             None
         }
@@ -64,51 +64,46 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             continue;
         }
 
-        if let FnArg::Typed(pat_type) = arg {
-            if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                let arg_name = &pat_ident.ident;
-                let arg_type = &pat_type.ty;
-                let arg_name_str = arg_name.to_string();
-                let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
+        if let FnArg::Typed(syn::PatType { pat, ty, .. }) = arg
+            && let Pat::Ident(pat_ident) = &**pat
+        {
+            let arg_name = &pat_ident.ident;
+            let arg_type = ty;
+            let arg_name_str = arg_name.to_string();
+            let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
 
-                // Add to param entries for verification with pre-computed key
-                let key_str = format!("{}_{}", arg_name_str, arg_type_str);
-                param_entries.push(quote! {
-                    service_daemon::ServiceParam {
-                        name: #arg_name_str,
-                        type_name: #arg_type_str,
-                        key: #key_str,
-                    }
-                });
-
-                // Check if the type is Arc<T>
-                if let Type::Path(type_path) = &**arg_type {
-                    if let Some(segment) = type_path.path.segments.last() {
-                        if segment.ident == "Arc" {
-                            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                                if let Some(syn::GenericArgument::Type(inner_type)) =
-                                    args.args.first()
-                                {
-                                    // Type-Based DI: use T::resolve().await for async resolution
-                                    di_resolve_tokens.push(quote! {
-                                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
-                                    });
-                                    di_call_args.push(quote! { #arg_name });
-                                    continue;
-                                }
-                            }
-                        }
-                    }
+            // Add to param entries for verification with pre-computed key
+            let key_str = format!("{}_{}", arg_name_str, arg_type_str);
+            param_entries.push(quote! {
+                service_daemon::ServiceParam {
+                    name: #arg_name_str,
+                    type_name: #arg_type_str,
+                    key: #key_str,
                 }
+            });
 
-                // Non-Arc types are not supported for DI
-                abort!(
-                    arg_type,
-                    "Trigger DI parameters must be Arc<T> where T implements Provided";
-                    help = "Wrap your type in Arc<T>, e.g., `Arc<MyType>` instead of `MyType`";
-                    note = "Parameters at index 0 (payload) and 1 (trigger_id) are not injected"
-                );
+            // Check if the type is Arc<T>
+            if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
+                && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
+                && segment.ident == "Arc"
+                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
+            {
+                // Type-Based DI: use T::resolve().await for async resolution
+                di_resolve_tokens.push(quote! {
+                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                });
+                di_call_args.push(quote! { #arg_name });
+                continue;
             }
+
+            // Non-Arc types are not supported for DI
+            abort!(
+                arg_type,
+                "Trigger DI parameters must be Arc<T> where T implements Provided";
+                help = "Wrap your type in Arc<T>, e.g., `Arc<MyType>` instead of `MyType`";
+                note = "Parameters at index 0 (payload) and 1 (trigger_id) are not injected"
+            );
         }
     }
 
@@ -332,13 +327,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 fn parse_trigger_attr(attr_str: &str, key: &str) -> Option<String> {
     // Parse: key = "value"
-    for part in attr_str.split(',') {
+    attr_str.split(',').find_map(|part| {
         let part = part.trim();
-        if part.contains(key) {
-            if let Some(value_part) = part.split('=').nth(1) {
-                return Some(value_part.trim().trim_matches('"').to_string());
-            }
+        if part.contains(key)
+            && let Some((_, val)) = part.split_once('=')
+        {
+            Some(val.trim().trim_matches('"').to_string())
+        } else {
+            None
         }
-    }
-    None
+    })
 }

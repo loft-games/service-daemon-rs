@@ -2,8 +2,8 @@ mod providers;
 mod services;
 mod triggers;
 
-use crate::providers::trigger_providers::UserNotifier;
-use service_daemon::{RestartPolicy, ServiceDaemon};
+use crate::providers::trigger_providers::{AsyncConfig, SyncConfig, UserNotifier};
+use service_daemon::{Provided, RestartPolicy, ServiceDaemon};
 use std::time::Duration;
 
 #[tokio::main]
@@ -40,7 +40,21 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 5. Run Daemon (handles Ctrl+C / SIGTERM gracefully)
+    // 6. For demonstration: Log custom providers every 30 seconds
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let async_cfg = AsyncConfig::resolve().await;
+            let sync_cfg = SyncConfig::resolve().await;
+            tracing::info!(
+                "--- [Main] AsyncConfig initialized at: {:?} ---",
+                async_cfg.initialized_at
+            );
+            tracing::info!("--- [Main] SyncConfig value: {} ---", sync_cfg.value);
+        }
+    });
+
+    // 7. Run Daemon (handles Ctrl+C / SIGTERM gracefully)
     daemon.run().await?;
 
     Ok(())

@@ -8,6 +8,6 @@ pub fn has_allow_sync(attrs: &[Attribute]) -> bool {
         attr.path()
             .segments
             .last()
-            .map_or(false, |seg| seg.ident == "allow_sync")
+            .is_some_and(|seg| seg.ident == "allow_sync")
     })
 }

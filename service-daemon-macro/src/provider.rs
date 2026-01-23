@@ -410,13 +410,11 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     };
 
     // Check if inner type is String (for auto .to_owned() expansion)
-    let inner_is_string = inner_type.as_ref().map_or(false, |ty| {
-        if let syn::Type::Path(type_path) = ty {
-            type_path
-                .path
-                .segments
-                .last()
-                .map_or(false, |seg| seg.ident == "String")
+    let inner_is_string = inner_type.as_ref().is_some_and(|ty| {
+        if let syn::Type::Path(type_path) = ty
+            && let Some(seg) = type_path.path.segments.last()
+        {
+            seg.ident == "String"
         } else {
             false
         }
@@ -506,22 +504,17 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
                 let field_type = &field.ty;
 
                 // Check if it's Arc<T>
-                if let Type::Path(type_path) = field_type {
-                    if let Some(segment) = type_path.path.segments.last() {
-                        if segment.ident == "Arc" {
-                            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                                if let Some(syn::GenericArgument::Type(inner_type)) =
-                                    args.args.first()
-                                {
-                                    // Async resolution with .await
-                                    field_inits.push(quote! {
-                                        #field_name: <#inner_type as service_daemon::Provided>::resolve().await
-                                    });
-                                    continue;
-                                }
-                            }
-                        }
-                    }
+                if let Type::Path(syn::TypePath { path, .. }) = field_type
+                    && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
+                    && segment.ident == "Arc"
+                    && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
+                {
+                    // Async resolution with .await
+                    field_inits.push(quote! {
+                        #field_name: <#inner_type as service_daemon::Provided>::resolve().await
+                    });
+                    continue;
                 }
 
                 // For non-Arc fields, use Default
