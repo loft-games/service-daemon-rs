@@ -113,134 +113,10 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let is_async = input.sig.asyncness.is_some();
     let allow_sync_present = has_allow_sync(attrs);
 
-    // Generate template-specific event loop
-    let event_loop = match template.as_str() {
+    // Generate template-specific event loop call
+    let event_loop_call = match template.as_str() {
         // Signal/Notify triggers - aliases: custom, notify, event
         "custom" | "notify" | "event" => {
-            let call_expr = if is_async {
-                quote! { #fn_name((), trigger_id, #(#di_call_args.clone()),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name((), trigger_id, #(#di_call_args.clone()),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name((), trigger_id, #(#di_call_args.clone()),*)
-                    }
-                }
-            };
-            quote! {
-                // Resolve DI dependencies for additional parameters
-                #(#di_resolve_tokens)*
-
-                // Signal trigger - resolve target using Type-Based DI (async)
-                let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
-
-                loop {
-                    notifier_wrapper.notified().await;
-                    let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
-                    tracing::info!("Signal trigger '{}' fired (ID: {})", #fn_name_str, trigger_id);
-                    if let Err(e) = #call_expr {
-                        tracing::error!("Trigger '{}' error: {:?}", #fn_name_str, e);
-                    }
-                }
-            }
-        }
-        "queue" => {
-            let call_expr = if is_async {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args.clone()),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args.clone()),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name(value, trigger_id, #(#di_call_args.clone()),*)
-                    }
-                }
-            };
-            quote! {
-                // Resolve DI dependencies for additional parameters
-                #(#di_resolve_tokens)*
-
-                // Broadcast Queue trigger - each handler subscribes independently
-                // Subscribe to get our own receiver (async)
-                let mut receiver = #target_type::subscribe().await;
-
-                loop {
-                    match receiver.recv().await {
-                        Ok(value) => {
-                            let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
-                            tracing::info!("Queue trigger '{}' received item (ID: {})", #fn_name_str, trigger_id);
-                            if let Err(e) = #call_expr {
-                                tracing::error!("Trigger '{}' error: {:?}", #fn_name_str, e);
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!("Queue trigger '{}' lagged by {} messages", #fn_name_str, n);
-                            continue;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            tracing::warn!("Queue trigger '{}' channel closed", #fn_name_str);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        // Load-balancing queue trigger - all triggers share one receiver
-        "lb_queue" => {
-            let call_expr = if is_async {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args.clone()),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args.clone()),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name(value, trigger_id, #(#di_call_args.clone()),*)
-                    }
-                }
-            };
-            quote! {
-                // Resolve DI dependencies for additional parameters
-                #(#di_resolve_tokens)*
-
-                // LB Queue trigger - use shared receiver via lock (async)
-                let queue_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
-
-                loop {
-                    let item = {
-                        let mut receiver = queue_wrapper.rx.lock().await;
-                        receiver.recv().await
-                    };
-
-                    match item {
-                        Some(value) => {
-                            let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
-                            tracing::info!("LB Queue trigger '{}' received item (ID: {})", #fn_name_str, trigger_id);
-                            if let Err(e) = #call_expr {
-                                tracing::error!("Trigger '{}' error: {:?}", #fn_name_str, e);
-                            }
-                        }
-                        None => {
-                            tracing::warn!("LB Queue trigger '{}' channel closed", #fn_name_str);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        "cron" => {
-            // For cron, we need to clone the Arc values into the closure
-            let di_clone_for_cron: Vec<_> = di_call_args
-                .iter()
-                .map(|arg| {
-                    quote! { let #arg = #arg.clone(); }
-                })
-                .collect();
-
             let call_expr = if is_async {
                 quote! { #fn_name((), trigger_id, #(#di_call_args),*).await }
             } else if allow_sync_present {
@@ -253,39 +129,107 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                 }
             };
-
             quote! {
-                // Resolve DI dependencies for additional parameters
                 #(#di_resolve_tokens)*
-
-                // Cron trigger - resolve target using Type-Based DI (async)
-                use service_daemon::tokio_cron_scheduler::{Job, JobScheduler};
-
-                let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
-
-                let sched = JobScheduler::new().await?;
-
-                let fn_name_for_job = #fn_name_str;
-                #(#di_clone_for_cron)*
-                let job = Job::new_async(schedule_wrapper.as_str(), move |_uuid, _lock| {
-                    let trigger_id = service_daemon::uuid::Uuid::new_v4().to_string();
-                    let fn_name_clone = fn_name_for_job;
-                    #(let #di_call_args = #di_call_args.clone();)*
-                    Box::pin(async move {
-                        tracing::info!("Cron trigger '{}' fired (ID: {})", fn_name_clone, trigger_id);
-                        if let Err(e) = #call_expr {
-                            tracing::error!("Trigger '{}' error: {:?}", fn_name_clone, e);
-                        }
-                    })
-                })?;
-
-                sched.add(job).await?;
-                sched.start().await?;
-
-                // Keep the scheduler running
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+                let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
+                service_daemon::utils::triggers::signal_trigger_host(
+                    #fn_name_str,
+                    notifier_wrapper.0.clone(),
+                    move |trigger_id| {
+                        #(let #di_call_args = #di_call_args.clone();)*
+                        Box::pin(async move {
+                            #call_expr
+                        })
+                    },
+                    token.clone()
+                ).await
+            }
+        }
+        "queue" => {
+            let call_expr = if is_async {
+                quote! { #fn_name(value, trigger_id, #(#di_call_args),*).await }
+            } else if allow_sync_present {
+                quote! { #fn_name(value, trigger_id, #(#di_call_args),*) }
+            } else {
+                quote! {
+                    {
+                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
+                        #fn_name(value, trigger_id, #(#di_call_args),*)
+                    }
                 }
+            };
+            quote! {
+                #(#di_resolve_tokens)*
+                let receiver = #target_type::subscribe().await;
+                service_daemon::utils::triggers::queue_trigger_host(
+                    #fn_name_str,
+                    receiver,
+                    move |value, trigger_id| {
+                        #(let #di_call_args = #di_call_args.clone();)*
+                        Box::pin(async move {
+                            #call_expr
+                        })
+                    },
+                    token.clone()
+                ).await
+            }
+        }
+        "lb_queue" => {
+            let call_expr = if is_async {
+                quote! { #fn_name(value, trigger_id, #(#di_call_args),*).await }
+            } else if allow_sync_present {
+                quote! { #fn_name(value, trigger_id, #(#di_call_args),*) }
+            } else {
+                quote! {
+                    {
+                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
+                        #fn_name(value, trigger_id, #(#di_call_args),*)
+                    }
+                }
+            };
+            quote! {
+                #(#di_resolve_tokens)*
+                let queue_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
+                service_daemon::utils::triggers::lb_queue_trigger_host(
+                    #fn_name_str,
+                    queue_wrapper.rx.clone(),
+                    move |value, trigger_id| {
+                        #(let #di_call_args = #di_call_args.clone();)*
+                        Box::pin(async move {
+                            #call_expr
+                        })
+                    },
+                    token.clone()
+                ).await
+            }
+        }
+        "cron" => {
+            let call_expr = if is_async {
+                quote! { #fn_name((), trigger_id, #(#di_call_args),*).await }
+            } else if allow_sync_present {
+                quote! { #fn_name((), trigger_id, #(#di_call_args),*) }
+            } else {
+                quote! {
+                    {
+                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
+                        #fn_name((), trigger_id, #(#di_call_args),*)
+                    }
+                }
+            };
+            quote! {
+                #(#di_resolve_tokens)*
+                let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
+                service_daemon::utils::triggers::cron_trigger_host(
+                    #fn_name_str,
+                    schedule_wrapper.as_str(),
+                    move |trigger_id| {
+                        #(let #di_call_args = #di_call_args.clone();)*
+                        Box::pin(async move {
+                            #call_expr
+                        })
+                    },
+                    token.clone()
+                ).await
             }
         }
         _ => {
@@ -303,11 +247,9 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         /// Auto-generated trigger wrapper - acts as an event-loop "Call Host"
         /// This is registered as a Service, so it benefits from ServiceDaemon's lifecycle management.
-        pub fn #wrapper_name() -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
-                #event_loop
-                #[allow(unreachable_code)]
-                Ok(())
+                #event_loop_call
             })
         }
 

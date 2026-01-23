@@ -44,8 +44,9 @@ pub use utils::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle, ServiceStatus,
 };
 
-// Re-export linkme for use in macro-generated code
+// Re-export dependencies for use in macro-generated code
 pub use linkme;
+pub use tokio_util;
 
 // Conditionally re-export dependencies based on features
 #[cfg(feature = "cron")]

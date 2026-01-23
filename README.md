@@ -135,40 +135,36 @@ async fn main() -> anyhow::Result<()> {
 
 ## Resilience Features
 
-### Exponential Backoff & Restart Policy
+### Exponential Backoff & Jitter
 
-Services that fail are automatically restarted with exponential backoff to prevent rapid crash loops:
+Services that fail are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues when multiple services fail simultaneously.
 
 ```rust
 use service_daemon::{ServiceDaemon, RestartPolicy};
 use std::time::Duration;
 
-// Custom restart policy with builder pattern
+// Custom restart policy with jitter
 let policy = RestartPolicy::builder()
     .initial_delay(Duration::from_secs(2))
-    .max_delay(Duration::from_secs(300))  // 5 minutes max
-    .multiplier(1.5)                       // Backoff multiplier
-    .reset_after(Duration::from_secs(60)) // Reset delay after stable run
+    .max_delay(Duration::from_secs(300))
+    .multiplier(1.5)
+    .jitter_factor(0.1) // 10% randomization
     .build();
 
 let daemon = ServiceDaemon::from_registry_with_policy(policy);
 daemon.run().await?
 ```
 
-Default policy: 1s initial → 2x multiplier → 5min max.
+### Graceful Shutdown (Signal-Based)
 
-### Graceful Shutdown
+The daemon uses `CancellationToken` to signal services to stop. When a shutdown signal (SIGINT/SIGTERM) is received:
+1. All services are notified simultaneously.
+2. The daemon waits for a grace period (default: 30s) for services to exit.
+3. Services that don't exit within the grace period are forcefully aborted.
 
-The daemon handles `SIGINT` (Ctrl+C) and `SIGTERM` signals for graceful shutdown:
+### Optimized Status Tracking
 
-```rust
-// Press Ctrl+C or send SIGTERM to stop gracefully
-daemon.run().await?
-// After receiving signal:
-// INFO: Received SIGINT, shutting down...
-// INFO: Stopping service: my_service
-// INFO: ServiceDaemon stopped.
-```
+The `ServiceDaemon` uses `DashMap` for high-performance concurrent access to service health statuses, ensuring that health checks never block the main service loops.
 
 ### Service Status API
 

@@ -90,7 +90,7 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
-        pub fn #wrapper_name() -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 #(#resolve_tokens)*
                 #call_expr

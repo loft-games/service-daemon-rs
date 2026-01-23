@@ -1,8 +1,10 @@
 use futures::future::BoxFuture;
 use std::borrow::Cow;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-pub type ServiceFn = Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
+pub type ServiceFn =
+    Arc<dyn Fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
 
 /// Describes a service parameter for the registry.
 ///
@@ -31,7 +33,7 @@ pub struct ServiceEntry {
     pub name: &'static str,
     pub module: &'static str,
     pub params: &'static [ServiceParam],
-    pub wrapper: fn() -> BoxFuture<'static, anyhow::Result<()>>,
+    pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
 }
 
 /// Runtime description of a running service
