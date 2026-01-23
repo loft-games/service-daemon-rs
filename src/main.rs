@@ -30,6 +30,16 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // 5. For demonstration: Query service status every 20 seconds
+    let daemon_ref = daemon.handle();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            let status = daemon_ref.get_service_status("example_service").await;
+            tracing::info!("--- [Main] example_service status: {:?} ---", status);
+        }
+    });
+
     // 5. Run Daemon (handles Ctrl+C / SIGTERM gracefully)
     daemon.run().await?;
 

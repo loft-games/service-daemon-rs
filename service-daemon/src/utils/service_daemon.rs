@@ -97,6 +97,24 @@ impl RestartPolicyBuilder {
     }
 }
 
+/// A handle to the ServiceDaemon that can be used to query status and interact with services.
+#[derive(Clone)]
+pub struct ServiceDaemonHandle {
+    service_status: Arc<Mutex<HashMap<String, ServiceStatus>>>,
+}
+
+impl ServiceDaemonHandle {
+    /// Get the current status of a service by name.
+    pub async fn get_service_status(&self, name: &str) -> ServiceStatus {
+        self.service_status
+            .lock()
+            .await
+            .get(name)
+            .copied()
+            .unwrap_or(ServiceStatus::Stopped)
+    }
+}
+
 /// A daemon that manages long-running services with automatic restart and DI support.
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
@@ -185,14 +203,16 @@ impl ServiceDaemon {
         });
     }
 
+    /// Get a handle to the daemon for querying status.
+    pub fn handle(&self) -> ServiceDaemonHandle {
+        ServiceDaemonHandle {
+            service_status: self.service_status.clone(),
+        }
+    }
+
     /// Get the current status of a service by name.
     pub async fn get_service_status(&self, name: &str) -> ServiceStatus {
-        self.service_status
-            .lock()
-            .await
-            .get(name)
-            .copied()
-            .unwrap_or(ServiceStatus::Stopped)
+        self.handle().get_service_status(name).await
     }
 
     /// Spawn a single service with the given restart policy.

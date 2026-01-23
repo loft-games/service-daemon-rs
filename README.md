@@ -332,7 +332,13 @@ service-daemon-rs/
 │       ├── models/           # Service, Provider, Trigger registry
 │       └── utils/            # DI Container, ServiceDaemon
 ├── service-daemon-macro/     # Procedural macros
-│   └── src/lib.rs            # #[service], #[provider], #[trigger]
+│   └── src/
+│       ├── lib.rs            # Entry points and re-exports
+│       ├── common.rs         # Shared macro utilities
+│       ├── service.rs        # #[service] implementation
+│       ├── provider.rs       # #[provider] implementation
+│       ├── trigger.rs        # #[trigger] implementation
+│       └── allow_sync.rs     # #[allow_sync] implementation
 └── src/                      # Example application
     ├── main.rs
     ├── providers/            # Your providers go here

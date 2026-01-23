@@ -32,7 +32,7 @@ sudo pacman -S base-devel
 
 1. **克隆仓库**:
    ```bash
-   git clone https://github.com/MemoryShadow/service-daemon-rs.git
+   git clone https://github.com/loft-games/service-daemon-rs.git
    cd service-daemon-rs
    ```
 

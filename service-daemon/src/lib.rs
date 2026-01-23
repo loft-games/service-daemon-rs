@@ -41,7 +41,7 @@ pub mod utils;
 pub use models::{SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam};
 pub use utils::di::Provided;
 pub use utils::service_daemon::{
-    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceStatus,
+    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle, ServiceStatus,
 };
 
 // Re-export linkme for use in macro-generated code
