@@ -5,7 +5,7 @@ A Rust library for automatic service management with dependency injection, inspi
 ## Features
 
 - **`#[service]`** - Mark functions (sync or async) as managed services
-- **`#[trigger]`** - Event-driven functions (sync or async; templates: Cron, Queue, Event)
+- **`#[trigger]`** - Event-driven functions (sync or async; templates: Cron, Queue, LBQueue, Notify, Event, Custom)
 - **`#[provider]`** - Auto-register dependencies, supports sync/async function initialization
 - **Automatic restart** - Failed services are restarted automatically
 - **Type-safe DI** - Services/Triggers receive dependencies by name with type verification
@@ -245,7 +245,7 @@ Executes a function based on a cron expression string.
 #[provider(default = "*/30 * * * * *")]
 pub struct CleanupSchedule(pub String);
 
-#[trigger(template = "cron", target = CleanupSchedule)]
+#[trigger(template = Cron, target = CleanupSchedule)]
 async fn hourly_cleanup(_request: (), id: String) -> anyhow::Result<()> {
     tracing::info!("Cleaning up... (id: {})", id);
     Ok(())
@@ -257,15 +257,15 @@ async fn hourly_cleanup(_request: (), id: String) -> anyhow::Result<()> {
 All handlers receive every message pushed to a `BroadcastQueue`.
 
 ```rust
-// BroadcastQueue aliases: Queue, BQueue
+// Queue aliases: Queue, BQueue, BroadcastQueue
 #[provider(default = Queue, item_type = "MyTask")]
 pub struct TaskQueue;
 
 // Multiple triggers can subscribe - all receive every message!
-#[trigger(template = "queue", target = TaskQueue)]
+#[trigger(template = Queue, target = TaskQueue)]
 async fn handler1(item: MyTask, id: String) -> anyhow::Result<()> { ... }
 
-#[trigger(template = "queue", target = TaskQueue)]
+#[trigger(template = BQueue, target = TaskQueue)]
 async fn handler2(item: MyTask, id: String) -> anyhow::Result<()> { ... }
 
 // Push to the queue (async)
@@ -279,11 +279,11 @@ async fn trigger_handlers() {
 Messages are distributed to one handler at a time with `LoadBalancingQueue`.
 
 ```rust
-// LoadBalancingQueue alias: LBQueue
+// LBQueue aliases: LBQueue, LoadBalancingQueue
 #[provider(default = LBQueue, item_type = "Task")]
 pub struct WorkerQueue;
 
-#[trigger(template = "lb_queue", target = WorkerQueue)]
+#[trigger(template = LBQueue, target = WorkerQueue)]
 async fn worker(item: Task, id: String) -> anyhow::Result<()> { ... }
 
 // Push to the queue (async)
@@ -298,12 +298,12 @@ async fn add_work() {
 Executes a function when a `tokio::sync::Notify` is triggered.
 
 ```rust
-// Provider aliases: Notify, Event
+// Provider aliases: Notify, Event, Custom
 #[provider(default = Notify)]
 pub struct EventNotifier;
 
-// Trigger template aliases: custom, notify, event
-#[trigger(template = "event", target = EventNotifier)]
+// Trigger template aliases: Notify, Event, Custom
+#[trigger(template = Event, target = EventNotifier)]
 async fn on_notification(_request: (), id: String) -> anyhow::Result<()> {
     tracing::info!("Event received! (id: {})", id);
     Ok(())

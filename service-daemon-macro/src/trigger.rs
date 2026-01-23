@@ -42,14 +42,26 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         .unwrap_or_else(|| Box::new(syn::parse_quote!(())));
     let payload_type_str = quote!(#payload_type_token).to_string().replace(" ", "");
 
-    // Compute expected target type based on template
-    let _target_type_str = match template.as_str() {
-        "custom" => "tokio::sync::Notify".to_string(),
+    // Compute normalized template name and expected target type
+    let normalized_template = match template.as_str() {
+        "Notify" | "Event" | "Custom" => "notify",
+        "Queue" | "BQueue" | "BroadcastQueue" => "queue",
+        "LBQueue" | "LoadBalancingQueue" => "lb_queue",
+        "Cron" => "cron",
+        _ => &template,
+    };
+
+    let _target_type_str = match normalized_template {
+        "notify" => "tokio::sync::Notify".to_string(),
         "queue" => format!(
             "tokio::sync::Mutex<tokio::sync::mpsc::Receiver<{}>>",
             payload_type_str
         ),
         "cron" => "String".to_string(),
+        "lb_queue" => format!(
+            "tokio::sync::Mutex<tokio::sync::mpsc::Receiver<{}>>",
+            payload_type_str
+        ),
         _ => "unknown".to_string(),
     };
 
@@ -114,9 +126,9 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let allow_sync_present = has_allow_sync(attrs);
 
     // Generate template-specific event loop call
-    let event_loop_call = match template.as_str() {
-        // Signal/Notify triggers - aliases: custom, notify, event
-        "custom" | "notify" | "event" => {
+    let event_loop_call = match normalized_template {
+        // Signal/Notify triggers
+        "notify" => {
             let call_expr = if is_async {
                 quote! { #fn_name((), trigger_id, #(#di_call_args),*).await }
             } else if allow_sync_present {
@@ -258,7 +270,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[linkme(crate = service_daemon::linkme)]
         static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
             name: #fn_name_str,
-            module: concat!("triggers/", #template),
+            module: concat!("triggers/", #normalized_template),
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
         };
@@ -274,7 +286,7 @@ fn parse_trigger_attr(attr_str: &str, key: &str) -> Option<String> {
         if part.contains(key)
             && let Some((_, val)) = part.split_once('=')
         {
-            Some(val.trim().trim_matches('"').to_string())
+            Some(val.trim().to_string())
         } else {
             None
         }
