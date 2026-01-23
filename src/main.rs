@@ -21,12 +21,12 @@ async fn main() -> anyhow::Result<()> {
     // 3. Initialize Daemon with custom policy
     let daemon = ServiceDaemon::from_registry_with_policy(policy);
 
-    // 4. For demonstration: Spawn a task to fire the custom notifier every 15 seconds
+    // 4. For demonstration: Spawn a task to fire the event notifier every 15 seconds
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(15)).await;
-            tracing::info!("--- Firing custom notifier from main ---");
-            UserNotifier::notify();
+            tracing::info!("--- Firing event notifier from main ---");
+            UserNotifier::notify().await;
         }
     });
 

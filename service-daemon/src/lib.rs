@@ -38,10 +38,7 @@ pub mod models;
 pub mod utils;
 
 // Re-export commonly used items
-pub use models::{
-    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam, TRIGGER_REGISTRY,
-    TriggerEntry,
-};
+pub use models::{SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam};
 pub use utils::di::Provided;
 pub use utils::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceStatus,
@@ -58,4 +55,4 @@ pub use tokio_cron_scheduler;
 pub use uuid;
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{provider, service, trigger, verify_setup};
+pub use service_daemon_macro::{provider, service, trigger};

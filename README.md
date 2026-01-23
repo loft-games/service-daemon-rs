@@ -168,31 +168,13 @@ sequenceDiagram
     ServiceDaemon->>SERVICE_REGISTRY: iterate services & triggers
     Main->>ServiceDaemon: run()
     ServiceDaemon->>ServiceWrapper: spawn()
-    ServiceWrapper->>Provider: T::resolve()
-    Note over Provider: Singleton (OnceLock)
+    ServiceWrapper->>Provider: T::resolve().await
+    Note over Provider: Singleton (OnceCell)
     Provider-->>ServiceWrapper: Arc<T>
     ServiceWrapper->>ServiceWrapper: run async function
 ```
 
-## Features
-
-### `macros` (Development Only)
-
-The `macros` feature enables `verify_setup!()` which provides diagnostic logging.
-The real power is in **Type-Based DI**, which gives you **compile-time errors** if a dependency is missing!
-
-```toml
-[features]
-macros = ["service-daemon/macros"]
-
-[dependencies]
-service-daemon = { path = "service-daemon" }
-
-[dev-dependencies]
-service-daemon = { path = "service-daemon", features = ["macros"] }
-```
-
-### Dependency Verification
+## Compile-Time Dependency Verification
 
 With Type-Based DI, missing dependencies are caught at **compile-time**:
 ```text
@@ -234,9 +216,9 @@ async fn handler1(item: MyTask, id: String) -> anyhow::Result<()> { ... }
 #[trigger(template = "queue", target = TaskQueue)]
 async fn handler2(item: MyTask, id: String) -> anyhow::Result<()> { ... }
 
-// Push to the queue (synchronous, not async)
-fn trigger_handlers() {
-    let _ = TaskQueue::push(MyTask { ... });
+// Push to the queue (async)
+async fn trigger_handlers() {
+    let _ = TaskQueue::push(MyTask { ... }).await;
 }
 ```
 
@@ -275,9 +257,9 @@ async fn on_notification(_request: (), id: String) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Trigger the signal from anywhere:
-fn unlock() {
-    EventNotifier::notify();
+// Trigger the signal from anywhere (async):
+async fn unlock() {
+    EventNotifier::notify().await;
 }
 ```
 

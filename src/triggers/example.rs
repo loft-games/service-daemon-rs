@@ -61,8 +61,8 @@ pub async fn lb_worker_trigger(payload: String, id: String, port: Arc<Port>) -> 
 }
 
 // --- Signal Trigger ---
-// Uses the Notify provider for custom event signaling
-#[trigger(template = "custom", target = UserNotifier)]
+// Uses the Notify provider for event signaling
+#[trigger(template = "event", target = UserNotifier)]
 pub async fn notify_trigger(_payload: (), id: String, port: Arc<Port>) -> anyhow::Result<()> {
     tracing::info!(
         ">>> Notify Trigger [Event] received (id: {}), port: {}",

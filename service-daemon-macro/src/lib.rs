@@ -59,9 +59,9 @@ pub fn service(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                 if let Some(syn::GenericArgument::Type(inner_type)) =
                                     args.args.first()
                                 {
-                                    // Type-Based DI: use T::resolve() for compile-time verification
+                                    // Type-Based DI: use T::resolve().await for async resolution
                                     resolve_tokens.push(quote! {
-                                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve();
+                                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
                                     });
                                     call_args.push(quote! { #arg_name });
 
@@ -315,20 +315,14 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         #fn_vis async fn #fn_name() -> #return_type
             #fn_block
 
-        // Generate Provided impl for the return type using OnceCell
+        // Generate Provided impl for the return type using OnceCell (fully async)
         impl service_daemon::Provided for #return_type {
-            fn resolve() -> std::sync::Arc<Self> {
+            async fn resolve() -> std::sync::Arc<Self> {
                 static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#return_type>> = tokio::sync::OnceCell::const_new();
 
-                // Use blocking to get the value synchronously (required for Provided trait)
-                // The actual async init happens on first call.
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        #singleton_name.get_or_init(|| async {
-                            std::sync::Arc::new(#fn_name().await)
-                        }).await.clone()
-                    })
-                })
+                #singleton_name.get_or_init(|| async {
+                    std::sync::Arc::new(#fn_name().await)
+                }).await.clone()
             }
         }
     };
@@ -369,23 +363,23 @@ fn generate_notify_template(
         }
 
         impl service_daemon::Provided for #struct_name {
-            fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
-                #singleton_name.get_or_init(|| std::sync::Arc::new(Self::default())).clone()
+            async fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
+                #singleton_name.get_or_init(|| async { std::sync::Arc::new(Self::default()) }).await.clone()
             }
         }
 
         impl #struct_name {
             /// Trigger this signal from anywhere in the application.
             /// This is a static shortcut that resolves the singleton and calls `notify_one()`.
-            pub fn notify() {
-                <Self as service_daemon::Provided>::resolve().notify_one();
+            pub async fn notify() {
+                <Self as service_daemon::Provided>::resolve().await.notify_one();
             }
 
             /// Wait for a notification on this signal.
             /// This is a static shortcut that resolves the singleton and calls `notified().await`.
             pub async fn wait() {
-                <Self as service_daemon::Provided>::resolve().notified().await;
+                <Self as service_daemon::Provided>::resolve().await.notified().await;
             }
         }
     };
@@ -435,9 +429,9 @@ fn generate_lb_queue_template(
         }
 
         impl service_daemon::Provided for #struct_name {
-            fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
-                #singleton_name.get_or_init(|| std::sync::Arc::new(Self::default())).clone()
+            async fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
+                #singleton_name.get_or_init(|| async { std::sync::Arc::new(Self::default()) }).await.clone()
             }
         }
 
@@ -445,7 +439,7 @@ fn generate_lb_queue_template(
             /// Push an item to this queue from anywhere in the application.
             /// This is a static shortcut that resolves the singleton and calls `tx.send(item)`.
             pub async fn push(item: #item_type) -> Result<(), tokio::sync::mpsc::error::SendError<#item_type>> {
-                <Self as service_daemon::Provided>::resolve().tx.send(item).await
+                <Self as service_daemon::Provided>::resolve().await.tx.send(item).await
             }
         }
     };
@@ -492,23 +486,23 @@ fn generate_broadcast_queue_template(
         }
 
         impl service_daemon::Provided for #struct_name {
-            fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
-                #singleton_name.get_or_init(|| std::sync::Arc::new(Self::default())).clone()
+            async fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
+                #singleton_name.get_or_init(|| async { std::sync::Arc::new(Self::default()) }).await.clone()
             }
         }
 
         impl #struct_name {
             /// Push an item to this queue from anywhere in the application.
             /// All subscribed handlers will receive a copy of this item.
-            pub fn push(item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
-                <Self as service_daemon::Provided>::resolve().tx.send(item)
+            pub async fn push(item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
+                <Self as service_daemon::Provided>::resolve().await.tx.send(item)
             }
 
             /// Subscribe to this queue to receive broadcast messages.
             /// Each trigger should call this to get its own receiver.
-            pub fn subscribe() -> tokio::sync::broadcast::Receiver<#item_type> {
-                <Self as service_daemon::Provided>::resolve().tx.subscribe()
+            pub async fn subscribe() -> tokio::sync::broadcast::Receiver<#item_type> {
+                <Self as service_daemon::Provided>::resolve().await.tx.subscribe()
             }
         }
     };
@@ -519,9 +513,9 @@ fn generate_broadcast_queue_template(
 /// Generates a provider for a struct with automatic field injection.
 
 ///
-/// For each field of type `Arc<T>`, it calls `T::resolve()` to inject dependencies.
+/// For each field of type `Arc<T>`, it calls `T::resolve().await` to inject dependencies.
 /// For single-element tuple structs with `default = ...`, generates Deref, Display, Default.
-/// Uses `once_cell` for singleton behavior so the same instance is returned on each resolve.
+/// Uses `tokio::sync::OnceCell` for singleton behavior so the same instance is returned on each resolve.
 ///
 /// # Magic Templates
 /// - `#[provider(default = Notify)]` - Generates a Signal with `notify()` static method.
@@ -689,7 +683,7 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
         quote! {}
     };
 
-    // Generate constructor based on field type
+    // Generate constructor based on field type (async for named structs with Arc deps)
     let constructor = match fields {
         syn::Fields::Named(named_fields) => {
             let mut field_inits = Vec::new();
@@ -705,8 +699,9 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
                                 if let Some(syn::GenericArgument::Type(inner_type)) =
                                     args.args.first()
                                 {
+                                    // Async resolution with .await
                                     field_inits.push(quote! {
-                                        #field_name: <#inner_type as service_daemon::Provided>::resolve()
+                                        #field_name: <#inner_type as service_daemon::Provided>::resolve().await
                                     });
                                     continue;
                                 }
@@ -728,7 +723,7 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
             }
         }
         syn::Fields::Unnamed(_) | syn::Fields::Unit => {
-            // Tuple struct or unit struct - use Default
+            // Tuple struct or unit struct - use Default (sync init is fine here)
             quote! {
                 std::sync::Arc::new(Self::default())
             }
@@ -745,31 +740,18 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
 
         #default_impl
 
-        // Type-based DI: impl Provided for the struct with singleton behavior
+        // Type-based DI: impl Provided for the struct with async singleton behavior
         impl service_daemon::Provided for #struct_name {
-            fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: std::sync::OnceLock<std::sync::Arc<#struct_name>> = std::sync::OnceLock::new();
-                #singleton_name.get_or_init(|| {
+            async fn resolve() -> std::sync::Arc<Self> {
+                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
+                #singleton_name.get_or_init(|| async {
                     #constructor
-                }).clone()
+                }).await.clone()
             }
         }
     };
 
     TokenStream::from(expanded)
-}
-
-/// **DEPRECATED**: This macro is a no-op.
-///
-/// With Type-Based DI, compile-time checks are automatic via the `Provided` trait.
-/// If a service requires `Arc<T>` but no `#[provider]` for `T` exists,
-/// you get a compile error: "Missing Provider: The type `T` cannot be injected."
-///
-/// No runtime verification is needed.
-#[proc_macro]
-pub fn verify_setup(_input: TokenStream) -> TokenStream {
-    // No-op - compile-time checks via Provided trait are sufficient
-    TokenStream::new()
 }
 
 /// Marks a function as an event-driven trigger.
@@ -893,9 +875,9 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 if let Some(syn::GenericArgument::Type(inner_type)) =
                                     args.args.first()
                                 {
-                                    // Type-Based DI: use T::resolve() for compile-time verification
+                                    // Type-Based DI: use T::resolve().await for async resolution
                                     di_resolve_tokens.push(quote! {
-                                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve();
+                                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
                                     });
                                     di_call_args.push(quote! { #arg_name });
                                     continue;
@@ -927,8 +909,8 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Resolve DI dependencies for additional parameters
                 #(#di_resolve_tokens)*
 
-                // Signal trigger - resolve target using Type-Based DI
-                let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve();
+                // Signal trigger - resolve target using Type-Based DI (async)
+                let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
 
                 loop {
                     notifier_wrapper.notified().await;
@@ -946,8 +928,8 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 #(#di_resolve_tokens)*
 
                 // Broadcast Queue trigger - each handler subscribes independently
-                // Subscribe to get our own receiver
-                let mut receiver = #target_type::subscribe();
+                // Subscribe to get our own receiver (async)
+                let mut receiver = #target_type::subscribe().await;
 
                 loop {
                     match receiver.recv().await {
@@ -976,8 +958,8 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Resolve DI dependencies for additional parameters
                 #(#di_resolve_tokens)*
 
-                // LB Queue trigger - use shared receiver via lock
-                let queue_wrapper = <#target_type as service_daemon::Provided>::resolve();
+                // LB Queue trigger - use shared receiver via lock (async)
+                let queue_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
 
                 loop {
                     let item = {
@@ -1015,10 +997,10 @@ pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Resolve DI dependencies for additional parameters
                 #(#di_resolve_tokens)*
 
-                // Cron trigger - resolve target using Type-Based DI
+                // Cron trigger - resolve target using Type-Based DI (async)
                 use service_daemon::tokio_cron_scheduler::{Job, JobScheduler};
 
-                let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve();
+                let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
 
                 let sched = JobScheduler::new().await?;
 

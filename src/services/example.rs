@@ -15,13 +15,14 @@ pub async fn example_service(port: Arc<Port>, db_url: Arc<DbUrl>) -> anyhow::Res
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         info!("Heartbeat from example service");
 
-        // --- NEW: Template-Based Interaction ---
+        // --- Template-Based Interaction ---
 
-        // 1. Trigger a Signal (Custom Trigger) from here
-        // No need to inject UserNotifier as a dependency if you just want to call it!
-        UserNotifier::notify();
+        // 1. Trigger a Signal (Event) from here
+        // notify() is now async to align with the async DI system
+        UserNotifier::notify().await;
 
         // 2. Push to a Broadcast Queue (all handlers will receive this message)
-        let _ = TaskQueue::push("Message from service".to_owned());
+        // push() is now async
+        let _ = TaskQueue::push("Message from service".to_owned()).await;
     }
 }

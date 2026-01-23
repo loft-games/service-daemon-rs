@@ -17,5 +17,7 @@ use std::sync::Arc;
 )]
 pub trait Provided: 'static + Send + Sync + Sized {
     /// Resolves an instance of this type from the DI system.
-    fn resolve() -> Arc<Self>;
+    ///
+    /// This is an async method to allow for non-blocking initialization.
+    fn resolve() -> impl std::future::Future<Output = Arc<Self>> + Send;
 }

@@ -2,7 +2,7 @@
 //!
 //! These tests verify that the Provided trait and SERVICE_REGISTRY work correctly.
 
-use service_daemon::{SERVICE_REGISTRY, TRIGGER_REGISTRY};
+use service_daemon::SERVICE_REGISTRY;
 use std::collections::HashSet;
 
 /// Test that we can collect service names from the registry
@@ -29,18 +29,6 @@ fn test_triggers_registered_as_services() {
             "Service module should not be empty"
         );
     }
-}
-
-/// Test that TRIGGER_REGISTRY is empty (since triggers are now services)
-#[test]
-fn test_trigger_registry_empty() {
-    // Triggers now register as services, so TRIGGER_REGISTRY should be empty
-    // This test verifies the migration to unified service-based architecture
-    let trigger_count = TRIGGER_REGISTRY.len();
-    assert_eq!(
-        trigger_count, 0,
-        "TRIGGER_REGISTRY should be empty - triggers now register as services"
-    );
 }
 
 /// Test ServiceEntry structure
