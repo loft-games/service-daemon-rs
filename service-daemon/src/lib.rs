@@ -55,4 +55,4 @@ pub use tokio_cron_scheduler;
 pub use uuid;
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{provider, service, trigger};
+pub use service_daemon_macro::{allow_sync, provider, service, trigger};

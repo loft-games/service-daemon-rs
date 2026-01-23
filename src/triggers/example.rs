@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::providers::trigger_providers::{CleanupSchedule, TaskQueue, UserNotifier, WorkerQueue};
 use crate::providers::typed_providers::{DbUrl, Port};
-use service_daemon::trigger;
+use service_daemon::{allow_sync, trigger};
 
 // --- Cron Trigger ---
 // Uses the schedule string from CleanupSchedule provider
@@ -69,5 +69,13 @@ pub async fn notify_trigger(_payload: (), id: String, port: Arc<Port>) -> anyhow
         id,
         port
     );
+    Ok(())
+}
+
+// --- Sync Trigger ---
+#[allow_sync]
+#[trigger(template = "event", target = UserNotifier)]
+pub fn sync_notify_trigger(_payload: (), id: String) -> anyhow::Result<()> {
+    tracing::info!(">>> Sync Notify Trigger fired (id: {})", id);
     Ok(())
 }

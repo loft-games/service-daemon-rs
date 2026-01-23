@@ -1,6 +1,6 @@
 use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, Port};
-use service_daemon::service;
+use service_daemon::{allow_sync, service};
 use std::sync::Arc;
 use tracing::info;
 
@@ -25,4 +25,13 @@ pub async fn example_service(port: Arc<Port>, db_url: Arc<DbUrl>) -> anyhow::Res
         // push() is now async
         let _ = TaskQueue::push("Message from service".to_owned()).await;
     }
+}
+
+#[allow_sync]
+#[service]
+pub fn sync_service(port: Arc<Port>) -> anyhow::Result<()> {
+    // This is a synchronous service. It still works because the macro wraps it!
+    // Note: Calling blocking code here would block the executor.
+    info!("Sync service started on port {}", port);
+    Ok(())
 }

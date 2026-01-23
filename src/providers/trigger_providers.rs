@@ -7,7 +7,7 @@
 //! - `BroadcastQueue` (aliases: `Queue`, `BQueue`): All handlers receive every message (fanout).
 //! - `LoadBalancingQueue` (alias: `LBQueue`): Messages are distributed to one handler at a time.
 
-use service_daemon::provider;
+use service_daemon::{allow_sync, provider};
 
 // Signal provider - generates Arc<Notify> with static `notify()` and `wait()` methods
 // Aliases: Notify, Event
@@ -45,5 +45,20 @@ pub async fn async_config() -> AsyncConfig {
     AsyncConfig {
         connection_string: "postgres://localhost/db".to_owned(),
         initialized_at: std::time::Instant::now(),
+    }
+}
+
+// --- Sync Function Provider Example ---
+#[allow(dead_code)]
+pub struct SyncConfig {
+    pub value: String,
+}
+
+#[allow(dead_code)]
+#[allow_sync]
+#[provider]
+pub fn sync_config() -> SyncConfig {
+    SyncConfig {
+        value: "sync-init-value".to_owned(),
     }
 }

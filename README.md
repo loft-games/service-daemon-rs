@@ -4,12 +4,32 @@ A Rust library for automatic service management with dependency injection, inspi
 
 ## Features
 
-- **`#[service]`** - Mark async functions as managed services
-- **`#[trigger]`** - Event-driven functions (Cron, Queue, Custom)
-- **`#[provider]`** - Auto-register dependencies (no manual `register` calls!)
+- **`#[service]`** - Mark functions (sync or async) as managed services
+- **`#[trigger]`** - Event-driven functions (sync or async; templates: Cron, Queue, Event)
+- **`#[provider]`** - Auto-register dependencies, supports sync/async function initialization
 - **Automatic restart** - Failed services are restarted automatically
 - **Type-safe DI** - Services/Triggers receive dependencies by name with type verification
 - **Zero boilerplate** - Just annotate and run
+
+> [!CAUTION]
+> **Performance Warning: Synchronous Functions**
+> While synchronous functions are supported for convenience, they run directly on the asynchronous executor's worker threads. **Blocking synchronous code will stall the entire daemon.**
+> - For I/O or long-running tasks, always prefer `async fn`.
+> - If you must use blocking code, consider wrapping it in `tokio::task::spawn_blocking` internally or converting the service to an `async fn`.
+
+> [!TIP]
+> **Suppressing Sync Warnings with `#[allow_sync]`**
+> If your synchronous function is intentionally non-blocking (e.g., fast in-memory operations), you can suppress the runtime warning by adding `#[allow_sync]` before your `#[service]`, `#[trigger]`, or `#[provider]` macro:
+> ```rust
+> use service_daemon::{allow_sync, service};
+>
+> #[allow_sync]
+> #[service]
+> pub fn fast_sync_service() -> anyhow::Result<()> {
+>     // This function is intentionally sync and safe.
+>     Ok(())
+> }
+> ```
 
 ## Quick Start
 
@@ -51,6 +71,12 @@ pub async fn async_config() -> AsyncConfig {
     // Custom async initialization (e.g., fetching from remote)
     AsyncConfig { connection_string: "postgres://localhost".to_owned() }
 }
+
+// --- Synchronous Function Provider ---
+#[provider]
+pub fn sync_config() -> String {
+    "some-static-value".to_owned()
+}
 ```
 
 
@@ -70,6 +96,13 @@ pub async fn my_service(port: Arc<Port>, db_url: Arc<DbUrl>) -> anyhow::Result<(
         // do work
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
+}
+
+// Synchronous services are also supported!
+#[service]
+pub fn my_sync_service(port: Arc<Port>) -> anyhow::Result<()> {
+    tracing::info!("Sync service running on port {}", **port);
+    Ok(())
 }
 ```
 
@@ -94,9 +127,9 @@ async fn main() -> anyhow::Result<()> {
 
 ## How It Works
 
-1. **`#[provider]`** implements the `Provided` trait for a struct, using `OnceLock` for thread-safe singleton resolution.
-2. **`#[service]`** generates a wrapper that calls `T::resolve()` for each `Arc<T>` dependency.
-3. **`#[trigger]`** registers a specialized service with an embedded event loop (Cron, Queue, or Custom).
+1. **`#[provider]`** implements the `Provided` trait for a struct or function, using `OnceCell` for thread-safe asynchronous singleton resolution.
+2. **`#[service]`** generates an async wrapper that calls `T::resolve().await` for each `Arc<T>` dependency.
+3. **`#[trigger]`** registers a specialized service with an embedded async event loop (Cron, Queue, or Event).
 4. **`ServiceDaemon::auto_init()`** discovers all services (including triggers) via `linkme`.
 5. **`daemon.run()`** spawns all services/triggers and restarts them on failure with **exponential backoff**.
 
@@ -184,6 +217,29 @@ error[E0599]: no function or associated item named `resolve` found for struct `M
 ## Triggers
 
 Triggers are specialized services with built-in event loops. They register normally as services but manage an internal "Call Host".
+
+```mermaid
+sequenceDiagram
+    participant Main
+    participant SERVICE_REGISTRY
+    participant ServiceDaemon
+    participant TriggerWrapper
+    participant Provider
+    participant EventSource
+
+    Main->>ServiceDaemon: auto_init()
+    ServiceDaemon->>SERVICE_REGISTRY: iterate services & triggers
+    Main->>ServiceDaemon: run()
+    ServiceDaemon->>TriggerWrapper: spawn()
+    TriggerWrapper->>Provider: T::resolve().await
+    Note over Provider: Singleton (OnceCell)
+    Provider-->>TriggerWrapper: Arc<T>
+    TriggerWrapper->>EventSource: subscribe() / wait()
+    loop Event Loop
+        EventSource-->>TriggerWrapper: fired / item received
+        TriggerWrapper->>TriggerWrapper: run user function
+    end
+```
 
 ### 1. Cron Trigger
 
