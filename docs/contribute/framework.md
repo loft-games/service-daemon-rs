@@ -99,7 +99,12 @@ Once started via `daemon.run().await`:
 Triggers are not a separate primitive; they are **Specialized Services**.
 - **Unified Registry**: The `#[trigger]` macro registers an entry directly into the `SERVICE_REGISTRY`.
 - **Host Wrapper**: Instead of running user code directly, the trigger wrapper spawns a "Host" (e.g., `cron_trigger_host`). 
-- **Inversion of Control**: The Host manages the event source (cron, queue, etc.) and executes the user's handler when the event occurs. It automatically injects the trigger name and a unique ID into the `tracing` context via a span, removing the need for an explicit `id` parameter. Dependencies are injected lazily via DI just like a standard service.
+- **Inversion of Control**: The Host manages the event source (cron, queue, etc.) and executes the user's handler when the event occurs. 
+- **Declarative Parameter Detection**: The `#[trigger]` macro categorizes parameters into two groups:
+    - **DI Resources**: Parameters of type `Arc<T>` (not marked with `#[payload]`). These are resolved via `T::resolve().await` before the event loop starts for that iteration.
+    - **Event Payloads**: Either the first non-`Arc<T>` parameter or any parameter explicitly marked with `#[payload]`. If an `Arc<T>` is marked as a payload, the macro automatically wraps the raw incoming payload in `Arc::new()`.
+- **Attribute Stripping**: To ensure valid Rust code after transformation, the macro strips the internal `#[payload]` attribute from the final function signature that is emitted into the user's codebase.
+- **Trace correlation**: It automatically injects the trigger name and a unique ID into the `tracing` context via a span, removing the need for an explicit `id` parameter.
 
 ## Key Components
 

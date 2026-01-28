@@ -283,13 +283,29 @@ Messages are distributed to one handler at a time with `LoadBalancingQueue`.
 #[provider(default = LBQueue, item_type = "Task")]
 pub struct WorkerQueue;
 
+// Pattern 1: Implicit Payload (non-Arc parameter)
 #[trigger(template = LBQueue, target = WorkerQueue)]
 async fn worker(item: Task) -> anyhow::Result<()> { ... }
+
+// Pattern 2: Explicit Arc Payload (using #[payload] marker)
+#[trigger(template = LBQueue, target = WorkerQueue)]
+async fn worker_arc(#[payload] item: Arc<Task>, port: Arc<Port>) -> anyhow::Result<()> {
+    // Both are received as Arc! One is from event, one from DI.
+    Ok(())
+}
 
 // Push to the queue (async)
 async fn add_work() {
     let _ = WorkerQueue::push(Task { ... }).await;
 }
+```
+
+### Parameter Mapping Rules
+
+The `#[trigger]` macro uses a declarative approach to map parameters:
+1. **Implicit Payload**: The first parameter that is *not* an `Arc<T>` is treated as the event payload.
+2. **Explicit Payload**: Any parameter marked with `#[payload]` is treated as the event payload. This is required if you want to receive the payload wrapped in an `Arc<T>`.
+3. **DI Resources**: All other `Arc<T>` parameters are automatically resolved via the DI system.
 ```
 
 
