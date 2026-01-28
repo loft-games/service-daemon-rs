@@ -1,7 +1,7 @@
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{Instrument, error, info, warn};
 
 #[cfg(feature = "uuid-trigger-ids")]
 use uuid::Uuid;
@@ -26,16 +26,20 @@ pub async fn signal_trigger_host<F>(
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
-    F: Fn(String) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
+    F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
     loop {
         tokio::select! {
             _ = notifier.notified() => {
-                let trigger_id = generate_trigger_id();
-                info!("Signal trigger '{}' fired (ID: {})", name, trigger_id);
-                if let Err(e) = handler(trigger_id).await {
-                    error!("Trigger '{}' error: {:?}", name, e);
-                }
+                let id = generate_trigger_id();
+                let span = tracing::info_span!("trigger", %name, %id);
+                let h = handler.clone();
+                async move {
+                    info!("Signal trigger fired");
+                    if let Err(e) = h().await {
+                        error!("Trigger error: {:?}", e);
+                    }
+                }.instrument(span).await;
             }
             _ = cancellation_token.cancelled() => {
                 info!("Signal trigger '{}' shutting down", name);
@@ -55,18 +59,22 @@ pub async fn queue_trigger_host<T, F>(
 ) -> anyhow::Result<()>
 where
     T: Clone + Send + Sync + 'static,
-    F: Fn(T, String) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
+    F: Fn(T) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
     loop {
         tokio::select! {
             res = receiver.recv() => {
                 match res {
                     Ok(value) => {
-                        let trigger_id = generate_trigger_id();
-                        info!("Queue trigger '{}' received item (ID: {})", name, trigger_id);
-                        if let Err(e) = handler(value, trigger_id).await {
-                            error!("Trigger '{}' error: {:?}", name, e);
-                        }
+                        let id = generate_trigger_id();
+                        let span = tracing::info_span!("trigger", %name, %id);
+                        let h = handler.clone();
+                        async move {
+                            info!("Queue trigger received item");
+                            if let Err(e) = h(value).await {
+                                error!("Trigger error: {:?}", e);
+                            }
+                        }.instrument(span).await;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         warn!("Queue trigger '{}' lagged by {} messages", name, n);
@@ -95,7 +103,7 @@ pub async fn lb_queue_trigger_host<T, F>(
 ) -> anyhow::Result<()>
 where
     T: Send + Sync + 'static,
-    F: Fn(T, String) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
+    F: Fn(T) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
     loop {
         let item = tokio::select! {
@@ -111,14 +119,17 @@ where
 
         match item {
             Some(value) => {
-                let trigger_id = generate_trigger_id();
-                info!(
-                    "LB Queue trigger '{}' received item (ID: {})",
-                    name, trigger_id
-                );
-                if let Err(e) = handler(value, trigger_id).await {
-                    error!("Trigger '{}' error: {:?}", name, e);
+                let id = generate_trigger_id();
+                let span = tracing::info_span!("trigger", %name, %id);
+                let h = handler.clone();
+                async move {
+                    info!("LB Queue trigger received item");
+                    if let Err(e) = h(value).await {
+                        error!("Trigger error: {:?}", e);
+                    }
                 }
+                .instrument(span)
+                .await;
             }
             None => {
                 warn!("LB Queue trigger '{}' channel closed", name);
@@ -138,7 +149,7 @@ pub async fn cron_trigger_host<F>(
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
-    F: Fn(String) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync + 'static,
+    F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
     use tokio_cron_scheduler::{Job, JobScheduler};
 
@@ -147,14 +158,19 @@ where
     let name_str = name.to_string();
 
     let job = Job::new_async(schedule, move |_uuid, _lock| {
-        let trigger_id = generate_trigger_id();
+        let id = generate_trigger_id();
         let h = handler.clone();
         let n = name_str.clone();
         Box::pin(async move {
-            info!("Cron trigger '{}' fired (ID: {})", n, trigger_id);
-            if let Err(e) = h(trigger_id).await {
-                error!("Trigger '{}' error: {:?}", n, e);
+            let span = tracing::info_span!("trigger", name = %n, %id);
+            async move {
+                info!("Cron trigger fired");
+                if let Err(e) = h().await {
+                    error!("Trigger error: {:?}", e);
+                }
             }
+            .instrument(span)
+            .await;
         })
     })?;
 

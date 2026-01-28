@@ -28,21 +28,91 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let target_type: proc_macro2::TokenStream =
         target_str.parse().unwrap_or_else(|_| quote!(Unknown));
 
-    // Extract the first parameter type (payload type)
-    let payload_type: Option<Box<Type>> = sig.inputs.iter().find_map(|arg| {
-        if let FnArg::Typed(syn::PatType { ty, .. }) = arg {
-            Some(ty.clone())
-        } else {
-            None
+    // Extract parameters and categorize them
+    let mut di_resolve_tokens = Vec::new();
+    let mut di_capture_idents = Vec::new(); // Variables that need to be cloned into the closure
+    let mut call_args = Vec::new(); // Arguments passed to the user function
+    let mut param_entries = Vec::new(); // Registry metadata
+    let mut payload_arg_name = None;
+
+    for arg in sig.inputs.iter() {
+        if let FnArg::Typed(syn::PatType {
+            pat,
+            ty,
+            attrs: arg_attrs,
+            ..
+        }) = arg
+            && let Pat::Ident(pat_ident) = &**pat
+        {
+            let arg_name = &pat_ident.ident;
+            let arg_type = ty;
+            let arg_name_str = arg_name.to_string();
+            let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
+
+            // 1. Check if explicitly marked as #[payload]
+            let is_explicit_payload = arg_attrs.iter().any(|a| a.path().is_ident("payload"));
+
+            // 2. Check if it's an Arc<T>
+            let is_arc = if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
+                && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
+                && segment.ident == "Arc"
+            {
+                true
+            } else {
+                false
+            };
+
+            // Categorization logic:
+            // - If #[payload] is present, it's the payload regardless of type.
+            // - If it's NOT an Arc, it's the payload (only one allowed).
+            // - Otherwise, it's a DI Resource.
+            if is_explicit_payload || (!is_arc && payload_arg_name.is_none()) {
+                if payload_arg_name.is_some() {
+                    abort!(
+                        arg,
+                        "Multiple payload parameters detected. Only one parameter can be the event payload."
+                    );
+                }
+                payload_arg_name = Some(arg_name.clone());
+
+                // If the user wants Arc<Payload>, we must wrap it
+                if is_arc {
+                    call_args.push(quote! { std::sync::Arc::new(payload) });
+                } else {
+                    call_args.push(quote! { payload });
+                }
+            } else if is_arc {
+                // It's a DI Resource
+                if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
+                    && let (Some(segment), _) = (path.segments.last(), true)
+                    && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                    && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
+                {
+                    di_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                    });
+                    di_capture_idents.push(quote! { #arg_name });
+                    call_args.push(quote! { #arg_name });
+
+                    let key_str = format!("{}_{}", arg_name_str, arg_type_str);
+                    param_entries.push(quote! {
+                        service_daemon::ServiceParam {
+                            name: #arg_name_str,
+                            type_name: #arg_type_str,
+                            key: #key_str,
+                        }
+                    });
+                }
+            } else {
+                abort!(
+                    arg,
+                    "Parameter must be either Arc<T> for DI or a payload parameter."
+                );
+            }
         }
-    });
+    }
 
-    let payload_type_token = payload_type
-        .clone()
-        .unwrap_or_else(|| Box::new(syn::parse_quote!(())));
-    let payload_type_str = quote!(#payload_type_token).to_string().replace(" ", "");
-
-    // Compute normalized template name and expected target type
+    // Compute normalized template name
     let normalized_template = match template.as_str() {
         "Notify" | "Event" | "Custom" => "notify",
         "Queue" | "BQueue" | "BroadcastQueue" => "queue",
@@ -51,105 +121,39 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => &template,
     };
 
-    let _target_type_str = match normalized_template {
-        "notify" => "tokio::sync::Notify".to_string(),
-        "queue" => format!(
-            "tokio::sync::Mutex<tokio::sync::mpsc::Receiver<{}>>",
-            payload_type_str
-        ),
-        "cron" => "String".to_string(),
-        "lb_queue" => format!(
-            "tokio::sync::Mutex<tokio::sync::mpsc::Receiver<{}>>",
-            payload_type_str
-        ),
-        _ => "unknown".to_string(),
-    };
-
-    // Extract additional DI parameters (index 2+)
-    let mut di_resolve_tokens = Vec::new();
-    let mut di_call_args = Vec::new();
-    let mut param_entries = Vec::new();
-
-    for (i, arg) in sig.inputs.iter().enumerate() {
-        // Skip first two params (payload and trigger_id)
-        if i < 2 {
-            continue;
-        }
-
-        if let FnArg::Typed(syn::PatType { pat, ty, .. }) = arg
-            && let Pat::Ident(pat_ident) = &**pat
-        {
-            let arg_name = &pat_ident.ident;
-            let arg_type = ty;
-            let arg_name_str = arg_name.to_string();
-            let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
-
-            // Add to param entries for verification with pre-computed key
-            let key_str = format!("{}_{}", arg_name_str, arg_type_str);
-            param_entries.push(quote! {
-                service_daemon::ServiceParam {
-                    name: #arg_name_str,
-                    type_name: #arg_type_str,
-                    key: #key_str,
-                }
-            });
-
-            // Check if the type is Arc<T>
-            if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
-                && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
-                && segment.ident == "Arc"
-                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
-            {
-                // Type-Based DI: use T::resolve().await for async resolution
-                di_resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
-                });
-                di_call_args.push(quote! { #arg_name });
-                continue;
-            }
-
-            // Non-Arc types are not supported for DI
-            abort!(
-                arg_type,
-                "Trigger DI parameters must be Arc<T> where T implements Provided";
-                help = "Wrap your type in Arc<T>, e.g., `Arc<MyType>` instead of `MyType`";
-                note = "Parameters at index 0 (payload) and 1 (trigger_id) are not injected"
-            );
-        }
-    }
-
     let wrapper_name = format_ident!("{}_trigger_wrapper", fn_name);
     let entry_name = format_ident!("__TRIGGER_ENTRY_{}", fn_name.to_string().to_uppercase());
 
     let is_async = input.sig.asyncness.is_some();
     let allow_sync_present = has_allow_sync(attrs);
 
+    // Prepare the user function call
+    let call_expr = if is_async {
+        quote! { #fn_name(#(#call_args),*).await }
+    } else if allow_sync_present {
+        quote! { #fn_name(#(#call_args),*) }
+    } else {
+        quote! {
+            {
+                tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
+                #fn_name(#(#call_args),*)
+            }
+        }
+    };
+
     // Generate template-specific event loop call
     let event_loop_call = match normalized_template {
-        // Signal/Notify triggers
         "notify" => {
-            let call_expr = if is_async {
-                quote! { #fn_name((), trigger_id, #(#di_call_args),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name((), trigger_id, #(#di_call_args),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name((), trigger_id, #(#di_call_args),*)
-                    }
-                }
-            };
             quote! {
                 #(#di_resolve_tokens)*
                 let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
                 service_daemon::utils::triggers::signal_trigger_host(
                     #fn_name_str,
                     notifier_wrapper.0.clone(),
-                    move |trigger_id| {
-                        #(let #di_call_args = #di_call_args.clone();)*
+                    move || {
+                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
+                            let payload = (); // Dummy for consistency
                             #call_expr
                         })
                     },
@@ -158,26 +162,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         "queue" => {
-            let call_expr = if is_async {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name(value, trigger_id, #(#di_call_args),*)
-                    }
-                }
-            };
             quote! {
                 #(#di_resolve_tokens)*
                 let receiver = #target_type::subscribe().await;
                 service_daemon::utils::triggers::queue_trigger_host(
                     #fn_name_str,
                     receiver,
-                    move |value, trigger_id| {
-                        #(let #di_call_args = #di_call_args.clone();)*
+                    move |payload| {
+                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
                             #call_expr
                         })
@@ -187,26 +179,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         "lb_queue" => {
-            let call_expr = if is_async {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name(value, trigger_id, #(#di_call_args),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name(value, trigger_id, #(#di_call_args),*)
-                    }
-                }
-            };
             quote! {
                 #(#di_resolve_tokens)*
                 let queue_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
                 service_daemon::utils::triggers::lb_queue_trigger_host(
                     #fn_name_str,
                     queue_wrapper.rx.clone(),
-                    move |value, trigger_id| {
-                        #(let #di_call_args = #di_call_args.clone();)*
+                    move |payload| {
+                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
                             #call_expr
                         })
@@ -216,27 +196,16 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
         "cron" => {
-            let call_expr = if is_async {
-                quote! { #fn_name((), trigger_id, #(#di_call_args),*).await }
-            } else if allow_sync_present {
-                quote! { #fn_name((), trigger_id, #(#di_call_args),*) }
-            } else {
-                quote! {
-                    {
-                        tracing::warn!("Trigger '{}' is synchronous. Consider switching to 'async fn'.", #fn_name_str);
-                        #fn_name((), trigger_id, #(#di_call_args),*)
-                    }
-                }
-            };
             quote! {
                 #(#di_resolve_tokens)*
                 let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
                 service_daemon::utils::triggers::cron_trigger_host(
                     #fn_name_str,
                     schedule_wrapper.as_str(),
-                    move |trigger_id| {
-                        #(let #di_call_args = #di_call_args.clone();)*
+                    move || {
+                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
+                            let payload = (); // Dummy for consistency
                             #call_expr
                         })
                     },
@@ -251,9 +220,20 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Generate a "clean" signature (removing #[payload] attributes)
+    let mut clean_sig = sig.clone();
+    for arg in clean_sig.inputs.iter_mut() {
+        if let FnArg::Typed(syn::PatType {
+            attrs: arg_attrs, ..
+        }) = arg
+        {
+            arg_attrs.retain(|a| !a.path().is_ident("payload"));
+        }
+    }
+
     let expanded = quote! {
         #(#attrs)*
-        #vis #sig {
+        #vis #clean_sig {
             #body
         }
 

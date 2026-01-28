@@ -24,7 +24,7 @@ pub fn sync_service(data: Arc<SyncData>) -> anyhow::Result<()> {
 pub struct SyncSignal;
 
 #[trigger(template = "event", target = SyncSignal)]
-pub fn sync_trigger(_payload: (), _id: String, data: Arc<SyncData>) -> anyhow::Result<()> {
+pub fn sync_trigger(data: Arc<SyncData>) -> anyhow::Result<()> {
     assert_eq!(data.value, 42);
     Ok(())
 }

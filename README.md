@@ -246,8 +246,8 @@ Executes a function based on a cron expression string.
 pub struct CleanupSchedule(pub String);
 
 #[trigger(template = Cron, target = CleanupSchedule)]
-async fn hourly_cleanup(_request: (), id: String) -> anyhow::Result<()> {
-    tracing::info!("Cleaning up... (id: {})", id);
+async fn hourly_cleanup() -> anyhow::Result<()> {
+    tracing::info!("Cleaning up..."); // ID is in the tracing context!
     Ok(())
 }
 ```
@@ -263,10 +263,10 @@ pub struct TaskQueue;
 
 // Multiple triggers can subscribe - all receive every message!
 #[trigger(template = Queue, target = TaskQueue)]
-async fn handler1(item: MyTask, id: String) -> anyhow::Result<()> { ... }
+async fn handler1(item: MyTask) -> anyhow::Result<()> { ... }
 
 #[trigger(template = BQueue, target = TaskQueue)]
-async fn handler2(item: MyTask, id: String) -> anyhow::Result<()> { ... }
+async fn handler2(item: MyTask) -> anyhow::Result<()> { ... }
 
 // Push to the queue (async)
 async fn trigger_handlers() {
@@ -284,7 +284,7 @@ Messages are distributed to one handler at a time with `LoadBalancingQueue`.
 pub struct WorkerQueue;
 
 #[trigger(template = LBQueue, target = WorkerQueue)]
-async fn worker(item: Task, id: String) -> anyhow::Result<()> { ... }
+async fn worker(item: Task) -> anyhow::Result<()> { ... }
 
 // Push to the queue (async)
 async fn add_work() {
@@ -304,8 +304,8 @@ pub struct EventNotifier;
 
 // Trigger template aliases: Notify, Event, Custom
 #[trigger(template = Event, target = EventNotifier)]
-async fn on_notification(_request: (), id: String) -> anyhow::Result<()> {
-    tracing::info!("Event received! (id: {})", id);
+async fn on_notification() -> anyhow::Result<()> {
+    tracing::info!("Event received!");
     Ok(())
 }
 

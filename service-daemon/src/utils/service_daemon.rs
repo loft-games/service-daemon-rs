@@ -6,7 +6,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn};
+use tracing::{Instrument, error, info, instrument, warn};
 
 use crate::models::{SERVICE_REGISTRY, ServiceDescription, ServiceFn};
 
@@ -260,10 +260,17 @@ impl ServiceDaemon {
                 service_status.insert(name.clone(), ServiceStatus::Running);
                 let start_time = std::time::Instant::now();
 
-                match run(cancellation_token.clone()).await {
-                    Ok(_) => warn!("Service {} exited normally", name),
-                    Err(e) => error!("Service {} failed: {:?}", name, e),
-                }
+                let span = tracing::info_span!("service", %name);
+                let _result = match run(cancellation_token.clone()).instrument(span).await {
+                    Ok(_) => {
+                        warn!("Service {} exited normally", name);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("Service {} failed: {:?}", name, e);
+                        Err(e)
+                    }
+                };
 
                 // Check for cancellation after service exits
                 if cancellation_token.is_cancelled() {

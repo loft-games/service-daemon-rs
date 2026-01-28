@@ -27,6 +27,15 @@ pub struct TaskQueue;
 // Alias: LoadBalancingQueue, LBQueue
 #[provider(default = LBQueue, item_type = "String")]
 pub struct WorkerQueue;
+// --- Complex Payload Example ---
+#[derive(Debug, Clone)]
+pub struct ComplexJob {
+    pub id: u64,
+    pub data: String,
+}
+
+#[provider(default = LBQueue, item_type = "ComplexJob")]
+pub struct JobQueue;
 
 // --- Async Function Provider Example ---
 // This struct is initialized via an async function below.

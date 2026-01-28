@@ -7,12 +7,8 @@ use service_daemon::{allow_sync, trigger};
 // --- Cron Trigger ---
 // Uses the schedule string from CleanupSchedule provider
 #[trigger(template = Cron, target = CleanupSchedule)]
-pub async fn cleanup_trigger(_payload: (), id: String, port: Arc<Port>) -> anyhow::Result<()> {
-    tracing::info!(
-        ">>> Cleanup Trigger [Cron] fired (id: {}), port: {}",
-        id,
-        port
-    );
+pub async fn cleanup_trigger(port: Arc<Port>) -> anyhow::Result<()> {
+    tracing::info!(">>> Cleanup Trigger [Cron] fired, port: {}", port);
     Ok(())
 }
 
@@ -22,14 +18,12 @@ pub async fn cleanup_trigger(_payload: (), id: String, port: Arc<Port>) -> anyho
 #[trigger(template = Queue, target = TaskQueue)]
 pub async fn worker_trigger(
     payload: String,
-    id: String,
     port: Arc<Port>,
     db_url: Arc<DbUrl>,
 ) -> anyhow::Result<()> {
     tracing::info!(
-        ">>> Worker Trigger 1 [Broadcast] received: '{}' (id: {}), port: {}, db_url: {}",
+        ">>> Worker Trigger 1 [Broadcast] received: '{}', port: {}, db_url: {}",
         payload,
-        id,
         port,
         db_url
     );
@@ -37,11 +31,10 @@ pub async fn worker_trigger(
 }
 
 #[trigger(template = BQueue, target = TaskQueue)]
-pub async fn worker_trigger2(payload: String, id: String, port: Arc<Port>) -> anyhow::Result<()> {
+pub async fn worker_trigger2(payload: String, port: Arc<Port>) -> anyhow::Result<()> {
     tracing::info!(
-        ">>> Worker Trigger 2 [Broadcast] received: '{}' (id: {}), port: {}",
+        ">>> Worker Trigger 2 [Broadcast] received: '{}', port: {}",
         payload,
-        id,
         port
     );
     Ok(())
@@ -50,11 +43,26 @@ pub async fn worker_trigger2(payload: String, id: String, port: Arc<Port>) -> an
 // --- Load-Balancing Queue Trigger ---
 // WorkerQueue is an LBQueue - messages are distributed to one handler at a time
 #[trigger(template = LBQueue, target = WorkerQueue)]
-pub async fn lb_worker_trigger(payload: String, id: String, port: Arc<Port>) -> anyhow::Result<()> {
+pub async fn lb_worker_trigger(payload: String, port: Arc<Port>) -> anyhow::Result<()> {
     tracing::info!(
-        ">>> LB Worker Trigger [LoadBalancing] received: '{}' (id: {}), port: {}",
+        ">>> LB Worker Trigger [LoadBalancing] received: '{}', port: {}",
         payload,
-        id,
+        port
+    );
+    Ok(())
+}
+
+// --- Complex Payload with Explicit Arc ---
+// Using #[payload] allows receiving the event payload wrapped in Arc
+#[trigger(template = LBQueue, target = crate::providers::trigger_providers::JobQueue)]
+pub async fn complex_job_handler(
+    #[payload] job: Arc<crate::providers::trigger_providers::ComplexJob>,
+    port: Arc<Port>,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        ">>> Complex Job Handler received Arc payload: id={}, data='{}', port: {}",
+        job.id,
+        job.data,
         port
     );
     Ok(())
@@ -63,19 +71,15 @@ pub async fn lb_worker_trigger(payload: String, id: String, port: Arc<Port>) -> 
 // --- Signal Trigger ---
 // Uses the Notify provider for event signaling
 #[trigger(template = Event, target = UserNotifier)]
-pub async fn notify_trigger(_payload: (), id: String, port: Arc<Port>) -> anyhow::Result<()> {
-    tracing::info!(
-        ">>> Notify Trigger [Event] received (id: {}), port: {}",
-        id,
-        port
-    );
+pub async fn notify_trigger(port: Arc<Port>) -> anyhow::Result<()> {
+    tracing::info!(">>> Notify Trigger [Event] received, port: {}", port);
     Ok(())
 }
 
 // --- Sync Trigger ---
 #[allow_sync]
 #[trigger(template = Notify, target = UserNotifier)]
-pub fn sync_notify_trigger(_payload: (), id: String) -> anyhow::Result<()> {
-    tracing::info!(">>> Sync Notify Trigger fired (id: {})", id);
+pub fn sync_notify_trigger() -> anyhow::Result<()> {
+    tracing::info!(">>> Sync Notify Trigger fired");
     Ok(())
 }
