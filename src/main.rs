@@ -30,20 +30,46 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // 5. For demonstration: Query service status every 20 seconds
+    // 5. For demonstration: Push various jobs and messages
+    tokio::spawn(async move {
+        let mut job_id = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+
+            // Push to WorkerQueue (LBQueue String)
+            let _ = crate::providers::trigger_providers::WorkerQueue::push(format!(
+                "LB Work Item #{}",
+                job_id
+            ))
+            .await;
+
+            // Push to JobQueue (LBQueue ComplexJob - demonstrates #[payload] Arc support)
+            let _ = crate::providers::trigger_providers::JobQueue::push(
+                crate::providers::trigger_providers::ComplexJob {
+                    id: job_id,
+                    data: format!("Complex Data for job {}", job_id),
+                },
+            )
+            .await;
+
+            job_id += 1;
+        }
+    });
+
+    // 6. For demonstration: Query service status every 20 seconds
     let daemon_ref = daemon.handle();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(20)).await;
+            tokio::time::sleep(Duration::from_secs(25)).await;
             let status = daemon_ref.get_service_status("example_service").await;
             tracing::info!("--- [Main] example_service status: {:?} ---", status);
         }
     });
 
-    // 6. For demonstration: Log custom providers every 30 seconds
+    // 7. For demonstration: Log custom providers every 40 seconds
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(40)).await;
             let async_cfg = AsyncConfig::resolve().await;
             let sync_cfg = SyncConfig::resolve().await;
             tracing::info!(
