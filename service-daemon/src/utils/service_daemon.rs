@@ -340,16 +340,22 @@ impl ServiceDaemon {
         };
 
         let grace_period = std::time::Duration::from_secs(30);
-        for (name, handle) in tasks {
+        for (name, mut handle) in tasks {
             info!("Waiting for service '{}' to stop...", name);
-            match tokio::time::timeout(grace_period, handle).await {
-                Ok(Ok(())) => info!("Service '{}' stopped gracefully", name),
-                Ok(Err(e)) => warn!("Service '{}' panicked during shutdown: {:?}", name, e),
-                Err(_) => {
+            tokio::select! {
+                res = &mut handle => {
+                    match res {
+                        Ok(()) => info!("Service '{}' stopped gracefully", name),
+                        Err(e) => warn!("Service '{}' panicked during shutdown: {:?}", name, e),
+                    }
+                }
+                _ = tokio::time::sleep(grace_period) => {
                     warn!(
                         "Service '{}' did not stop within grace period, forcing abort",
                         name
                     );
+                    handle.abort();
+                    let _ = handle.await;
                 }
             }
             self.service_status.insert(name, ServiceStatus::Stopped);

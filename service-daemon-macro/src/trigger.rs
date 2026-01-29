@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemFn, Pat, Type, parse_macro_input};
+use syn::{FnArg, ItemFn, parse_macro_input};
 
 use crate::common::has_allow_sync;
 
@@ -30,86 +30,104 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Extract parameters and categorize them
     let mut di_resolve_tokens = Vec::new();
-    let mut di_capture_idents = Vec::new(); // Variables that need to be cloned into the closure
-    let mut call_args = Vec::new(); // Arguments passed to the user function
-    let mut param_entries = Vec::new(); // Registry metadata
+    let mut di_capture_idents = Vec::new();
+    let mut call_args = Vec::new();
+    let mut param_entries = Vec::new();
+    let mut mutability_marks = Vec::new();
     let mut payload_arg_name = None;
+    let mut _payload_is_arc = false;
 
     for arg in sig.inputs.iter() {
-        if let FnArg::Typed(syn::PatType {
-            pat,
-            ty,
-            attrs: arg_attrs,
-            ..
-        }) = arg
-            && let Pat::Ident(pat_ident) = &**pat
-        {
-            let arg_name = &pat_ident.ident;
-            let arg_type = ty;
+        if let Some((arg_name, intent)) = crate::common::analyze_param(arg) {
             let arg_name_str = arg_name.to_string();
-            let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
 
-            // 1. Check if explicitly marked as #[payload]
-            let is_explicit_payload = arg_attrs.iter().any(|a| a.path().is_ident("payload"));
+            match intent {
+                crate::common::ParamIntent::Payload { is_arc } => {
+                    if payload_arg_name.is_some() {
+                        abort!(
+                            arg,
+                            "Multiple payload parameters detected. Only one parameter can be the event payload."
+                        );
+                    }
+                    payload_arg_name = Some(arg_name.clone());
+                    _payload_is_arc = is_arc;
 
-            // 2. Check if it's an Arc<T>
-            let is_arc = if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
-                && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
-                && segment.ident == "Arc"
-            {
-                true
-            } else {
-                false
-            };
-
-            // Categorization logic:
-            // - If #[payload] is present, it's the payload regardless of type.
-            // - If it's NOT an Arc, it's the payload (only one allowed).
-            // - Otherwise, it's a DI Resource.
-            if is_explicit_payload || (!is_arc && payload_arg_name.is_none()) {
-                if payload_arg_name.is_some() {
-                    abort!(
-                        arg,
-                        "Multiple payload parameters detected. Only one parameter can be the event payload."
-                    );
+                    if is_arc {
+                        call_args.push(quote! { std::sync::Arc::new(payload) });
+                    } else {
+                        call_args.push(quote! { payload });
+                    }
                 }
-                payload_arg_name = Some(arg_name.clone());
-
-                // If the user wants Arc<Payload>, we must wrap it
-                if is_arc {
-                    call_args.push(quote! { std::sync::Arc::new(payload) });
-                } else {
-                    call_args.push(quote! { payload });
+                crate::common::ParamIntent::Cancellation => {
+                    call_args.push(quote! { token.clone() });
                 }
-            } else if is_arc {
-                // It's a DI Resource
-                if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
-                    && let (Some(segment), _) = (path.segments.last(), true)
-                    && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                    && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
-                {
-                    di_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
-                    });
+                crate::common::ParamIntent::Dependency {
+                    inner_type,
+                    wrapper,
+                } => {
+                    let type_str = quote!(#inner_type).to_string().replace(" ", "");
+                    let arg_type_wrapper_str = match wrapper {
+                        crate::common::WrapperKind::Arc => format!("Arc<{}>", type_str),
+                        crate::common::WrapperKind::ArcRwLock => {
+                            format!("Arc<RwLock<{}>>", type_str)
+                        }
+                        crate::common::WrapperKind::ArcMutex => format!("Arc<Mutex<{}>>", type_str),
+                    };
+
+                    match wrapper {
+                        crate::common::WrapperKind::Arc => {
+                            di_resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                            });
+                        }
+                        crate::common::WrapperKind::ArcRwLock => {
+                            di_resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
+                            });
+                            let mark_name = format_ident!(
+                                "__MUT_MARK_{}_{}",
+                                fn_name.to_string().to_uppercase(),
+                                arg_name.to_string().to_uppercase()
+                            );
+                            mutability_marks.push(quote! {
+                                #[service_daemon::linkme::distributed_slice(service_daemon::models::mutability::MUTABILITY_REGISTRY)]
+                                #[linkme(crate = service_daemon::linkme)]
+                                static #mark_name: service_daemon::models::mutability::MutabilityMark = service_daemon::models::mutability::MutabilityMark {
+                                    key: #type_str
+                                };
+                            });
+                        }
+                        crate::common::WrapperKind::ArcMutex => {
+                            di_resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
+                            });
+                            let mark_name = format_ident!(
+                                "__MUT_MARK_{}_{}",
+                                fn_name.to_string().to_uppercase(),
+                                arg_name.to_string().to_uppercase()
+                            );
+                            mutability_marks.push(quote! {
+                                #[service_daemon::linkme::distributed_slice(service_daemon::models::mutability::MUTABILITY_REGISTRY)]
+                                #[linkme(crate = service_daemon::linkme)]
+                                static #mark_name: service_daemon::models::mutability::MutabilityMark = service_daemon::models::mutability::MutabilityMark {
+                                    key: #type_str
+                                };
+                            });
+                        }
+                    }
+
                     di_capture_idents.push(quote! { #arg_name });
                     call_args.push(quote! { #arg_name });
-
-                    let key_str = format!("{}_{}", arg_name_str, arg_type_str);
+                    let key_str = format!("{}_{}", arg_name_str, arg_type_wrapper_str);
                     param_entries.push(quote! {
-                        service_daemon::ServiceParam {
-                            name: #arg_name_str,
-                            type_name: #arg_type_str,
-                            key: #key_str,
-                        }
+                        service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
                     });
                 }
-            } else {
-                abort!(
-                    arg,
-                    "Parameter must be either Arc<T> for DI or a payload parameter."
-                );
             }
+            continue;
         }
+
+        abort!(arg, "Unsupported parameter type in trigger.");
     }
 
     // Compute normalized template name
@@ -145,14 +163,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let event_loop_call = match normalized_template {
         "notify" => {
             quote! {
-                #(#di_resolve_tokens)*
                 let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
                 service_daemon::utils::triggers::signal_trigger_host(
                     #fn_name_str,
                     notifier_wrapper.0.clone(),
                     move || {
-                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
+                            #(#di_resolve_tokens)*
                             let payload = (); // Dummy for consistency
                             #call_expr
                         })
@@ -163,14 +180,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         "queue" => {
             quote! {
-                #(#di_resolve_tokens)*
                 let receiver = #target_type::subscribe().await;
                 service_daemon::utils::triggers::queue_trigger_host(
                     #fn_name_str,
                     receiver,
                     move |payload| {
-                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
+                            #(#di_resolve_tokens)*
                             #call_expr
                         })
                     },
@@ -180,14 +196,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         "lb_queue" => {
             quote! {
-                #(#di_resolve_tokens)*
                 let queue_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
                 service_daemon::utils::triggers::lb_queue_trigger_host(
                     #fn_name_str,
                     queue_wrapper.rx.clone(),
                     move |payload| {
-                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
+                            #(#di_resolve_tokens)*
                             #call_expr
                         })
                     },
@@ -197,14 +212,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
         "cron" => {
             quote! {
-                #(#di_resolve_tokens)*
                 let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
                 service_daemon::utils::triggers::cron_trigger_host(
                     #fn_name_str,
                     schedule_wrapper.as_str(),
                     move || {
-                        #(let #di_capture_idents = #di_capture_idents.clone();)*
                         Box::pin(async move {
+                            #(#di_resolve_tokens)*
                             let payload = (); // Dummy for consistency
                             #call_expr
                         })
@@ -254,6 +268,8 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
         };
+
+        #(#mutability_marks)*
     };
 
     TokenStream::from(expanded)

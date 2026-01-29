@@ -5,11 +5,12 @@ A Rust library for automatic service management with dependency injection, inspi
 ## Features
 
 - **`#[service]`** - Mark functions (sync or async) as managed services
-- **`#[trigger]`** - Event-driven functions (sync or async; templates: Cron, Queue, LBQueue, Notify, Event, Custom)
-- **`#[provider]`** - Auto-register dependencies, supports sync/async function initialization
-- **Automatic restart** - Failed services are restarted automatically
-- **Type-safe DI** - Services/Triggers receive dependencies by name with type verification
-- **Zero boilerplate** - Just annotate and run
+- **`#[trigger]`** - Event-driven functions (Cron, Queue, Notify)
+- **`#[provider]`** - Auto-register dependencies with once-lock singletons
+- **Intelligent State** - Automatic promotion to RwLock/Mutex with lock-free snapshots
+- **Cooperative Shutdown** - CancellationToken support for clean service exits
+- **Automatic restart** - Failed services are restarted with exponential backoff
+- **Type-safe DI** - Compile-time verified dependency resolution
 
 > [!CAUTION]
 > **Performance Warning: Synchronous Functions**
@@ -188,18 +189,17 @@ match status {
 ```mermaid
 sequenceDiagram
     participant Main
-    participant SERVICE_REGISTRY
     participant ServiceDaemon
     participant ServiceWrapper
+    participant StateManager
     participant Provider
 
     Main->>ServiceDaemon: auto_init()
-    ServiceDaemon->>SERVICE_REGISTRY: iterate services & triggers
     Main->>ServiceDaemon: run()
     ServiceDaemon->>ServiceWrapper: spawn()
-    ServiceWrapper->>Provider: T::resolve().await
-    Note over Provider: Singleton (OnceCell)
-    Provider-->>ServiceWrapper: Arc<T>
+    ServiceWrapper->>StateManager: T::resolve().await
+    StateManager->>Provider: instantiate (once)
+    StateManager-->>ServiceWrapper: Arc<T> (Snapshot)
     ServiceWrapper->>ServiceWrapper: run async function
 ```
 
@@ -216,24 +216,19 @@ Triggers are specialized services with built-in event loops. They register norma
 
 ```mermaid
 sequenceDiagram
-    participant Main
-    participant SERVICE_REGISTRY
     participant ServiceDaemon
-    participant TriggerWrapper
-    participant Provider
+    participant TriggerHost
     participant EventSource
+    participant StateManager
+    participant UserFunction
 
-    Main->>ServiceDaemon: auto_init()
-    ServiceDaemon->>SERVICE_REGISTRY: iterate services & triggers
-    Main->>ServiceDaemon: run()
-    ServiceDaemon->>TriggerWrapper: spawn()
-    TriggerWrapper->>Provider: T::resolve().await
-    Note over Provider: Singleton (OnceCell)
-    Provider-->>TriggerWrapper: Arc<T>
-    TriggerWrapper->>EventSource: subscribe() / wait()
+    ServiceDaemon->>TriggerHost: spawn()
+    TriggerHost->>EventSource: subscribe() / wait()
     loop Event Loop
-        EventSource-->>TriggerWrapper: fired / item received
-        TriggerWrapper->>TriggerWrapper: run user function
+        EventSource-->>TriggerHost: event fired
+        TriggerHost->>StateManager: T::resolve().await
+        StateManager-->>TriggerHost: Arc<T> (Snapshot)
+        TriggerHost->>UserFunction: execute(dependencies, payload)
     end
 ```
 
@@ -334,6 +329,45 @@ async fn unlock() {
 
 
 
+## Intelligent State Management
+
+The framework automatically manages shared state synchronization based on how your services declare their dependencies.
+
+### 1. The Snapshot Pattern (High Performance)
+Declare a dependency as `Arc<T>` to get a consistent, read-only snapshot.
+- **Zero Lockdown**: Even if other services are writing to the state, `Arc<T>` readers never block.
+- **Efficient**: Uses a zero-lock path (OnceCell) by default unless mutation is requested elsewhere.
+
+```rust
+#[service]
+pub async fn reader_service(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
+    // Zero-overhead reading!
+    tracing::info!("Processed total: {}", stats.total_processed);
+    Ok(())
+}
+```
+
+### 2. The Mutability Pattern (Thread-Safe Updates)
+Declare a dependency as `Arc<RwLock<T>>` or `Arc<Mutex<T>>` to gain write access.
+- **Automatic Promotion**: If even one service in your binary asks for a lock, the framework "promotes" that provider from a simple singleton to a **Managed State**.
+- **Atomic Publishing**: When a writer finishes, the framework automatically publishes a new snapshot for future `Arc<T>` readers.
+
+```rust
+#[service]
+pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
+    let mut guard = stats.write().await;
+    guard.total_processed += 1;
+    // Snapshot is updated when guard is dropped
+    Ok(())
+}
+```
+
+### 3. Promotion Logic
+1. **The Fast Path (Immutable)**: If everyone only asks for `Arc<T>`, the state is initialized once and never locked. Performance is identical to a raw pointer.
+2. **The Managed Path (Mutable)**: If `Arc<RwLock<T>>` or `Arc<Mutex<T>>` is detected anywhere at link-time, the framework upgrades the provider to support consistent snapshots and concurrent locking.
+
+---
+
 ## Project Structure
 
 ```
@@ -342,7 +376,7 @@ service-daemon-rs/
 │   └── src/
 │       ├── lib.rs            # Re-exports macros and core types
 │       ├── models/           # Service, Provider, Trigger registry
-│       └── utils/            # DI Container, ServiceDaemon
+│       └── utils/            # DI, ServiceDaemon, StateManager, Triggers
 ├── service-daemon-macro/     # Procedural macros
 │   └── src/
 │       ├── lib.rs            # Entry points and re-exports

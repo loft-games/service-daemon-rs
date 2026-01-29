@@ -1,9 +1,5 @@
-//! Type-Based Dependency Injection
-//!
-//! With pure Type-Based DI, all dependencies are resolved at compile time via the
-//! `Provided` trait. The `#[provider]` macro automatically implements this trait.
-
 use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
 
 /// A trait for types that can be provided by the DI system.
 ///
@@ -16,8 +12,33 @@ use std::sync::Arc;
     note = "Add `#[provider]` to a function returning `{Self}`, or use `#[provider]` on the struct definition."
 )]
 pub trait Provided: 'static + Send + Sync + Sized {
-    /// Resolves an instance of this type from the DI system.
+    /// Resolves a read-only snapshot of this type.
     ///
-    /// This is an async method to allow for non-blocking initialization.
+    /// If promoted to managed state, this returns a consistent snapshot.
+    /// Otherwise, it returns the global immutable singleton.
     fn resolve() -> impl std::future::Future<Output = Arc<Self>> + Send;
+
+    /// Resolves a live RwLock for this type.
+    ///
+    /// This is used when a service requests `Arc<RwLock<T>>`.
+    fn resolve_rwlock() -> impl std::future::Future<Output = Arc<RwLock<Self>>> + Send {
+        async {
+            panic!(
+                "Type {} does not support RwLock resolution. Did you use #[provider]?",
+                std::any::type_name::<Self>()
+            )
+        }
+    }
+
+    /// Resolves a live Mutex for this type.
+    ///
+    /// This is used when a service requests `Arc<Mutex<Self>>`.
+    fn resolve_mutex() -> impl std::future::Future<Output = Arc<Mutex<Self>>> + Send {
+        async {
+            panic!(
+                "Type {} does not support Mutex resolution. Did you use #[provider]?",
+                std::any::type_name::<Self>()
+            )
+        }
+    }
 }

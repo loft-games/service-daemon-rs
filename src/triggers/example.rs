@@ -12,6 +12,23 @@ pub async fn cleanup_trigger(port: Arc<Port>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A trigger that demonstrates reading a snapshot of shared global state.
+/// By declaring Arc<GlobalStats>, we get a zero-lock snapshot.
+/// Even if writers are busy, this reader never blocks!
+#[trigger(template = Cron, target = CleanupSchedule)]
+pub async fn stats_viewer(
+    stats: Arc<crate::providers::typed_providers::GlobalStats>,
+) -> anyhow::Result<()> {
+    // Note: We don't need .read().await here!
+    // We already have a consistent snapshot in the Arc.
+    tracing::info!(
+        ">>> Stats Viewer [Snapshot] total: {}, last status: '{}'",
+        stats.total_processed,
+        stats.last_status
+    );
+    Ok(())
+}
+
 // --- Broadcast Queue Triggers ---
 // TaskQueue is a BroadcastQueue - BOTH handlers receive every message!
 

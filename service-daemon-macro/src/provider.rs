@@ -161,14 +161,26 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         #fn_vis #fn_asyncness fn #fn_name() -> #return_type
             #fn_block
 
-        // Generate Provided impl for the return type using OnceCell (fully async)
+        static #singleton_name: service_daemon::utils::managed_state::StateManager<#return_type> = service_daemon::utils::managed_state::StateManager::new();
+
+        // Generate Provided impl for the return type using StateManager
         impl service_daemon::Provided for #return_type {
             async fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#return_type>> = tokio::sync::OnceCell::const_new();
-
-                #singleton_name.get_or_init(|| async {
+                #singleton_name.resolve_snapshot(#return_type_str, || async {
                     std::sync::Arc::new(#call_expr)
-                }).await.clone()
+                }).await
+            }
+
+            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+                #singleton_name.resolve_rwlock(|| async {
+                    std::sync::Arc::new(#call_expr)
+                }).await
+            }
+
+            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+                #singleton_name.resolve_mutex(|| async {
+                    std::sync::Arc::new(#call_expr)
+                }).await
             }
         }
     };
@@ -186,6 +198,7 @@ fn generate_notify_template(
 
     let expanded = quote! {
         #(#attrs)*
+        #[derive(Clone)]
         #vis struct #struct_name(pub std::sync::Arc<tokio::sync::Notify>);
 
         impl Default for #struct_name {
@@ -201,10 +214,20 @@ fn generate_notify_template(
             }
         }
 
+        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
-                #singleton_name.get_or_init(|| async { std::sync::Arc::new(Self::default()) }).await.clone()
+                let name_str = stringify!(#struct_name);
+                #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+                #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+                #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
 
@@ -238,6 +261,7 @@ fn generate_lb_queue_template(
 
     let expanded = quote! {
         #(#attrs)*
+        #[derive(Clone)]
         #vis struct #struct_name {
             pub tx: tokio::sync::mpsc::Sender<#item_type>,
             pub rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<#item_type>>>,
@@ -260,10 +284,20 @@ fn generate_lb_queue_template(
             }
         }
 
+        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
-                #singleton_name.get_or_init(|| async { std::sync::Arc::new(Self::default()) }).await.clone()
+                let name_str = stringify!(#struct_name);
+                #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+                #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+                #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
 
@@ -292,6 +326,7 @@ fn generate_broadcast_queue_template(
 
     let expanded = quote! {
         #(#attrs)*
+        #[derive(Clone)]
         #vis struct #struct_name {
             pub tx: tokio::sync::broadcast::Sender<#item_type>,
         }
@@ -305,15 +340,25 @@ fn generate_broadcast_queue_template(
 
         impl std::ops::Deref for #struct_name {
             type Target = tokio::sync::broadcast::Sender<#item_type>;
-            fn deref(&self) -> &Self::Target {
+            fn deref(&self) -> &tokio::sync::broadcast::Sender<#item_type> {
                 &self.tx
             }
         }
 
+        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
-                #singleton_name.get_or_init(|| async { std::sync::Arc::new(Self::default()) }).await.clone()
+                let name_str = stringify!(#struct_name);
+                #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+                #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+                #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
 
@@ -341,6 +386,7 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     let generics = &item.generics;
     let fields = &item.fields;
     let semi = &item.semi_token;
+    let struct_name_str = struct_name.to_string();
 
     // Parse attributes (default, env_name, item_type, capacity)
     let provider_attrs = parse_provider_attrs(attr_str);
@@ -547,13 +593,26 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
 
         #default_impl
 
-        // Type-based DI: impl Provided for the struct with async singleton behavior
+        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+
+        // Type-based DI: impl Provided for the struct with intelligent state management
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                static #singleton_name: tokio::sync::OnceCell<std::sync::Arc<#struct_name>> = tokio::sync::OnceCell::const_new();
-                #singleton_name.get_or_init(|| async {
+                #singleton_name.resolve_snapshot(#struct_name_str, || async {
                     #constructor
-                }).await.clone()
+                }).await
+            }
+
+            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+                #singleton_name.resolve_rwlock(|| async {
+                    #constructor
+                }).await
+            }
+
+            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+                #singleton_name.resolve_mutex(|| async {
+                    #constructor
+                }).await
             }
         }
     };

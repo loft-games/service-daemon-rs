@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 // 1. Sync Provider
+#[derive(Clone)]
 pub struct SyncData {
     pub value: i32,
 }

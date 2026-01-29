@@ -15,6 +15,7 @@ use service_daemon::{allow_sync, provider};
 pub struct UserNotifier;
 
 // Cron schedule provider - simple string wrapper
+#[derive(Clone)]
 #[provider(default = "*/30 * * * * *")]
 pub struct CleanupSchedule(pub String);
 
@@ -39,6 +40,7 @@ pub struct JobQueue;
 
 // --- Async Function Provider Example ---
 // This struct is initialized via an async function below.
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct AsyncConfig {
     pub connection_string: String,
@@ -58,6 +60,7 @@ pub async fn async_config() -> AsyncConfig {
 }
 
 // --- Sync Function Provider Example ---
+#[derive(Clone)]
 #[allow(dead_code)]
 pub struct SyncConfig {
     pub value: String,

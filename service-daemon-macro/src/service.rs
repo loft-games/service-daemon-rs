@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemFn, Pat, Type, parse_macro_input};
+use syn::{ItemFn, parse_macro_input};
 
 use crate::common::has_allow_sync;
 
@@ -20,45 +20,95 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
+    let mut mutability_marks = Vec::new();
 
     for arg in &sig.inputs {
-        if let FnArg::Typed(syn::PatType { pat, ty, .. }) = arg
-            && let Pat::Ident(pat_ident) = &**pat
-        {
-            let arg_name = &pat_ident.ident;
-            let arg_type = ty;
+        if let Some((arg_name, intent)) = crate::common::analyze_param(arg) {
             let arg_name_str = arg_name.to_string();
-            let arg_type_str = quote!(#arg_type).to_string().replace(" ", "");
 
-            // Check if the type is Arc<T>
-            if let Type::Path(syn::TypePath { path, .. }) = &**arg_type
-                && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
-                && segment.ident == "Arc"
-                && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
-            {
-                // Type-Based DI: use T::resolve().await for async resolution
-                resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
-                });
-                call_args.push(quote! { #arg_name });
+            match intent {
+                crate::common::ParamIntent::Dependency {
+                    inner_type,
+                    wrapper,
+                } => {
+                    let type_str = quote!(#inner_type).to_string().replace(" ", "");
+                    let arg_type_wrapper_str = match wrapper {
+                        crate::common::WrapperKind::Arc => format!("Arc<{}>", type_str),
+                        crate::common::WrapperKind::ArcRwLock => {
+                            format!("Arc<RwLock<{}>>", type_str)
+                        }
+                        crate::common::WrapperKind::ArcMutex => format!("Arc<Mutex<{}>>", type_str),
+                    };
 
-                // Build param entry for registry with pre-computed key
-                let key_str = format!("{}_{}", arg_name_str, arg_type_str);
-                param_entries.push(quote! {
-                    service_daemon::ServiceParam { name: #arg_name_str, type_name: #arg_type_str, key: #key_str }
-                });
-                continue;
+                    match wrapper {
+                        crate::common::WrapperKind::Arc => {
+                            resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                            });
+                        }
+                        crate::common::WrapperKind::ArcRwLock => {
+                            resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
+                            });
+                            // Emit mutability mark for promotion
+                            let mark_name = format_ident!(
+                                "__MUT_MARK_{}_{}",
+                                fn_name.to_string().to_uppercase(),
+                                arg_name.to_string().to_uppercase()
+                            );
+                            mutability_marks.push(quote! {
+                                #[service_daemon::linkme::distributed_slice(service_daemon::models::mutability::MUTABILITY_REGISTRY)]
+                                #[linkme(crate = service_daemon::linkme)]
+                                static #mark_name: service_daemon::models::mutability::MutabilityMark = service_daemon::models::mutability::MutabilityMark {
+                                    key: #type_str
+                                };
+                            });
+                        }
+                        crate::common::WrapperKind::ArcMutex => {
+                            resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
+                            });
+                            // Emit mutability mark for promotion
+                            let mark_name = format_ident!(
+                                "__MUT_MARK_{}_{}",
+                                fn_name.to_string().to_uppercase(),
+                                arg_name.to_string().to_uppercase()
+                            );
+                            mutability_marks.push(quote! {
+                                #[service_daemon::linkme::distributed_slice(service_daemon::models::mutability::MUTABILITY_REGISTRY)]
+                                #[linkme(crate = service_daemon::linkme)]
+                                static #mark_name: service_daemon::models::mutability::MutabilityMark = service_daemon::models::mutability::MutabilityMark {
+                                    key: #type_str
+                                };
+                            });
+                        }
+                    }
+
+                    call_args.push(quote! { #arg_name });
+                    let key_str = format!("{}_{}", arg_name_str, arg_type_wrapper_str);
+                    param_entries.push(quote! {
+                        service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
+                    });
+                }
+                crate::common::ParamIntent::Cancellation => {
+                    call_args.push(quote! { token.clone() });
+                }
+                crate::common::ParamIntent::Payload { .. } => {
+                    abort!(
+                        arg,
+                        "Services do not support event payloads. Only Arc<T> dependencies are allowed.";
+                        help = "Remove the payload parameter or use #[trigger] instead."
+                    );
+                }
             }
-
-            // Non-Arc types are not supported for DI
-            abort!(
-                arg_type,
-                "Service parameters must be Arc<T> where T implements Provided";
-                help = "Wrap your type in Arc<T>, e.g., `Arc<MyType>` instead of `MyType`";
-                note = "The DI system requires Arc<T> to manage shared ownership of providers"
-            );
+            continue;
         }
+
+        abort!(
+            arg,
+            "Unsupported parameter type. Service parameters must be Arc wrappers.";
+            help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>."
+        );
     }
 
     let wrapper_name = format_ident!("{}_wrapper", fn_name);
@@ -106,6 +156,8 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
         };
+
+        #(#mutability_marks)*
     };
 
     TokenStream::from(expanded)
