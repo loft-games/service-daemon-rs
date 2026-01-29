@@ -1,17 +1,12 @@
 use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
-use service_daemon::tokio_util::sync::CancellationToken;
 use service_daemon::{allow_sync, service};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
 
 #[service]
-pub async fn example_service(
-    port: Arc<Port>,
-    db_url: Arc<DbUrl>,
-    token: CancellationToken,
-) -> anyhow::Result<()> {
+pub async fn example_service(port: Arc<Port>, db_url: Arc<DbUrl>) -> anyhow::Result<()> {
     // No .0 needed - Display is auto-generated!
     info!(
         "Example service running on port {} with DB {}",
@@ -31,7 +26,7 @@ pub async fn example_service(
                 // 2. Push to a Broadcast Queue
                 let _ = TaskQueue::push("Message from service".to_owned()).await;
             }
-            _ = token.cancelled() => {
+            _ = service_daemon::wait_for_shutdown() => {
                 info!("Example service shutting down");
                 break;
             }
@@ -40,29 +35,24 @@ pub async fn example_service(
     Ok(())
 }
 
-/// A service that demonstrates writing to shared global state.
 #[service]
-pub async fn stats_writer(
-    stats: Arc<RwLock<GlobalStats>>,
-    token: CancellationToken,
-) -> anyhow::Result<()> {
+pub async fn stats_writer(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
     info!("Stats writer service started");
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-                // Gain exclusive write access
-                let mut guard = stats.write().await;
-                guard.total_processed += 1;
-                guard.last_status = format!("Processed {}", guard.total_processed);
+    while !service_daemon::is_shutdown() {
+        // Gain exclusive write access
+        let mut guard = stats.write().await;
+        guard.total_processed += 1;
+        guard.last_status = format!("Processed {}", guard.total_processed);
 
-                info!("Updated global stats: {}", guard.total_processed);
-            }
-            _ = token.cancelled() => {
-                info!("Stats writer shutting down");
-                break;
-            }
+        info!("Updated global stats: {}", guard.total_processed);
+
+        // Wait or check for shutdown again
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {}
+            _ = service_daemon::wait_for_shutdown() => break,
         }
     }
+    info!("Stats writer shutting down");
     Ok(())
 }
 

@@ -90,9 +90,6 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
                     });
                 }
-                crate::common::ParamIntent::Cancellation => {
-                    call_args.push(quote! { token.clone() });
-                }
                 crate::common::ParamIntent::Payload { .. } => {
                     abort!(
                         arg,

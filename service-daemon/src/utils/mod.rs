@@ -1,3 +1,4 @@
+pub mod context;
 pub mod di;
 pub mod managed_state;
 pub mod service_daemon;

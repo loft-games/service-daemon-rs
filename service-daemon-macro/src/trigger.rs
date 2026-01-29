@@ -58,9 +58,6 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                         call_args.push(quote! { payload });
                     }
                 }
-                crate::common::ParamIntent::Cancellation => {
-                    call_args.push(quote! { token.clone() });
-                }
                 crate::common::ParamIntent::Dependency {
                     inner_type,
                     wrapper,

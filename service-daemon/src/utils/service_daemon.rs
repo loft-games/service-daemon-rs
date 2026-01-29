@@ -261,7 +261,14 @@ impl ServiceDaemon {
                 let start_time = std::time::Instant::now();
 
                 let span = tracing::info_span!("service", %name);
-                let _result = match run(cancellation_token.clone()).instrument(span).await {
+                let token_clone = cancellation_token.clone();
+                let result = crate::utils::context::SHUTDOWN_TOKEN
+                    .scope(token_clone.clone(), async {
+                        run(token_clone).instrument(span).await
+                    })
+                    .await;
+
+                let _result = match result {
                     Ok(_) => {
                         warn!("Service {} exited normally", name);
                         Ok(())

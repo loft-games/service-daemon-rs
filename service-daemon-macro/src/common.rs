@@ -15,8 +15,6 @@ pub fn has_allow_sync(attrs: &[Attribute]) -> bool {
 pub enum ParamIntent {
     /// An event payload (optionally wrapped in Arc).
     Payload { is_arc: bool },
-    /// A CancellationToken for cooperative shutdown.
-    Cancellation,
     /// A DI dependency.
     Dependency {
         inner_type: Type,
@@ -52,13 +50,6 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
 
         // 2. Analyze the type structure
         let (inner_type, wrapper) = decompose_type(ty);
-
-        // 3. Check for CancellationToken
-        if let Type::Path(syn::TypePath { path, .. }) = &**ty
-            && path.segments.iter().any(|s| s.ident == "CancellationToken")
-        {
-            return Some((arg_name, ParamIntent::Cancellation));
-        }
 
         if is_explicit_payload {
             return Some((
