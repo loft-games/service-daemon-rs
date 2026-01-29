@@ -171,16 +171,20 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
                 }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
                     std::sync::Arc::new(#call_expr)
                 }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async {
                     std::sync::Arc::new(#call_expr)
                 }).await
+            }
+
+            async fn changed() {
+                #singleton_name.changed().await
             }
         }
     };
@@ -222,11 +226,11 @@ fn generate_notify_template(
                 #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
@@ -292,11 +296,11 @@ fn generate_lb_queue_template(
                 #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
@@ -353,11 +357,11 @@ fn generate_broadcast_queue_template(
                 #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
@@ -603,16 +607,20 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
                 }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<tokio::sync::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
                     #constructor
                 }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<tokio::sync::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async {
                     #constructor
                 }).await
+            }
+
+            async fn changed() {
+                #singleton_name.changed().await
             }
         }
     };

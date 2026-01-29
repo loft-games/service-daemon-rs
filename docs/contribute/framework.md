@@ -114,7 +114,8 @@ Once started via `daemon.run().await`:
 Triggers are not a separate primitive; they are **Specialized Services**.
 - **Unified Registry**: The `#[trigger]` macro registers an entry directly into the `SERVICE_REGISTRY`.
 - **Host Wrapper**: Instead of running user code directly, the trigger wrapper spawns a "Host" (e.g., `cron_trigger_host`). 
-- **Inversion of Control**: The Host manages the event source (cron, queue, etc.) and executes the user's handler when the event occurs. 
+- **Inversion of Control**: The Host manages the event source (cron, queue, etc.) and executes the user's handler when the event occurs.
+- **Watch Trigger**: A special trigger type that subscribes to `StateManager` notifications. It fires whenever a `TrackedRwLock` or `TrackedMutex` guard is dropped for the target type.
 - **Declarative Parameter Detection**: The `#[trigger]` macro categorizes parameters into three groups:
     - **DI Resources**: Parameters of type `Arc<T>` (not marked with `#[payload]`). These are resolved via `T::resolve().await` **inside the event loop** on every firing, ensuring triggers always have the latest promoted state snapshots.
     - **Event Payloads**: Either the first non-`Arc<T>` parameter or any parameter explicitly marked with `#[payload]`.
@@ -127,11 +128,12 @@ Triggers are not a separate primitive; they are **Specialized Services**.
 The framework implements a "Hybrid State" pattern that optimizes for the common case (read-only) while supporting transparent mutation.
 
 - **MutabilityMark**: The `#[service]` and `#[trigger]` macros analyze their parameters. If they detect `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, they emit a `MutabilityMark` for type `T` into the `MUTABILITY_REGISTRY` using `linkme`.
-- **StateManager**: A specialized state container that holds a simple `OnceCell` for the "Fast Path" and a `OnceCell<Arc<RwLock<T>>>` for the "Managed Path".
+- **StateManager**: A specialized state container that holds a simple `OnceCell` for the "Fast Path" and a `OnceCell<Arc<TrackedShared<T>>>` for the "Managed Path". It also maintains a `Notify` instance to broadcast change notifications to `Watch` triggers.
 - **Intelligent Switching**:
     - **The Fast Path (Immutable)**: If `T` has no mutability marks, `Provided::resolve()` returns a simple immutable singleton. Performance is equivalent to a raw pointer.
     - **The Managed Path (Mutable)**: If even one `MutabilityMark` exists for `T` anywhere in the binary, `Provided::resolve()` switches to the `StateManager`'s managed path. It reads the current value from the `RwLock` and returns a consistent `Arc<T>` snapshot.
-- **Atomic Publishing**: Every time a service requests `Arc<RwLock<T>>`, it interacts with the live source. Snapshot consistency is maintained by the `StateManager`'s resolution logic.
+- **Atomic Publishing & Watch**: Every time a service requests `Arc<RwLock<T>>`, it receives a `TrackedRwLock<T>`. When the write guard is dropped, it atomically updates the shared snapshot and triggers the `StateManager`'s notification.
+- **The Macro Illusion**: The `#[service]` and `#[trigger]` macros inject local `use` aliases for `RwLock` and `Mutex`. This directs user code (which uses standard `tokio` names) to use our tracked versions transparently, enabling the notification logic without changing a single line of business logic.
 
 ---
 

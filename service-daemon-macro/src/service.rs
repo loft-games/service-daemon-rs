@@ -22,6 +22,7 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut param_entries = Vec::new();
     let mut mutability_marks = Vec::new();
 
+    let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
     for arg in &sig.inputs {
         if let Some((arg_name, intent)) = crate::common::analyze_param(arg) {
             let arg_name_str = arg_name.to_string();
@@ -45,11 +46,16 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
                             });
+                            clean_inputs.push(
+                                syn::parse2(quote! { #arg_name: std::sync::Arc<#inner_type> })
+                                    .unwrap(),
+                            );
                         }
                         crate::common::WrapperKind::ArcRwLock => {
                             resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
                             });
+                            clean_inputs.push(syn::parse2(quote! { #arg_name: std::sync::Arc<service_daemon::utils::managed_state::RwLock<#inner_type>> }).unwrap());
                             // Emit mutability mark for promotion
                             let mark_name = format_ident!(
                                 "__MUT_MARK_{}_{}",
@@ -68,6 +74,7 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
                             });
+                            clean_inputs.push(syn::parse2(quote! { #arg_name: std::sync::Arc<service_daemon::utils::managed_state::Mutex<#inner_type>> }).unwrap());
                             // Emit mutability mark for promotion
                             let mark_name = format_ident!(
                                 "__MUT_MARK_{}_{}",
@@ -108,6 +115,9 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
         );
     }
 
+    let mut clean_sig = sig.clone();
+    clean_sig.inputs = clean_inputs;
+
     let wrapper_name = format_ident!("{}_wrapper", fn_name);
     let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
 
@@ -132,7 +142,10 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         #(#attrs)*
-        #vis #sig {
+        #vis #clean_sig {
+            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
+            #[allow(unused_imports)]
+            use service_daemon::utils::managed_state::{RwLock, Mutex};
             #body
         }
 

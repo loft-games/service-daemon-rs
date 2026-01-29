@@ -186,3 +186,37 @@ where
 
     Ok(())
 }
+
+/// Generic host for state watch triggers.
+pub async fn watch_trigger_host<T, F>(
+    name: &str,
+    handler: F,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()>
+where
+    T: crate::utils::di::Provided + Send + Sync + 'static,
+    F: Fn(Arc<T>) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
+{
+    loop {
+        tokio::select! {
+            _ = T::changed() => {
+                let id = generate_trigger_id();
+                let span = tracing::info_span!("trigger", %name, %id);
+                let h = handler.clone();
+                // Resolve a fresh snapshot to pass to the handler
+                let snapshot = T::resolve().await;
+                async move {
+                    info!("Watch trigger fired (state changed)");
+                    if let Err(e) = h(snapshot).await {
+                        error!("Trigger error: {:?}", e);
+                    }
+                }.instrument(span).await;
+            }
+            _ = cancellation_token.cancelled() => {
+                info!("Watch trigger '{}' shutting down", name);
+                break;
+            }
+        }
+    }
+    Ok(())
+}

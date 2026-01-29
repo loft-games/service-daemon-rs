@@ -1,5 +1,4 @@
 use service_daemon::{ServiceDaemon, provider, service, trigger};
-use std::sync::Arc;
 use std::time::Duration;
 
 // 1. Sync Provider

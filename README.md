@@ -326,6 +326,27 @@ async fn unlock() {
 }
 ```
 
+### 5. Watch Trigger (State Change)
+
+Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified.
+
+```rust
+// 1. A service modifies the state
+#[service]
+pub async fn updater(data: Arc<RwLock<MyData>>) -> anyhow::Result<()> {
+    let mut guard = data.write().await;
+    guard.value += 1;
+    Ok(()) // Trigger fires when guard is dropped!
+}
+
+// 2. A trigger watches for any modification to MyData
+#[trigger(template = Watch, target = MyData)]
+pub async fn on_data_changed(snapshot: Arc<MyData>) -> anyhow::Result<()> {
+    tracing::info!("Data changed! New value: {}", snapshot.value);
+    Ok(())
+}
+```
+
 
 
 
@@ -362,7 +383,13 @@ pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<(
 }
 ```
 
-### 3. Promotion Logic
+### 3. Automatic "Watch" Notifications (The Macro Illusion)
+The framework uses a **Macro Illusion** to detect modifications without specialized wrapper types.
+- **Zero Boilerplate**: You still use standard `tokio::sync::RwLock` and `Mutex` in your code.
+- **Transparent Tracking**: The `#[service]` macro transparently redirects these to the framework's tracked versions.
+- **Efficient**: Uses atomic checks to ensure zero overhead when no `Watch` triggers are active for a type.
+
+### 4. Promotion Logic
 1. **The Fast Path (Immutable)**: If everyone only asks for `Arc<T>`, the state is initialized once and never locked. Performance is identical to a raw pointer.
 2. **The Managed Path (Mutable)**: If `Arc<RwLock<T>>` or `Arc<Mutex<T>>` is detected anywhere at link-time, the framework upgrades the provider to support consistent snapshots and concurrent locking.
 

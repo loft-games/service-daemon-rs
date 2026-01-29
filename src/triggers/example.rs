@@ -100,3 +100,17 @@ pub fn sync_notify_trigger() -> anyhow::Result<()> {
     tracing::info!(">>> Sync Notify Trigger fired");
     Ok(())
 }
+
+// --- Watch Trigger ---
+// Fires whenever GlobalStats is modified (via Arc<RwLock<GlobalStats>>)
+#[trigger(template = Watch, target = crate::providers::typed_providers::GlobalStats)]
+pub async fn on_stats_changed(
+    snapshot: Arc<crate::providers::typed_providers::GlobalStats>,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        ">>> Watch Trigger [State Change] detected update: total={}, last='{}'",
+        snapshot.total_processed,
+        snapshot.last_status
+    );
+    Ok(())
+}

@@ -1,8 +1,6 @@
 use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::{allow_sync, service};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::info;
 
 #[service]

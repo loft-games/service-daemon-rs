@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
 use quote::{format_ident, quote};
-use syn::{FnArg, ItemFn, parse_macro_input};
+use syn::{ItemFn, parse_macro_input};
 
 use crate::common::has_allow_sync;
 
@@ -37,6 +37,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut payload_arg_name = None;
     let mut _payload_is_arc = false;
 
+    let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
     for arg in sig.inputs.iter() {
         if let Some((arg_name, intent)) = crate::common::analyze_param(arg) {
             let arg_name_str = arg_name.to_string();
@@ -51,6 +52,12 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     }
                     payload_arg_name = Some(arg_name.clone());
                     _payload_is_arc = is_arc;
+
+                    let mut clean_arg = arg.clone();
+                    if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
+                        attrs.retain(|a| !a.path().is_ident("payload"));
+                    }
+                    clean_inputs.push(clean_arg);
 
                     if is_arc {
                         call_args.push(quote! { std::sync::Arc::new(payload) });
@@ -76,11 +83,16 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                             di_resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
                             });
+                            clean_inputs.push(
+                                syn::parse2(quote! { #arg_name: std::sync::Arc<#inner_type> })
+                                    .unwrap(),
+                            );
                         }
                         crate::common::WrapperKind::ArcRwLock => {
                             di_resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
                             });
+                            clean_inputs.push(syn::parse2(quote! { #arg_name: std::sync::Arc<service_daemon::utils::managed_state::RwLock<#inner_type>> }).unwrap());
                             let mark_name = format_ident!(
                                 "__MUT_MARK_{}_{}",
                                 fn_name.to_string().to_uppercase(),
@@ -98,6 +110,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                             di_resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
                             });
+                            clean_inputs.push(syn::parse2(quote! { #arg_name: std::sync::Arc<service_daemon::utils::managed_state::Mutex<#inner_type>> }).unwrap());
                             let mark_name = format_ident!(
                                 "__MUT_MARK_{}_{}",
                                 fn_name.to_string().to_uppercase(),
@@ -133,6 +146,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         "Queue" | "BQueue" | "BroadcastQueue" => "queue",
         "LBQueue" | "LoadBalancingQueue" => "lb_queue",
         "Cron" => "cron",
+        "Watch" | "State" => "watch",
         _ => &template,
     };
 
@@ -224,6 +238,20 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                 ).await
             }
         }
+        "watch" => {
+            quote! {
+                service_daemon::utils::triggers::watch_trigger_host::<#target_type, _>(
+                    #fn_name_str,
+                    move |payload| {
+                        Box::pin(async move {
+                            #(#di_resolve_tokens)*
+                            #call_expr
+                        })
+                    },
+                    token.clone()
+                ).await
+            }
+        }
         _ => {
             quote! {
                 anyhow::bail!("Unknown trigger template: {}", #template);
@@ -231,20 +259,15 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Generate a "clean" signature (removing #[payload] attributes)
     let mut clean_sig = sig.clone();
-    for arg in clean_sig.inputs.iter_mut() {
-        if let FnArg::Typed(syn::PatType {
-            attrs: arg_attrs, ..
-        }) = arg
-        {
-            arg_attrs.retain(|a| !a.path().is_ident("payload"));
-        }
-    }
+    clean_sig.inputs = clean_inputs;
 
     let expanded = quote! {
         #(#attrs)*
         #vis #clean_sig {
+            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
+            #[allow(unused_imports)]
+            use service_daemon::utils::managed_state::{RwLock, Mutex};
             #body
         }
 

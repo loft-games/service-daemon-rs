@@ -1,5 +1,5 @@
+use crate::utils::managed_state::{Mutex, RwLock};
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
 
 /// A trait for types that can be provided by the DI system.
 ///
@@ -18,7 +18,7 @@ pub trait Provided: 'static + Send + Sync + Sized {
     /// Otherwise, it returns the global immutable singleton.
     fn resolve() -> impl std::future::Future<Output = Arc<Self>> + Send;
 
-    /// Resolves a live RwLock for this type.
+    /// Resolves a live RwLock for this type (tracked for modifications).
     ///
     /// This is used when a service requests `Arc<RwLock<T>>`.
     fn resolve_rwlock() -> impl std::future::Future<Output = Arc<RwLock<Self>>> + Send {
@@ -30,13 +30,25 @@ pub trait Provided: 'static + Send + Sync + Sized {
         }
     }
 
-    /// Resolves a live Mutex for this type.
+    /// Resolves a live Mutex for this type (tracked for modifications).
     ///
     /// This is used when a service requests `Arc<Mutex<Self>>`.
     fn resolve_mutex() -> impl std::future::Future<Output = Arc<Mutex<Self>>> + Send {
         async {
             panic!(
                 "Type {} does not support Mutex resolution. Did you use #[provider]?",
+                std::any::type_name::<Self>()
+            )
+        }
+    }
+
+    /// Returns a future that resolves when the state for this type is modified.
+    ///
+    /// This is used by the `Watch` trigger template.
+    fn changed() -> impl std::future::Future<Output = ()> + Send {
+        async {
+            panic!(
+                "Type {} does not support change notification. Did you use #[provider]?",
                 std::any::type_name::<Self>()
             )
         }
