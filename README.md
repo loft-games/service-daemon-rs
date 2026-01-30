@@ -385,8 +385,9 @@ pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<(
 
 ### 3. Automatic "Watch" Notifications (The Macro Illusion)
 The framework uses a **Macro Illusion** to detect modifications without specialized wrapper types.
-- **Zero Boilerplate**: You still use standard `tokio::sync::RwLock` and `Mutex` in your code.
 - **Transparent Tracking**: The `#[service]` macro transparently redirects these to the framework's tracked versions.
+- **Intelligent Spanning**: Uses `quote_spanned!` to preserve original source spans, ensuring that IDE documentation hints and "Jump to Definition" continue to work for your original types.
+- **Qualified Path Support**: Supports both simple names (e.g., `Arc`, `RwLock`) and qualified paths (e.g., `std::sync::Arc`, `tokio::sync::RwLock`).
 - **Efficient**: Uses atomic checks to ensure zero overhead when no `Watch` triggers are active for a type.
 
 ### 4. Promotion Logic

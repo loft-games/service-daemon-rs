@@ -7,7 +7,9 @@ use service_daemon::{allow_sync, trigger};
 // --- Cron Trigger ---
 // Uses the schedule string from CleanupSchedule provider
 #[trigger(template = Cron, target = CleanupSchedule)]
-pub async fn cleanup_trigger(port: Arc<Port>) -> anyhow::Result<()> {
+pub async fn cleanup_trigger(
+    port: std::sync::Arc<Port>, // Now supports qualified paths!
+) -> anyhow::Result<()> {
     tracing::info!(">>> Cleanup Trigger [Cron] fired, port: {}", port);
     Ok(())
 }

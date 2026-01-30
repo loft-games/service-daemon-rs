@@ -134,6 +134,10 @@ The framework implements a "Hybrid State" pattern that optimizes for the common 
     - **The Managed Path (Mutable)**: If even one `MutabilityMark` exists for `T` anywhere in the binary, `Provided::resolve()` switches to the `StateManager`'s managed path. It reads the current value from the `RwLock` and returns a consistent `Arc<T>` snapshot.
 - **Atomic Publishing & Watch**: Every time a service requests `Arc<RwLock<T>>`, it receives a `TrackedRwLock<T>`. When the write guard is dropped, it atomically updates the shared snapshot and triggers the `StateManager`'s notification.
 - **The Macro Illusion**: The `#[service]` and `#[trigger]` macros inject local `use` aliases for `RwLock` and `Mutex`. This directs user code (which uses standard `tokio` names) to use our tracked versions transparently, enabling the notification logic without changing a single line of business logic.
+- **Documentation Hint Preservation**: To prevent the macros from "breaking" the IDE's intellisense:
+    - **Spanning**: The macros use `quote_spanned!` when generating the new function signature. It captures the `Span` of the original `Arc`, `RwLock`, and `Mutex` tokens and applies them to the new generated tokens. This allows `rust-analyzer` to correctly associate documentation and navigation with the original source.
+    - **Qualified Path Handling**: The `decompose_type` utility in `common.rs` supports qualified paths (e.g., `std::sync::Arc`), ensuring that the macro correctly identifies and wraps dependencies even if they aren't imported by their short names.
+- **Efficient**: Uses atomic checks to ensure zero overhead when no `Watch` triggers are active for a type.
 
 ---
 

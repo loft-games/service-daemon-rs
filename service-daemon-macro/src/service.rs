@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{ItemFn, parse_macro_input};
 
 use crate::common::has_allow_sync;
@@ -34,28 +34,31 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 } => {
                     let type_str = quote!(#inner_type).to_string().replace(" ", "");
                     let arg_type_wrapper_str = match wrapper {
-                        crate::common::WrapperKind::Arc => format!("Arc<{}>", type_str),
-                        crate::common::WrapperKind::ArcRwLock => {
+                        crate::common::WrapperKind::Arc(_) => format!("Arc<{}>", type_str),
+                        crate::common::WrapperKind::ArcRwLock(_, _) => {
                             format!("Arc<RwLock<{}>>", type_str)
                         }
-                        crate::common::WrapperKind::ArcMutex => format!("Arc<Mutex<{}>>", type_str),
+                        crate::common::WrapperKind::ArcMutex(_, _) => {
+                            format!("Arc<Mutex<{}>>", type_str)
+                        }
                     };
 
                     match wrapper {
-                        crate::common::WrapperKind::Arc => {
+                        crate::common::WrapperKind::Arc(arc_span) => {
                             resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
                             });
                             clean_inputs.push(
-                                syn::parse2(quote! { #arg_name: std::sync::Arc<#inner_type> })
+                                syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#inner_type> })
                                     .unwrap(),
                             );
                         }
-                        crate::common::WrapperKind::ArcRwLock => {
+                        crate::common::WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                             resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
                             });
-                            clean_inputs.push(syn::parse2(quote! { #arg_name: std::sync::Arc<service_daemon::utils::managed_state::RwLock<#inner_type>> }).unwrap());
+                            let rw_path = quote_spanned! { rwlock_span => service_daemon::utils::managed_state::RwLock<#inner_type> };
+                            clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> }).unwrap());
                             // Emit mutability mark for promotion
                             let mark_name = format_ident!(
                                 "__MUT_MARK_{}_{}",
@@ -70,11 +73,12 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                 };
                             });
                         }
-                        crate::common::WrapperKind::ArcMutex => {
+                        crate::common::WrapperKind::ArcMutex(arc_span, mutex_span) => {
                             resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
                             });
-                            clean_inputs.push(syn::parse2(quote! { #arg_name: std::sync::Arc<service_daemon::utils::managed_state::Mutex<#inner_type>> }).unwrap());
+                            let mutex_path = quote_spanned! { mutex_span => service_daemon::utils::managed_state::Mutex<#inner_type> };
+                            clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> }).unwrap());
                             // Emit mutability mark for promotion
                             let mark_name = format_ident!(
                                 "__MUT_MARK_{}_{}",

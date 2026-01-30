@@ -39,6 +39,7 @@ pub mod utils;
 
 // Re-export commonly used items
 pub use models::{SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam};
+pub use std::sync::Arc;
 pub use utils::context::{is_shutdown, token, wait_for_shutdown};
 pub use utils::di::Provided;
 pub use utils::service_daemon::{

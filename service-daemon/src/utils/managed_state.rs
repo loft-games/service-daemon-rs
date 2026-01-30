@@ -113,26 +113,31 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
 /// An asynchronous reader-writer lock with automatic change tracking.
 ///
-/// This type wraps `tokio::sync::RwLock` and automatically notifies the `ServiceDaemon`
-/// state management system whenever a write lock is released. This enables the `Watch`
-/// trigger to fire precisely when state changes occur.
+/// This type is a tracked version of [tokio::sync::RwLock]. It automatically
+/// notifies the `ServiceDaemon` state management system whenever a write lock
+/// is released, enabling the [Watch](service_daemon::trigger) trigger to fire.
+///
+/// For detailed behavioral documentation, see the official [tokio::sync::RwLock].
+#[doc(alias = "tokio::sync::RwLock")]
 pub struct TrackedRwLock<T> {
     inner: TokioRwLock<T>,
     notify: Arc<tokio::sync::Notify>,
 }
 
 impl<T> TrackedRwLock<T> {
-    /// Locks this `RwLock` with shared read access, causing the current task
-    /// to yield until the lock has been acquired.
+    /// Locks this `RwLock` with shared read access.
+    ///
+    /// See also [tokio::sync::RwLock::read].
     pub async fn read(&self) -> TokioRwLockReadGuard<'_, T> {
         self.inner.read().await
     }
 
-    /// Locks this `RwLock` with exclusive write access, causing the current task
-    /// to yield until the lock has been acquired.
+    /// Locks this `RwLock` with exclusive write access.
     ///
-    /// When the returned `WriteGuard` is dropped, any `Watch` triggers listening
-    /// to this state will be notified.
+    /// When the returned [TrackedWriteGuard] is dropped, any `Watch` triggers
+    /// listening to this state will be notified.
+    ///
+    /// See also [tokio::sync::RwLock::write].
     pub async fn write(&self) -> TrackedWriteGuard<'_, T> {
         TrackedWriteGuard {
             inner: self.inner.write().await,
@@ -169,9 +174,12 @@ impl<T> Drop for TrackedWriteGuard<'_, T> {
 
 /// An asynchronous mutual exclusion primitive with automatic change tracking.
 ///
-/// This type wraps `tokio::sync::Mutex` and automatically notifies the `ServiceDaemon`
-/// state management system whenever the lock is released. This enables the `Watch`
-/// trigger to fire precisely when state changes occur.
+/// This type is a tracked version of [tokio::sync::Mutex]. It automatically
+/// notifies the `ServiceDaemon` state management system whenever the lock
+/// is released, enabling the [Watch](service_daemon::trigger) trigger to fire.
+///
+/// For detailed behavioral documentation, see the official [tokio::sync::Mutex].
+#[doc(alias = "tokio::sync::Mutex")]
 pub struct TrackedMutex<T> {
     inner: TokioMutex<T>,
     notify: Arc<tokio::sync::Notify>,
@@ -180,8 +188,10 @@ pub struct TrackedMutex<T> {
 impl<T> TrackedMutex<T> {
     /// Locks this `Mutex`, causing the current task to yield until the lock has been acquired.
     ///
-    /// When the returned `MutexGuard` is dropped, any `Watch` triggers listening
-    /// to this state will be notified.
+    /// When the returned [TrackedMutexGuard] is dropped, any `Watch` triggers
+    /// listening to this state will be notified.
+    ///
+    /// See also [tokio::sync::Mutex::lock].
     pub async fn lock(&self) -> TrackedMutexGuard<'_, T> {
         TrackedMutexGuard {
             inner: self.inner.lock().await,
