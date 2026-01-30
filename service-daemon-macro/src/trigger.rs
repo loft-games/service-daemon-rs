@@ -17,14 +17,62 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &input.sig;
     let body = &input.block;
 
-    // Parse attributes
+    // Parse attributes robustly
     let attr_str = attr.to_string();
-    let template =
-        parse_trigger_attr(&attr_str, "template").unwrap_or_else(|| "custom".to_string());
+    let attrs_map = parse_attrs(&attr_str);
 
-    // Parse target as a type identifier (not a string)
-    let target_str =
-        parse_trigger_attr(&attr_str, "target").unwrap_or_else(|| "Unknown".to_string());
+    let template_raw = attrs_map
+        .get("template")
+        .cloned()
+        .unwrap_or_else(|| "TriggerTemplate::Custom".to_string());
+
+    // Extract variant name from path (e.g. TriggerTemplate::Cron -> Cron, or just Cron -> Cron)
+    let template = template_raw
+        .split("::")
+        .last()
+        .unwrap_or(&template_raw)
+        .trim()
+        .to_string();
+
+    // Strict Compile-Time Validation
+    let valid_variants = [
+        "Notify",
+        "Event",
+        "Signal",
+        "Custom",
+        "Queue",
+        "BQueue",
+        "BroadcastQueue",
+        "LBQueue",
+        "LoadBalancingQueue",
+        "Cron",
+        "Watch",
+        "State",
+    ];
+
+    if !valid_variants.contains(&template.as_str()) {
+        abort!(
+            input.sig.ident,
+            format!(
+                "Invalid trigger template '{}'. Valid options are: {}. \n\
+                 Hint: To get IDE candidate lists, import the prelude: 'use service_daemon::prelude::*;' or use 'TT::Variant'.",
+                template,
+                valid_variants.join(", ")
+            )
+        );
+    }
+
+    let priority_expr = attrs_map
+        .get("priority")
+        .cloned()
+        .unwrap_or_else(|| "50".to_string());
+    let priority_tokens: proc_macro2::TokenStream =
+        priority_expr.parse().unwrap_or_else(|_| quote!(50));
+
+    let target_str = attrs_map
+        .get("target")
+        .cloned()
+        .unwrap_or_else(|| "Unknown".to_string());
     let target_type: proc_macro2::TokenStream =
         target_str.parse().unwrap_or_else(|_| quote!(Unknown));
 
@@ -121,15 +169,16 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         abort!(arg, "Unsupported parameter type in trigger.");
     }
 
-    // Compute normalized template name
-    let normalized_template = match template.as_str() {
-        "Notify" | "Event" | "Custom" => "notify",
-        "Queue" | "BQueue" | "BroadcastQueue" => "queue",
-        "LBQueue" | "LoadBalancingQueue" => "lb_queue",
-        "Cron" => "cron",
-        "Watch" | "State" => "watch",
-        _ => &template,
+    // Compute normalized template name and enum variant
+    let (normalized_template, template_variant) = match template.as_str() {
+        "Notify" | "Event" | "Signal" | "Custom" => ("notify", "Notify"),
+        "Queue" | "BQueue" | "BroadcastQueue" => ("queue", "Queue"),
+        "LBQueue" | "LoadBalancingQueue" => ("lb_queue", "LBQueue"),
+        "Cron" => ("cron", "Cron"),
+        "Watch" | "State" => ("watch", "Watch"),
+        _ => (&*template, &*template),
     };
+    let template_ident = format_ident!("{}", template_variant);
 
     let wrapper_name = format_ident!("{}_trigger_wrapper", fn_name);
     let entry_name = format_ident!("__TRIGGER_ENTRY_{}", fn_name.to_string().to_uppercase());
@@ -268,6 +317,8 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             module: concat!("triggers/", #normalized_template),
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
+            priority: #priority_tokens,
+            template: Some(service_daemon::TriggerTemplate::#template_ident),
         };
 
     };
@@ -275,16 +326,12 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn parse_trigger_attr(attr_str: &str, key: &str) -> Option<String> {
-    // Parse: key = "value"
-    attr_str.split(',').find_map(|part| {
-        let part = part.trim();
-        if part.contains(key)
-            && let Some((_, val)) = part.split_once('=')
-        {
-            Some(val.trim().to_string())
-        } else {
-            None
+fn parse_attrs(attr_str: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for part in attr_str.split(',') {
+        if let Some((key, val)) = part.split_once('=') {
+            map.insert(key.trim().to_string(), val.trim().to_string());
         }
-    })
+    }
+    map
 }

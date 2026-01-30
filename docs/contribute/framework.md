@@ -117,15 +117,18 @@ Once started via `daemon.run().await`:
 2. **Monitoring**: The `ServiceDaemon` tracks the `JoinHandle` and status (Running, Restarting, Stopped) of each service. It also automatically wraps each service execution in a `tracing::Span` named `service` with the service's name, enabling automatic log correlation.
 3. **Restart Policy**: If a service fails (returns `Err`), the daemon applies an **Exponential Backoff** policy with jitter to prevent "thundering herd" issues.
 4. **Graceful Shutdown**: Upon receiving a `SIGINT` (Ctrl+C) or `SIGTERM`:
-    - The `CancellationToken` is cancelled.
-    - All services are awaited.
-    - A grace period (e.g., 30s) is enforced before forcing an abort.
+    - The `ServiceDaemon` initiates a **Wave-Based Lifecycle**.
+    - It groups services by their `priority` (`u8`).
+    - **Startup**: Descending order (Highest -> Lowest). Ensures infrastructure is `Running` before logic starts.
+    - **Shutdown**: Ascending order (Lowest -> Highest). Ensures logic finishes before infrastructure stops.
+    - A grace period (e.g., 30s) is enforced per wave before forcing an abort.
 
 ### 5. Event Triggers (Specialized Services)
 
 Triggers are not a separate primitive; they are **Specialized Services**.
 - **Unified Registry**: The `#[trigger]` macro registers an entry directly into the `SERVICE_REGISTRY`.
 - **Host Wrapper**: Instead of running user code directly, the trigger wrapper spawns a "Host" (e.g., `cron_trigger_host`). 
+- **Type-Safe Registry**: The `#[trigger]` macro now preserves the exact `TriggerTemplate` variant in the `ServiceEntry` struct, enabling better telemetry and programmatic introspection.
 - **Inversion of Control**: The Host manages the event source (cron, queue, etc.) and executes the user's handler when the event occurs.
 - **Watch Trigger**: A special trigger type that subscribes to `StateManager` notifications. It fires whenever a `TrackedRwLock` or `TrackedMutex` guard is dropped for the target type.
 - **Declarative Parameter Detection**: The `#[trigger]` macro categorizes parameters into three groups:
@@ -210,9 +213,15 @@ Trigger macros generate an internal **Event Loop Host**.
 
 **User Code:**
 ```rust
+// Use short template names with the prelude
+use service_daemon::prelude::*;
+
 #[trigger(template = Queue, target = MyQueue)]
 async fn my_handler(payload: String) -> anyhow::Result<()> { ... }
 ```
+
+> [!NOTE]
+> **Developer Experience**: The macro now supports unqualified names (like `Cron`, `Watch`) and the `TT` alias. Using `service_daemon::prelude::*` is recommended to enable IDE autocompletion for these attributes.
 
 **Expanded Code (Simplified):**
 ```rust

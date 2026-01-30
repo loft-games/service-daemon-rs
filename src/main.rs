@@ -9,8 +9,14 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Setup Logging
-    tracing_subscriber::fmt::init();
+    // 1. Setup Logging (including the new Non-blocking DaemonLayer)
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(service_daemon::utils::logging::DaemonLayer)
+        .init();
 
     // 2. Configure custom restart policy (optional)
     let policy = RestartPolicy::builder()

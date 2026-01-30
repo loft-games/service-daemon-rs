@@ -8,7 +8,13 @@ use syn::{ItemFn, parse_macro_input};
 use crate::common::has_allow_sync;
 
 /// Implementation of the `#[service]` attribute macro.
-pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let attr_str = attr.to_string();
+    let priority_expr =
+        parse_service_attr(&attr_str, "priority").unwrap_or_else(|| "50".to_string());
+    let priority_tokens: proc_macro2::TokenStream =
+        priority_expr.parse().unwrap_or_else(|_| quote!(50));
+
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
@@ -142,9 +148,24 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             module: #module_name,
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
+            priority: #priority_tokens,
+            template: None,
         };
 
     };
 
     TokenStream::from(expanded)
+}
+
+fn parse_service_attr(attr_str: &str, key: &str) -> Option<String> {
+    attr_str.split(',').find_map(|part| {
+        let part = part.trim();
+        if part.starts_with(key)
+            && let Some((_, val)) = part.split_once('=')
+        {
+            Some(val.trim().to_string())
+        } else {
+            None
+        }
+    })
 }

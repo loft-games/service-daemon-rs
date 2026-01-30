@@ -8,7 +8,8 @@
 mod tests {
     use crate::providers::trigger_providers::{ExternalStatus, UserNotifier};
     use crate::providers::typed_providers::GlobalStats;
-    use service_daemon::{Provided, RestartPolicy, ServiceDaemon};
+    use service_daemon::prelude::*;
+    use service_daemon::{RestartPolicy, ServiceDaemon};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -46,8 +47,8 @@ mod tests {
     // --- 2. Watch Triggers & Promotion ---
     static WATCH_FIRED: AtomicU32 = AtomicU32::new(0);
 
-    #[service_daemon::trigger(template = Watch, target = GlobalStats)]
-    async fn stats_watcher(snapshot: Arc<GlobalStats>) -> anyhow::Result<()> {
+    #[service_daemon::trigger(template = Watch, target = GlobalStats, priority = 50)]
+    pub async fn stats_watcher(snapshot: Arc<GlobalStats>) -> anyhow::Result<()> {
         if !snapshot.last_status.is_empty() {
             WATCH_FIRED.fetch_add(1, Ordering::SeqCst);
         }
@@ -117,8 +118,8 @@ mod tests {
     #[service_daemon::provider(default = Notify)]
     struct SyncTestSignal;
 
-    #[service_daemon::trigger(template = Event, target = SyncTestSignal)]
-    fn sync_handler() -> anyhow::Result<()> {
+    #[service_daemon::trigger(template = Event, target = SyncTestSignal, priority = 50)]
+    pub fn sync_handler() -> anyhow::Result<()> {
         println!("Sync handler fired!");
         Ok(())
     }
@@ -135,6 +136,151 @@ mod tests {
 
         cancel.cancel();
         let _ = handle.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ordered_shutdown() -> anyhow::Result<()> {
+        use std::sync::Mutex as StdMutex;
+        let exit_sequence = Arc::new(StdMutex::new(Vec::new()));
+
+        let mut daemon = ServiceDaemon::new();
+
+        // Priority 0: Takes 100ms to exit
+        let seq1 = exit_sequence.clone();
+        daemon.register(
+            "priority_0",
+            Arc::new(move |_| {
+                let s = seq1.clone();
+                Box::pin(async move {
+                    service_daemon::wait_for_shutdown().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    s.lock().unwrap().push(0);
+                    Ok(())
+                })
+            }),
+            0,
+        );
+
+        // Priority 50: Takes 50ms to exit
+        let seq2 = exit_sequence.clone();
+        daemon.register(
+            "priority_50",
+            Arc::new(move |_| {
+                let s = seq2.clone();
+                Box::pin(async move {
+                    service_daemon::wait_for_shutdown().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    s.lock().unwrap().push(50);
+                    Ok(())
+                })
+            }),
+            50,
+        );
+
+        // Priority 100: Exit immediately
+        let seq3 = exit_sequence.clone();
+        daemon.register(
+            "priority_100",
+            Arc::new(move |_| {
+                let s = seq3.clone();
+                Box::pin(async move {
+                    service_daemon::wait_for_shutdown().await;
+                    s.lock().unwrap().push(100);
+                    Ok(())
+                })
+            }),
+            100,
+        );
+
+        let cancel = daemon.cancel_token();
+        let handle = tokio::spawn(async move { daemon.run().await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+        let _ = handle.await;
+
+        let final_seq = exit_sequence.lock().unwrap().clone();
+        // If ordered shutdown works, priority 0 must finish before 50 is even signaled, etc.
+        // Sequence MUST be [0, 50, 100].
+        assert_eq!(
+            final_seq,
+            vec![0, 50, 100],
+            "Services did not exit in priority order!"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_ordered_startup() -> anyhow::Result<()> {
+        use std::sync::Mutex as StdMutex;
+        let start_sequence = Arc::new(StdMutex::new(Vec::new()));
+
+        let mut daemon = ServiceDaemon::new();
+
+        // Priority 100
+        let seq1 = start_sequence.clone();
+        daemon.register(
+            "priority_100",
+            Arc::new(move |_| {
+                let s = seq1.clone();
+                Box::pin(async move {
+                    s.lock().unwrap().push(100);
+                    service_daemon::wait_for_shutdown().await;
+                    Ok(())
+                })
+            }),
+            100,
+        );
+
+        // Priority 50
+        let seq2 = start_sequence.clone();
+        daemon.register(
+            "priority_50",
+            Arc::new(move |_| {
+                let s = seq2.clone();
+                Box::pin(async move {
+                    s.lock().unwrap().push(50);
+                    service_daemon::wait_for_shutdown().await;
+                    Ok(())
+                })
+            }),
+            50,
+        );
+
+        // Priority 0
+        let seq3 = start_sequence.clone();
+        daemon.register(
+            "priority_0",
+            Arc::new(move |_| {
+                let s = seq3.clone();
+                Box::pin(async move {
+                    s.lock().unwrap().push(0);
+                    service_daemon::wait_for_shutdown().await;
+                    Ok(())
+                })
+            }),
+            0,
+        );
+
+        let cancel = daemon.cancel_token();
+        let handle = tokio::spawn(async move { daemon.run().await });
+
+        // Allow enough time for all waves to start
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        cancel.cancel();
+        let _ = handle.await;
+
+        let final_seq = start_sequence.lock().unwrap().clone();
+        // Startup order should be descending: 100, 50, 0
+        assert_eq!(
+            final_seq,
+            vec![100, 50, 0],
+            "Services did not start in priority order!"
+        );
+
         Ok(())
     }
 }

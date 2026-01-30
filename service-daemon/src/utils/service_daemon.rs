@@ -193,9 +193,10 @@ impl ServiceDaemon {
 
         for entry in SERVICE_REGISTRY {
             info!(
-                "Registering service '{}' from module '{}' with {} params: {:?}",
+                "Registering service '{}' from module '{}' with priority {} and {} params: {:?}",
                 entry.name,
                 entry.module,
+                entry.priority,
                 entry.params.len(),
                 entry
                     .params
@@ -205,17 +206,23 @@ impl ServiceDaemon {
             );
 
             let wrapper = entry.wrapper;
-            daemon.register(entry.name, Arc::new(move |token| wrapper(token)));
+            daemon.register(
+                entry.name,
+                Arc::new(move |token| wrapper(token)),
+                entry.priority,
+            );
         }
 
         daemon
     }
 
     /// Register a service manually.
-    pub fn register(&mut self, name: &str, run: ServiceFn) {
+    pub fn register(&mut self, name: &str, run: ServiceFn, priority: u8) {
         self.services.push(ServiceDescription {
             name: name.to_string(),
             run,
+            priority,
+            cancellation_token: CancellationToken::new(),
         });
     }
 
@@ -322,56 +329,135 @@ impl ServiceDaemon {
         running_tasks.lock().await.insert(name, handle);
     }
 
-    /// Spawn all registered services.
-    async fn spawn_all_services(&self) {
-        for service in &self.services {
-            Self::spawn_service(
-                service.name.clone(),
-                service.run.clone(),
-                self.restart_policy,
-                self.running_tasks.clone(),
-                self.service_status.clone(),
-                self.cancellation_token.clone(),
-            )
-            .await;
-        }
-    }
-
-    /// Stop all running services gracefully.
+    /// Spawn all registered services using wave-based priorities.
     ///
-    /// This signals all services to stop via CancellationToken and waits for them to exit.
-    async fn stop_all_services(&self) {
-        // Signal all services to stop
-        self.cancellation_token.cancel();
-        info!("Signaled all services to stop");
+    /// This starts services in descending order of their `priority` value.
+    /// Services with high priority (e.g. SYSTEM = 100) start first.
+    async fn spawn_all_services(&self) {
+        use std::collections::BTreeMap;
 
-        // Wait for all tasks to complete with a timeout
-        let tasks: Vec<_> = {
-            let mut guard = self.running_tasks.lock().await;
-            guard.drain().collect()
-        };
+        info!("Beginning wave-based startup sequence...");
 
-        let grace_period = std::time::Duration::from_secs(30);
-        for (name, mut handle) in tasks {
-            info!("Waiting for service '{}' to stop...", name);
-            tokio::select! {
-                res = &mut handle => {
-                    match res {
-                        Ok(()) => info!("Service '{}' stopped gracefully", name),
-                        Err(e) => warn!("Service '{}' panicked during shutdown: {:?}", name, e),
+        // Group services by priority
+        let mut waves: BTreeMap<u8, Vec<&ServiceDescription>> = BTreeMap::new();
+        for service in &self.services {
+            waves.entry(service.priority).or_default().push(service);
+        }
+
+        // Process waves in descending order of priority (u8)
+        for (priority, services) in waves.into_iter().rev() {
+            info!(
+                "Starting wave priority {} ({} services)...",
+                priority,
+                services.len()
+            );
+
+            for service in &services {
+                Self::spawn_service(
+                    service.name.clone(),
+                    service.run.clone(),
+                    self.restart_policy,
+                    self.running_tasks.clone(),
+                    self.service_status.clone(),
+                    service.cancellation_token.clone(),
+                )
+                .await;
+            }
+
+            // Sync Step: Wait for all services in this wave to be reported as 'Running'
+            // This ensures Wave 100 actually initialized before Wave 80 starts.
+            let start = std::time::Instant::now();
+            let mut all_running = false;
+            while !all_running && start.elapsed() < std::time::Duration::from_secs(5) {
+                all_running = true;
+                for service in &services {
+                    let status = self.service_status.get(&service.name).map(|r| *r.value());
+                    if status != Some(ServiceStatus::Running) {
+                        all_running = false;
+                        break;
                     }
                 }
-                _ = tokio::time::sleep(grace_period) => {
-                    warn!(
-                        "Service '{}' did not stop within grace period, forcing abort",
-                        name
-                    );
-                    handle.abort();
-                    let _ = handle.await;
+                if !all_running {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             }
-            self.service_status.insert(name, ServiceStatus::Stopped);
+
+            if !all_running {
+                warn!(
+                    "Wave priority {} did not reach 'Running' status within 5s, proceeding anyway",
+                    priority
+                );
+            }
         }
+
+        info!("All startup waves initiated.");
+    }
+
+    /// Stop all running services gracefully using wave-based priorities.
+    ///
+    /// This stops services in ascending order of their `priority` value.
+    /// Services with the same priority are shut down concurrently.
+    async fn stop_all_services(&self) {
+        use std::collections::BTreeMap;
+
+        info!("Beginning wave-based graceful shutdown...");
+
+        // Group services by priority
+        let mut waves: BTreeMap<u8, Vec<&ServiceDescription>> = BTreeMap::new();
+        for service in &self.services {
+            waves.entry(service.priority).or_default().push(service);
+        }
+
+        let grace_period = std::time::Duration::from_secs(30);
+
+        // Process waves in ascending order of priority (u8)
+        for (priority, services) in waves {
+            info!(
+                "Shutting down wave priority {} ({} services)...",
+                priority,
+                services.len()
+            );
+
+            // 1. Parallel Signal: Cancel all services in this wave
+            for service in &services {
+                service.cancellation_token.cancel();
+            }
+
+            // 2. Parallel Wait: Wait for all services in this wave to finish
+            for service in services {
+                let name = &service.name;
+                let handle_opt = {
+                    let mut guard = self.running_tasks.lock().await;
+                    guard.remove(name)
+                };
+
+                if let Some(mut handle) = handle_opt {
+                    info!("Waiting for service '{}' to stop...", name);
+                    tokio::select! {
+                        res = &mut handle => {
+                            match res {
+                                Ok(()) => info!("Service '{}' stopped gracefully", name),
+                                Err(e) => warn!("Service '{}' panicked during shutdown: {:?}", name, e),
+                            }
+                        }
+                        _ = tokio::time::sleep(grace_period) => {
+                            warn!(
+                                "Service '{}' did not stop within grace period, forcing abort",
+                                name
+                            );
+                            handle.abort();
+                            let _ = handle.await;
+                        }
+                    }
+                    self.service_status
+                        .insert(name.clone(), ServiceStatus::Stopped);
+                }
+            }
+        }
+
+        // Finally, cancel the daemon's own token to signal completion if anyone is watching it
+        self.cancellation_token.cancel();
+        info!("All shutdown waves completed. ServiceDaemon stopped.");
     }
 
     /// Run the daemon until interrupted by Ctrl+C (SIGINT) or SIGTERM.
@@ -480,7 +566,7 @@ mod tests {
 
         let service_fn: ServiceFn = Arc::new(|_| Box::pin(async { Ok(()) }));
 
-        daemon.register("test_service", service_fn);
+        daemon.register("test_service", service_fn, 50);
 
         assert_eq!(daemon.services.len(), 1);
         assert_eq!(daemon.services[0].name, "test_service");
@@ -503,7 +589,7 @@ mod tests {
             })
         });
 
-        daemon.register("failing_service", service_fn);
+        daemon.register("failing_service", service_fn, 50);
 
         daemon
             .run_for_duration(Duration::from_secs(3))
@@ -538,7 +624,7 @@ mod tests {
             })
         });
 
-        daemon.register("successful_service", service_fn);
+        daemon.register("successful_service", service_fn, 50);
 
         daemon
             .run_for_duration(Duration::from_secs(2))
@@ -583,8 +669,8 @@ mod tests {
             })
         });
 
-        daemon.register("service_a", service_a);
-        daemon.register("service_b", service_b);
+        daemon.register("service_a", service_a, 50);
+        daemon.register("service_b", service_b, 50);
 
         daemon
             .run_for_duration(Duration::from_secs(2))

@@ -1,5 +1,6 @@
 use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
+use service_daemon::prelude::*;
 use service_daemon::{allow_sync, service};
 use tracing::info;
 
@@ -94,5 +95,43 @@ pub async fn external_status_updater() -> anyhow::Result<()> {
             _ = service_daemon::wait_for_shutdown() => break,
         }
     }
+    Ok(())
+}
+
+// --- Priority Verification Examples ---
+
+/// A service with SYSTEM priority (100).
+/// This will be the FIRST to start and the LAST to shut down.
+#[service(priority = ServicePriority::SYSTEM)]
+pub async fn log_flusher() -> anyhow::Result<()> {
+    info!("[SYSTEM] Log flusher started (Priority 100)");
+    service_daemon::wait_for_shutdown().await;
+    info!("[SYSTEM] Log flusher exiting LAST");
+    Ok(())
+}
+
+/// A service with STORAGE priority (80).
+/// Starts after SYSTEM, shuts down before SYSTEM.
+#[service(priority = ServicePriority::STORAGE)]
+pub async fn db_connector(db_url: Arc<DbUrl>) -> anyhow::Result<()> {
+    info!(
+        "[STORAGE] DB connector started (Priority 80) for {}",
+        db_url
+    );
+    service_daemon::wait_for_shutdown().await;
+    info!("[STORAGE] DB connector exiting");
+    Ok(())
+}
+
+/// A service with EXTERNAL priority (0).
+/// This will be the LAST to start and the FIRST to shut down.
+#[service(priority = ServicePriority::EXTERNAL)]
+pub async fn public_api(port: Arc<Port>) -> anyhow::Result<()> {
+    info!(
+        "[EXTERNAL] Public API started (Priority 0) on port {}",
+        port
+    );
+    service_daemon::wait_for_shutdown().await;
+    info!("[EXTERNAL] Public API exiting FIRST");
     Ok(())
 }

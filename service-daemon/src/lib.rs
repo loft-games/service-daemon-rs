@@ -34,11 +34,17 @@
 //! let daemon = ServiceDaemon::from_registry_with_policy(policy);
 //! ```
 
+extern crate self as service_daemon;
+
 pub mod models;
 pub mod utils;
 
 // Re-export commonly used items
-pub use models::{SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam};
+pub use models::service::ServicePriority;
+pub use models::{
+    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam, TT,
+    TriggerTemplate,
+};
 pub use std::sync::Arc;
 pub use utils::context::{is_shutdown, token, wait_for_shutdown};
 pub use utils::di::Provided;
@@ -59,3 +65,16 @@ pub use uuid;
 
 // Re-export macros for unified user experience
 pub use service_daemon_macro::{allow_sync, provider, service, trigger};
+
+/// A prelude module for commonly used items and trigger templates.
+///
+/// Importing this allows using short variant names like `Cron` or `Watch` and
+/// provides IDE autocompletion for `#[trigger]` attributes.
+pub mod prelude {
+    pub use crate::models::service::ServicePriority;
+    pub use crate::models::trigger::TriggerTemplate;
+    pub use crate::models::trigger::TriggerTemplate as TT;
+    pub use crate::models::trigger::TriggerTemplate::*;
+    pub use crate::utils::context::{is_shutdown, token, wait_for_shutdown};
+    pub use crate::utils::di::Provided;
+}

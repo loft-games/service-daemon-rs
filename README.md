@@ -13,13 +13,10 @@ A Rust library for automatic service management with dependency injection, inspi
 - [Troubleshooting](#troubleshooting)
 - [Testing](#testing)
 
-## Features
-
-- **`#[service]`** - Mark functions (sync or async) as managed services
-- **`#[trigger]`** - Event-driven functions (Cron, Queue, Notify)
-- **`#[provider]`** - Auto-register dependencies with once-lock singletons
-- **Intelligent State** - Automatic promotion to RwLock/Mutex with lock-free snapshots
-- **Cooperative Shutdown** - CancellationToken support for clean service exits
+- **`#[service]`** - Mark functions (sync or async) as managed services with custom priorities
+- **`#[trigger]`** - Event-driven functions (Cron, Queue, Notify, Watch) with Typed Enum support
+- **Managed Logging** - High-performance, non-blocking asynchronous log processing
+- **Wave-Based Lifecycle**: Symmetric, priority-based startup (descending) and shutdown (ascending).
 - **Automatic restart** - Failed services are restarted with exponential backoff
 - **Type-safe DI** - Compile-time verified dependency resolution
 
@@ -129,9 +126,14 @@ use service_daemon::ServiceDaemon;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // 1. Setup Logging (including the Non-blocking DaemonLayer)
+    use tracing_subscriber::prelude::*;
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(service_daemon::utils::logging::DaemonLayer)
+        .init();
     
-    // Registers all services (providers are resolved lazily via OnceLock)
+    // 2. Registers all services (providers are resolved lazily via OnceLock)
     let daemon = ServiceDaemon::auto_init();
     daemon.run().await
 }
@@ -139,11 +141,11 @@ async fn main() -> anyhow::Result<()> {
 
 ## How It Works
 
-1. **`#[provider]`** implements the `Provided` trait for a struct or function, using `OnceCell` for thread-safe asynchronous singleton resolution.
-2. **`#[service]`** generates an async wrapper that calls `T::resolve().await` for each `Arc<T>` dependency.
-3. **`#[trigger]`** registers a specialized service with an embedded async event loop (Cron, Queue, or Event).
-4. **`ServiceDaemon::auto_init()`** discovers all services (including triggers) via `linkme`.
-5. **`daemon.run()`** spawns all services/triggers and restarts them on failure with **exponential backoff**.
+1.  **`#[provider]`** implements the `Provided` trait for a struct or function, using `OnceCell` for thread-safe asynchronous singleton resolution.
+2.  **`#[service]`** generates an async wrapper that calls `T::resolve().await` for each `Arc<T>` dependency.
+3.  **`#[trigger]`** registers a specialized service with an embedded async event loop (Cron, Queue, or Event).
+4.  **`ServiceDaemon::auto_init()`** discovers all services (including triggers) via `linkme`.
+5.  **`daemon.run()`** spawns all services/triggers and restarts them on failure with **exponential backoff**.
 
 ## Resilience Features
 
@@ -197,6 +199,32 @@ match status {
 }
 ```
 
+### Lifecycle Priorities
+
+Services are assigned a `u8` priority (default 50).
+- **Startup**: Descending (100 -> 80 -> 50 -> 0). Core systems start first.
+- **Shutdown**: Ascending (0 -> 50 -> 80 -> 100). Core systems stop last.
+
+```rust
+use service_daemon::{service, models::ServicePriority};
+
+#[service(priority = ServicePriority::SYSTEM)]   // (100)
+pub async fn log_flush() { ... }
+
+#[service(priority = ServicePriority::STORAGE)]  // (80)
+pub async fn database() { ... }
+
+#[service(priority = ServicePriority::EXTERNAL)] // (0)
+pub async fn api_server() { ... }
+```
+
+| Level (u8) | Constant | Purpose |
+| :--- | :--- | :--- |
+| **100** | `SYSTEM` | Core systems (Logging, Metrics). |
+| **80** | `STORAGE` | Data providers, database pools. |
+| **50** | `DEFAULT` | Core business logic and triggers. |
+| **0** | `EXTERNAL` | API Gateways, HTTP servers. |
+
 ```mermaid
 sequenceDiagram
     participant Main
@@ -225,13 +253,16 @@ Triggers are specialized services with built-in event loops. They register norma
 
 ### Trigger Template Reference
 
-| Template | Alias | Target Type | Behavior |
-| :--- | :--- | :--- | :--- |
-| `Cron` | - | `CleanupSchedule` (String) | Fires based on cron expression. |
-| `Queue` | `BQueue`, `BroadcastQueue` | `BroadcastQueue` | Every handler receives every message (Fanout). |
-| `LBQueue` | `LoadBalancingQueue` | `LoadBalancingQueue` | Single handler per message (Load-balanced). |
-| `Event` | `Notify`, `Custom` | `Notify` | Fires on explicit signal notification. |
-| `Watch` | `State` | `Any Provided Type` | Fires automatically on state modification. |
+| Template | Alias | Functionality |
+| :--- | :--- | :--- |
+| `Cron` | - | Time-based scheduling via `tokio-cron-scheduler` |
+| `Queue` | `BQueue`, `BroadcastQueue` | Receives every message sent to the target queue |
+| `LBQueue` | `LoadBalancingQueue` | Distributes messages to one available worker at a time |
+| `Watch` | `State` | Zero-lock reactive handlers for shared state changes |
+| `Notify` | `Event`, `Signal` | Simple signal-based triggers |
+
+> [!TIP]
+> **IDE Autocompletion**: Use `use service_daemon::prelude::*;` to get full candidate lists for short names like `Cron` and `Watch`. You can also use `TT::Cron` as a shorter alternative to the full path.
 
 ```mermaid
 sequenceDiagram

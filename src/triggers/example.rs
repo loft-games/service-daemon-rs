@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use crate::providers::trigger_providers::{CleanupSchedule, TaskQueue, UserNotifier, WorkerQueue};
 use crate::providers::typed_providers::{DbUrl, Port};
+#[allow(unused_imports)]
+use service_daemon::prelude::*;
 use service_daemon::{allow_sync, trigger};
 
 // --- Cron Trigger ---
@@ -105,7 +107,7 @@ pub fn sync_notify_trigger() -> anyhow::Result<()> {
 
 // --- Watch Trigger ---
 // Fires whenever GlobalStats is modified (via Arc<RwLock<GlobalStats>>)
-#[trigger(template = Watch, target = crate::providers::typed_providers::GlobalStats)]
+#[trigger(template = TT::Watch, target = crate::providers::typed_providers::GlobalStats)]
 pub async fn on_stats_changed(
     snapshot: Arc<crate::providers::typed_providers::GlobalStats>,
 ) -> anyhow::Result<()> {
@@ -118,7 +120,7 @@ pub async fn on_stats_changed(
 }
 
 // --- External Modification Watcher ---
-#[trigger(template = Watch, target = crate::providers::trigger_providers::ExternalStatus)]
+#[trigger(template = TT::Watch, target = crate::providers::trigger_providers::ExternalStatus)]
 pub async fn on_external_status_changed(
     snapshot: Arc<crate::providers::trigger_providers::ExternalStatus>,
 ) -> anyhow::Result<()> {
