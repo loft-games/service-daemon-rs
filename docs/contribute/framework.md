@@ -16,6 +16,18 @@ The framework is built around a **unified service registry** and **decentralized
 - **Unified Registry**: Both standard services and event-driven triggers are collected into a single `SERVICE_REGISTRY` at link time.
 - **Decentralized DI**: Unlike traditional DI containers, there is no central registry for providers. Instead, each type provides its own resolution logic via the `Provided` trait, typically as a lazy `OnceCell` singleton.
 
+## Getting Started for Contributors
+
+### Development Environment
+- **Rust**: Latest stable version.
+- **Tokio**: The framework is built exclusively on the `tokio` runtime.
+- **Cargo Expand**: Extremely helpful for debugging macro expansion. Install via `cargo install cargo-expand`.
+
+### Standard Workflow
+1. **Modify Core/Macros**: Make changes in `service-daemon` or `service-daemon-macro`.
+2. **Run Tests**: Use `cargo test` to run integrated tests in `src/integration_tests.rs`.
+3. **Verify Expansion**: Use `cargo expand --bin service-daemon-rs` to see how your changes affect user code.
+
 ```mermaid
 graph TD
     subgraph "User Code"
@@ -148,6 +160,113 @@ The `#[service]` and `#[trigger]` macros perform a "Macro Illusion" by redirecti
     - **Spanning**: The macros use `quote_spanned!` when generating the new function signature. It captures the `Span` of the original `Arc`, `RwLock`, and `Mutex` tokens and applies them to the new generated tokens. This allows `rust-analyzer` to correctly associate documentation and navigation with the original source.
     - **Qualified Path Handling**: The `decompose_type` utility in `common.rs` supports qualified paths (e.g., `std::sync::Arc`), ensuring that the macro correctly identifies and wraps dependencies even if they aren't imported by their short names.
 - **Efficient**: Uses atomic checks to ensure zero overhead when no `Watch` triggers are active for a type.
+
+---
+
+## Macro Anatomy (Before & After)
+
+Understanding how macros transform code is essential for contributors.
+
+### The `#[service]` Transformation
+
+**User Code:**
+```rust
+#[service]
+pub async fn my_service(port: Arc<Port>) -> anyhow::Result<()> {
+    // logic
+}
+```
+
+**Expanded Code (Simplified):**
+```rust
+// 1. Logic preserved in the original function
+pub async fn my_service(port: Arc<Port>) -> anyhow::Result<()> {
+    // logic
+}
+
+// 2. Generated Wrapper for the Daemon
+pub fn my_service_wrapper(token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    Box::pin(async move {
+        // DI Resolution
+        let port = <Port as Provided>::resolve().await;
+        
+        // Execution Loop with Backoff/Shutdown support handled by Daemon
+        my_service(port).await
+    })
+}
+
+// 3. Static Registration
+#[linkme::distributed_slice(SERVICE_REGISTRY)]
+static __SERVICE_ENTRY_MY_SERVICE: ServiceEntry = ServiceEntry {
+    name: "my_service",
+    wrapper: my_service_wrapper,
+    // ...
+};
+```
+
+### The `#[trigger]` Transformation
+
+Trigger macros generate an internal **Event Loop Host**.
+
+**User Code:**
+```rust
+#[trigger(template = Queue, target = MyQueue)]
+async fn my_handler(payload: String) -> anyhow::Result<()> { ... }
+```
+
+**Expanded Code (Simplified):**
+```rust
+pub fn my_handler_wrapper(token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    Box::pin(async move {
+        // 1. Resolve the target event source
+        let receiver = MyQueue::subscribe().await;
+        
+        // 2. Run the specialized Trigger Host
+        service_daemon::utils::triggers::queue_trigger_host(
+            "my_handler",
+            receiver,
+            move |payload| {
+                Box::pin(async move {
+                    my_handler(payload).await
+                })
+            },
+            token
+        ).await
+    })
+}
+```
+
+---
+
+## Extending the Framework
+
+### Adding a New Trigger Template
+1. **Define the Host**: Add a new host function in `service-daemon/src/utils/triggers.rs` (e.g., `webhook_trigger_host`).
+2. **Update the Macro**: Modify `service-daemon-macro/src/trigger.rs` to recognize the new template name and generate the call to your new host.
+3. **Update Logic**: Ensure the macro correctly maps parameters (payload vs dependencies).
+
+### Adding a "Magic Provider"
+Magic providers (like `Notify` or `Queue`) are handled in `service-daemon-macro/src/provider.rs`.
+1. Add a new template generator function (e.g., `generate_mqtt_template`).
+2. Update `generate_struct_provider` to detect the template name in the `#[provider(default = ...)]` attribute.
+
+---
+
+## Troubleshooting & Debugging
+
+### High-Level Error: "Missing Provider"
+**Symptoms**: Compile error `the trait Provided is not implemented for MyType`.
+**Cause**: You are trying to inject `Arc<MyType>` but `MyType` is not marked with `#[provider]`.
+**Fix**: Add `#[provider]` to `MyType` or the function that creates it.
+
+### Linker Errors
+**Symptoms**: `linkme` related errors or services "not found" at runtime.
+**Cause**: Usually occurs if a module containing services is not explicitly included in the crate tree (`mod` statement missing in `main.rs` or `lib.rs`).
+**Fix**: Ensure the module is reachable during compilation.
+
+### Macro Debugging Tips
+- Always use `cargo expand` to verify that your macro is generating valid syntax.
+- Use `proc_macro_error` to provide helpful error messages during expansion instead of panicking.
 
 ---
 

@@ -2,6 +2,17 @@
 
 A Rust library for automatic service management with dependency injection, inspired by Python's decorator-based service registration.
 
+## Table of Contents
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [Resilience Features](#resilience-features)
+- [Triggers](#triggers)
+- [Intelligent State Management](#intelligent-state-management)
+- [Common Patterns](#common-patterns)
+- [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
+
 ## Features
 
 - **`#[service]`** - Mark functions (sync or async) as managed services
@@ -210,9 +221,17 @@ With Type-Based DI, missing dependencies are caught at **compile-time**:
 error[E0599]: no function or associated item named `resolve` found for struct `MissingType`
 ```
 
-## Triggers
-
 Triggers are specialized services with built-in event loops. They register normally as services but manage an internal "Call Host".
+
+### Trigger Template Reference
+
+| Template | Alias | Target Type | Behavior |
+| :--- | :--- | :--- | :--- |
+| `Cron` | - | `CleanupSchedule` (String) | Fires based on cron expression. |
+| `Queue` | `BQueue`, `BroadcastQueue` | `BroadcastQueue` | Every handler receives every message (Fanout). |
+| `LBQueue` | `LoadBalancingQueue` | `LoadBalancingQueue` | Single handler per message (Load-balanced). |
+| `Event` | `Notify`, `Custom` | `Notify` | Fires on explicit signal notification. |
+| `Watch` | `State` | `Any Provided Type` | Fires automatically on state modification. |
 
 ```mermaid
 sequenceDiagram
@@ -417,6 +436,43 @@ async fn on_web_request(new_status: String) {
 *   **Symmetry**: Internal services and external bridges use the same `rwlock()` and `mutex()` API.
 *   **Zero Lockdown**: Snapshot reads (`resolve().await`) are **guaranteed non-blocking** even if a writer holds the lock, thanks to an internal `watch` channel.
 *   **Zero Overhead**: If you never call a lock method, the state remains a simple, high-performance immutable singleton.
+
+## Common Patterns
+
+### 1. Resource Pooling (e.g., Database)
+Use `#[provider]` to manage resources that require complex initialization or pooling.
+
+```rust
+#[provider]
+pub async fn db_pool() -> MyDbPool {
+    MyDbPool::connect("...").await.unwrap()
+}
+
+#[service]
+pub async fn data_service(db: Arc<MyDbPool>) -> anyhow::Result<()> {
+    // db is shared across all services
+    Ok(())
+}
+```
+
+### 2. Cross-Service Communication
+*   **Decoupled**: Use `BroadcastQueue` if multiple services need to react to the same event.
+*   **State-Driven**: Use `Watch` triggers if services just need to know when shared state has changed.
+
+## Troubleshooting
+
+### Compile Error: `the trait Provided is not implemented for T`
+**Cause**: You are attempting to inject `Arc<T>` but forgot to annotate `T` (or the function producing it) with `#[provider]`.
+**Fix**: Add `#[provider]` to the dependency.
+
+### Trigger Not Firing
+*   **Module Inclusion**: Ensure the module containing your `#[trigger]` is included in your `main.rs` via `mod submodule;`. `linkme` cannot find services in modules that aren't compiled into the binary.
+*   **Target Mismatch**: Double-check that the `target` in your trigger attribute matches the intended provider.
+
+### Sync Warning in Logs
+**Cause**: You are using `#[service]` on a `fn` instead of an `async fn`.
+**Fix**: Convert to `async fn` or add `#[allow_sync]` if the function is guaranteed to be fast and non-blocking.
+
 
 ## Testing
 

@@ -85,12 +85,6 @@ pub struct ExternalStatus {
     pub updated_count: u32,
 }
 
-#[derive(Debug, Clone)]
-pub struct InternalStats {
-    pub message: String,
-    pub updated_count: u32,
-}
-
 impl Default for ExternalStatus {
     fn default() -> Self {
         Self {
