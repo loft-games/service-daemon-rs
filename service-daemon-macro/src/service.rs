@@ -20,7 +20,6 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
-    let mut mutability_marks = Vec::new();
 
     let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
     for arg in &sig.inputs {
@@ -55,43 +54,17 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         }
                         crate::common::WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                             resolve_tokens.push(quote! {
-                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
+                                let #arg_name = #inner_type::rwlock().await;
                             });
                             let rw_path = quote_spanned! { rwlock_span => service_daemon::utils::managed_state::RwLock<#inner_type> };
                             clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> }).unwrap());
-                            // Emit mutability mark for promotion
-                            let mark_name = format_ident!(
-                                "__MUT_MARK_{}_{}",
-                                fn_name.to_string().to_uppercase(),
-                                arg_name.to_string().to_uppercase()
-                            );
-                            mutability_marks.push(quote! {
-                                #[service_daemon::linkme::distributed_slice(service_daemon::models::mutability::MUTABILITY_REGISTRY)]
-                                #[linkme(crate = service_daemon::linkme)]
-                                static #mark_name: service_daemon::models::mutability::MutabilityMark = service_daemon::models::mutability::MutabilityMark {
-                                    key: #type_str
-                                };
-                            });
                         }
                         crate::common::WrapperKind::ArcMutex(arc_span, mutex_span) => {
                             resolve_tokens.push(quote! {
-                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
+                                let #arg_name = #inner_type::mutex().await;
                             });
                             let mutex_path = quote_spanned! { mutex_span => service_daemon::utils::managed_state::Mutex<#inner_type> };
                             clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> }).unwrap());
-                            // Emit mutability mark for promotion
-                            let mark_name = format_ident!(
-                                "__MUT_MARK_{}_{}",
-                                fn_name.to_string().to_uppercase(),
-                                arg_name.to_string().to_uppercase()
-                            );
-                            mutability_marks.push(quote! {
-                                #[service_daemon::linkme::distributed_slice(service_daemon::models::mutability::MUTABILITY_REGISTRY)]
-                                #[linkme(crate = service_daemon::linkme)]
-                                static #mark_name: service_daemon::models::mutability::MutabilityMark = service_daemon::models::mutability::MutabilityMark {
-                                    key: #type_str
-                                };
-                            });
                         }
                     }
 
@@ -171,7 +144,6 @@ pub fn service_impl(_attr: TokenStream, item: TokenStream) -> TokenStream {
             wrapper: #wrapper_name,
         };
 
-        #(#mutability_marks)*
     };
 
     TokenStream::from(expanded)

@@ -11,7 +11,7 @@ use std::sync::Arc;
     label = "this requires `{Self}`, but no `#[provider]` exists for it",
     note = "Add `#[provider]` to a function returning `{Self}`, or use `#[provider]` on the struct definition."
 )]
-pub trait Provided: 'static + Send + Sync + Sized {
+pub trait Provided: 'static + Send + Sync + Clone + Sized {
     /// Resolves a read-only snapshot of this type.
     ///
     /// If promoted to managed state, this returns a consistent snapshot.

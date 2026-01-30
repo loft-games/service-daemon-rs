@@ -219,6 +219,11 @@ impl ServiceDaemon {
         });
     }
 
+    /// Get the cancellation token for this daemon.
+    pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancellation_token.clone()
+    }
+
     /// Get a handle to the daemon for querying status.
     pub fn handle(&self) -> ServiceDaemonHandle {
         ServiceDaemonHandle {
@@ -397,13 +402,22 @@ impl ServiceDaemon {
                 _ = sigterm.recv() => {
                     info!("Received SIGTERM, shutting down...");
                 }
+                _ = self.cancellation_token.cancelled() => {
+                    info!("Received internal cancellation signal, shutting down...");
+                }
             }
         }
 
         #[cfg(not(unix))]
         {
-            tokio::signal::ctrl_c().await?;
-            info!("Received Ctrl+C, shutting down...");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C, shutting down...");
+                }
+                _ = self.cancellation_token.cancelled() => {
+                    info!("Received internal cancellation signal, shutting down...");
+                }
+            }
         }
 
         // Graceful shutdown

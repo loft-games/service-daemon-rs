@@ -1,9 +1,8 @@
-use crate::models::MUTABILITY_REGISTRY;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{
-    Mutex as TokioMutex, MutexGuard as TokioMutexGuard, OnceCell, RwLock as TokioRwLock,
-    RwLockReadGuard as TokioRwLockReadGuard, RwLockWriteGuard as TokioRwLockWriteGuard,
+    OnceCell, RwLock as TokioRwLock, RwLockReadGuard as TokioRwLockReadGuard,
+    RwLockWriteGuard as TokioRwLockWriteGuard, watch,
 };
 
 /// Manages intelligent promotion and synchronization for shared state.
@@ -17,8 +16,8 @@ use tokio::sync::{
 /// to managed (mutable) state.
 pub struct StateManager<T: 'static + Send + Sync + Clone> {
     lock: OnceCell<Arc<TrackedRwLock<T>>>,
-    mutex: OnceCell<Arc<TrackedMutex<T>>>,
     snapshot: OnceCell<Arc<T>>,
+    watch_rx: OnceCell<watch::Receiver<Arc<T>>>,
     change_notify: OnceCell<Arc<tokio::sync::Notify>>,
 }
 
@@ -26,8 +25,8 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub const fn new() -> Self {
         Self {
             lock: OnceCell::const_new(),
-            mutex: OnceCell::const_new(),
             snapshot: OnceCell::const_new(),
+            watch_rx: OnceCell::const_new(),
             change_notify: OnceCell::const_new(),
         }
     }
@@ -40,11 +39,6 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             .clone()
     }
 
-    /// Checks if the type T is marked as mutable anywhere in the system.
-    pub fn is_promoted(key: &'static str) -> bool {
-        MUTABILITY_REGISTRY.iter().any(|m| m.key == key)
-    }
-
     /// Resolves as a tracked RwLock.
     pub async fn resolve_rwlock<F, Fut>(&self, init: F) -> Arc<TrackedRwLock<T>>
     where
@@ -53,55 +47,54 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     {
         self.lock
             .get_or_init(|| async {
-                let initial_arc = init().await;
+                // If we already have a snapshot, use it to seed the lock to avoid double-init
+                let initial_arc = if let Some(sn) = self.snapshot.get() {
+                    sn.clone()
+                } else {
+                    init().await
+                };
+
                 let val = (*initial_arc).clone();
                 let notify = self.get_notify().await;
+                let (tx, rx) = watch::channel(initial_arc);
+
+                // Ensure watch_rx is also populated
+                let _ = self.watch_rx.set(rx);
+
                 Arc::new(TrackedRwLock {
                     inner: TokioRwLock::new(val),
                     notify,
+                    watch_tx: tx,
                 })
             })
             .await
             .clone()
     }
 
-    /// Resolves as a tracked Mutex.
+    /// Resolves as a tracked Mutex (backed by the same underlying RwLock).
     pub async fn resolve_mutex<F, Fut>(&self, init: F) -> Arc<TrackedMutex<T>>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Arc<T>> + Send,
     {
-        self.mutex
-            .get_or_init(|| async {
-                let initial_arc = init().await;
-                let val = (*initial_arc).clone();
-                let notify = self.get_notify().await;
-                Arc::new(TrackedMutex {
-                    inner: TokioMutex::new(val),
-                    notify,
-                })
-            })
-            .await
-            .clone()
+        let lock = self.resolve_rwlock(init).await;
+        Arc::new(TrackedMutex { inner: lock })
     }
 
     /// Resolves as a snapshot Arc<T>.
-    /// If promoted, it attempts to provide a consistent snapshot by reading the RwLock.
-    /// Otherwise, it uses the fast-path immutable singleton.
-    pub async fn resolve_snapshot<F, Fut>(&self, key: &'static str, init: F) -> Arc<T>
+    /// Provides "Zero Lockdown" reads - never blocks even if a writer is holding the lock.
+    pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Arc<T>> + Send,
     {
-        if Self::is_promoted(key) {
-            // Managed Path: Resolve the RwLock and take a snapshot
-            let rw = self.resolve_rwlock(init).await;
-            let val = rw.read().await.clone();
-            Arc::new(val)
-        } else {
-            // Fast Path: Resolve the immutable singleton
-            self.snapshot.get_or_init(init).await.clone()
+        // 1. Dynamic Check: If lock is already initialized, we MUST use the managed path
+        if let Some(rx) = self.watch_rx.get() {
+            return rx.borrow().clone();
         }
+
+        // 2. Fast Path: Plain immutable singleton
+        self.snapshot.get_or_init(init).await.clone()
     }
 
     /// Returns a future that resolves when the state is modified.
@@ -119,12 +112,13 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 ///
 /// For detailed behavioral documentation, see the official [tokio::sync::RwLock].
 #[doc(alias = "tokio::sync::RwLock")]
-pub struct TrackedRwLock<T> {
+pub struct TrackedRwLock<T: Clone> {
     inner: TokioRwLock<T>,
     notify: Arc<tokio::sync::Notify>,
+    watch_tx: watch::Sender<Arc<T>>,
 }
 
-impl<T> TrackedRwLock<T> {
+impl<T: Clone> TrackedRwLock<T> {
     /// Locks this `RwLock` with shared read access.
     ///
     /// See also [tokio::sync::RwLock::read].
@@ -142,33 +136,39 @@ impl<T> TrackedRwLock<T> {
         TrackedWriteGuard {
             inner: self.inner.write().await,
             notify: self.notify.clone(),
+            watch_tx: &self.watch_tx,
         }
     }
 }
 
 /// RAII structure used to release the exclusive write access of a `RwLock`
 /// and notify state observers.
-pub struct TrackedWriteGuard<'a, T> {
+pub struct TrackedWriteGuard<'a, T: Clone> {
     inner: TokioRwLockWriteGuard<'a, T>,
     notify: Arc<tokio::sync::Notify>,
+    watch_tx: &'a watch::Sender<Arc<T>>,
 }
 
-impl<T> Deref for TrackedWriteGuard<'_, T> {
+impl<T: Clone> Deref for TrackedWriteGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl<T> DerefMut for TrackedWriteGuard<'_, T> {
+impl<T: Clone> DerefMut for TrackedWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<T> Drop for TrackedWriteGuard<'_, T> {
+impl<T: Clone> Drop for TrackedWriteGuard<'_, T> {
     fn drop(&mut self) {
+        // 1. Notify Watch triggers
         self.notify.notify_waiters();
+        // 2. Update non-blocking watch channel
+        let new_val = (*self.inner).clone();
+        self.watch_tx.send_replace(Arc::new(new_val));
     }
 }
 
@@ -180,12 +180,11 @@ impl<T> Drop for TrackedWriteGuard<'_, T> {
 ///
 /// For detailed behavioral documentation, see the official [tokio::sync::Mutex].
 #[doc(alias = "tokio::sync::Mutex")]
-pub struct TrackedMutex<T> {
-    inner: TokioMutex<T>,
-    notify: Arc<tokio::sync::Notify>,
+pub struct TrackedMutex<T: Clone> {
+    inner: Arc<TrackedRwLock<T>>,
 }
 
-impl<T> TrackedMutex<T> {
+impl<T: Clone> TrackedMutex<T> {
     /// Locks this `Mutex`, causing the current task to yield until the lock has been acquired.
     ///
     /// When the returned [TrackedMutexGuard] is dropped, any `Watch` triggers
@@ -194,35 +193,27 @@ impl<T> TrackedMutex<T> {
     /// See also [tokio::sync::Mutex::lock].
     pub async fn lock(&self) -> TrackedMutexGuard<'_, T> {
         TrackedMutexGuard {
-            inner: self.inner.lock().await,
-            notify: self.notify.clone(),
+            inner: self.inner.write().await,
         }
     }
 }
 
 /// RAII structure used to release the exclusive lock of a `Mutex`
 /// and notify state observers.
-pub struct TrackedMutexGuard<'a, T> {
-    inner: TokioMutexGuard<'a, T>,
-    notify: Arc<tokio::sync::Notify>,
+pub struct TrackedMutexGuard<'a, T: Clone> {
+    inner: TrackedWriteGuard<'a, T>,
 }
 
-impl<T> Deref for TrackedMutexGuard<'_, T> {
+impl<T: Clone> Deref for TrackedMutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl<T> DerefMut for TrackedMutexGuard<'_, T> {
+impl<T: Clone> DerefMut for TrackedMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
-    }
-}
-
-impl<T> Drop for TrackedMutexGuard<'_, T> {
-    fn drop(&mut self) {
-        self.notify.notify_waiters();
     }
 }
 
@@ -238,9 +229,11 @@ mod tests {
     #[tokio::test]
     async fn test_tracked_rwlock_notification() {
         let notify = Arc::new(Notify::new());
+        let (tx, _rx) = watch::channel(Arc::new(0));
         let lock = TrackedRwLock {
             inner: TokioRwLock::new(0),
             notify: notify.clone(),
+            watch_tx: tx,
         };
 
         // Read doesn't notify
@@ -271,10 +264,13 @@ mod tests {
     #[tokio::test]
     async fn test_tracked_mutex_notification() {
         let notify = Arc::new(Notify::new());
-        let lock = TrackedMutex {
-            inner: TokioMutex::new(0),
+        let (tx, _rx) = watch::channel(Arc::new(0));
+        let rw = Arc::new(TrackedRwLock {
+            inner: TokioRwLock::new(0),
             notify: notify.clone(),
-        };
+            watch_tx: tx,
+        });
+        let lock = TrackedMutex { inner: rw };
 
         // Lock notifies on drop
         {

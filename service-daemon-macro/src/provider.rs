@@ -18,7 +18,7 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Support async fn items for custom async initialization
     if let Ok(item_fn) = syn::parse::<ItemFn>(item.clone()) {
-        return generate_async_fn_provider(item_fn);
+        return generate_async_fn_provider(item_fn, parse_provider_attrs(&attr_str));
     }
 
     // Error for unsupported items - use abort! for enhanced error
@@ -30,7 +30,6 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     )
 }
 
-/// Parsed attributes from #[provider(...)]
 struct ProviderAttrs {
     default_value: Option<String>,
     env_name: Option<String>,
@@ -119,7 +118,7 @@ fn parse_provider_attrs(attr_str: &str) -> ProviderAttrs {
 }
 
 /// Generates a provider from an async function.
-fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
+fn generate_async_fn_provider(item_fn: ItemFn, _provider_attrs: ProviderAttrs) -> TokenStream {
     let fn_name = &item_fn.sig.ident;
     let fn_vis = &item_fn.vis;
     let fn_block = &item_fn.block;
@@ -138,7 +137,7 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
     };
 
     let fn_name_str = fn_name.to_string();
-    let return_type_str = quote!(#return_type).to_string();
+    let return_type_str = quote!(#return_type).to_string().replace(" ", "");
     let allow_sync_present = has_allow_sync(&item_fn.attrs);
     let call_expr = if fn_asyncness.is_some() {
         quote! { #fn_name().await }
@@ -166,7 +165,7 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         // Generate Provided impl for the return type using StateManager
         impl service_daemon::Provided for #return_type {
             async fn resolve() -> std::sync::Arc<Self> {
-                #singleton_name.resolve_snapshot(#return_type_str, || async {
+                #singleton_name.resolve_snapshot(|| async {
                     std::sync::Arc::new(#call_expr)
                 }).await
             }
@@ -187,9 +186,23 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
                 #singleton_name.changed().await
             }
         }
+
+        impl #return_type {
+            /// Resolves a tracked RwLock for this provider.
+            pub async fn rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+                <Self as service_daemon::Provided>::resolve_rwlock().await
+            }
+
+            /// Resolves a tracked Mutex for this provider.
+            pub async fn mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+                <Self as service_daemon::Provided>::resolve_mutex().await
+            }
+        }
     };
 
-    TokenStream::from(expanded)
+    TokenStream::from(quote! {
+        #expanded
+    })
 }
 
 /// Generates a Signal provider using `tokio::sync::Notify`.
@@ -222,8 +235,7 @@ fn generate_notify_template(
 
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                let name_str = stringify!(#struct_name);
-                #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
+                #singleton_name.resolve_snapshot(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
             async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
@@ -292,8 +304,7 @@ fn generate_lb_queue_template(
 
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                let name_str = stringify!(#struct_name);
-                #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
+                #singleton_name.resolve_snapshot(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
             async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
@@ -353,8 +364,7 @@ fn generate_broadcast_queue_template(
 
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                let name_str = stringify!(#struct_name);
-                #singleton_name.resolve_snapshot(name_str, || async { std::sync::Arc::new(Self::default()) }).await
+                #singleton_name.resolve_snapshot(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
             async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
@@ -390,7 +400,6 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     let generics = &item.generics;
     let fields = &item.fields;
     let semi = &item.semi_token;
-    let struct_name_str = struct_name.to_string();
 
     // Parse attributes (default, env_name, item_type, capacity)
     let provider_attrs = parse_provider_attrs(attr_str);
@@ -602,7 +611,7 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
         // Type-based DI: impl Provided for the struct with intelligent state management
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                #singleton_name.resolve_snapshot(#struct_name_str, || async {
+                #singleton_name.resolve_snapshot(|| async {
                     #constructor
                 }).await
             }
@@ -623,7 +632,21 @@ fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
                 #singleton_name.changed().await
             }
         }
+
+        impl #struct_name {
+            /// Resolves a tracked RwLock for this provider.
+            pub async fn rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+                <Self as service_daemon::Provided>::resolve_rwlock().await
+            }
+
+            /// Resolves a tracked Mutex for this provider.
+            pub async fn mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+                <Self as service_daemon::Provided>::resolve_mutex().await
+            }
+        }
     };
 
-    TokenStream::from(expanded)
+    TokenStream::from(quote! {
+        #expanded
+    })
 }

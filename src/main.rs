@@ -1,3 +1,4 @@
+mod integration_tests;
 mod providers;
 mod services;
 mod triggers;

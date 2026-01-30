@@ -65,3 +65,34 @@ pub fn sync_service(port: Arc<Port>) -> anyhow::Result<()> {
     info!("Sync service started on port {}", port);
     Ok(())
 }
+
+// --- External Modification Mock Service ---
+// This service simulates an "external" callback or context that doesn't
+// have the state injected as a parameter, but uses the new static methods.
+#[service]
+pub async fn external_status_updater() -> anyhow::Result<()> {
+    info!("External status updater mock service started");
+    let mut count = 0;
+
+    while !service_daemon::is_shutdown() {
+        // Wait 15 seconds between updates
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(15)) => {
+                count += 1;
+                let msg = format!("External update #{}", count);
+
+                // DIRECT MODIFICATION SYNTAX (Zero Overhead)
+                // We obtain a genuine TrackedRwLock object directly.
+                let state_lock = crate::providers::trigger_providers::ExternalStatus::rwlock().await;
+                {
+                    let mut guard = state_lock.write().await;
+                    guard.message = msg;
+                    guard.updated_count = count;
+                    info!("Pushed external update #{}", count);
+                } // <--- Trigger fires here when guard is dropped!
+            }
+            _ = service_daemon::wait_for_shutdown() => break,
+        }
+    }
+    Ok(())
+}

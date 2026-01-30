@@ -127,13 +127,23 @@ Triggers are not a separate primitive; they are **Specialized Services**.
 
 The framework implements a "Hybrid State" pattern that optimizes for the common case (read-only) while supporting transparent mutation.
 
-- **MutabilityMark**: The `#[service]` and `#[trigger]` macros analyze their parameters. If they detect `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, they emit a `MutabilityMark` for type `T` into the `MUTABILITY_REGISTRY` using `linkme`.
-- **StateManager**: A specialized state container that holds a simple `OnceCell` for the "Fast Path" and a `OnceCell<Arc<TrackedShared<T>>>` for the "Managed Path". It also maintains a `Notify` instance to broadcast change notifications to `Watch` triggers.
-- **Intelligent Switching**:
-    - **The Fast Path (Immutable)**: If `T` has no mutability marks, `Provided::resolve()` returns a simple immutable singleton. Performance is equivalent to a raw pointer.
-    - **The Managed Path (Mutable)**: If even one `MutabilityMark` exists for `T` anywhere in the binary, `Provided::resolve()` switches to the `StateManager`'s managed path. It reads the current value from the `RwLock` and returns a consistent `Arc<T>` snapshot.
-- **Atomic Publishing & Watch**: Every time a service requests `Arc<RwLock<T>>`, it receives a `TrackedRwLock<T>`. When the write guard is dropped, it atomically updates the shared snapshot and triggers the `StateManager`'s notification.
-- **The Macro Illusion**: The `#[service]` and `#[trigger]` macros inject local `use` aliases for `RwLock` and `Mutex`. This directs user code (which uses standard `tokio` names) to use our tracked versions transparently, enabling the notification logic without changing a single line of business logic.
+### State Unification & Managed State
+The framework uses a dual-path execution model for state providers, optimized for both performance and safely shared mutability.
+
+#### 1. The Fast Path (Immutable Singletons)
+By default, every `#[provider]` is an immutable singleton. It is initialized once into a `StateManager`'s `OnceCell`. Access via `Arc<T>` is direct and involves zero locking.
+
+#### 2. Dynamic Promotion (Managed State)
+If any service requests `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, or if external code calls `T::rwlock()`, the system **dynamically promotes** the type to managed state.
+- **Unified Sync**: `Mutex` is internally implemented as a wrapper around `RwLock`, ensuring that exclusive locks correctly block read locks and vice-versa across the whole application.
+- **Dynamic Awareness**: `StateManager::resolve_snapshot` performs a single **Relaxed Atomic Load** to check if a lock has been initialized. This is $O(1)$ and significantly faster than the previous registry-based lookup.
+- **Zero Lockdown**: Managed state includes an internal `tokio::sync::watch` channel. Snapshot reads (`resolve().await`) return the latest value from this channel, ensuring they **never block** even if a writer holds the lock.
+
+#### 3. Macro Illusion
+The `#[service]` and `#[trigger]` macros perform a "Macro Illusion" by redirecting standard `RwLock` and `Mutex` imports to `service_daemon::utils::managed_state`. This allows developers to use standard Rust patterns while gaining automatic change tracking for `Watch` triggers.
+
+> [!NOTE]
+> The `mutable = true` attribute was removed in favor of this dynamic promotion model. Promotion is now fully automatic upon first lock acquisition.
 - **Documentation Hint Preservation**: To prevent the macros from "breaking" the IDE's intellisense:
     - **Spanning**: The macros use `quote_spanned!` when generating the new function signature. It captures the `Span` of the original `Arc`, `RwLock`, and `Mutex` tokens and applies them to the new generated tokens. This allows `rust-analyzer` to correctly associate documentation and navigation with the original source.
     - **Qualified Path Handling**: The `decompose_type` utility in `common.rs` supports qualified paths (e.g., `std::sync::Arc`), ensuring that the macro correctly identifies and wraps dependencies even if they aren't imported by their short names.

@@ -74,3 +74,28 @@ pub fn sync_config() -> SyncConfig {
         value: "sync-init-value".to_owned(),
     }
 }
+
+// --- External Modification Example ---
+// promotion occurs automatically at runtime when any lock is first acquired.
+// Convenience static methods: ExternalStatus::rwlock(), ExternalStatus::mutex().
+#[derive(Debug, Clone)]
+#[provider]
+pub struct ExternalStatus {
+    pub message: String,
+    pub updated_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct InternalStats {
+    pub message: String,
+    pub updated_count: u32,
+}
+
+impl Default for ExternalStatus {
+    fn default() -> Self {
+        Self {
+            message: "Initial state".to_owned(),
+            updated_count: 0,
+        }
+    }
+}

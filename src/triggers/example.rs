@@ -116,3 +116,16 @@ pub async fn on_stats_changed(
     );
     Ok(())
 }
+
+// --- External Modification Watcher ---
+#[trigger(template = Watch, target = crate::providers::trigger_providers::ExternalStatus)]
+pub async fn on_external_status_changed(
+    snapshot: Arc<crate::providers::trigger_providers::ExternalStatus>,
+) -> anyhow::Result<()> {
+    tracing::info!(
+        ">>> External Watch Trigger detected update: '{}' (count: {})",
+        snapshot.message,
+        snapshot.updated_count
+    );
+    Ok(())
+}

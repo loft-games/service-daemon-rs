@@ -394,6 +394,43 @@ The framework uses a **Macro Illusion** to detect modifications without speciali
 1. **The Fast Path (Immutable)**: If everyone only asks for `Arc<T>`, the state is initialized once and never locked. Performance is identical to a raw pointer.
 2. **The Managed Path (Mutable)**: If `Arc<RwLock<T>>` or `Arc<Mutex<T>>` is detected anywhere at link-time, the framework upgrades the provider to support consistent snapshots and concurrent locking.
 
+### Direct State Modification (External Bridging)
+While `ServiceDaemon` encourages reactive programming via `Triggers`, you can also modify state directly from external contexts (e.g., HTTP callbacks, MQTT handlers).
+
+`ServiceDaemon` automatically promotes state to a **Tracked/Managed** path the moment you request a lock.
+
+```rust
+// In your HTTP handler or external callback:
+async fn on_web_request(new_status: String) {
+    // 1. Obtain a tracked lock directly from the provider type.
+    // This automatically "promotes" the state at runtime!
+    let lock = ExternalStatus::rwlock().await;
+    
+    // 2. Modify the state. 
+    // When the guard drops, all internal `Watch` triggers fire automatically.
+    let mut guard = lock.write().await;
+    guard.message = new_status;
+}
+```
+
+#### Why use this?
+*   **Symmetry**: Internal services and external bridges use the same `rwlock()` and `mutex()` API.
+*   **Zero Lockdown**: Snapshot reads (`resolve().await`) are **guaranteed non-blocking** even if a writer holds the lock, thanks to an internal `watch` channel.
+*   **Zero Overhead**: If you never call a lock method, the state remains a simple, high-performance immutable singleton.
+
+## Testing
+
+The framework includes an integrated test suite in `src/integration_tests.rs` that verifies core functionality like:
+- **Declarative Patterns**: Cron, Queues, and Signals.
+- **Dynamic Promotion**: Verification that immutable singletons are correctly upgraded to managed state when locks are requested.
+- **Zero Lockdown**: Proof that snapshot reads (`resolve().await`) are non-blocking even during write operations.
+- **Sync Support**: Support for synchronous services and triggers.
+
+To run the tests:
+```bash
+cargo test
+```
+
 ---
 
 ## Project Structure
