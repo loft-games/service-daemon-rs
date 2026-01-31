@@ -1,8 +1,8 @@
 use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::prelude::*;
-use service_daemon::{allow_sync, service};
-use tracing::info;
+use service_daemon::{ServiceState, allow_sync, service, shelve, state, unshelve};
+use tracing::{info, warn};
 
 #[service]
 pub async fn example_service(
@@ -133,5 +133,129 @@ pub async fn public_api(port: Arc<Port>) -> anyhow::Result<()> {
     );
     service_daemon::wait_for_shutdown().await;
     info!("[EXTERNAL] Public API exiting FIRST");
+    Ok(())
+}
+
+// --- Service Control Plane Demonstrations ---
+
+/// Demonstrates how a service can use the state() API to handle restarts and recoveries.
+#[service]
+pub async fn resilient_service_demo() -> anyhow::Result<()> {
+    match state().await {
+        ServiceState::Starting => {
+            info!("Resilient service starting for the FIRST time.");
+        }
+        ServiceState::Reloading => {
+            info!("Resilient service RELOADING (warm restart).");
+        }
+        ServiceState::Recovering(last_error) => {
+            warn!("Resilient service RECOVERING from a crash!");
+            warn!("Context from previous failure: {}", last_error);
+        }
+        _ => {
+            // Uniformly handle other states (like Running) if no special logic is needed
+            service_daemon::done().await;
+        }
+    }
+
+    // Simulate work...
+    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    Ok(())
+}
+
+/// Demonstrates cross-generational state handoff using shelving.
+#[service]
+pub async fn state_handoff_demo() -> anyhow::Result<()> {
+    // 1. Try to unshelve data from the previous generation
+    if let Some(history) = unshelve::<Vec<String>>().await {
+        info!("Retrieved {} historical events from shelf", history.len());
+        for event in history {
+            info!("  - {}", event);
+        }
+    } else {
+        info!("No historical data found in shelf (first run or empty).");
+    }
+
+    // 2. Perform some work
+    let event = format!("Event at {:?}", std::time::SystemTime::now());
+
+    // 3. Shelve state for the next generation (e.g., if we were to restart)
+    let history = vec![event];
+    shelve(history).await;
+
+    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    Ok(())
+}
+
+/// Demonstrates automatic service restart when an injected dependency changes.
+/// This service depends on GlobalStats. When stats_writer updates GlobalStats,
+/// this service will be automatically restarted by the daemon.
+#[service]
+pub async fn di_restart_demo(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
+    match state().await {
+        ServiceState::Reloading => {
+            info!("DI Restart Demo: Dependency (GlobalStats) changed! Performing warm restart...");
+        }
+        _ => {
+            info!(
+                "DI Restart Demo: Initializing with stats: {}",
+                stats.total_processed
+            );
+            service_daemon::done().await;
+        }
+    }
+
+    info!("DI Restart Demo is now active and watching for changes...");
+    service_daemon::wait_for_shutdown().await;
+    Ok(())
+}
+
+/// A comprehensive example of a state-aware service.
+/// It maintains an internal counter that survives dependency-triggered reloads.
+/// This service uses the unified state() API to handle its lifecycle in a single loop.
+#[service]
+pub async fn reloading_counter_service(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
+    // 1. Restore state from previous generation if it exists
+    let mut count = unshelve::<u32>().await.unwrap_or(0);
+    info!("Counter Service: Started. Current count: {}", count);
+
+    // 2. Signal that initialization is complete
+    service_daemon::done().await;
+
+    // 3. Main Loop: Unified state handling
+    loop {
+        match service_daemon::state().await {
+            ServiceState::Reloading => {
+                warn!(
+                    "Counter Service: Reloading due to dependency change! Shelving count: {}",
+                    count
+                );
+                // Save state for the next generation
+                shelve(count).await;
+                break; // Graceful exit for warm restart
+            }
+            ServiceState::Stopping => {
+                info!("Counter Service: Shutting down. Final count was: {}", count);
+                break; // Graceful exit for shutdown
+            }
+            ServiceState::Recovering(err) => {
+                warn!("Counter Service: Recovering from error: {}", err);
+                // We can choose to reset or continue
+                service_daemon::done().await;
+            }
+            _ => {
+                // Normal Running state
+                count += 1;
+                info!(
+                    "Counter Service: Working... count = {} (Global Stats: {})",
+                    count, stats.total_processed
+                );
+
+                // Simulate work
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            }
+        }
+    }
+
     Ok(())
 }

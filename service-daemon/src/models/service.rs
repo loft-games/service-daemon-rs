@@ -52,6 +52,7 @@ pub struct ServiceEntry {
     pub module: &'static str,
     pub params: &'static [ServiceParam],
     pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
+    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub priority: u8,
     /// The trigger template if this is a trigger service.
     pub template: Option<TriggerTemplate>,
@@ -61,6 +62,7 @@ pub struct ServiceEntry {
 pub struct ServiceDescription {
     pub name: String,
     pub run: ServiceFn,
+    pub watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     pub priority: u8,
     pub cancellation_token: CancellationToken,
 }

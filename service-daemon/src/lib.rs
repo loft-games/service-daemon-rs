@@ -46,14 +46,18 @@ pub use models::{
     TriggerTemplate,
 };
 pub use std::sync::Arc;
-pub use utils::context::{is_shutdown, token, wait_for_shutdown};
+pub use utils::context::{
+    ServiceState, done, is_shutdown, shelve, state, token, unshelve, wait_for_shutdown,
+};
 pub use utils::di::Provided;
 pub use utils::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle, ServiceStatus,
 };
 
 // Re-export dependencies for use in macro-generated code
+pub use futures;
 pub use linkme;
+pub use tokio;
 pub use tokio_util;
 
 // Conditionally re-export dependencies based on features
@@ -75,6 +79,8 @@ pub mod prelude {
     pub use crate::models::trigger::TriggerTemplate;
     pub use crate::models::trigger::TriggerTemplate as TT;
     pub use crate::models::trigger::TriggerTemplate::*;
-    pub use crate::utils::context::{is_shutdown, token, wait_for_shutdown};
+    pub use crate::utils::context::{
+        ServiceState, is_shutdown, shelve, state, token, unshelve, wait_for_shutdown,
+    };
     pub use crate::utils::di::Provided;
 }

@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use futures::future::BoxFuture;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -9,8 +10,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, instrument, warn};
 
 use crate::models::{SERVICE_REGISTRY, ServiceDescription, ServiceFn};
-
-/// Current status of a service managed by the daemon.
+use crate::utils::context::{
+    CURRENT_SERVICE, RELOAD_SIGNALS, SERVICE_STATE_STORE, ServiceIdentity, ServiceState,
+};
+use futures::FutureExt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceStatus {
     /// Service is currently running.
@@ -206,9 +209,11 @@ impl ServiceDaemon {
             );
 
             let wrapper = entry.wrapper;
-            daemon.register(
+            let watcher_ptr = entry.watcher;
+            daemon.register_with_watcher(
                 entry.name,
                 Arc::new(move |token| wrapper(token)),
+                watcher_ptr.map(|w| Arc::new(move || w()) as _),
                 entry.priority,
             );
         }
@@ -218,9 +223,21 @@ impl ServiceDaemon {
 
     /// Register a service manually.
     pub fn register(&mut self, name: &str, run: ServiceFn, priority: u8) {
+        self.register_with_watcher(name, run, None, priority);
+    }
+
+    /// Register a service with an optional watcher for dependency reloads.
+    pub fn register_with_watcher(
+        &mut self,
+        name: &str,
+        run: ServiceFn,
+        watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+        priority: u8,
+    ) {
         self.services.push(ServiceDescription {
             name: name.to_string(),
             run,
+            watcher,
             priority,
             cancellation_token: CancellationToken::new(),
         });
@@ -247,6 +264,7 @@ impl ServiceDaemon {
     async fn spawn_service(
         name: String,
         run: ServiceFn,
+        watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
         policy: RestartPolicy,
         running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
         service_status: Arc<DashMap<String, ServiceStatus>>,
@@ -256,6 +274,30 @@ impl ServiceDaemon {
         let handle = tokio::spawn(async move {
             let mut current_delay = policy.initial_delay;
             let name = name_for_task;
+
+            // Spawn dependency watcher if present
+            if let Some(watcher) = watcher {
+                let n = name.clone();
+                let ct = cancellation_token.clone();
+                tokio::spawn(async move {
+                    while !ct.is_cancelled() {
+                        let reload_signal = RELOAD_SIGNALS
+                            .get_or_init(|| async { DashMap::new() })
+                            .await
+                            .entry(n.clone())
+                            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                            .clone();
+
+                        tokio::select! {
+                            _ = watcher() => {
+                                info!("Watcher: Dependency change detected for service '{}', triggering reload", n);
+                                reload_signal.notify_one();
+                            }
+                            _ = ct.cancelled() => break,
+                        }
+                    }
+                });
+            }
 
             loop {
                 // Check for cancellation before starting
@@ -268,37 +310,130 @@ impl ServiceDaemon {
                     break;
                 }
 
-                info!("Starting service: {}", name);
+                // Determine initial state
+                let initial_state = if let Some(state) = SERVICE_STATE_STORE
+                    .get_or_init(|| async { DashMap::new() })
+                    .await
+                    .get(&name)
+                {
+                    let s = state.value().clone();
+                    info!("Supervisor: Found state {:?} in store for {}", s, name);
+                    s
+                } else {
+                    info!(
+                        "Supervisor: No state found in store for {}, using Starting",
+                        name
+                    );
+                    ServiceState::Starting
+                };
+
+                info!("Starting service: {} with state {:?}", name, initial_state);
                 service_status.insert(name.clone(), ServiceStatus::Running);
                 let start_time = std::time::Instant::now();
 
                 let span = tracing::info_span!("service", %name);
                 let token_clone = cancellation_token.clone();
-                let result = crate::utils::context::SHUTDOWN_TOKEN
-                    .scope(token_clone.clone(), async {
-                        run(token_clone).instrument(span).await
+
+                // Get or create reload signal
+                let reload_signal = RELOAD_SIGNALS
+                    .get_or_init(|| async { DashMap::new() })
+                    .await
+                    .entry(name.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                    .clone();
+
+                // Create a reload token that we can cancel when a reload is requested.
+                // This allows state().await to return Reloading immediately.
+                let reload_token = CancellationToken::new();
+                let rt_clone = reload_token.clone();
+                let rs_clone = reload_signal.clone();
+                let bridge_task = tokio::spawn(async move {
+                    rs_clone.notified().await;
+                    rt_clone.cancel();
+                });
+
+                let identity = ServiceIdentity {
+                    name: name.clone(),
+                    reload_signal: reload_signal.clone(),
+                    cancellation_token: token_clone.clone(),
+                    reload_token: reload_token.clone(),
+                };
+
+                // Update current state to Running if it was Starting or Reloading.
+                // Recovering states remain as they are until done() is called.
+                let s = match initial_state {
+                    ServiceState::Starting | ServiceState::Reloading => ServiceState::Running,
+                    other => other,
+                };
+
+                SERVICE_STATE_STORE
+                    .get_or_init(|| async { DashMap::new() })
+                    .await
+                    .insert(name.clone(), s);
+
+                // Wrapper to run service in TLS scope and capture errors
+                let run_clone = run.clone();
+                let token_for_run = token_clone.clone();
+
+                let result = CURRENT_SERVICE
+                    .scope(identity, async move {
+                        std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
+                            .catch_unwind()
+                            .await
                     })
                     .await;
 
-                let _result = match result {
-                    Ok(_) => {
+                bridge_task.abort();
+
+                let mut next_state = ServiceState::Starting;
+
+                match result {
+                    Ok(Ok(_)) => {
                         warn!("Service {} exited normally", name);
-                        Ok(())
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!("Service {} failed: {:?}", name, e);
-                        Err(e)
+                        next_state = ServiceState::Recovering(format!("{:?}", e));
+                    }
+                    Err(panic) => {
+                        let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "Unknown panic".to_string()
+                        };
+                        error!("Service {} panicked: {}", name, panic_msg);
+                        next_state = ServiceState::Recovering(format!("Panic: {}", panic_msg));
                     }
                 };
+
+                // Check for explicit reload (the service might have exited itself gracefully)
+                if reload_token.is_cancelled() {
+                    info!("Supervisor: Service {} exited for reload", name);
+                    next_state = ServiceState::Reloading;
+                }
 
                 // Check for cancellation after service exits
                 if cancellation_token.is_cancelled() {
                     info!("Service {} received shutdown signal, not restarting", name);
                     service_status.insert(name.clone(), ServiceStatus::Stopped);
+                    SERVICE_STATE_STORE
+                        .get_or_init(|| async { DashMap::new() })
+                        .await
+                        .remove(&name);
                     break;
                 }
 
                 service_status.insert(name.clone(), ServiceStatus::Restarting);
+                info!(
+                    "Supervisor: Setting next_state for {} to {:?}",
+                    name, next_state
+                );
+                SERVICE_STATE_STORE
+                    .get_or_init(|| async { DashMap::new() })
+                    .await
+                    .insert(name.clone(), next_state);
 
                 // Reset delay if service ran successfully for long enough
                 if start_time.elapsed() >= policy.reset_after {
@@ -356,6 +491,7 @@ impl ServiceDaemon {
                 Self::spawn_service(
                     service.name.clone(),
                     service.run.clone(),
+                    service.watcher.clone(),
                     self.restart_policy,
                     self.running_tasks.clone(),
                     self.service_status.clone(),
@@ -524,6 +660,7 @@ impl ServiceDaemon {
             Self::spawn_service(
                 service.name.clone(),
                 service.run.clone(),
+                service.watcher.clone(),
                 test_policy,
                 self.running_tasks.clone(),
                 self.service_status.clone(),
@@ -608,6 +745,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_crash_recovery_state() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        let service_fn: ServiceFn = Arc::new(move |_| {
+            let count = call_count_clone.clone();
+            Box::pin(async move {
+                let c = count.fetch_add(1, Ordering::SeqCst);
+                if c == 0 {
+                    panic!("Boom!");
+                } else {
+                    let s = crate::utils::context::state().await;
+                    info!("Service received state: {:?}", s);
+                    if let ServiceState::Recovering(ref err) = s {
+                        if err.contains("Boom") {
+                            info!("Successfully detected recovery state with message: {}", err);
+                            return Ok(());
+                        }
+                    }
+                    Err(anyhow::anyhow!(
+                        "Expected Recovering state with Boom!, got {:?}",
+                        s
+                    ))
+                }
+            })
+        });
+
+        daemon.register("crash_service", service_fn, 50);
+
+        daemon
+            .run_for_duration(Duration::from_secs(3))
+            .await
+            .unwrap();
+
+        let final_count = call_count.load(Ordering::SeqCst);
+        assert!(final_count >= 2);
+    }
+
+    #[tokio::test]
     async fn test_service_runs_successfully() {
         setup_tracing();
         let mut daemon = ServiceDaemon::new();
@@ -688,5 +867,52 @@ mod tests {
         assert!(final_a >= 1, "Service A should have executed");
         assert!(final_b >= 1, "Service B should have executed");
         debug!("test_multiple_services passed");
+    }
+
+    #[tokio::test]
+    async fn test_state_handoff_shelving() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::new();
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = call_count.clone();
+
+        let service_fn: ServiceFn = Arc::new(move |_| {
+            let count = call_count_clone.clone();
+            Box::pin(async move {
+                let c = count.fetch_add(1, Ordering::SeqCst);
+                if c == 0 {
+                    info!("First run: shelving data");
+                    crate::utils::context::shelve("Hello Shelf".to_string()).await;
+                    // Simulate an error to trigger restart
+                    return Err(anyhow::anyhow!("Restart me"));
+                } else {
+                    info!("Second run: checking shelf");
+                    let data: Option<String> = crate::utils::context::unshelve().await;
+                    if let Some(ref msg) = data {
+                        if msg == "Hello Shelf" {
+                            info!("Successfully unshelved data!");
+                            // Wait for shutdown to prevent restarting and failing on subsequently empty shelf
+                            service_daemon::wait_for_shutdown().await;
+                            return Ok(());
+                        }
+                    }
+                    Err(anyhow::anyhow!(
+                        "Expected 'Hello Shelf' in shelf, got {:?}",
+                        data
+                    ))
+                }
+            })
+        });
+
+        daemon.register("shelve_service", service_fn, 50);
+
+        daemon
+            .run_for_duration(Duration::from_secs(3))
+            .await
+            .unwrap();
+
+        let final_count = call_count.load(Ordering::SeqCst);
+        assert!(final_count >= 2);
     }
 }

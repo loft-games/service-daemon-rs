@@ -18,6 +18,9 @@ A Rust library for automatic service management with dependency injection, inspi
 - **Managed Logging** - High-performance, non-blocking asynchronous log processing
 - **Wave-Based Lifecycle**: Symmetric, priority-based startup (descending) and shutdown (ascending).
 - **Automatic restart** - Failed services are restarted with exponential backoff
+- **Service Control Plane**: Intelligent state machine (`Starting`, `Running`, `Reloading`, `Recovering`).
+- **Zero-Copy State**: O(1) snapshots and CoW mutations for high-performance shared state.
+- **Exception Handoff**: Previous errors are passed to the next service generation for custom recovery logic.
 - **Type-safe DI** - Compile-time verified dependency resolution
 
 > [!CAUTION]
@@ -418,17 +421,59 @@ pub async fn reader_service(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
 }
 ```
 
-### 2. The Mutability Pattern (Thread-Safe Updates)
+### 2. The Mutability Pattern (Zero-Copy CoW)
 Declare a dependency as `Arc<RwLock<T>>` or `Arc<Mutex<T>>` to gain write access.
-- **Automatic Promotion**: If even one service in your binary asks for a lock, the framework "promotes" that provider from a simple singleton to a **Managed State**.
-- **Atomic Publishing**: When a writer finishes, the framework automatically publishes a new snapshot for future `Arc<T>` readers.
+- **Automatic Promotion**: If even one service asks for a lock, the framework promotes that provider to a **Managed State**.
+- **Zero-Copy Publishing**: When a writer commits, a new `Arc<T>` is published. Existing readers keep their old snapshots (O(1) handover).
+- **Atomic Notifications**: `Watch` triggers fire only when the state is actually modified.
 
 ```rust
 #[service]
 pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
     let mut guard = stats.write().await;
     guard.total_processed += 1;
-    // Snapshot is updated when guard is dropped
+    // Automatic CoW mutation and notification on Drop
+    Ok(())
+}
+```
+
+## Service Control Plane
+
+The Control Plane provides services with implicit context and lifecycle awareness.
+
+### Lifecycle Awareness
+Services can use `service_daemon::state().await` to determine their current generation's purpose:
+
+```rust
+use service_daemon::{state, ServiceState};
+
+#[service]
+async fn my_service() -> anyhow::Result<()> {
+    match state().await {
+        ServiceState::Starting => info!("First time setup"),
+        ServiceState::Reloading => info!("Config changed, re-initializing"),
+        ServiceState::Recovering(last_err) => warn!("Recovering from crash: {}", last_err),
+        ServiceState::Running => info!("Steady state"),
+    }
+    // ...
+}
+```
+
+### State Handoff (Shelving)
+Persist non-managed state (like file handles or network buffers) across service restarts:
+
+```rust
+use service_daemon::{shelve, unshelve};
+
+#[service]
+async fn persistence_service() -> anyhow::Result<()> {
+    // 1. Try to retrieve state from previous generation
+    let my_buffer: Option<Vec<u8>> = unshelve();
+    
+    // 2. Do work...
+    
+    // 3. Before exit/error, shelve for the next generation
+    shelve(vec![1, 2, 3]);
     Ok(())
 }
 ```

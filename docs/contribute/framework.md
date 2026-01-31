@@ -51,11 +51,13 @@ graph TD
         SD[ServiceDaemon]
         CT[CancellationToken]
         TH[TriggerHosts]
+        SCP[Service Control Plane]
     end
 
     subgraph "Intelligent State"
         SM[StateManager]
         P_Impl["Provided Trait Impls"]
+        ZC[Zero-Copy CoW]
     end
 
     S --> M_S
@@ -71,9 +73,12 @@ graph TD
 
     SD -->|load| SR
     SD -->|control| CT
+    SD -->|orchestrate| SCP
     
-    SD -->|spawn| S
-    SD -->|spawn| TH
+    SCP -->|spawn| S
+    SCP -->|spawn| TH
+    SCP -->|state flow| SM
+    
     TH -->|loop| T
     
     CT -.->|signal| S
@@ -83,6 +88,7 @@ graph TD
     T -.->|resolve| SM
     SM -.->|check| MR
     SM -.->|instantiate| P_Impl
+    SM --> ZC
 ```
 
 ## Step-by-Step Technical Details
@@ -138,7 +144,24 @@ Triggers are not a separate primitive; they are **Specialized Services**.
 - **Attribute Stripping**: To ensure valid Rust code after transformation, the macro strips the internal `#[payload]` attribute.
 - **Trace correlation**: It automatically injects the trigger name and a unique ID into the `tracing` context via a span.
 
-### 6. Intelligent State Management & Promotion
+### 6. Service Control Plane & Lifecycle Orchestration
+
+The framework implements a sophisticated Control Plane that manages the transition between service generations (restarts, reloads, recoveries).
+
+#### Lifecycle States
+The `ServiceDaemon` manages an internal `SERVICE_STATE_STORE` that tracks the condition of each service:
+- **`Starting`**: Initial boot-up.
+- **`Running`**: Active execution.
+- **`Reloading`**: Signal-triggered restart.
+- **`Recovering(String)`**: Automatically entered after a service panic or error. The next generation receives the error message from the previous one.
+
+#### Implicit Context (Task-Local Storage)
+The Control Plane uses `tokio::task_local` to provide services with their `ServiceIdentity` (name, tokens) and current `ServiceState` without requiring explicit parameter passing. This enables functions like `state()`, `shelve()`, and `unshelve()` to be called from anywhere within the service's call stack.
+
+#### Exception Handoff
+When a service task panics or returns an `Err`, the supervisor captures the payload (if it's a `String` or `&str`) or uses `Debug` representation to populate the `Recovering` state. This ensures that diagnostics are preserved across process-local service generations.
+
+### 7. Intelligent State Management (Zero-Copy CoW)
 
 The framework implements a "Hybrid State" pattern that optimizes for the common case (read-only) while supporting transparent mutation.
 
@@ -146,13 +169,13 @@ The framework implements a "Hybrid State" pattern that optimizes for the common 
 The framework uses a dual-path execution model for state providers, optimized for both performance and safely shared mutability.
 
 #### 1. The Fast Path (Immutable Singletons)
-By default, every `#[provider]` is an immutable singleton. It is initialized once into a `StateManager`'s `OnceCell`. Access via `Arc<T>` is direct and involves zero locking.
+Every `#[provider]` is an immutable singleton by default. It is initialized once into a `StateManager`'s `OnceCell`. Access via `Arc<T>` is direct and involves zero locking.
 
-#### 2. Dynamic Promotion (Managed State)
-If any service requests `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, or if external code calls `T::rwlock()`, the system **dynamically promotes** the type to managed state.
-- **Unified Sync**: `Mutex` is internally implemented as a wrapper around `RwLock`, ensuring that exclusive locks correctly block read locks and vice-versa across the whole application.
-- **Dynamic Awareness**: `StateManager::resolve_snapshot` performs a single **Relaxed Atomic Load** to check if a lock has been initialized. This is $O(1)$ and significantly faster than the previous registry-based lookup.
-- **Zero Lockdown**: Managed state includes an internal `tokio::sync::watch` channel. Snapshot reads (`resolve().await`) return the latest value from this channel, ensuring they **never block** even if a writer holds the lock.
+#### 2. Dynamic Promotion (Zero-Copy CoW)
+If any service requests `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, the system promotes the type to a **Managed State**.
+- **CoW Mutation**: Write operations in `TrackedRwLock` trigger a Copy-on-Write of the internal `Arc<T>`.
+- **Zero-Copy Snapshots**: Snapshot reads (`resolve().await` or `snapshot().await`) return the current `Arc<T>`. This is an $O(1)$ operation that never blocks writers.
+- **Atomic Publishing**: When a write guard is dropped, the new state is atomically published to the `watch` channel.
 
 #### 3. Macro Illusion
 The `#[service]` and `#[trigger]` macros perform a "Macro Illusion" by redirecting standard `RwLock` and `Mutex` imports to `service_daemon::utils::managed_state`. This allows developers to use standard Rust patterns while gaining automatic change tracking for `Watch` triggers.

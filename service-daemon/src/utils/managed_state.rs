@@ -16,7 +16,7 @@ use tokio::sync::{
 /// to managed (mutable) state.
 pub struct StateManager<T: 'static + Send + Sync + Clone> {
     lock: OnceCell<Arc<TrackedRwLock<T>>>,
-    snapshot: OnceCell<Arc<T>>,
+    snapshot_cache: OnceCell<Arc<T>>,
     watch_rx: OnceCell<watch::Receiver<Arc<T>>>,
     change_notify: OnceCell<Arc<tokio::sync::Notify>>,
 }
@@ -25,10 +25,18 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub const fn new() -> Self {
         Self {
             lock: OnceCell::const_new(),
-            snapshot: OnceCell::const_new(),
+            snapshot_cache: OnceCell::const_new(),
             watch_rx: OnceCell::const_new(),
             change_notify: OnceCell::const_new(),
         }
+    }
+
+    /// Create a new StateManager with an initial value.
+    pub fn with_value(val: T) -> Self {
+        let manager = Self::new();
+        let arc = Arc::new(val);
+        manager.snapshot_cache.set(arc).ok();
+        manager
     }
 
     /// Internal helper to get or initialize the shared notification handle.
@@ -48,13 +56,13 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         self.lock
             .get_or_init(|| async {
                 // If we already have a snapshot, use it to seed the lock to avoid double-init
-                let initial_arc = if let Some(sn) = self.snapshot.get() {
+                let initial_arc = if let Some(sn) = self.snapshot_cache.get() {
                     sn.clone()
                 } else {
                     init().await
                 };
 
-                let val = (*initial_arc).clone();
+                let val = initial_arc.clone();
                 let notify = self.get_notify().await;
                 let (tx, rx) = watch::channel(initial_arc);
 
@@ -94,7 +102,18 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         }
 
         // 2. Fast Path: Plain immutable singleton
-        self.snapshot.get_or_init(init).await.clone()
+        self.snapshot_cache.get_or_init(init).await.clone()
+    }
+
+    /// Convenience method to get a snapshot. Panics if not initialized.
+    pub async fn snapshot(&self) -> Arc<T> {
+        if let Some(rx) = self.watch_rx.get() {
+            return rx.borrow().clone();
+        }
+        self.snapshot_cache
+            .get()
+            .expect("StateManager not initialized")
+            .clone()
     }
 
     /// Returns a future that resolves when the state is modified.
@@ -113,7 +132,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 /// For detailed behavioral documentation, see the official [tokio::sync::RwLock].
 #[doc(alias = "tokio::sync::RwLock")]
 pub struct TrackedRwLock<T: Clone> {
-    inner: TokioRwLock<T>,
+    inner: TokioRwLock<Arc<T>>,
     notify: Arc<tokio::sync::Notify>,
     watch_tx: watch::Sender<Arc<T>>,
 }
@@ -122,8 +141,10 @@ impl<T: Clone> TrackedRwLock<T> {
     /// Locks this `RwLock` with shared read access.
     ///
     /// See also [tokio::sync::RwLock::read].
-    pub async fn read(&self) -> TokioRwLockReadGuard<'_, T> {
-        self.inner.read().await
+    pub async fn read(&self) -> TrackedReadGuard<'_, T> {
+        TrackedReadGuard {
+            inner: self.inner.read().await,
+        }
     }
 
     /// Locks this `RwLock` with exclusive write access.
@@ -137,16 +158,50 @@ impl<T: Clone> TrackedRwLock<T> {
             inner: self.inner.write().await,
             notify: self.notify.clone(),
             watch_tx: &self.watch_tx,
+            committed: false,
         }
+    }
+}
+
+/// RAII structure used to release the shared read access of a `RwLock`.
+pub struct TrackedReadGuard<'a, T: Clone> {
+    inner: TokioRwLockReadGuard<'a, Arc<T>>,
+}
+
+impl<T: Clone> Deref for TrackedReadGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
 /// RAII structure used to release the exclusive write access of a `RwLock`
 /// and notify state observers.
 pub struct TrackedWriteGuard<'a, T: Clone> {
-    inner: TokioRwLockWriteGuard<'a, T>,
+    inner: TokioRwLockWriteGuard<'a, Arc<T>>,
     notify: Arc<tokio::sync::Notify>,
     watch_tx: &'a watch::Sender<Arc<T>>,
+    committed: bool,
+}
+
+impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
+    /// Commits the current state to the snapshot channel and notifies listeners.
+    /// This can be called multiple times during a single write lock.
+    pub fn commit(&mut self) {
+        let new_val = (*self.inner).clone();
+        self.watch_tx.send_replace(new_val);
+        self.notify.notify_waiters();
+        self.committed = true;
+    }
+
+    /// Replaces the entire state with a new Arc and commits it.
+    /// This is the "Total Zero-Copy" path.
+    pub fn publish(&mut self, new_val: Arc<T>) {
+        *self.inner = new_val.clone();
+        self.watch_tx.send_replace(new_val);
+        self.notify.notify_waiters();
+        self.committed = true;
+    }
 }
 
 impl<T: Clone> Deref for TrackedWriteGuard<'_, T> {
@@ -158,17 +213,18 @@ impl<T: Clone> Deref for TrackedWriteGuard<'_, T> {
 
 impl<T: Clone> DerefMut for TrackedWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        Arc::make_mut(&mut self.inner)
     }
 }
 
 impl<T: Clone> Drop for TrackedWriteGuard<'_, T> {
     fn drop(&mut self) {
-        // 1. Notify Watch triggers
-        self.notify.notify_waiters();
-        // 2. Update non-blocking watch channel
-        let new_val = (*self.inner).clone();
-        self.watch_tx.send_replace(Arc::new(new_val));
+        if !self.committed {
+            // Automatically commit on drop if not already committed
+            let new_val = (*self.inner).clone();
+            self.watch_tx.send_replace(new_val);
+            self.notify.notify_waiters();
+        }
     }
 }
 
@@ -227,11 +283,39 @@ mod tests {
     use tokio::sync::Notify;
 
     #[tokio::test]
+    async fn test_state_manager_zero_copy() {
+        let manager = StateManager::<i32>::with_value(10);
+
+        // Initial snapshot
+        let snap1 = manager.snapshot().await;
+        assert_eq!(*snap1, 10);
+
+        // Second snapshot (should be identical pointer)
+        let snap2 = manager.snapshot().await;
+        assert!(Arc::ptr_eq(&snap1, &snap2));
+
+        // Setup the lock to test mutation and publish
+        let lock = manager.resolve_rwlock(|| async { Arc::new(10) }).await;
+
+        // After write (CoW happens)
+        {
+            let mut guard = lock.write().await;
+            *guard = 20;
+            guard.commit(); // Ensure change is pushed back to StateManager
+        }
+
+        // After commit, snapshot changes
+        let snap4 = manager.snapshot().await;
+        assert_eq!(*snap4, 20);
+        assert!(!Arc::ptr_eq(&snap1, &snap4));
+    }
+
+    #[tokio::test]
     async fn test_tracked_rwlock_notification() {
         let notify = Arc::new(Notify::new());
         let (tx, _rx) = watch::channel(Arc::new(0));
         let lock = TrackedRwLock {
-            inner: TokioRwLock::new(0),
+            inner: TokioRwLock::new(Arc::new(0)),
             notify: notify.clone(),
             watch_tx: tx,
         };
@@ -262,11 +346,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tracked_rwlock_commit_and_publish() {
+        let notify = Arc::new(Notify::new());
+        let (tx, mut rx) = watch::channel(Arc::new(10));
+        let lock = TrackedRwLock {
+            inner: TokioRwLock::new(Arc::new(10)),
+            notify: notify.clone(),
+            watch_tx: tx,
+        };
+
+        // Test commit
+        {
+            let mut guard = lock.write().await;
+            *guard = 20;
+            guard.commit();
+            assert_eq!(**rx.borrow_and_update(), 20);
+        }
+
+        // Test publish (zero-copy replacement)
+        {
+            let mut guard = lock.write().await;
+            guard.publish(Arc::new(30));
+        }
+        assert_eq!(**rx.borrow_and_update(), 30);
+    }
+
+    #[tokio::test]
     async fn test_tracked_mutex_notification() {
         let notify = Arc::new(Notify::new());
         let (tx, _rx) = watch::channel(Arc::new(0));
         let rw = Arc::new(TrackedRwLock {
-            inner: TokioRwLock::new(0),
+            inner: TokioRwLock::new(Arc::new(0)),
             notify: notify.clone(),
             watch_tx: tx,
         });

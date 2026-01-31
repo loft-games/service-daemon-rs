@@ -26,6 +26,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
+    let mut watcher_select_arms = Vec::new();
 
     let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
     for arg in &sig.inputs {
@@ -79,6 +80,10 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     param_entries.push(quote! {
                         service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
                     });
+
+                    watcher_select_arms.push(quote! {
+                        _ = <#inner_type as service_daemon::Provided>::changed() => {}
+                    });
                 }
                 crate::common::ParamIntent::Payload { .. } => {
                     abort!(
@@ -107,6 +112,25 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Get module name from function path (simplified - uses "services" as default)
     let module_name = "services";
 
+    let watcher_name = format_ident!("{}_watcher", fn_name);
+    let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty() {
+        (
+            quote! {
+                /// Auto-generated watcher for the service - notifies when dependencies change
+                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
+                    Box::pin(async move {
+                        service_daemon::tokio::select! {
+                            #(#watcher_select_arms),*
+                        }
+                    })
+                }
+            },
+            quote! { Some(#watcher_name) },
+        )
+    } else {
+        (quote! {}, quote! { None })
+    };
+
     let is_async = input.sig.asyncness.is_some();
     let allow_sync_present = has_allow_sync(attrs);
     let call_expr = if is_async {
@@ -133,12 +157,14 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
-        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 #(#resolve_tokens)*
                 #call_expr
             })
         }
+
+        #watcher_fn
 
         /// Auto-generated static registry entry - collected by linkme at link time
         #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
@@ -148,6 +174,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             module: #module_name,
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
+            watcher: #watcher_ptr,
             priority: #priority_tokens,
             template: None,
         };

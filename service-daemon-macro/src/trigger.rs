@@ -81,6 +81,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut di_capture_idents = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
+    let mut watcher_select_arms = Vec::new();
     let mut payload_arg_name = None;
     let mut _payload_is_arc = false;
     let mut _payload_span = None;
@@ -161,6 +162,10 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
                     param_entries.push(quote! {
                         service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
                     });
+
+                    watcher_select_arms.push(quote! {
+                        _ = <#inner_type as service_daemon::Provided>::changed() => {}
+                    });
                 }
             }
             continue;
@@ -179,6 +184,25 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => (&*template, &*template),
     };
     let template_ident = format_ident!("{}", template_variant);
+
+    let watcher_name = format_ident!("{}_watcher", fn_name);
+    let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty() {
+        (
+            quote! {
+                /// Auto-generated watcher for the trigger - notifies when dependencies change
+                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
+                    Box::pin(async move {
+                        service_daemon::tokio::select! {
+                            #(#watcher_select_arms),*
+                        }
+                    })
+                }
+            },
+            quote! { Some(#watcher_name) },
+        )
+    } else {
+        (quote! {}, quote! { None })
+    };
 
     let wrapper_name = format_ident!("{}_trigger_wrapper", fn_name);
     let entry_name = format_ident!("__TRIGGER_ENTRY_{}", fn_name.to_string().to_uppercase());
@@ -303,11 +327,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         /// Auto-generated trigger wrapper - acts as an event-loop "Call Host"
         /// This is registered as a Service, so it benefits from ServiceDaemon's lifecycle management.
-        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 #event_loop_call
             })
         }
+
+        #watcher_fn
 
         /// Auto-generated static registry entry - triggers are specialized services
         #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
@@ -317,6 +343,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             module: concat!("triggers/", #normalized_template),
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
+            watcher: #watcher_ptr,
             priority: #priority_tokens,
             template: Some(service_daemon::TriggerTemplate::#template_ident),
         };
