@@ -38,17 +38,17 @@ sudo pacman -S base-devel
 
 2. **编译并检查代码**:
    ```bash
-   cargo check
+   cargo check --workspace
    ```
 
 3. **运行测试**:
    ```bash
-   cargo test
+   cargo test --workspace
    ```
 
 4. **运行示例程序**:
    ```bash
-   cargo run
+   cargo run -p service-daemon-demo
    ```
 
 ## 代码规范

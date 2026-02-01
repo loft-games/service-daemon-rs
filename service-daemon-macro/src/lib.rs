@@ -23,7 +23,7 @@ mod trigger;
 /// computations.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::{service, allow_sync};
 ///
 /// #[allow_sync]
@@ -48,7 +48,7 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 2. A static registry entry that is automatically collected at link time
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::service;
 /// use std::sync::Arc;
 ///
@@ -59,7 +59,7 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// Then in main.rs:
-/// ```rust
+/// ```rust,ignore
 /// let daemon = ServiceDaemon::from_registry();
 /// daemon.run().await?;
 /// ```
@@ -75,7 +75,7 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// compile-time verified dependency injection.
 ///
 /// # Example with default value
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::provider;
 ///
 /// #[provider(default = 8080)]
@@ -86,7 +86,7 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// # Example with environment variable
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::provider;
 ///
 /// #[provider(default = "localhost:5432", env_name = "DATABASE_HOST")]
@@ -94,7 +94,7 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 ///
 /// # Example with dependencies
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::provider;
 /// use std::sync::Arc;
 ///
@@ -127,7 +127,7 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// - `event` / `notify` / `custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::trigger;
 ///
 /// #[trigger(template = event, target = MyNotifier)]

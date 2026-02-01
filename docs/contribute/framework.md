@@ -25,8 +25,8 @@ The framework is built around a **unified service registry** and **decentralized
 
 ### Standard Workflow
 1. **Modify Core/Macros**: Make changes in `service-daemon` or `service-daemon-macro`.
-2. **Run Tests**: Use `cargo test` to run integrated tests in `src/integration_tests.rs`.
-3. **Verify Expansion**: Use `cargo expand --bin service-daemon-rs` to see how your changes affect user code.
+2. **Run Tests**: Use `cargo test --workspace` to run integrated tests.
+3. **Verify Expansion**: Use `cargo expand -p service-daemon-demo` to see how your changes affect user code.
 
 ```mermaid
 graph TD
@@ -122,7 +122,8 @@ Once started via `daemon.run().await`:
 1. **Spawning**: Each service is spawned as a separate `tokio` task.
 2. **Monitoring**: The `ServiceDaemon` tracks the `JoinHandle` and status (Running, Restarting, Stopped) of each service. It also automatically wraps each service execution in a `tracing::Span` named `service` with the service's name, enabling automatic log correlation.
 3. **Restart Policy**: If a service fails (returns `Err`), the daemon applies an **Exponential Backoff** policy with jitter to prevent "thundering herd" issues.
-4. **Graceful Shutdown**: Upon receiving a `SIGINT` (Ctrl+C) or `SIGTERM`:
+4. **Error Handling**: The framework uses a specialized `ServiceError` type and `service_daemon::Result` for improved error diagnostics and type safety. Key methods are marked with `#[must_use]` to ensure errors are handled or explicitly ignored.
+5. **Graceful Shutdown**: Upon receiving a `SIGINT` (Ctrl+C) or `SIGTERM`:
     - The `ServiceDaemon` initiates a **Wave-Based Lifecycle**.
     - It groups services by their `priority` (`u8`).
     - **Startup**: Descending order (Highest -> Lowest). Ensures infrastructure is `Running` before logic starts.
@@ -309,5 +310,6 @@ Magic providers (like `Notify` or `Queue`) are handled in `service-daemon-macro/
 | `ServiceDaemon` | Main orchestrator, manages task lifecycles and restarts. |
 | `SERVICE_REGISTRY` | Global list of all services found at link-time. |
 | `Provided` | Trait that enables a type to be injected. |
+| `ServiceError` | Specialized error type for common failure modes. |
 | `RestartPolicy` | Configures backoff timing and jitter. |
 | `CancellationToken` | Orchestrates graceful coordination for shutdown. |

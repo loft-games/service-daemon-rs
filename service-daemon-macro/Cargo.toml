@@ -2,6 +2,11 @@
 name = "service-daemon-macro"
 version = "0.1.0"
 edition = "2024"
+description = "Procedural macros for service-daemon-rs."
+license = "MIT"
+repository = "https://github.com/loft-games/service-daemon-rs"
+keywords = ["daemon", "service", "dependency-injection", "proc-macro"]
+categories = ["asynchronous", "development-tools::procedural-macros"]
 
 [lib]
 proc-macro = true

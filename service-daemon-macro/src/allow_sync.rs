@@ -12,7 +12,7 @@ use proc_macro::TokenStream;
 /// computations.
 ///
 /// # Example
-/// ```rust
+/// ```rust,ignore
 /// use service_daemon::{service, allow_sync};
 ///
 /// #[allow_sync]

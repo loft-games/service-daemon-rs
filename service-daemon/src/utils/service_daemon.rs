@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, instrument, warn};
 
-use crate::models::{SERVICE_REGISTRY, ServiceDescription, ServiceFn};
+use crate::models::{Result as ServiceResult, SERVICE_REGISTRY, ServiceDescription, ServiceFn};
 use crate::utils::context::{
     CURRENT_SERVICE, RELOAD_SIGNALS, SERVICE_STATE_STORE, ServiceIdentity, ServiceState,
 };
@@ -110,6 +110,7 @@ impl RestartPolicyBuilder {
         self
     }
 
+    #[must_use]
     pub fn build(self) -> RestartPolicy {
         self.policy
     }
@@ -131,7 +132,6 @@ impl ServiceDaemonHandle {
     }
 }
 
-/// A daemon that manages long-running services with automatic restart and DI support.
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
     running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
@@ -560,14 +560,22 @@ impl ServiceDaemon {
             }
 
             // 2. Parallel Wait: Wait for all services in this wave to finish
+            let mut join_handles = Vec::new();
             for service in services {
                 let name = &service.name;
                 let handle_opt = {
                     let mut guard = self.running_tasks.lock().await;
                     guard.remove(name)
                 };
+                if let Some(handle) = handle_opt {
+                    join_handles.push((name.clone(), handle));
+                }
+            }
 
-                if let Some(mut handle) = handle_opt {
+            let mut shutdown_futures = Vec::new();
+            for (name, mut handle) in join_handles {
+                let status_clone = self.service_status.clone();
+                shutdown_futures.push(async move {
                     info!("Waiting for service '{}' to stop...", name);
                     tokio::select! {
                         res = &mut handle => {
@@ -585,10 +593,10 @@ impl ServiceDaemon {
                             let _ = handle.await;
                         }
                     }
-                    self.service_status
-                        .insert(name.clone(), ServiceStatus::Stopped);
-                }
+                    status_clone.insert(name, ServiceStatus::Stopped);
+                });
             }
+            futures::future::join_all(shutdown_futures).await;
         }
 
         // Finally, cancel the daemon's own token to signal completion if anyone is watching it
@@ -601,7 +609,7 @@ impl ServiceDaemon {
     /// This method spawns all registered services and waits for a shutdown signal.
     /// Services are automatically restarted on failure using exponential backoff.
     #[instrument(skip(self))]
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> ServiceResult<()> {
         // Spawn all services
         self.spawn_all_services().await;
 
@@ -614,8 +622,15 @@ impl ServiceDaemon {
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
-            let mut sigint = signal(SignalKind::interrupt())?;
-            let mut sigterm = signal(SignalKind::terminate())?;
+            let mut sigint = signal(SignalKind::interrupt()).map_err(|e| {
+                crate::models::ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
+            })?;
+            let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
+                crate::models::ServiceError::InternalError(format!(
+                    "Failed to setup SIGTERM: {}",
+                    e
+                ))
+            })?;
 
             tokio::select! {
                 _ = sigint.recv() => {
@@ -652,7 +667,7 @@ impl ServiceDaemon {
     /// Run for a limited duration (for testing).
     #[allow(dead_code)]
     #[instrument(skip(self))]
-    pub async fn run_for_duration(self, duration: Duration) -> anyhow::Result<()> {
+    pub async fn run_for_duration(self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
 

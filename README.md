@@ -1,5 +1,7 @@
 # Service Daemon
 
+[![Rust CI](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml)
+
 A Rust library for automatic service management with dependency injection, inspired by Python's decorator-based service registration.
 
 ## Table of Contents
@@ -120,8 +122,7 @@ pub fn my_sync_service(port: Arc<Port>) -> anyhow::Result<()> {
 
 ### 4. Run the daemon
 
-```rust
-// src/main.rs
+// examples/demo/src/main.rs
 mod providers;
 mod services;
 
@@ -129,17 +130,15 @@ use service_daemon::ServiceDaemon;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // 1. Setup Logging (including the Non-blocking DaemonLayer)
-    use tracing_subscriber::prelude::*;
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::utils::logging::DaemonLayer)
-        .init();
-    
-    // 2. Registers all services (providers are resolved lazily via OnceLock)
+    // ... setup logging and config ...
     let daemon = ServiceDaemon::auto_init();
-    daemon.run().await
+    daemon.run().await?
 }
+```
+
+To run the demonstration:
+```bash
+cargo run -p service-daemon-demo
 ```
 
 ## How It Works

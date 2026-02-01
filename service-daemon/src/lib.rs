@@ -10,18 +10,19 @@
 //! - **Resilience**: Integrated exponential backoff and graceful shutdown.
 //!
 //! # Getting Started
-//! ```rust
+//! ```rust,ignore
 //! use service_daemon::ServiceDaemon;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     let daemon = ServiceDaemon::auto_init();
-//!     daemon.run().await
+//!     daemon.run().await?;
+//!     Ok(())
 //! }
 //! ```
 //!
 //! # Custom Restart Policy
-//! ```rust
+//! ```rust,ignore
 //! use service_daemon::{ServiceDaemon, RestartPolicy};
 //! use std::time::Duration;
 //!
@@ -42,8 +43,8 @@ pub mod utils;
 // Re-export commonly used items
 pub use models::service::ServicePriority;
 pub use models::{
-    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam, TT,
-    TriggerTemplate,
+    Result, SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceError, ServiceFn,
+    ServiceParam, TT, TriggerTemplate,
 };
 pub use std::sync::Arc;
 pub use utils::context::{

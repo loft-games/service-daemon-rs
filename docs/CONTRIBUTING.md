@@ -1,6 +1,6 @@
 # service-daemon-rs 贡献指南
 
-[![Build/test](https://github.com/loft-games/service-daemon-rs/actions/workflows/main.yml/badge.svg?branch=master)](https://github.com/loft-games/service-daemon-rs/actions/workflows/main.yml)
+[![test](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml)
 [![License](https://img.shields.io/github/license/loft-games/service-daemon-rs)](LICENSE)
 
 ## 您遇到了一个 BUG?

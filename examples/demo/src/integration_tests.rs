@@ -33,7 +33,7 @@ mod tests {
         assert!(has_lb_worker);
 
         // Signal test
-        let handle = tokio::spawn(async move { daemon.run().await });
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
         UserNotifier::notify().await;
 
@@ -59,7 +59,7 @@ mod tests {
     async fn test_watch_and_dynamic_promotion() -> anyhow::Result<()> {
         let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await });
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -128,7 +128,7 @@ mod tests {
     async fn test_sync_trigger_support() -> anyhow::Result<()> {
         let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await });
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         SyncTestSignal::notify().await;
@@ -194,7 +194,7 @@ mod tests {
         );
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await });
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         cancel.cancel();
@@ -265,7 +265,7 @@ mod tests {
         );
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await });
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
         // Allow enough time for all waves to start
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
