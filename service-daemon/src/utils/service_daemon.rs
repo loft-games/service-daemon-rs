@@ -212,8 +212,8 @@ impl ServiceDaemon {
             let watcher_ptr = entry.watcher;
             daemon.register_with_watcher(
                 entry.name,
-                Arc::new(move |token| wrapper(token)),
-                watcher_ptr.map(|w| Arc::new(move || w()) as _),
+                Arc::new(wrapper),
+                watcher_ptr.map(|w| Arc::new(w) as _),
                 entry.priority,
             );
         }

@@ -20,7 +20,7 @@ pub enum ParamIntent {
     },
     /// A DI dependency.
     Dependency {
-        inner_type: Type,
+        inner_type: Box<Type>,
         wrapper: WrapperKind,
     },
 }
@@ -74,7 +74,7 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
             return Some((
                 arg_name,
                 ParamIntent::Dependency {
-                    inner_type: inner_type.clone(),
+                    inner_type: Box::new(inner_type.clone()),
                     wrapper,
                 },
             ));

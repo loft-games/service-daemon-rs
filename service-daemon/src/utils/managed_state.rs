@@ -21,6 +21,12 @@ pub struct StateManager<T: 'static + Send + Sync + Clone> {
     change_notify: OnceCell<Arc<tokio::sync::Notify>>,
 }
 
+impl<T: 'static + Send + Sync + Clone> Default for StateManager<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub const fn new() -> Self {
         Self {
