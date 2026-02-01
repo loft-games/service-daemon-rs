@@ -1,6 +1,6 @@
 # Service Daemon
 
-[![Rust CI](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml)
+[![Rust CI](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml)
 
 A Rust library for automatic service management with dependency injection, inspired by Python's decorator-based service registration.
 
