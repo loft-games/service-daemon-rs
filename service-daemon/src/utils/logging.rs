@@ -81,41 +81,35 @@ pub async fn log_service() -> anyhow::Result<()> {
     let mut rx = get_log_queue().tx.subscribe();
 
     while !service_daemon::is_shutdown() {
-        tokio::select! {
-            res = rx.recv() => {
-                match res {
-                    Ok(event) => {
-                        // In a real application, you might write to a file or a remote collector here.
-                        // For now, we'll output to standard error to avoid infinitely recursive tracing
-                        // if the standard subscriber is also looking at stdout.
-                        eprintln!(
-                            "[{}] {:<5} [{}] {}",
-                            event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                            event.level,
-                            event.target,
-                            event.message
-                        );
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("LogService lagged by {} messages", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
+        match rx.recv().await {
+            Ok(event) => {
+                // In a real application, you might write to a file or a remote collector here.
+                // For now, we'll output to standard error to avoid infinitely recursive tracing
+                // if the standard subscriber is also looking at stdout.
+                eprintln!(
+                    "[{}] {:<5} [{}] {}",
+                    event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    event.level,
+                    event.target,
+                    event.message
+                );
             }
-            _ = service_daemon::wait_for_shutdown() => {
-                // Drain any remaining logs before exiting
-                while let Ok(event) = rx.try_recv() {
-                     eprintln!(
-                        "[{}] {:<5} [{}] {} (Drained)",
-                        event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                        event.level,
-                        event.target,
-                        event.message
-                    );
-                }
-                break;
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!("LogService lagged by {} messages", n);
             }
+            Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+
+    // Drain any remaining logs before exiting
+    while let Ok(event) = rx.try_recv() {
+        eprintln!(
+            "[{}] {:<5} [{}] {} (Drained)",
+            event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            event.level,
+            event.target,
+            event.message
+        );
     }
 
     eprintln!("LogService shutting down (Priority: SYSTEM)");

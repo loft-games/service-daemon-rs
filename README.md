@@ -106,10 +106,11 @@ use std::sync::Arc;
 #[service]
 pub async fn my_service(port: Arc<Port>, db_url: Arc<DbUrl>) -> anyhow::Result<()> {
     tracing::info!("Running on port {} with DB {}", **port, **db_url);
-    loop {
+    while !service_daemon::is_shutdown() {
         // do work
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
     }
+    Ok(())
 }
 
 // Synchronous services are also supported!
@@ -171,10 +172,21 @@ let daemon = ServiceDaemon::from_registry_with_policy(policy);
 daemon.run().await?
 ```
 
+Services and triggers use a unified signal to handle both **graceful shutdown** (SIGINT/SIGTERM) and **warm reloads** (dependency changes).
+
+- **`is_shutdown()`**: The recommended way to check if the service should stop. It is now synchronous and state-aware.
+
+```rust
+while !service_daemon::is_shutdown() {
+    // Perform work
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+```
+
 ### Graceful Shutdown (Signal-Based)
 
-The daemon uses `CancellationToken` to signal services to stop. When a shutdown signal (SIGINT/SIGTERM) is received:
-1. All services are notified simultaneously.
+The daemon uses `CancellationToken` to signal services to stop. When a shutdown signal is received:
+1. All services are notified via `is_shutdown()`.
 2. The daemon waits for a grace period (default: 30s) for services to exit.
 3. Services that don't exit within the grace period are forcefully aborted.
 
@@ -441,16 +453,21 @@ pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<(
 The Control Plane provides services with implicit context and lifecycle awareness.
 
 ### Lifecycle Awareness
-Services can use `service_daemon::state().await` to determine their current generation's purpose:
+Services can use `service_daemon::state()` to determine their current generation's purpose:
 
 ```rust
 use service_daemon::{state, ServiceState};
 
 #[service]
 async fn my_service() -> anyhow::Result<()> {
-    match state().await {
+    match state() {
         ServiceState::Starting => info!("First time setup"),
-        ServiceState::Reloading => info!("Config changed, re-initializing"),
+        ServiceState::NeedReload => {
+             info!("Dependency changed, submitting state...");
+             shelve("my_key", my_state).await;
+             done();
+        }
+        ServiceState::Restoring => info!("Warm restart, retrieving state..."),
         ServiceState::Recovering(last_err) => warn!("Recovering from crash: {}", last_err),
         ServiceState::Running => info!("Steady state"),
     }
@@ -459,7 +476,7 @@ async fn my_service() -> anyhow::Result<()> {
 ```
 
 ### State Handoff (Shelving)
-Persist non-managed state (like file handles or network buffers) across service restarts:
+Persist state across service restarts with named values that survive reloads:
 
 ```rust
 use service_daemon::{shelve, unshelve};
@@ -467,12 +484,12 @@ use service_daemon::{shelve, unshelve};
 #[service]
 async fn persistence_service() -> anyhow::Result<()> {
     // 1. Try to retrieve state from previous generation
-    let my_buffer: Option<Vec<u8>> = unshelve();
+    let my_buffer: Option<Vec<u8>> = unshelve("buffer").await;
     
     // 2. Do work...
     
-    // 3. Before exit/error, shelve for the next generation
-    shelve(vec![1, 2, 3]);
+    // 3. Before exit/reload, shelve for the next generation
+    shelve("buffer", vec![1, 2, 3]).await;
     Ok(())
 }
 ```
@@ -555,7 +572,7 @@ The framework includes an integrated test suite in `src/integration_tests.rs` th
 - **Declarative Patterns**: Cron, Queues, and Signals.
 - **Dynamic Promotion**: Verification that immutable singletons are correctly upgraded to managed state when locks are requested.
 - **Zero Lockdown**: Proof that snapshot reads (`resolve().await`) are non-blocking even during write operations.
-- **Sync Support**: Support for synchronous services and triggers.
+- **Sync Support**: Support for synchronous services and triggers using `is_shutdown()`.
 
 To run the tests:
 ```bash

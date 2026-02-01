@@ -133,9 +133,9 @@ Once started via `daemon.run().await`:
 ### 5. Event Triggers (Specialized Services)
 
 Triggers are not a separate primitive; they are **Specialized Services**.
-- **Unified Registry**: The `#[trigger]` macro registers an entry directly into the `SERVICE_REGISTRY`.
+- **Unified Registry**: The `#[trigger]` macro registers an entry directly into the `SERVICE_REGISTRY`, treating it as a standard service with a specialized host.
 - **Host Wrapper**: Instead of running user code directly, the trigger wrapper spawns a "Host" (e.g., `cron_trigger_host`). 
-- **Type-Safe Registry**: The `#[trigger]` macro now preserves the exact `TriggerTemplate` variant in the `ServiceEntry` struct, enabling better telemetry and programmatic introspection.
+- **Reload Awareness**: Trigger hosts use `is_shutdown()` to gracefully exit and restart when dependencies change.
 - **Inversion of Control**: The Host manages the event source (cron, queue, etc.) and executes the user's handler when the event occurs.
 - **Watch Trigger**: A special trigger type that subscribes to `StateManager` notifications. It fires whenever a `TrackedRwLock` or `TrackedMutex` guard is dropped for the target type.
 - **Declarative Parameter Detection**: The `#[trigger]` macro categorizes parameters into three groups:
@@ -153,11 +153,18 @@ The framework implements a sophisticated Control Plane that manages the transiti
 The `ServiceDaemon` manages an internal `SERVICE_STATE_STORE` that tracks the condition of each service:
 - **`Starting`**: Initial boot-up.
 - **`Running`**: Active execution.
-- **`Reloading`**: Signal-triggered restart.
+- **`NeedReload`**: A dependency changed, and the service is notified to save state and exit.
+- **`Restoring`**: A service is starting as a replacement for an old instance (warm restart).
 - **`Recovering(String)`**: Automatically entered after a service panic or error. The next generation receives the error message from the previous one.
+- **`Stopping`**: The daemon or service is shutting down.
 
 #### Implicit Context (Task-Local Storage)
-The Control Plane uses `tokio::task_local` to provide services with their `ServiceIdentity` (name, tokens) and current `ServiceState` without requiring explicit parameter passing. This enables functions like `state()`, `shelve()`, and `unshelve()` to be called from anywhere within the service's call stack.
+The Control Plane uses `tokio::task_local` to provide services with their `ServiceIdentity` (name, tokens) and current `ServiceState` without requiring explicit parameter passing. This enables functions like `state()`, `done()`, `shelve()`, and `unshelve()` to be called synchronously from anywhere within the service's call stack.
+
+#### Managed Value Persistence
+The framework provides a named state persistence system (the "Shelf") that survives service reloads:
+- **`shelve(key, data)`**: Stores data in the service's private bucket in the global `MANAGED_VALUES` store. Requires a unique key for the value.
+- **`unshelve(key)`**: Removes and returns data from the bucket by its key.
 
 #### Exception Handoff
 When a service task panics or returns an `Err`, the supervisor captures the payload (if it's a `String` or `&str`) or uses `Debug` representation to populate the `Recovering` state. This ensures that diagnostics are preserved across process-local service generations.

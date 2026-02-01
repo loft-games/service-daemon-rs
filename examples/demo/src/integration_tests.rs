@@ -153,7 +153,9 @@ mod tests {
             Arc::new(move |_| {
                 let s = seq1.clone();
                 Box::pin(async move {
-                    service_daemon::wait_for_shutdown().await;
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     s.lock().unwrap().push(0);
                     Ok(())
@@ -169,7 +171,9 @@ mod tests {
             Arc::new(move |_| {
                 let s = seq2.clone();
                 Box::pin(async move {
-                    service_daemon::wait_for_shutdown().await;
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     s.lock().unwrap().push(50);
                     Ok(())
@@ -185,7 +189,9 @@ mod tests {
             Arc::new(move |_| {
                 let s = seq3.clone();
                 Box::pin(async move {
-                    service_daemon::wait_for_shutdown().await;
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                     s.lock().unwrap().push(100);
                     Ok(())
                 })
@@ -227,7 +233,9 @@ mod tests {
                 let s = seq1.clone();
                 Box::pin(async move {
                     s.lock().unwrap().push(100);
-                    service_daemon::wait_for_shutdown().await;
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                     Ok(())
                 })
             }),
@@ -242,7 +250,9 @@ mod tests {
                 let s = seq2.clone();
                 Box::pin(async move {
                     s.lock().unwrap().push(50);
-                    service_daemon::wait_for_shutdown().await;
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                     Ok(())
                 })
             }),
@@ -257,7 +267,9 @@ mod tests {
                 let s = seq3.clone();
                 Box::pin(async move {
                     s.lock().unwrap().push(0);
-                    service_daemon::wait_for_shutdown().await;
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                     Ok(())
                 })
             }),

@@ -183,7 +183,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         "Watch" | "State" => ("watch", "Watch"),
         _ => (&*template, &*template),
     };
-    let template_ident = format_ident!("{}", template_variant);
+    let _template_ident = format_ident!("{}", template_variant);
 
     let watcher_name = format_ident!("{}_watcher", fn_name);
     let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty() {
@@ -345,7 +345,6 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,
             priority: #priority_tokens,
-            template: Some(service_daemon::TriggerTemplate::#template_ident),
         };
 
     };

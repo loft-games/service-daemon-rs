@@ -176,7 +176,6 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,
             priority: #priority_tokens,
-            template: None,
         };
 
     };

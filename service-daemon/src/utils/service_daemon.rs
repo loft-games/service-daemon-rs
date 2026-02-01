@@ -282,8 +282,6 @@ impl ServiceDaemon {
                 tokio::spawn(async move {
                     while !ct.is_cancelled() {
                         let reload_signal = RELOAD_SIGNALS
-                            .get_or_init(|| async { DashMap::new() })
-                            .await
                             .entry(n.clone())
                             .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
                             .clone();
@@ -301,6 +299,21 @@ impl ServiceDaemon {
 
             loop {
                 // Check for cancellation before starting
+                // Determine initial state
+                let initial_state = if let Some(state) = SERVICE_STATE_STORE.get(&name) {
+                    state.value().clone()
+                } else {
+                    ServiceState::Starting
+                };
+
+                // Normalizing initial state: if we were reloading, the new instance starts as Restoring.
+                // If we were starting or recovering, we preserve that state.
+                let start_state = match initial_state {
+                    ServiceState::Starting => ServiceState::Starting,
+                    ServiceState::Recovering(e) => ServiceState::Recovering(e),
+                    _ => ServiceState::Restoring,
+                };
+
                 if cancellation_token.is_cancelled() {
                     info!(
                         "Service {} received shutdown signal, exiting gracefully",
@@ -310,24 +323,7 @@ impl ServiceDaemon {
                     break;
                 }
 
-                // Determine initial state
-                let initial_state = if let Some(state) = SERVICE_STATE_STORE
-                    .get_or_init(|| async { DashMap::new() })
-                    .await
-                    .get(&name)
-                {
-                    let s = state.value().clone();
-                    info!("Supervisor: Found state {:?} in store for {}", s, name);
-                    s
-                } else {
-                    info!(
-                        "Supervisor: No state found in store for {}, using Starting",
-                        name
-                    );
-                    ServiceState::Starting
-                };
-
-                info!("Starting service: {} with state {:?}", name, initial_state);
+                info!("Starting service: {} with state {:?}", name, start_state);
                 service_status.insert(name.clone(), ServiceStatus::Running);
                 let start_time = std::time::Instant::now();
 
@@ -336,20 +332,23 @@ impl ServiceDaemon {
 
                 // Get or create reload signal
                 let reload_signal = RELOAD_SIGNALS
-                    .get_or_init(|| async { DashMap::new() })
-                    .await
                     .entry(name.clone())
                     .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
                     .clone();
 
                 // Create a reload token that we can cancel when a reload is requested.
-                // This allows state().await to return Reloading immediately.
+                // This allows state().await to return NeedReload immediately.
                 let reload_token = CancellationToken::new();
                 let rt_clone = reload_token.clone();
                 let rs_clone = reload_signal.clone();
+                let n = name.clone();
                 let bridge_task = tokio::spawn(async move {
                     rs_clone.notified().await;
                     rt_clone.cancel();
+                    info!(
+                        "Supervisor: Reload triggered for {}, notifying service task",
+                        n
+                    );
                 });
 
                 let identity = ServiceIdentity {
@@ -359,17 +358,8 @@ impl ServiceDaemon {
                     reload_token: reload_token.clone(),
                 };
 
-                // Update current state to Running if it was Starting or Reloading.
-                // Recovering states remain as they are until done() is called.
-                let s = match initial_state {
-                    ServiceState::Starting | ServiceState::Reloading => ServiceState::Running,
-                    other => other,
-                };
-
-                SERVICE_STATE_STORE
-                    .get_or_init(|| async { DashMap::new() })
-                    .await
-                    .insert(name.clone(), s);
+                // Update current state in store
+                SERVICE_STATE_STORE.insert(name.clone(), start_state);
 
                 // Wrapper to run service in TLS scope and capture errors
                 let run_clone = run.clone();
@@ -408,20 +398,17 @@ impl ServiceDaemon {
                     }
                 };
 
-                // Check for explicit reload (the service might have exited itself gracefully)
+                // Check for explicit reload or normal exit
                 if reload_token.is_cancelled() {
-                    info!("Supervisor: Service {} exited for reload", name);
-                    next_state = ServiceState::Reloading;
+                    info!("Supervisor: Service {} exited after reload signal", name);
+                    next_state = ServiceState::Restoring;
                 }
 
                 // Check for cancellation after service exits
                 if cancellation_token.is_cancelled() {
                     info!("Service {} received shutdown signal, not restarting", name);
                     service_status.insert(name.clone(), ServiceStatus::Stopped);
-                    SERVICE_STATE_STORE
-                        .get_or_init(|| async { DashMap::new() })
-                        .await
-                        .remove(&name);
+                    SERVICE_STATE_STORE.remove(&name);
                     break;
                 }
 
@@ -430,10 +417,7 @@ impl ServiceDaemon {
                     "Supervisor: Setting next_state for {} to {:?}",
                     name, next_state
                 );
-                SERVICE_STATE_STORE
-                    .get_or_init(|| async { DashMap::new() })
-                    .await
-                    .insert(name.clone(), next_state);
+                SERVICE_STATE_STORE.insert(name.clone(), next_state);
 
                 // Reset delay if service ran successfully for long enough
                 if start_time.elapsed() >= policy.reset_after {
@@ -557,6 +541,7 @@ impl ServiceDaemon {
             // 1. Parallel Signal: Cancel all services in this wave
             for service in &services {
                 service.cancellation_token.cancel();
+                SERVICE_STATE_STORE.insert(service.name.clone(), ServiceState::Stopping);
             }
 
             // 2. Parallel Wait: Wait for all services in this wave to finish
@@ -774,11 +759,14 @@ mod tests {
                 if c == 0 {
                     panic!("Boom!");
                 } else {
-                    let s = crate::utils::context::state().await;
+                    let s = crate::utils::context::state();
                     info!("Service received state: {:?}", s);
                     if let ServiceState::Recovering(ref err) = s {
                         if err.contains("Boom") {
                             info!("Successfully detected recovery state with message: {}", err);
+                            while !crate::is_shutdown() {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
                             return Ok(());
                         }
                     }
@@ -790,7 +778,7 @@ mod tests {
             })
         });
 
-        daemon.register("crash_service", service_fn, 50);
+        daemon.register("crash_recovery_test_service", service_fn, 50);
 
         daemon
             .run_for_duration(Duration::from_secs(3))
@@ -898,17 +886,19 @@ mod tests {
                 let c = count.fetch_add(1, Ordering::SeqCst);
                 if c == 0 {
                     info!("First run: shelving data");
-                    crate::utils::context::shelve("Hello Shelf".to_string()).await;
+                    crate::utils::context::shelve("data", "Hello Shelf".to_string()).await;
                     // Simulate an error to trigger restart
                     return Err(anyhow::anyhow!("Restart me"));
                 } else {
                     info!("Second run: checking shelf");
-                    let data: Option<String> = crate::utils::context::unshelve().await;
+                    let data: Option<String> = crate::utils::context::unshelve("data").await;
                     if let Some(ref msg) = data {
                         if msg == "Hello Shelf" {
                             info!("Successfully unshelved data!");
                             // Wait for shutdown to prevent restarting and failing on subsequently empty shelf
-                            service_daemon::wait_for_shutdown().await;
+                            while !crate::is_shutdown() {
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
                             return Ok(());
                         }
                     }

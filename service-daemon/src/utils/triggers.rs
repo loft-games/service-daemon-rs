@@ -18,17 +18,16 @@ fn generate_trigger_id() -> String {
     }
 }
 
-/// Generic host for signal-based triggers.
 pub async fn signal_trigger_host<F>(
     name: &str,
     notifier: Arc<tokio::sync::Notify>,
     handler: F,
-    cancellation_token: CancellationToken,
+    _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    loop {
+    while !crate::utils::context::is_shutdown() {
         tokio::select! {
             _ = notifier.notified() => {
                 let id = generate_trigger_id();
@@ -41,27 +40,22 @@ where
                     }
                 }.instrument(span).await;
             }
-            _ = cancellation_token.cancelled() => {
-                info!("Signal trigger '{}' shutting down", name);
-                break;
-            }
         }
     }
     Ok(())
 }
 
-/// Generic host for broadcast queue triggers.
 pub async fn queue_trigger_host<T, F>(
     name: &str,
     mut receiver: tokio::sync::broadcast::Receiver<T>,
     handler: F,
-    cancellation_token: CancellationToken,
+    _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
     T: Clone + Send + Sync + 'static,
     F: Fn(T) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    loop {
+    while !crate::utils::context::is_shutdown() {
         tokio::select! {
             res = receiver.recv() => {
                 match res {
@@ -85,37 +79,27 @@ where
                     }
                 }
             }
-            _ = cancellation_token.cancelled() => {
-                info!("Queue trigger '{}' shutting down", name);
-                break;
-            }
         }
     }
     Ok(())
 }
 
-/// Generic host for load-balancing queue triggers.
 pub async fn lb_queue_trigger_host<T, F>(
     name: &str,
     receiver_mutex: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>>,
     handler: F,
-    cancellation_token: CancellationToken,
+    _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
     T: Send + Sync + 'static,
     F: Fn(T) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    loop {
-        let item = tokio::select! {
-            item = async {
-                let mut receiver = receiver_mutex.lock().await;
-                receiver.recv().await
-            } => item,
-            _ = cancellation_token.cancelled() => {
-                info!("LB Queue trigger '{}' shutting down", name);
-                break;
-            }
-        };
+    while !crate::utils::context::is_shutdown() {
+        let item = async {
+            let mut receiver = receiver_mutex.lock().await;
+            receiver.recv().await
+        }
+        .await;
 
         match item {
             Some(value) => {
@@ -140,13 +124,11 @@ where
     Ok(())
 }
 
-/// Generic host for cron triggers.
-#[cfg(feature = "cron")]
 pub async fn cron_trigger_host<F>(
     name: &str,
     schedule: &str,
     handler: F,
-    cancellation_token: CancellationToken,
+    _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
     F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
@@ -177,27 +159,26 @@ where
     sched.add(job).await?;
     sched.start().await?;
 
-    tokio::select! {
-        _ = cancellation_token.cancelled() => {
-            info!("Cron trigger '{}' shutting down", name);
-            let _ = sched.shutdown().await;
-        }
+    // For cron, we start the scheduler and just wait.
+    // Cron scheduler manages its own tasks.
+    while !crate::utils::context::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    let _ = sched.shutdown().await;
 
     Ok(())
 }
 
-/// Generic host for state watch triggers.
 pub async fn watch_trigger_host<T, F>(
     name: &str,
     handler: F,
-    cancellation_token: CancellationToken,
+    _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
     T: crate::utils::di::Provided + Send + Sync + 'static,
     F: Fn(Arc<T>) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    loop {
+    while !crate::utils::context::is_shutdown() {
         tokio::select! {
             _ = T::changed() => {
                 let id = generate_trigger_id();
@@ -211,10 +192,6 @@ where
                         error!("Trigger error: {:?}", e);
                     }
                 }.instrument(span).await;
-            }
-            _ = cancellation_token.cancelled() => {
-                info!("Watch trigger '{}' shutting down", name);
-                break;
             }
         }
     }

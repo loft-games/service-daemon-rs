@@ -3,8 +3,6 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::models::trigger::TriggerTemplate;
-
 pub type ServiceFn =
     Arc<dyn Fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
 
@@ -54,8 +52,6 @@ pub struct ServiceEntry {
     pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub priority: u8,
-    /// The trigger template if this is a trigger service.
-    pub template: Option<TriggerTemplate>,
 }
 
 /// Runtime description of a running service

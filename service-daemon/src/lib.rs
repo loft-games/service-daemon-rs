@@ -47,9 +47,7 @@ pub use models::{
     ServiceParam, TT, TriggerTemplate,
 };
 pub use std::sync::Arc;
-pub use utils::context::{
-    ServiceState, done, is_shutdown, shelve, state, token, unshelve, wait_for_shutdown,
-};
+pub use utils::context::{ServiceState, done, is_shutdown, shelve, state, unshelve};
 pub use utils::di::Provided;
 pub use utils::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle, ServiceStatus,
@@ -80,8 +78,6 @@ pub mod prelude {
     pub use crate::models::trigger::TriggerTemplate;
     pub use crate::models::trigger::TriggerTemplate as TT;
     pub use crate::models::trigger::TriggerTemplate::*;
-    pub use crate::utils::context::{
-        ServiceState, is_shutdown, shelve, state, token, unshelve, wait_for_shutdown,
-    };
+    pub use crate::utils::context::{ServiceState, is_shutdown, shelve, state, unshelve};
     pub use crate::utils::di::Provided;
 }
