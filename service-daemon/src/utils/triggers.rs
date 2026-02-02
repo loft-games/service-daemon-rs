@@ -1,5 +1,6 @@
 use futures::future::BoxFuture;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
@@ -15,6 +16,22 @@ fn generate_trigger_id() -> String {
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         format!("trigger-{}", id)
     }
+}
+
+/// Global shared scheduler for all cron triggers.
+static SHARED_SCHEDULER: LazyLock<Mutex<Option<tokio_cron_scheduler::JobScheduler>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+async fn get_shared_scheduler() -> anyhow::Result<tokio_cron_scheduler::JobScheduler> {
+    let mut guard = SHARED_SCHEDULER.lock().await;
+    if let Some(sched) = &*guard {
+        return Ok(sched.clone());
+    }
+
+    let sched = tokio_cron_scheduler::JobScheduler::new().await?;
+    sched.start().await?;
+    *guard = Some(sched.clone());
+    Ok(sched)
 }
 
 pub async fn signal_trigger_host<F>(
@@ -132,9 +149,9 @@ pub async fn cron_trigger_host<F>(
 where
     F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    use tokio_cron_scheduler::{Job, JobScheduler};
+    use tokio_cron_scheduler::Job;
 
-    let mut sched = JobScheduler::new().await?;
+    let sched = get_shared_scheduler().await?;
     let handler = Arc::new(handler);
     let name_str = name.to_string();
 
@@ -155,13 +172,21 @@ where
         })
     })?;
 
-    sched.add(job).await?;
-    sched.start().await?;
+    let job_id = sched.add(job).await?;
 
-    // For cron, we start the scheduler and wait for shutdown.
-    // Cron scheduler manages its own tasks.
+    // For cron, we wait for shutdown.
+    // The shared scheduler manages the execution in the background.
     crate::utils::context::wait_shutdown().await;
-    let _ = sched.shutdown().await;
+
+    // Remove the job from the shared scheduler before exiting
+    if let Err(e) = sched.remove(&job_id).await {
+        error!(
+            "Failed to remove cron job '{}' from shared scheduler: {:?}",
+            name, e
+        );
+    } else {
+        info!("Removed cron job '{}' from shared scheduler", name);
+    }
 
     Ok(())
 }
