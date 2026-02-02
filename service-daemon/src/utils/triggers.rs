@@ -178,22 +178,22 @@ where
     T: crate::utils::di::Provided + Send + Sync + 'static,
     F: Fn(Arc<T>) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    while !crate::utils::context::is_shutdown() {
-        tokio::select! {
-            _ = T::changed() => {
-                let id = generate_trigger_id();
-                let span = tracing::info_span!("trigger", %name, %id);
-                let h = handler.clone();
-                // Resolve a fresh snapshot to pass to the handler
-                let snapshot = T::resolve().await;
-                async move {
-                    info!("Watch trigger fired (state changed)");
-                    if let Err(e) = h(snapshot).await {
-                        error!("Trigger error: {:?}", e);
-                    }
-                }.instrument(span).await;
-            }
+    // Resolve a fresh snapshot to pass to the handler
+    let snapshot = T::resolve().await;
+    let id = generate_trigger_id();
+    let span = tracing::info_span!("trigger", %name, %id);
+    let h = handler.clone();
+
+    async move {
+        info!("Watch trigger fired (instance started)");
+        if let Err(e) = h(snapshot).await {
+            error!("Trigger error: {:?}", e);
         }
     }
+    .instrument(span)
+    .await;
+
+    // Wait for the next reload (triggered by dependency watcher) or shutdown
+    crate::utils::context::wait_shutdown().await;
     Ok(())
 }

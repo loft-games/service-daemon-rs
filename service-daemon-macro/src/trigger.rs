@@ -186,14 +186,22 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let _template_ident = format_ident!("{}", template_variant);
 
     let watcher_name = format_ident!("{}_watcher", fn_name);
-    let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty() {
+    let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty()
+        || normalized_template == "watch"
+    {
+        let mut final_watcher_arms = watcher_select_arms.clone();
+        if normalized_template == "watch" {
+            final_watcher_arms.push(quote! {
+                _ = <#target_type as service_daemon::Provided>::changed() => {}
+            });
+        }
         (
             quote! {
                 /// Auto-generated watcher for the trigger - notifies when dependencies change
                 pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
                     Box::pin(async move {
                         service_daemon::tokio::select! {
-                            #(#watcher_select_arms),*
+                            #(#final_watcher_arms),*
                         }
                     })
                 }

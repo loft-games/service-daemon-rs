@@ -33,7 +33,7 @@ async fn worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
 ### Watch Trigger (State Change)
-Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified.
+Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified. Internally, this leverages the `ServiceDaemon`'s reload mechanism: the service is re-spawned with a fresh snapshot exactly when the state changes.
 
 ```rust
 #[trigger(template = Watch, target = MyData)]

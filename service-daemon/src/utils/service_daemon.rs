@@ -418,9 +418,13 @@ impl ServiceDaemon {
                     current_delay.as_secs_f64()
                 );
 
-                // Use select to allow cancellation during sleep
+                // Use select to allow cancellation OR reload during sleep
                 tokio::select! {
                     _ = tokio::time::sleep(current_delay) => {}
+                    _ = reload_signal.notified() => {
+                        info!("Supervisor: Service {} received immediate reload during restart delay", name);
+                        current_delay = Duration::from_millis(0); // Restart immediately
+                    }
                     _ = cancellation_token.cancelled() => {
                         info!("Service {} received shutdown signal during restart delay", name);
                         GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);

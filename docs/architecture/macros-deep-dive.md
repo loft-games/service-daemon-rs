@@ -12,8 +12,8 @@ When you annotate a function, the macro generates:
 ## 2. The `#[trigger]` Transformation
 
 Triggers are specialized services. The macro generates a **Host Wrapper** that:
-- Resolves the event source (e.g., a Queue or Signal).
 - Spawns the appropriate "Host" logic (e.g., `cron_trigger_host`).
+- **Service-Level Integration (`Watch`)**: For `Watch` templates, the macro generates a service watcher that leverages the `ServiceDaemon`'s reload mechanism, allowing triggers to be reactive with minimal internal logic.
 - Manages the inversion of control: the host executes the user handler when events occur.
 
 ## 3. The "Macro Illusion"

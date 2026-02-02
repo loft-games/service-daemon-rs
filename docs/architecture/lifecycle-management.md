@@ -15,6 +15,9 @@ All services share a central `GLOBAL_STATUS_PLANE` (`DashMap<String, ServiceStat
 | `NeedReload` | `Terminated` | Service cleanup + exit |
 | `ShuttingDown` | `Terminated` | Daemon shutdown signal |
 
+> [!NOTE]
+> **Immediate Reloads**: If a service is in a restart backoff delay (due to a failure) and a `NeedReload` signal is received (e.g. from an upstream dependency change), the `ServiceDaemon` will wake the service immediately, bypassing the remaining delay to ensure the system reaches a healthy state as quickly as possible.
+
 ## 2. Wave-Based Orchestration
 
 Services are started and stopped synchronized by waves of `priority`.
