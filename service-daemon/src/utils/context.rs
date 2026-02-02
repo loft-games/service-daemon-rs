@@ -20,10 +20,13 @@ task_local! {
     pub static CURRENT_SERVICE: ServiceIdentity;
 }
 
+type ShelfValue = Box<dyn Any + Send + Sync>;
+type ServiceShelf = DashMap<String, ShelfValue>;
+type GlobalShelfMapping = DashMap<String, ServiceShelf>;
+
 /// Global shelf for cross-generational state persistence (managed values).
 /// Structure: DashMap<ServiceName, DashMap<Key, Value>>
-pub static GLOBAL_SHELF: LazyLock<DashMap<String, DashMap<String, Box<dyn Any + Send + Sync>>>> =
-    LazyLock::new(DashMap::new);
+pub static GLOBAL_SHELF: LazyLock<GlobalShelfMapping> = LazyLock::new(DashMap::new);
 
 /// The unified Status Plane: stores the current lifecycle status for each service.
 pub static GLOBAL_STATUS_PLANE: LazyLock<DashMap<String, ServiceStatus>> =
@@ -95,7 +98,7 @@ pub fn done() {
 /// The value is stored in a service-isolated bucket based on the calling service's identity.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
     if let Ok(name) = CURRENT_SERVICE.try_with(|id| id.name.clone()) {
-        let entry = GLOBAL_SHELF.entry(name).or_insert_with(DashMap::new);
+        let entry = GLOBAL_SHELF.entry(name).or_default();
         entry.insert(key.to_string(), Box::new(data));
     }
 }
@@ -103,13 +106,12 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// Retrieves a shelved managed value previously submitted by this service.
 /// The value is retrieved from the service's isolated bucket.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
-    if let Ok(name) = CURRENT_SERVICE.try_with(|id| id.name.clone()) {
-        if let Some(entry) = GLOBAL_SHELF.get(&name) {
-            return entry
-                .remove(key)
-                .map(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
-                .flatten();
-        }
+    if let Ok(name) = CURRENT_SERVICE.try_with(|id| id.name.clone())
+        && let Some(entry) = GLOBAL_SHELF.get(&name)
+    {
+        return entry
+            .remove(key)
+            .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b));
     }
     None
 }
@@ -118,23 +120,20 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// This enables a smooth "growth curve" for minimalist services that just use
 /// `while !is_shutdown()` without needing to call `done()` explicitly.
 fn implicit_handshake() {
-    if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
-        if let Some(status) = GLOBAL_STATUS_PLANE.get(&id.name) {
-            if matches!(
-                status.value(),
-                ServiceStatus::Initializing
-                    | ServiceStatus::Restoring
-                    | ServiceStatus::Recovering(_)
-            ) {
-                // Auto-transition to Healthy
-                drop(status); // Release the read lock before inserting
-                GLOBAL_STATUS_PLANE.insert(id.name.clone(), ServiceStatus::Healthy);
-                tracing::debug!(
-                    "Service '{}' implicitly transitioned to Healthy (via lifecycle utility)",
-                    id.name
-                );
-            }
-        }
+    if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone())
+        && let Some(status) = GLOBAL_STATUS_PLANE.get(&id.name)
+        && matches!(
+            status.value(),
+            ServiceStatus::Initializing | ServiceStatus::Restoring | ServiceStatus::Recovering(_)
+        )
+    {
+        // Auto-transition to Healthy
+        drop(status); // Release the read lock before inserting
+        GLOBAL_STATUS_PLANE.insert(id.name.clone(), ServiceStatus::Healthy);
+        tracing::debug!(
+            "Service '{}' implicitly transitioned to Healthy (via lifecycle utility)",
+            id.name
+        );
     }
 }
 

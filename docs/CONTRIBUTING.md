@@ -17,7 +17,7 @@
 
 ## 您希望参与开发工作但不知从何开始?
 
-请从[这儿](contribute/main.md)开始您的工作。
+请从[这儿](docs/development/contributing.md)开始您的工作。如果您对扩展框架感兴趣，请参阅[扩展框架指南](docs/development/extending-framework.md)。
 
 ## 您打算新增功能还是调整现有功能?
 

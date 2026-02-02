@@ -22,6 +22,11 @@ mod trigger;
 /// the synchronous function will not perform blocking I/O or long-running
 /// computations.
 ///
+/// > [!CAUTION]
+/// > **Misuse Warning**: Using this on truly blocking code (e.g., `std::thread::sleep`,
+/// > network I/O) will stall the entire daemon and break graceful shutdown.
+/// > For blocking operations, use `tokio::task::spawn_blocking` instead.
+///
 /// # Example
 /// ```rust,ignore
 /// use service_daemon::{service, allow_sync};
@@ -46,6 +51,10 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The macro generates:
 /// 1. A wrapper function that resolves dependencies from the global container
 /// 2. A static registry entry that is automatically collected at link time
+///
+/// > [!IMPORTANT]
+/// > **Async Preferred**: Always prefer `async fn` for services. Synchronous
+/// > functions will trigger a runtime warning unless annotated with `#[allow_sync]`.
 ///
 /// # Example
 /// ```rust,ignore
@@ -115,6 +124,10 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The macro automatically registers the trigger in the global registry
 /// using `linkme`. The trigger will be started by `ServiceDaemon` and will
 /// execute the function when the specified event occurs.
+///
+/// > [!NOTE]
+/// > Triggers are specialized services. Like normal services, they should
+/// > be asynchronous to avoid blocking the event loop host.
 ///
 /// # Attributes
 /// - `template`: The trigger template type. Options: `cron`, `queue`, `lb_queue`, `event`, `notify`, `custom`.
