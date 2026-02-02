@@ -63,6 +63,30 @@ pub struct ServiceDescription {
     pub cancellation_token: CancellationToken,
 }
 
+/// Represents the unified lifecycle status of a service.
+///
+/// This is the single source of truth for all service status, combining
+/// both the external (daemon-observed) and internal (service-perceived) views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServiceStatus {
+    /// The service is starting for the first time in this process session.
+    Initializing,
+    /// The service has been restarted after a configuration or dependency change
+    /// and is ready to restore state from the shelf.
+    Restoring,
+    /// The service is recovering from a previous crash (panic or error).
+    /// Contains the error message from the previous generation.
+    Recovering(String),
+    /// The service is running normally following a successful `done()` call.
+    Healthy,
+    /// A dependency changed; the service should save its state and call `done()`.
+    NeedReload,
+    /// The daemon is shutting down; the service should save its state and call `done()`.
+    ShuttingDown,
+    /// The service has completed its clean exit handshake and is ready for collection.
+    Terminated,
+}
+
 // Define the distributed slice for automatic registration
 use linkme::distributed_slice;
 

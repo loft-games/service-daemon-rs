@@ -120,14 +120,14 @@ The `service-daemon-rs` uses **Type-Based Decentralized Resolution**. There is n
 
 Once started via `daemon.run().await`:
 1. **Spawning**: Each service is spawned as a separate `tokio` task.
-2. **Monitoring**: The `ServiceDaemon` tracks the `JoinHandle` and status (Running, Restarting, Stopped) of each service. It also automatically wraps each service execution in a `tracing::Span` named `service` with the service's name, enabling automatic log correlation.
+2. **Monitoring**: The `ServiceDaemon` tracks the `JoinHandle` and status via the `GLOBAL_STATUS_PLANE`. It also automatically wraps each service execution in a `tracing::Span` named `service` with the service's name, enabling automatic log correlation.
 3. **Restart Policy**: If a service fails (returns `Err`), the daemon applies an **Exponential Backoff** policy with jitter to prevent "thundering herd" issues.
 4. **Error Handling**: The framework uses a specialized `ServiceError` type and `service_daemon::Result` for improved error diagnostics and type safety. Key methods are marked with `#[must_use]` to ensure errors are handled or explicitly ignored.
-5. **Graceful Shutdown**: Upon receiving a `SIGINT` (Ctrl+C) or `SIGTERM`:
+5. **Wave-Based Lifecycle**: Upon receiving a `SIGINT` (Ctrl+C) or `SIGTERM`:
     - The `ServiceDaemon` initiates a **Wave-Based Lifecycle**.
     - It groups services by their `priority` (`u8`).
-    - **Startup**: Descending order (Highest -> Lowest). Ensures infrastructure is `Running` before logic starts.
-    - **Shutdown**: Ascending order (Lowest -> Highest). Ensures logic finishes before infrastructure stops.
+    - **Startup**: Descending order (Highest → Lowest). Each wave waits for services to reach `Healthy` status (via `done()`) before proceeding.
+    - **Shutdown**: Ascending order (Lowest → Highest). Services are notified via `ShuttingDown` status.
     - A grace period (e.g., 30s) is enforced per wave before forcing an abort.
 
 ### 5. Event Triggers (Specialized Services)
@@ -145,29 +145,48 @@ Triggers are not a separate primitive; they are **Specialized Services**.
 - **Attribute Stripping**: To ensure valid Rust code after transformation, the macro strips the internal `#[payload]` attribute.
 - **Trace correlation**: It automatically injects the trigger name and a unique ID into the `tracing` context via a span.
 
-### 6. Service Control Plane & Lifecycle Orchestration
+### 6. Unified Status Plane & Lifecycle Orchestration
 
-The framework implements a sophisticated Control Plane that manages the transition between service generations (restarts, reloads, recoveries).
+The framework implements a sophisticated Status Plane that manages the transition between service generations (restarts, reloads, recoveries).
 
-#### Lifecycle States
-The `ServiceDaemon` manages an internal `SERVICE_STATE_STORE` that tracks the condition of each service:
-- **`Starting`**: Initial boot-up.
-- **`Running`**: Active execution.
-- **`NeedReload`**: A dependency changed, and the service is notified to save state and exit.
-- **`Restoring`**: A service is starting as a replacement for an old instance (warm restart).
-- **`Recovering(String)`**: Automatically entered after a service panic or error. The next generation receives the error message from the previous one.
-- **`Stopping`**: The daemon or service is shutting down.
+#### Unified ServiceStatus Enum
+The daemon manages a `GLOBAL_STATUS_PLANE` (`DashMap<String, ServiceStatus>`) that tracks the lifecycle state of each service:
+
+| Status | Description |
+|--------|-------------|
+| `Initializing` | Fresh start, first run |
+| `Restoring` | Warm start with shelved data available |
+| `Recovering(String)` | Crash recovery, error context from previous failure |
+| `Healthy` | Steady state, set after `done()` is called |
+| `NeedReload` | Dependency changed, preparing for warm restart |
+| `ShuttingDown` | Graceful shutdown in progress |
+| `Terminated` | Clean exit, ready for collection |
+
+#### Handshake Protocol
+Services must call `done()` to signal completion of initialization. This triggers the transition:
+- `Initializing | Restoring | Recovering` → `Healthy`
+- `NeedReload | ShuttingDown` → `Terminated`
+
+##### Implicit Handshake
+To support a smooth developer growth curve, the framework implements an **Implicit Handshake**. If a service enters its main loop and calls any of the following lifecycle utilities while still in a "Starting" phase, the framework automatically triggers `done()`:
+- `is_shutdown()`
+- `sleep(duration)`
+- `wait_shutdown()`
+
+This ensures that minimalist services (which typically only use `while !is_shutdown()`) reach the `Healthy` state without hanging the wave-based startup synchronization.
 
 #### Implicit Context (Task-Local Storage)
-The Control Plane uses `tokio::task_local` to provide services with their `ServiceIdentity` (name, tokens) and current `ServiceState` without requiring explicit parameter passing. This enables functions like `state()`, `done()`, `shelve()`, and `unshelve()` to be called synchronously from anywhere within the service's call stack.
+The Control Plane uses `tokio::task_local` to provide services with their `ServiceIdentity` (name, tokens) and current `ServiceStatus` without requiring explicit parameter passing. This enables functions like `state()`, `done()`, `shelve()`, and `unshelve()` to be called synchronously from anywhere within the service's call stack.
 
-#### Managed Value Persistence
-The framework provides a named state persistence system (the "Shelf") that survives service reloads:
-- **`shelve(key, data)`**: Stores data in the service's private bucket in the global `MANAGED_VALUES` store. Requires a unique key for the value.
+#### Managed Value Persistence (Shelf)
+The framework provides a named state persistence system (the "Shelf") that survives service reloads and crashes:
+- **Strict Isolation**: Each service has its own bucket keyed by `ServiceIdentity.name`.
+- **`shelve(key, data)`**: Stores data in the service's private bucket in the global `GLOBAL_SHELF` store.
 - **`unshelve(key)`**: Removes and returns data from the bucket by its key.
+- **Crash Survival**: Unlike previous designs, shelf data now survives crashes and serves as a checkpoint for recovery.
 
 #### Exception Handoff
-When a service task panics or returns an `Err`, the supervisor captures the payload (if it's a `String` or `&str`) or uses `Debug` representation to populate the `Recovering` state. This ensures that diagnostics are preserved across process-local service generations.
+When a service task panics or returns an `Err`, the supervisor captures the error message and sets the status to `Recovering(error_message)`. The next generation can access this via `state()` to implement custom recovery logic.
 
 ### 7. Intelligent State Management (Zero-Copy CoW)
 

@@ -61,7 +61,8 @@ mod tests {
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Wait longer for services to reach Healthy status (wave startup synchronization)
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 
         // External modification triggers promotion and the watch trigger
         {
@@ -70,7 +71,8 @@ mod tests {
             guard.last_status = "Updated".to_string();
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // Wait for watch trigger to fire
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(WATCH_FIRED.load(Ordering::SeqCst) >= 1);
 
         cancel.cancel();
@@ -153,6 +155,7 @@ mod tests {
             Arc::new(move |_| {
                 let s = seq1.clone();
                 Box::pin(async move {
+                    service_daemon::done(); // Signal ready
                     while !service_daemon::is_shutdown() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
@@ -171,6 +174,7 @@ mod tests {
             Arc::new(move |_| {
                 let s = seq2.clone();
                 Box::pin(async move {
+                    service_daemon::done(); // Signal ready
                     while !service_daemon::is_shutdown() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
@@ -189,6 +193,7 @@ mod tests {
             Arc::new(move |_| {
                 let s = seq3.clone();
                 Box::pin(async move {
+                    service_daemon::done(); // Signal ready
                     while !service_daemon::is_shutdown() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
@@ -233,6 +238,7 @@ mod tests {
                 let s = seq1.clone();
                 Box::pin(async move {
                     s.lock().unwrap().push(100);
+                    service_daemon::done(); // Signal ready
                     while !service_daemon::is_shutdown() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
@@ -250,6 +256,7 @@ mod tests {
                 let s = seq2.clone();
                 Box::pin(async move {
                     s.lock().unwrap().push(50);
+                    service_daemon::done(); // Signal ready
                     while !service_daemon::is_shutdown() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }
@@ -267,6 +274,7 @@ mod tests {
                 let s = seq3.clone();
                 Box::pin(async move {
                     s.lock().unwrap().push(0);
+                    service_daemon::done(); // Signal ready
                     while !service_daemon::is_shutdown() {
                         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                     }

@@ -9,20 +9,13 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, instrument, warn};
 
-use crate::models::{Result as ServiceResult, SERVICE_REGISTRY, ServiceDescription, ServiceFn};
+use crate::models::{
+    Result as ServiceResult, SERVICE_REGISTRY, ServiceDescription, ServiceFn, ServiceStatus,
+};
 use crate::utils::context::{
-    CURRENT_SERVICE, RELOAD_SIGNALS, SERVICE_STATE_STORE, ServiceIdentity, ServiceState,
+    CURRENT_SERVICE, GLOBAL_STATUS_PLANE, RELOAD_SIGNALS, ServiceIdentity,
 };
 use futures::FutureExt;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceStatus {
-    /// Service is currently running.
-    Running,
-    /// Service has failed and is waiting to be restarted.
-    Restarting,
-    /// Service has been stopped gracefully or never started.
-    Stopped,
-}
 
 /// Configuration for service restart behavior with exponential backoff.
 #[derive(Debug, Clone, Copy)]
@@ -127,8 +120,8 @@ impl ServiceDaemonHandle {
     pub async fn get_service_status(&self, name: &str) -> ServiceStatus {
         self.service_status
             .get(name)
-            .map(|s| *s)
-            .unwrap_or(ServiceStatus::Stopped)
+            .map(|s| s.clone())
+            .unwrap_or(ServiceStatus::Terminated)
     }
 }
 
@@ -267,7 +260,7 @@ impl ServiceDaemon {
         watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
         policy: RestartPolicy,
         running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-        service_status: Arc<DashMap<String, ServiceStatus>>,
+        _service_status: Arc<DashMap<String, ServiceStatus>>,
         cancellation_token: CancellationToken,
     ) {
         let name_for_task = name.clone();
@@ -298,20 +291,18 @@ impl ServiceDaemon {
             }
 
             loop {
-                // Check for cancellation before starting
-                // Determine initial state
-                let initial_state = if let Some(state) = SERVICE_STATE_STORE.get(&name) {
-                    state.value().clone()
-                } else {
-                    ServiceState::Starting
-                };
+                // Determine initial status based on the previous generation
+                let initial_status = GLOBAL_STATUS_PLANE
+                    .get(&name)
+                    .map(|s| s.value().clone())
+                    .unwrap_or(ServiceStatus::Initializing);
 
-                // Normalizing initial state: if we were reloading, the new instance starts as Restoring.
-                // If we were starting or recovering, we preserve that state.
-                let start_state = match initial_state {
-                    ServiceState::Starting => ServiceState::Starting,
-                    ServiceState::Recovering(e) => ServiceState::Recovering(e),
-                    _ => ServiceState::Restoring,
+                // Normalizing initial status: if we were reloading, the new instance starts as Restoring.
+                // If we were starting or recovering, we preserve that status.
+                let start_status = match initial_status {
+                    ServiceStatus::Initializing => ServiceStatus::Initializing,
+                    ServiceStatus::Recovering(e) => ServiceStatus::Recovering(e),
+                    _ => ServiceStatus::Restoring,
                 };
 
                 if cancellation_token.is_cancelled() {
@@ -319,12 +310,12 @@ impl ServiceDaemon {
                         "Service {} received shutdown signal, exiting gracefully",
                         name
                     );
-                    service_status.insert(name.clone(), ServiceStatus::Stopped);
+                    GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);
                     break;
                 }
 
-                info!("Starting service: {} with state {:?}", name, start_state);
-                service_status.insert(name.clone(), ServiceStatus::Running);
+                info!("Starting service: {} with status {:?}", name, start_status);
+                GLOBAL_STATUS_PLANE.insert(name.clone(), start_status.clone());
                 let start_time = std::time::Instant::now();
 
                 let span = tracing::info_span!("service", %name);
@@ -358,9 +349,6 @@ impl ServiceDaemon {
                     reload_token: reload_token.clone(),
                 };
 
-                // Update current state in store
-                SERVICE_STATE_STORE.insert(name.clone(), start_state);
-
                 // Wrapper to run service in TLS scope and capture errors
                 let run_clone = run.clone();
                 let token_for_run = token_clone.clone();
@@ -375,7 +363,9 @@ impl ServiceDaemon {
 
                 bridge_task.abort();
 
-                let mut next_state = ServiceState::Starting;
+                // Determine next status based on outcome
+                // Note: Shelf is preserved for recovery; service can decide whether to use it.
+                let mut next_status = ServiceStatus::Initializing;
 
                 match result {
                     Ok(Ok(_)) => {
@@ -383,7 +373,7 @@ impl ServiceDaemon {
                     }
                     Ok(Err(e)) => {
                         error!("Service {} failed: {:?}", name, e);
-                        next_state = ServiceState::Recovering(format!("{:?}", e));
+                        next_status = ServiceStatus::Recovering(format!("{:?}", e));
                     }
                     Err(panic) => {
                         let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
@@ -394,30 +384,28 @@ impl ServiceDaemon {
                             "Unknown panic".to_string()
                         };
                         error!("Service {} panicked: {}", name, panic_msg);
-                        next_state = ServiceState::Recovering(format!("Panic: {}", panic_msg));
+                        next_status = ServiceStatus::Recovering(format!("Panic: {}", panic_msg));
                     }
                 };
 
                 // Check for explicit reload or normal exit
                 if reload_token.is_cancelled() {
                     info!("Supervisor: Service {} exited after reload signal", name);
-                    next_state = ServiceState::Restoring;
+                    next_status = ServiceStatus::Restoring;
                 }
 
                 // Check for cancellation after service exits
                 if cancellation_token.is_cancelled() {
                     info!("Service {} received shutdown signal, not restarting", name);
-                    service_status.insert(name.clone(), ServiceStatus::Stopped);
-                    SERVICE_STATE_STORE.remove(&name);
+                    GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);
                     break;
                 }
 
-                service_status.insert(name.clone(), ServiceStatus::Restarting);
                 info!(
-                    "Supervisor: Setting next_state for {} to {:?}",
-                    name, next_state
+                    "Supervisor: Setting next_status for {} to {:?}",
+                    name, next_status
                 );
-                SERVICE_STATE_STORE.insert(name.clone(), next_state);
+                GLOBAL_STATUS_PLANE.insert(name.clone(), next_status);
 
                 // Reset delay if service ran successfully for long enough
                 if start_time.elapsed() >= policy.reset_after {
@@ -435,7 +423,7 @@ impl ServiceDaemon {
                     _ = tokio::time::sleep(current_delay) => {}
                     _ = cancellation_token.cancelled() => {
                         info!("Service {} received shutdown signal during restart delay", name);
-                        service_status.insert(name.clone(), ServiceStatus::Stopped);
+                        GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);
                         break;
                     }
                 }
@@ -484,27 +472,29 @@ impl ServiceDaemon {
                 .await;
             }
 
-            // Sync Step: Wait for all services in this wave to be reported as 'Running'
+            // Sync Step: Wait for all services in this wave to become 'Healthy'
             // This ensures Wave 100 actually initialized before Wave 80 starts.
             let start = std::time::Instant::now();
-            let mut all_running = false;
-            while !all_running && start.elapsed() < std::time::Duration::from_secs(5) {
-                all_running = true;
+            let mut all_healthy = false;
+            while !all_healthy && start.elapsed() < std::time::Duration::from_secs(5) {
+                all_healthy = true;
                 for service in &services {
-                    let status = self.service_status.get(&service.name).map(|r| *r.value());
-                    if status != Some(ServiceStatus::Running) {
-                        all_running = false;
+                    let status = GLOBAL_STATUS_PLANE
+                        .get(&service.name)
+                        .map(|r| r.value().clone());
+                    if status != Some(ServiceStatus::Healthy) {
+                        all_healthy = false;
                         break;
                     }
                 }
-                if !all_running {
+                if !all_healthy {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
             }
 
-            if !all_running {
+            if !all_healthy {
                 warn!(
-                    "Wave priority {} did not reach 'Running' status within 5s, proceeding anyway",
+                    "Wave priority {} did not reach 'Healthy' status within 5s, proceeding anyway",
                     priority
                 );
             }
@@ -541,7 +531,7 @@ impl ServiceDaemon {
             // 1. Parallel Signal: Cancel all services in this wave
             for service in &services {
                 service.cancellation_token.cancel();
-                SERVICE_STATE_STORE.insert(service.name.clone(), ServiceState::Stopping);
+                GLOBAL_STATUS_PLANE.insert(service.name.clone(), ServiceStatus::ShuttingDown);
             }
 
             // 2. Parallel Wait: Wait for all services in this wave to finish
@@ -559,7 +549,6 @@ impl ServiceDaemon {
 
             let mut shutdown_futures = Vec::new();
             for (name, mut handle) in join_handles {
-                let status_clone = self.service_status.clone();
                 shutdown_futures.push(async move {
                     info!("Waiting for service '{}' to stop...", name);
                     tokio::select! {
@@ -578,7 +567,7 @@ impl ServiceDaemon {
                             let _ = handle.await;
                         }
                     }
-                    status_clone.insert(name, ServiceStatus::Stopped);
+                    GLOBAL_STATUS_PLANE.insert(name, ServiceStatus::Terminated);
                 });
             }
             futures::future::join_all(shutdown_futures).await;
@@ -761,7 +750,7 @@ mod tests {
                 } else {
                     let s = crate::utils::context::state();
                     info!("Service received state: {:?}", s);
-                    if let ServiceState::Recovering(ref err) = s {
+                    if let ServiceStatus::Recovering(ref err) = s {
                         if err.contains("Boom") {
                             info!("Successfully detected recovery state with message: {}", err);
                             while !crate::is_shutdown() {

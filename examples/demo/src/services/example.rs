@@ -1,7 +1,7 @@
 use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::prelude::*;
-use service_daemon::{ServiceState, allow_sync, service, shelve, state, unshelve};
+use service_daemon::{ServiceStatus, allow_sync, done, service, shelve, sleep, state, unshelve};
 use tracing::{info, warn};
 
 #[service]
@@ -15,7 +15,10 @@ pub async fn example_service(
         port, db_url
     );
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        // Use interruptible sleep - returns false if interrupted
+        if !sleep(std::time::Duration::from_secs(10)).await {
+            break;
+        }
         info!("Heartbeat from example service");
 
         // --- Template-Based Interaction ---
@@ -33,6 +36,7 @@ pub async fn example_service(
 #[service]
 pub async fn stats_writer(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
     info!("Stats writer service started");
+    done(); // Signal initialization complete
     while !service_daemon::is_shutdown() {
         // Gain exclusive write access
         let mut guard = stats.write().await;
@@ -44,7 +48,7 @@ pub async fn stats_writer(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()>
         // Drop guard before sleep
         drop(guard);
 
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        sleep(std::time::Duration::from_secs(5)).await;
     }
     info!("Stats writer shutting down");
     Ok(())
@@ -65,12 +69,12 @@ pub fn sync_service(port: Arc<Port>) -> anyhow::Result<()> {
 #[service]
 pub async fn external_status_updater() -> anyhow::Result<()> {
     info!("External status updater mock service started");
+    done(); // Signal initialization complete
     let mut count = 0;
 
     while !service_daemon::is_shutdown() {
         // Wait 15 seconds between updates
-        tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-        if service_daemon::is_shutdown() {
+        if !sleep(std::time::Duration::from_secs(15)).await {
             break;
         }
 
@@ -96,8 +100,9 @@ pub async fn external_status_updater() -> anyhow::Result<()> {
 #[service(priority = ServicePriority::SYSTEM)]
 pub async fn log_flusher() -> anyhow::Result<()> {
     info!("[SYSTEM] Log flusher started (Priority 100)");
+    done(); // Signal initialization complete
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        sleep(std::time::Duration::from_secs(1)).await;
     }
     info!("[SYSTEM] Log flusher exiting LAST");
     Ok(())
@@ -111,8 +116,9 @@ pub async fn db_connector(db_url: Arc<DbUrl>) -> anyhow::Result<()> {
         "[STORAGE] DB connector started (Priority 80) for {}",
         db_url
     );
+    done(); // Signal initialization complete
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        sleep(std::time::Duration::from_secs(1)).await;
     }
     info!("[STORAGE] DB connector exiting (Reload or Shutdown)");
     Ok(())
@@ -126,8 +132,9 @@ pub async fn public_api(port: Arc<Port>) -> anyhow::Result<()> {
         "[EXTERNAL] Public API started (Priority 0) on port {}",
         port
     );
+    done(); // Signal initialization complete
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        sleep(std::time::Duration::from_secs(1)).await;
     }
     info!("[EXTERNAL] Public API exiting FIRST");
     Ok(())
@@ -139,24 +146,24 @@ pub async fn public_api(port: Arc<Port>) -> anyhow::Result<()> {
 #[service]
 pub async fn resilient_service_demo() -> anyhow::Result<()> {
     match state() {
-        ServiceState::Starting => {
+        ServiceStatus::Initializing => {
             info!("Resilient service starting for the FIRST time.");
         }
-        ServiceState::Restoring => {
+        ServiceStatus::Restoring => {
             info!("Resilient service RESTORING (warm restart).");
         }
-        ServiceState::Recovering(last_error) => {
+        ServiceStatus::Recovering(last_error) => {
             warn!("Resilient service RECOVERING from a crash!");
             warn!("Context from previous failure: {}", last_error);
         }
         _ => {
-            // Uniformly handle other states (like Running) if no special logic is needed
-            service_daemon::done();
+            // Uniformly handle other states (like Healthy) if no special logic is needed
+            done();
         }
     }
 
-    // Simulate work...
-    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+    // Simulate work using interruptible sleep
+    sleep(std::time::Duration::from_secs(5)).await;
     Ok(())
 }
 
@@ -189,7 +196,7 @@ pub async fn state_handoff_demo() -> anyhow::Result<()> {
 #[service]
 pub async fn di_restart_demo(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
     match state() {
-        ServiceState::Restoring => {
+        ServiceStatus::Restoring => {
             info!("DI Restart Demo: Dependency (GlobalStats) changed! Performing warm restart...");
         }
         _ => {
@@ -197,13 +204,13 @@ pub async fn di_restart_demo(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
                 "DI Restart Demo: Initializing with stats: {}",
                 stats.total_processed
             );
-            service_daemon::done();
+            done();
         }
     }
 
     info!("DI Restart Demo is now active and watching for changes...");
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        sleep(std::time::Duration::from_secs(1)).await;
     }
     Ok(())
 }
@@ -218,37 +225,37 @@ pub async fn reloading_counter_service(stats: Arc<GlobalStats>) -> anyhow::Resul
     info!("Counter Service: Started. Current count: {}", count);
 
     // 2. Signal that initialization is complete
-    service_daemon::done();
+    done();
 
     // 3. Main Loop: Unified state handling
     while !service_daemon::is_shutdown() {
-        match service_daemon::state() {
-            ServiceState::NeedReload => {
+        match state() {
+            ServiceStatus::NeedReload => {
                 warn!(
                     "Counter Service: Reloading due to dependency change! Submitting count: {}",
                     count
                 );
                 // Save state for the next generation
                 shelve("counter", count).await;
-                service_daemon::done(); // Signal ready to exit
+                done(); // Signal ready to exit
                 break; // Graceful exit for warm restart
             }
-            ServiceState::Stopping => break,
-            ServiceState::Recovering(err) => {
+            ServiceStatus::ShuttingDown => break,
+            ServiceStatus::Recovering(err) => {
                 warn!("Counter Service: Recovering from error: {}", err);
                 // We can choose to reset or continue
-                service_daemon::done();
+                done();
             }
             _ => {
-                // Normal Running state
+                // Normal Healthy state
                 count += 1;
                 info!(
                     "Counter Service: Working... count = {} (Global Stats: {})",
                     count, stats.total_processed
                 );
 
-                // Simulate work
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                // Simulate work using interruptible sleep
+                sleep(std::time::Duration::from_secs(3)).await;
             }
         }
     }

@@ -44,13 +44,13 @@ pub mod utils;
 pub use models::service::ServicePriority;
 pub use models::{
     Result, SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceError, ServiceFn,
-    ServiceParam, TT, TriggerTemplate,
+    ServiceParam, ServiceStatus, TT, TriggerTemplate,
 };
 pub use std::sync::Arc;
-pub use utils::context::{ServiceState, done, is_shutdown, shelve, state, unshelve};
+pub use utils::context::{done, is_shutdown, shelve, sleep, state, unshelve, wait_shutdown};
 pub use utils::di::Provided;
 pub use utils::service_daemon::{
-    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle, ServiceStatus,
+    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle,
 };
 
 // Re-export dependencies for use in macro-generated code
@@ -75,9 +75,10 @@ pub use service_daemon_macro::{allow_sync, provider, service, trigger};
 /// provides IDE autocompletion for `#[trigger]` attributes.
 pub mod prelude {
     pub use crate::models::service::ServicePriority;
+    pub use crate::models::service::ServiceStatus;
     pub use crate::models::trigger::TriggerTemplate;
     pub use crate::models::trigger::TriggerTemplate as TT;
     pub use crate::models::trigger::TriggerTemplate::*;
-    pub use crate::utils::context::{ServiceState, is_shutdown, shelve, state, unshelve};
+    pub use crate::utils::context::{is_shutdown, shelve, sleep, state, unshelve, wait_shutdown};
     pub use crate::utils::di::Provided;
 }

@@ -20,7 +20,7 @@ A Rust library for automatic service management with dependency injection, inspi
 - **Managed Logging** - High-performance, non-blocking asynchronous log processing
 - **Wave-Based Lifecycle**: Symmetric, priority-based startup (descending) and shutdown (ascending).
 - **Automatic restart** - Failed services are restarted with exponential backoff
-- **Service Control Plane**: Intelligent state machine (`Starting`, `Running`, `Reloading`, `Recovering`).
+- **Unified Status Plane**: Single source of truth for service lifecycle (`Initializing`, `Healthy`, `Recovering`, etc.).
 - **Zero-Copy State**: O(1) snapshots and CoW mutations for high-performance shared state.
 - **Exception Handoff**: Previous errors are passed to the next service generation for custom recovery logic.
 - **Type-safe DI** - Compile-time verified dependency resolution
@@ -174,14 +174,45 @@ daemon.run().await?
 
 Services and triggers use a unified signal to handle both **graceful shutdown** (SIGINT/SIGTERM) and **warm reloads** (dependency changes).
 
-- **`is_shutdown()`**: The recommended way to check if the service should stop. It is now synchronous and state-aware.
+- **`is_shutdown()`**: Check if the service should stop (returns true for `NeedReload`, `ShuttingDown`, or `Terminated`).
+- **`sleep(duration)`**: Interruptible sleep that returns early if shutdown is signaled.
+- **`done()`**: Explicitly signal completion of current lifecycle phase (transitions `Initializing` → `Healthy`).
 
+> [!TIP]
+> **Implicit Handshake**: For minimalist services, you don't need to call `done()` explicitly. The framework automatically transitions to `Healthy` when you first call `is_shutdown()`, `sleep()`, or `wait_shutdown()`.
+
+**Minimalist Service (Recommended for beginners):**
 ```rust
-while !service_daemon::is_shutdown() {
-    // Perform work
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+#[service]
+async fn my_service() -> anyhow::Result<()> {
+    while !service_daemon::is_shutdown() {  // Auto-transitions to Healthy here!
+        // Perform work
+        service_daemon::sleep(std::time::Duration::from_secs(60)).await;
+    }
+    Ok(())
 }
 ```
+
+**Advanced Service (Full lifecycle control):**
+```rust
+use service_daemon::{state, done, ServiceStatus};
+
+#[service]
+async fn advanced_service() -> anyhow::Result<()> {
+    match state() {
+        ServiceStatus::Recovering(err) => tracing::warn!("Recovering from: {}", err),
+        ServiceStatus::Restoring => { /* retrieve shelved state */ },
+        _ => {}
+    }
+    done();  // Explicit handshake for precise wave synchronization
+    
+    while !service_daemon::is_shutdown() {
+        service_daemon::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Ok(())
+}
+```
+
 
 ### Graceful Shutdown (Signal-Based)
 
@@ -204,12 +235,15 @@ use service_daemon::ServiceStatus;
 let daemon = ServiceDaemon::auto_init();
 // ... after spawning services ...
 
-// Query status (Running, Restarting, or Stopped)
+// Query status
 let status = daemon.get_service_status("my_service").await;
 match status {
-    ServiceStatus::Running => println!("Service is healthy"),
-    ServiceStatus::Restarting => println!("Service is recovering"),
-    ServiceStatus::Stopped => println!("Service has stopped"),
+    ServiceStatus::Healthy => println!("Service is running normally"),
+    ServiceStatus::Initializing => println!("Service is starting up"),
+    ServiceStatus::Recovering(_) => println!("Service is recovering from a crash"),
+    ServiceStatus::ShuttingDown => println!("Service is shutting down"),
+    ServiceStatus::Terminated => println!("Service has stopped"),
+    _ => {}
 }
 ```
 
@@ -448,30 +482,61 @@ pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<(
 }
 ```
 
-## Service Control Plane
+## Unified Status Plane
 
-The Control Plane provides services with implicit context and lifecycle awareness.
+The Status Plane provides services with implicit context and lifecycle awareness via a single unified `ServiceStatus` enum.
+
+### Status States
+
+| Status | Description |
+|--------|-------------|
+| `Initializing` | Fresh start, first run |
+| `Restoring` | Warm start with shelved data available |
+| `Recovering(String)` | Crash recovery, error context available |
+| `Healthy` | Steady state after `done()` is called |
+| `NeedReload` | Dependency changed, preparing for warm restart |
+| `ShuttingDown` | Graceful shutdown in progress |
+| `Terminated` | Clean exit, ready for collection |
 
 ### Lifecycle Awareness
-Services can use `service_daemon::state()` to determine their current generation's purpose:
+Services use `service_daemon::state()` to determine their current lifecycle phase:
 
 ```rust
-use service_daemon::{state, ServiceState};
+use service_daemon::{state, done, shelve, unshelve, ServiceStatus};
 
 #[service]
 async fn my_service() -> anyhow::Result<()> {
     match state() {
-        ServiceState::Starting => info!("First time setup"),
-        ServiceState::NeedReload => {
-             info!("Dependency changed, submitting state...");
-             shelve("my_key", my_state).await;
-             done();
+        ServiceStatus::Initializing => {
+            info!("First time setup");
         }
-        ServiceState::Restoring => info!("Warm restart, retrieving state..."),
-        ServiceState::Recovering(last_err) => warn!("Recovering from crash: {}", last_err),
-        ServiceState::Running => info!("Steady state"),
+        ServiceStatus::Restoring => {
+            info!("Warm restart, retrieving shelved state...");
+            if let Some(data) = unshelve::<MyState>("my_key").await {
+                // Restore previous state
+            }
+        }
+        ServiceStatus::Recovering(last_err) => {
+            warn!("Recovering from crash: {}", last_err);
+        }
+        ServiceStatus::NeedReload => {
+            info!("Dependency changed, saving state for next generation...");
+            shelve("my_key", my_state).await;
+            done(); // Signal ready to exit
+            return Ok(());
+        }
+        _ => {}
     }
-    // ...
+    
+    // Signal initialization complete (enables wave synchronization)
+    done();
+    
+    // Main service loop
+    while !service_daemon::is_shutdown() {
+        // Use interruptible sleep
+        service_daemon::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Ok(())
 }
 ```
 
