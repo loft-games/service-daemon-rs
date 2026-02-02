@@ -20,6 +20,8 @@ let policy = RestartPolicy::builder()
 let daemon = ServiceDaemon::from_registry_with_policy(policy);
 daemon.run().await?
 ```
+### 1.1. Immediate Restart on Reload Signal
+Even if a service is in a restart delay period (e.g. after a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
 
 ## 2. Advanced Resilience: Managing CPU-Intensive & Blocking Tasks
 

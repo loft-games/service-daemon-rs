@@ -36,6 +36,10 @@ pub static GLOBAL_STATUS_PLANE: LazyLock<DashMap<String, ServiceStatus>> =
 pub static RELOAD_SIGNALS: LazyLock<DashMap<String, Arc<tokio::sync::Notify>>> =
     LazyLock::new(DashMap::new);
 
+/// Global notification for any status change in the STATUS_PLANE.
+pub static STATUS_CHANGED: LazyLock<Arc<tokio::sync::Notify>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Notify::new()));
+
 /// Returns the current lifecycle status of the calling service.
 pub fn state() -> ServiceStatus {
     if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
@@ -84,6 +88,7 @@ pub fn done() {
 
         if next_status != current_status {
             GLOBAL_STATUS_PLANE.insert(id.name.clone(), next_status.clone());
+            STATUS_CHANGED.notify_waiters();
             tracing::info!(
                 "Service '{}' signalled done() (Transition: {:?} -> {:?})",
                 id.name,
@@ -130,6 +135,7 @@ fn implicit_handshake() {
         // Auto-transition to Healthy
         drop(status); // Release the read lock before inserting
         GLOBAL_STATUS_PLANE.insert(id.name.clone(), ServiceStatus::Healthy);
+        STATUS_CHANGED.notify_waiters();
         tracing::debug!(
             "Service '{}' implicitly transitioned to Healthy (via lifecycle utility)",
             id.name

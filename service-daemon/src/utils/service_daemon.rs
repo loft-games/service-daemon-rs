@@ -13,7 +13,7 @@ use crate::models::{
     Result as ServiceResult, SERVICE_REGISTRY, ServiceDescription, ServiceFn, ServiceStatus,
 };
 use crate::utils::context::{
-    CURRENT_SERVICE, GLOBAL_STATUS_PLANE, RELOAD_SIGNALS, ServiceIdentity,
+    CURRENT_SERVICE, GLOBAL_STATUS_PLANE, RELOAD_SIGNALS, STATUS_CHANGED, ServiceIdentity,
 };
 use futures::FutureExt;
 
@@ -311,11 +311,13 @@ impl ServiceDaemon {
                         name
                     );
                     GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);
+                    STATUS_CHANGED.notify_waiters();
                     break;
                 }
 
                 info!("Starting service: {} with status {:?}", name, start_status);
                 GLOBAL_STATUS_PLANE.insert(name.clone(), start_status.clone());
+                STATUS_CHANGED.notify_waiters();
                 let start_time = std::time::Instant::now();
 
                 let span = tracing::info_span!("service", %name);
@@ -398,6 +400,7 @@ impl ServiceDaemon {
                 if cancellation_token.is_cancelled() {
                     info!("Service {} received shutdown signal, not restarting", name);
                     GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);
+                    STATUS_CHANGED.notify_waiters();
                     break;
                 }
 
@@ -406,6 +409,7 @@ impl ServiceDaemon {
                     name, next_status
                 );
                 GLOBAL_STATUS_PLANE.insert(name.clone(), next_status);
+                STATUS_CHANGED.notify_waiters();
 
                 // Reset delay if service ran successfully for long enough
                 if start_time.elapsed() >= policy.reset_after {
@@ -428,6 +432,7 @@ impl ServiceDaemon {
                     _ = cancellation_token.cancelled() => {
                         info!("Service {} received shutdown signal during restart delay", name);
                         GLOBAL_STATUS_PLANE.insert(name.clone(), ServiceStatus::Terminated);
+                        STATUS_CHANGED.notify_waiters();
                         break;
                     }
                 }
@@ -492,7 +497,10 @@ impl ServiceDaemon {
                     }
                 }
                 if !all_healthy {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    tokio::select! {
+                        _ = STATUS_CHANGED.notified() => {}
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    }
                 }
             }
 
@@ -536,6 +544,7 @@ impl ServiceDaemon {
             for service in &services {
                 service.cancellation_token.cancel();
                 GLOBAL_STATUS_PLANE.insert(service.name.clone(), ServiceStatus::ShuttingDown);
+                STATUS_CHANGED.notify_waiters();
             }
 
             // 2. Parallel Wait: Wait for all services in this wave to finish
@@ -572,6 +581,7 @@ impl ServiceDaemon {
                         }
                     }
                     GLOBAL_STATUS_PLANE.insert(name, ServiceStatus::Terminated);
+                    STATUS_CHANGED.notify_waiters();
                 });
             }
             futures::future::join_all(shutdown_futures).await;

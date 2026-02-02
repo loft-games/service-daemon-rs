@@ -18,6 +18,9 @@ Unlike traditional DI containers that hold all instances in a central map, `serv
 - **Lazy Singletons**: Resolution usually involves a `OnceCell` or `StateManager` ensuring thread-safe, single-instance sharing via `Arc<T>`.
 - **Recursive Resolution**: When a service starts, its dependencies are resolved recursively. Errors are caught at compile-time.
 
+### 2.1. Status Plane & Reactive Orchestration
+The daemon maintains a **Unified Status Plane** to track service health. To eliminate inefficient polling, the framework uses a global `STATUS_CHANGED` notification mechanism. When any service changes its status (e.g. transitioning from `Initializing` to `Healthy`), the daemon is notified immediately, enabling responsive wave-based startup and proactive dependency management.
+
 ## 3. High-Level System Flow
 
 ```mermaid

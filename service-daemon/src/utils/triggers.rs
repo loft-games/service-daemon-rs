@@ -3,18 +3,17 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
-#[cfg(feature = "uuid-trigger-ids")]
-use uuid::Uuid;
-
 /// Helper to generate a unique trigger ID if the feature is enabled.
 fn generate_trigger_id() -> String {
     #[cfg(feature = "uuid-trigger-ids")]
     {
-        Uuid::new_v4().to_string()
+        uuid::Uuid::new_v4().to_string()
     }
     #[cfg(not(feature = "uuid-trigger-ids"))]
     {
-        "static-id".to_string()
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        format!("trigger-{}", id)
     }
 }
 
@@ -159,11 +158,9 @@ where
     sched.add(job).await?;
     sched.start().await?;
 
-    // For cron, we start the scheduler and just wait.
+    // For cron, we start the scheduler and wait for shutdown.
     // Cron scheduler manages its own tasks.
-    while !crate::utils::context::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    crate::utils::context::wait_shutdown().await;
     let _ = sched.shutdown().await;
 
     Ok(())
