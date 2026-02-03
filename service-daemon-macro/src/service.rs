@@ -109,8 +109,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let wrapper_name = format_ident!("{}_wrapper", fn_name);
     let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
 
-    // Get module name from function path (simplified - uses "services" as default)
-    let module_name = "services";
+    // The module path will be captured at the call site using module_path!() macro
 
     let watcher_name = format_ident!("{}_watcher", fn_name);
     let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty() {
@@ -171,7 +170,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[linkme(crate = service_daemon::linkme)]
         static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
             name: #fn_name_str,
-            module: #module_name,
+            module: module_path!(),
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,

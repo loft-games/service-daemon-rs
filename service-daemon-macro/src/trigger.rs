@@ -352,7 +352,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[linkme(crate = service_daemon::linkme)]
         static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
             name: #fn_name_str,
-            module: concat!("triggers/", #normalized_template),
+            module: module_path!(),
             params: &[#(#param_entries),*],
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,

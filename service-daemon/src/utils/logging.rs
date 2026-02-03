@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{OnceCell, broadcast};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
@@ -30,10 +30,22 @@ impl Default for LogQueue {
     }
 }
 
-static LOG_QUEUE: std::sync::OnceLock<LogQueue> = std::sync::OnceLock::new();
+/// Using tokio::sync::OnceCell for async-native initialization.
+static LOG_QUEUE: OnceCell<LogQueue> = OnceCell::const_new();
 
+/// Gets the log queue, initializing it if necessary.
+/// This is safe to call from both sync and async contexts due to OnceCell's design.
 fn get_log_queue() -> &'static LogQueue {
-    LOG_QUEUE.get_or_init(LogQueue::default)
+    // For the tracing layer (sync context), we use blocking_get or initialize synchronously.
+    // OnceCell::get() returns Option, get_or_init requires async.
+    // Since this is called from a sync tracing layer, we use try_get or a sync fallback.
+    // The LOG_QUEUE will be initialized on first use in either context.
+    LOG_QUEUE.get().unwrap_or_else(|| {
+        // This is a fallback for sync contexts. Initialize synchronously.
+        // This is safe because LogQueue::default() doesn't require async.
+        let _ = LOG_QUEUE.set(LogQueue::default());
+        LOG_QUEUE.get().expect("LogQueue should be initialized")
+    })
 }
 
 /// A non-blocking tracing Layer that captures events and pushes them to the LogQueue.
@@ -81,23 +93,30 @@ pub async fn log_service() -> anyhow::Result<()> {
     let mut rx = get_log_queue().tx.subscribe();
 
     while !service_daemon::is_shutdown() {
-        match rx.recv().await {
-            Ok(event) => {
-                // In a real application, you might write to a file or a remote collector here.
-                // For now, we'll output to standard error to avoid infinitely recursive tracing
-                // if the standard subscriber is also looking at stdout.
-                eprintln!(
-                    "[{}] {:<5} [{}] {}",
-                    event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                    event.level,
-                    event.target,
-                    event.message
-                );
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        // In a real application, you might write to a file or a remote collector here.
+                        // For now, we'll output to standard error to avoid infinitely recursive tracing
+                        // if the standard subscriber is also looking at stdout.
+                        eprintln!(
+                            "[{}] {:<5} [{}] {}",
+                            event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                            event.level,
+                            event.target,
+                            event.message
+                        );
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        eprintln!("LogService lagged by {} messages", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                eprintln!("LogService lagged by {} messages", n);
+            _ = service_daemon::wait_shutdown() => {
+                break;
             }
-            Err(broadcast::error::RecvError::Closed) => break,
         }
     }
 

@@ -1,8 +1,10 @@
 use futures::future::BoxFuture;
-use std::sync::{Arc, LazyLock};
-use tokio::sync::Mutex;
+use std::sync::Arc;
+use tokio::sync::{Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
+
+use crate::utils::context;
 
 /// Helper to generate a unique trigger ID if the feature is enabled.
 fn generate_trigger_id() -> String {
@@ -19,19 +21,19 @@ fn generate_trigger_id() -> String {
 }
 
 /// Global shared scheduler for all cron triggers.
-static SHARED_SCHEDULER: LazyLock<Mutex<Option<tokio_cron_scheduler::JobScheduler>>> =
-    LazyLock::new(|| Mutex::new(None));
+/// Using tokio::sync::OnceCell for async-native initialization.
+static SHARED_SCHEDULER: OnceCell<tokio_cron_scheduler::JobScheduler> = OnceCell::const_new();
 
 async fn get_shared_scheduler() -> anyhow::Result<tokio_cron_scheduler::JobScheduler> {
-    let mut guard = SHARED_SCHEDULER.lock().await;
-    if let Some(sched) = &*guard {
-        return Ok(sched.clone());
-    }
-
-    let sched = tokio_cron_scheduler::JobScheduler::new().await?;
-    sched.start().await?;
-    *guard = Some(sched.clone());
-    Ok(sched)
+    // OnceCell::get_or_try_init is async and non-blocking
+    SHARED_SCHEDULER
+        .get_or_try_init(|| async {
+            let sched = tokio_cron_scheduler::JobScheduler::new().await?;
+            sched.start().await?;
+            Ok::<_, anyhow::Error>(sched)
+        })
+        .await
+        .cloned()
 }
 
 pub async fn signal_trigger_host<F>(
@@ -43,7 +45,7 @@ pub async fn signal_trigger_host<F>(
 where
     F: Fn() -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    while !crate::utils::context::is_shutdown() {
+    while !context::is_shutdown() {
         tokio::select! {
             _ = notifier.notified() => {
                 let id = generate_trigger_id();
@@ -55,6 +57,10 @@ where
                         error!("Trigger error: {:?}", e);
                     }
                 }.instrument(span).await;
+            }
+            _ = context::wait_shutdown() => {
+                info!("Signal trigger '{}' received shutdown, exiting", name);
+                break;
             }
         }
     }
@@ -71,7 +77,7 @@ where
     T: Clone + Send + Sync + 'static,
     F: Fn(T) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    while !crate::utils::context::is_shutdown() {
+    while !context::is_shutdown() {
         tokio::select! {
             res = receiver.recv() => {
                 match res {
@@ -95,6 +101,10 @@ where
                     }
                 }
             }
+            _ = context::wait_shutdown() => {
+                info!("Queue trigger '{}' received shutdown, exiting", name);
+                break;
+            }
         }
     }
     Ok(())
@@ -102,7 +112,7 @@ where
 
 pub async fn lb_queue_trigger_host<T, F>(
     name: &str,
-    receiver_mutex: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<T>>>,
+    receiver_mutex: Arc<Mutex<tokio::sync::mpsc::Receiver<T>>>,
     handler: F,
     _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
@@ -110,12 +120,18 @@ where
     T: Send + Sync + 'static,
     F: Fn(T) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
-    while !crate::utils::context::is_shutdown() {
-        let item = async {
-            let mut receiver = receiver_mutex.lock().await;
-            receiver.recv().await
-        }
-        .await;
+    while !context::is_shutdown() {
+        // We need to select between receiving an item and shutdown
+        let item = tokio::select! {
+            result = async {
+                let mut receiver = receiver_mutex.lock().await;
+                receiver.recv().await
+            } => result,
+            _ = context::wait_shutdown() => {
+                info!("LB Queue trigger '{}' received shutdown, exiting", name);
+                return Ok(());
+            }
+        };
 
         match item {
             Some(value) => {
@@ -176,7 +192,7 @@ where
 
     // For cron, we wait for shutdown.
     // The shared scheduler manages the execution in the background.
-    crate::utils::context::wait_shutdown().await;
+    context::wait_shutdown().await;
 
     // Remove the job from the shared scheduler before exiting
     if let Err(e) = sched.remove(&job_id).await {
@@ -216,6 +232,6 @@ where
     .await;
 
     // Wait for the next reload (triggered by dependency watcher) or shutdown
-    crate::utils::context::wait_shutdown().await;
+    context::wait_shutdown().await;
     Ok(())
 }
