@@ -11,7 +11,7 @@ use tracing::{Instrument, error, info, instrument, warn};
 use crate::models::{
     Result as ServiceResult, SERVICE_REGISTRY, ServiceDescription, ServiceFn, ServiceStatus,
 };
-use crate::utils::context::{CURRENT_SERVICE, DaemonResources, ServiceIdentity};
+use crate::utils::context::{__run_service_scope, DaemonResources, ServiceIdentity};
 use futures::FutureExt;
 
 /// Configuration for service restart behavior with exponential backoff.
@@ -353,25 +353,20 @@ impl ServiceDaemon {
                     );
                 });
 
-                let identity = ServiceIdentity {
-                    name: name.clone(),
-                    reload_signal: reload_signal.clone(),
-                    cancellation_token: token_clone.clone(),
-                    reload_token: reload_token.clone(),
-                    resources: resources.clone(),
-                };
+                let identity =
+                    ServiceIdentity::new(name.clone(), token_clone.clone(), reload_token.clone());
 
                 // Wrapper to run service in TLS scope and capture errors
                 let run_clone = run.clone();
                 let token_for_run = token_clone.clone();
+                let resources_clone = resources.clone();
 
-                let result = CURRENT_SERVICE
-                    .scope(identity, async move {
-                        std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
-                            .catch_unwind()
-                            .await
-                    })
-                    .await;
+                let result = __run_service_scope(identity, resources_clone, || async move {
+                    std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
+                        .catch_unwind()
+                        .await
+                })
+                .await;
 
                 bridge_task.abort();
 

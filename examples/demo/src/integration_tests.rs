@@ -303,4 +303,133 @@ mod tests {
 
         Ok(())
     }
+
+    // --- 5. Handshake Synchronization ---
+    // Verify that lower-priority services wait for higher-priority services to become Healthy.
+    #[tokio::test]
+    async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
+        use std::sync::Mutex as StdMutex;
+        let start_log = Arc::new(StdMutex::new(Vec::new()));
+        let mut daemon = ServiceDaemon::new();
+
+        // Higher priority: 100 - sleeps 200ms before done()
+        let log1 = start_log.clone();
+        daemon.register(
+            "high_prio_100",
+            Arc::new(move |_| {
+                let l = log1.clone();
+                Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    l.lock()
+                        .unwrap()
+                        .push(("high_done", std::time::Instant::now()));
+                    service_daemon::done();
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Ok(())
+                })
+            }),
+            100,
+        );
+
+        // Lower priority: 50 - should not start until high_prio_100 is Healthy
+        let log2 = start_log.clone();
+        daemon.register(
+            "low_prio_50",
+            Arc::new(move |_| {
+                let l = log2.clone();
+                Box::pin(async move {
+                    l.lock()
+                        .unwrap()
+                        .push(("low_start", std::time::Instant::now()));
+                    service_daemon::done();
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Ok(())
+                })
+            }),
+            50,
+        );
+
+        let cancel = daemon.cancel_token();
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        // Wait long enough for both waves to complete
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        cancel.cancel();
+        let _ = handle.await;
+
+        let log = start_log.lock().unwrap();
+        let high_done = log.iter().find(|(s, _)| *s == "high_done");
+        let low_start = log.iter().find(|(s, _)| *s == "low_start");
+
+        assert!(high_done.is_some(), "high_prio_100 did not log 'done'");
+        assert!(low_start.is_some(), "low_prio_50 did not log 'start'");
+
+        // Verify low_start happened AFTER high_done
+        assert!(
+            low_start.unwrap().1 >= high_done.unwrap().1,
+            "Low priority service started BEFORE high priority service signaled done!"
+        );
+
+        Ok(())
+    }
+
+    // --- 6. Shelf Persistence Across Crash ---
+    // Verify that shelved data survives a service crash and is available in the next generation.
+    #[tokio::test]
+    async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
+        use std::sync::Mutex as StdMutex;
+        static GENERATION_COUNTER: AtomicU32 = AtomicU32::new(0);
+        let recovered_value = Arc::new(StdMutex::new(None::<u32>));
+
+        let mut daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let rv = recovered_value.clone();
+        daemon.register(
+            "crash_test_service",
+            Arc::new(move |_| {
+                let rv_clone = rv.clone();
+                Box::pin(async move {
+                    let generation = GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                    match service_daemon::state() {
+                        ServiceStatus::Recovering(_) => {
+                            // Second generation: unshelve and confirm
+                            if let Some(v) = service_daemon::unshelve::<u32>("crash_data").await {
+                                *rv_clone.lock().unwrap() = Some(v);
+                            }
+                            service_daemon::done();
+                        }
+                        _ => {
+                            // First generation: shelve and crash
+                            service_daemon::shelve("crash_data", 42u32).await;
+                            if generation == 0 {
+                                panic!("Simulated crash on first generation!");
+                            }
+                            service_daemon::done();
+                        }
+                    }
+                    while !service_daemon::is_shutdown() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    Ok(())
+                })
+            }),
+            50,
+        );
+
+        let cancel = daemon.cancel_token();
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        // Wait for restart cycle to complete
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        cancel.cancel();
+        let _ = handle.await;
+
+        let value = recovered_value.lock().unwrap().take();
+        assert_eq!(value, Some(42), "Shelf data did not survive the crash!");
+
+        Ok(())
+    }
 }

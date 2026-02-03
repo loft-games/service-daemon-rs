@@ -140,53 +140,84 @@ pub async fn public_api(port: Arc<Port>) -> anyhow::Result<()> {
     Ok(())
 }
 
-// --- Service Control Plane Demonstrations ---
+// =============================================================================
+// LIFECYCLE PATTERN EXAMPLES
+// =============================================================================
 
-/// Demonstrates how a service can use the state() API to handle restarts and recoveries.
+/// 1. The Simple Pattern:
+/// Ideal for 90% of services. Just use `while !is_shutdown()`.
+/// The framework handles the "Initializing -> Healthy" transition automatically.
+/// (See also: `example_service` at the top of this file.)
+
+/// 2. The Advanced Pattern:
+/// For services that need fine-grained control over every state transition.
 #[service]
-pub async fn resilient_service_demo() -> anyhow::Result<()> {
-    match state() {
-        ServiceStatus::Initializing => {
-            info!("Resilient service starting for the FIRST time.");
-        }
-        ServiceStatus::Restoring => {
-            info!("Resilient service RESTORING (warm restart).");
-        }
-        ServiceStatus::Recovering(last_error) => {
-            warn!("Resilient service RECOVERING from a crash!");
-            warn!("Context from previous failure: {}", last_error);
-        }
-        _ => {
-            // Uniformly handle other states (like Healthy) if no special logic is needed
-            done();
+pub async fn advanced_lifecycle_demo() -> anyhow::Result<()> {
+    loop {
+        match state() {
+            ServiceStatus::Initializing
+            | ServiceStatus::Recovering(_)
+            | ServiceStatus::Restoring => {
+                info!("Advanced Service: Initializing/Restoring context...");
+                done(); // Signal we are now Healthy
+            }
+            ServiceStatus::Healthy => {
+                info!("Advanced Service: Working in Healthy state.");
+                if !sleep(std::time::Duration::from_secs(5)).await {
+                    continue;
+                }
+            }
+            ServiceStatus::NeedReload => {
+                warn!("Advanced Service: Custom cleanup before reload...");
+                done();
+                break;
+            }
+            ServiceStatus::ShuttingDown => {
+                info!("Advanced Service: Final cleanup before total shutdown...");
+                break;
+            }
+            _ => break,
         }
     }
-
-    // Simulate work using interruptible sleep
-    sleep(std::time::Duration::from_secs(5)).await;
     Ok(())
 }
 
-/// Demonstrates cross-generational state handoff using shelving.
+/// 3. Crash Recovery Pattern:
+/// Demonstrates how a service can persist its state via `shelve()` and recover
+/// it from the Shelf after a crash, using the `Recovering` state.
+/// To test: Uncomment the panic line, run the demo, and observe the recovery.
 #[service]
-pub async fn state_handoff_demo() -> anyhow::Result<()> {
-    // 1. Try to unshelve data from the previous generation
-    if let Some(history) = unshelve::<Vec<String>>("history").await {
-        info!("Retrieved {} historical events from shelf", history.len());
-        for event in history {
-            info!("  - {}", event);
+pub async fn recovery_service_demo() -> anyhow::Result<()> {
+    // Restore state from shelf if recovering from a crash
+    let mut iteration = match state() {
+        ServiceStatus::Recovering(err) => {
+            warn!("Recovery Demo: RECOVERING from crash: {}", err);
+            unshelve::<u32>("iteration").await.unwrap_or(0)
         }
-    } else {
-        info!("No historical data found in shelf (first run or empty).");
+        _ => {
+            info!("Recovery Demo: Starting fresh.");
+            0
+        }
+    };
+    done(); // Signal we are ready
+
+    while !service_daemon::is_shutdown() {
+        iteration += 1;
+        info!("Recovery Demo: Iteration {}", iteration);
+
+        // Persist state before potential failure
+        shelve("iteration", iteration).await;
+
+        // Simulate a crash on the 3rd iteration (uncomment to test)
+        // if iteration == 3 {
+        //     panic!("Simulated crash on iteration 3!");
+        // }
+
+        if !sleep(std::time::Duration::from_secs(2)).await {
+            break;
+        }
     }
-
-    // 2. Perform some work
-    let event = format!("Event at {:?}", std::time::SystemTime::now());
-
-    // 3. Shelve state for the next generation (e.g., if we were to restart)
-    shelve("history", vec![event]).await;
-
-    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    info!("Recovery Demo: Exiting at iteration {}", iteration);
     Ok(())
 }
 
@@ -215,51 +246,40 @@ pub async fn di_restart_demo(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A comprehensive example of a state-aware service.
-/// It maintains an internal counter that survives dependency-triggered reloads.
-/// This service uses the unified state() API to handle its lifecycle in a single loop.
+/// Demonstrates how an advanced service uses the loop+match pattern to manage
+/// its internal state (like counters) across reloads.
 #[service]
 pub async fn reloading_counter_service(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
-    // 1. Restore state from previous generation if it exists
+    // 1. Restore state from previous generation
     let mut count = unshelve::<u32>("counter").await.unwrap_or(0);
     info!("Counter Service: Started. Current count: {}", count);
 
-    // 2. Signal that initialization is complete
-    done();
-
-    // 3. Main Loop: Unified state handling
-    while !service_daemon::is_shutdown() {
+    // 2. Main Loop: Explicit state handling
+    loop {
         match state() {
-            ServiceStatus::NeedReload => {
-                warn!(
-                    "Counter Service: Reloading due to dependency change! Submitting count: {}",
-                    count
-                );
-                // Save state for the next generation
-                shelve("counter", count).await;
-                done(); // Signal ready to exit
-                break; // Graceful exit for warm restart
+            ServiceStatus::Initializing | ServiceStatus::Restoring => {
+                done(); // Move to Healthy
             }
-            ServiceStatus::ShuttingDown => break,
-            ServiceStatus::Recovering(err) => {
-                warn!("Counter Service: Recovering from error: {}", err);
-                // We can choose to reset or continue
-                done();
-            }
-            _ => {
-                // Normal Healthy state
+            ServiceStatus::Healthy => {
                 count += 1;
                 info!(
                     "Counter Service: Working... count = {} (Global Stats: {})",
                     count, stats.total_processed
                 );
 
-                // Simulate work using interruptible sleep
-                sleep(std::time::Duration::from_secs(3)).await;
+                if !sleep(std::time::Duration::from_secs(3)).await {
+                    continue;
+                }
             }
+            ServiceStatus::NeedReload => {
+                warn!("Counter Service: Shelving state before reload: {}", count);
+                shelve("counter", count).await;
+                done();
+                break;
+            }
+            _ => break, // ShuttingDown or Terminated
         }
     }
-    info!("Counter Service: Shutting down. Final count was: {}", count);
-
+    info!("Counter Service: Final count was: {}", count);
     Ok(())
 }

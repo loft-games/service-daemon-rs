@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 #[service]
 pub async fn my_service(port: Arc<Port>) -> anyhow::Result<()> {
+    service_daemon::done(); // Signal we are ready
     while !service_daemon::is_shutdown() {
         service_daemon::sleep(std::time::Duration::from_secs(1)).await;
     }

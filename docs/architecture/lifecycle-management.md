@@ -9,8 +9,8 @@ All services share a central `GLOBAL_STATUS_PLANE` (`DashMap<String, ServiceStat
 | Status | Transitions to | Triggered by |
 |--------|----------------|--------------|
 | `Initializing` | `Healthy` | `done()` or implicit handshake |
-| `Restoring` | `Healthy` | Successful warm start |
-| `Recovering(err)`| `Healthy` | Custom recovery logic + `done()` |
+| `Restoring` | `Healthy` | Successful warm start or implicit handshake |
+| `Recovering(err)`| `Healthy` | Custom recovery logic + `done()` or implicit handshake |
 | `Healthy` | `NeedReload` | Dependency mutation detected |
 | `NeedReload` | `Terminated` | Service cleanup + exit |
 | `ShuttingDown` | `Terminated` | Daemon shutdown signal |
@@ -33,7 +33,10 @@ A service indicates it is "ready" via a handshake. This prevents dependent servi
 Calling `service_daemon::done()` manually. Recommended for complex initialization.
 
 ### Implicit Handshake
-For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdown()` counts as a transition to `Healthy` if the service is still initializing.
+For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdown()` counts as a transition to `Healthy` if the service is still in an introductory phase (`Initializing`, `Restoring`, `Recovering`).
+
+> [!TIP]
+> **Performance Optimization**: The implicit handshake is internally optimized using a task-local flag. Only the first call to these functions per service generation will interact with the central Status Plane. Subsequent calls are near-zero overhead atomic checks.
 
 ## 4. State Persistence (The Shelf)
 
