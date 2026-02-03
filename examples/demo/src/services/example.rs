@@ -144,13 +144,15 @@ pub async fn public_api(port: Arc<Port>) -> anyhow::Result<()> {
 // LIFECYCLE PATTERN EXAMPLES
 // =============================================================================
 
-/// 1. The Simple Pattern:
-/// Ideal for 90% of services. Just use `while !is_shutdown()`.
-/// The framework handles the "Initializing -> Healthy" transition automatically.
-/// (See also: `example_service` at the top of this file.)
+// 1. The Simple Pattern:
+// Ideal for 90% of services. Just use `while !is_shutdown()`.
+// The framework handles the "Initializing -> Healthy" transition automatically.
+// (See also: `example_service` at the top of this file.)
 
 /// 2. The Advanced Pattern:
 /// For services that need fine-grained control over every state transition.
+///
+/// This demonstrates explicit handling of each `ServiceStatus` state in a `loop + match` pattern.
 #[service]
 pub async fn advanced_lifecycle_demo() -> anyhow::Result<()> {
     loop {

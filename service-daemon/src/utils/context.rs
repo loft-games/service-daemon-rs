@@ -121,12 +121,11 @@ pub fn state() -> ServiceStatus {
     }
     if id.reload_token.is_cancelled() {
         // Need to check if daemon already marked ShuttingDown
-        if let Ok(resources) = CURRENT_RESOURCES.try_with(|r| r.clone()) {
-            if let Some(status) = resources.status_plane.get(&id.name) {
-                if matches!(status.value(), ServiceStatus::ShuttingDown) {
-                    return ServiceStatus::ShuttingDown;
-                }
-            }
+        if let Ok(resources) = CURRENT_RESOURCES.try_with(|r| r.clone())
+            && let Some(status) = resources.status_plane.get(&id.name)
+            && matches!(status.value(), ServiceStatus::ShuttingDown)
+        {
+            return ServiceStatus::ShuttingDown;
         }
         return ServiceStatus::NeedReload;
     }
@@ -273,10 +272,10 @@ pub fn is_shutdown() -> bool {
     implicit_handshake();
 
     // Fast path: Check tokens directly (atomic, no locking)
-    if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
-        if id.cancellation_token.is_cancelled() || id.reload_token.is_cancelled() {
-            return true;
-        }
+    if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone())
+        && (id.cancellation_token.is_cancelled() || id.reload_token.is_cancelled())
+    {
+        return true;
     }
     false
 }
