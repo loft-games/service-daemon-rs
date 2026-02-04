@@ -1,5 +1,26 @@
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type};
 
+/// Result of extracting and categorizing function parameters.
+///
+/// Used by `#[service]` and `#[trigger]` macros to collect:
+/// - Cleaned function inputs (without macro attributes).
+/// - Dependency resolution tokens.
+/// - Call arguments for the user function.
+/// - Registry parameter entries.
+/// - Watcher select arms for reactive dependency updates.
+pub struct ExtractedParams {
+    /// Function inputs with macro attributes stripped.
+    pub clean_inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    /// Tokens that resolve dependencies via DI.
+    pub resolve_tokens: Vec<proc_macro2::TokenStream>,
+    /// Arguments to pass when calling the user function.
+    pub call_args: Vec<proc_macro2::TokenStream>,
+    /// ServiceParam entries for the static registry.
+    pub param_entries: Vec<proc_macro2::TokenStream>,
+    /// Select arms for the watcher function (reactive updates).
+    pub watcher_arms: Vec<proc_macro2::TokenStream>,
+}
+
 /// Helper to check if `#[allow_sync]` is present on the function's attributes.
 pub fn has_allow_sync(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
@@ -14,10 +35,7 @@ pub fn has_allow_sync(attrs: &[Attribute]) -> bool {
 #[derive(Debug, Clone)]
 pub enum ParamIntent {
     /// An event payload (optionally wrapped in Arc).
-    Payload {
-        is_arc: bool,
-        span: Option<proc_macro2::Span>,
-    },
+    Payload { is_arc: bool },
     /// A DI dependency.
     Dependency {
         inner_type: Box<Type>,
@@ -55,17 +73,10 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
         let (inner_type, wrapper) = decompose_type(ty);
 
         if is_explicit_payload {
-            let span = match wrapper {
-                Some(WrapperKind::Arc(s)) => Some(s),
-                Some(WrapperKind::ArcRwLock(s, _)) => Some(s),
-                Some(WrapperKind::ArcMutex(s, _)) => Some(s),
-                None => None,
-            };
             return Some((
                 arg_name,
                 ParamIntent::Payload {
                     is_arc: wrapper.is_some(),
-                    span,
                 },
             ));
         }
@@ -81,13 +92,7 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
         }
 
         // Implicit payload (non-wrapped type)
-        return Some((
-            arg_name,
-            ParamIntent::Payload {
-                is_arc: false,
-                span: None,
-            },
-        ));
+        return Some((arg_name, ParamIntent::Payload { is_arc: false }));
     }
     None
 }

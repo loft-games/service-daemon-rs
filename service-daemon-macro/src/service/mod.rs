@@ -10,7 +10,7 @@ use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::common::has_allow_sync;
+use crate::common::{ExtractedParams, has_allow_sync};
 use codegen::{generate_call_expr, generate_watcher};
 
 /// Implementation of the `#[service]` attribute macro.
@@ -30,8 +30,13 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let body = &input.block;
 
     // Extract parameters and categorize them
-    let (clean_inputs, resolve_tokens, call_args, param_entries, watcher_select_arms) =
-        extract_params(sig);
+    let ExtractedParams {
+        clean_inputs,
+        resolve_tokens,
+        call_args,
+        param_entries,
+        watcher_arms,
+    } = extract_params(sig);
 
     let mut clean_sig = sig.clone();
     clean_sig.inputs = clean_inputs;
@@ -49,7 +54,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         allow_sync_present,
     );
 
-    let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_select_arms);
+    let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
     let expanded = quote! {
         #(#attrs)*
@@ -88,26 +93,11 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Extracts and categorizes parameters from the function signature.
-///
-/// Returns a tuple of:
-/// - `clean_inputs`: Cleaned function inputs.
-/// - `resolve_tokens`: Tokens for resolving dependencies.
-/// - `call_args`: Arguments to pass to the user function.
-/// - `param_entries`: ServiceParam entries for registry.
-/// - `watcher_select_arms`: Select arms for the watcher function.
-fn extract_params(
-    sig: &syn::Signature,
-) -> (
-    syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-) {
+fn extract_params(sig: &syn::Signature) -> ExtractedParams {
     let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
-    let mut watcher_select_arms = Vec::new();
+    let mut watcher_arms = Vec::new();
 
     let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
     for arg in &sig.inputs {
@@ -162,7 +152,7 @@ fn extract_params(
                         service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
                     });
 
-                    watcher_select_arms.push(quote! {
+                    watcher_arms.push(quote! {
                         _ = <#inner_type as service_daemon::Provided>::changed() => {}
                     });
                 }
@@ -184,13 +174,13 @@ fn extract_params(
         );
     }
 
-    (
+    ExtractedParams {
         clean_inputs,
         resolve_tokens,
         call_args,
         param_entries,
-        watcher_select_arms,
-    )
+        watcher_arms,
+    }
 }
 
 fn parse_service_attr(attr_str: &str, key: &str) -> Option<String> {

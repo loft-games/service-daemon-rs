@@ -12,7 +12,7 @@ use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::common::has_allow_sync;
+use crate::common::{ExtractedParams, has_allow_sync};
 use codegen::{generate_call_expr, generate_event_loop_call, generate_watcher};
 use parser::{VALID_VARIANTS, normalize_template, parse_attrs};
 
@@ -71,8 +71,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         target_str.parse().unwrap_or_else(|_| quote!(Unknown));
 
     // Extract parameters and categorize them
-    let (clean_inputs, di_resolve_tokens, call_args, param_entries, watcher_select_arms) =
-        extract_params(sig, fn_name);
+    let ExtractedParams {
+        clean_inputs,
+        resolve_tokens,
+        call_args,
+        param_entries,
+        watcher_arms,
+    } = extract_params(sig);
 
     // Compute normalized template name and enum variant
     let (normalized_template, _template_variant) = normalize_template(&template);
@@ -87,18 +92,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         allow_sync_present,
     );
 
-    let (watcher_fn, watcher_ptr) = generate_watcher(
-        fn_name,
-        normalized_template,
-        &watcher_select_arms,
-        &target_type,
-    );
+    let (watcher_fn, watcher_ptr) =
+        generate_watcher(fn_name, normalized_template, &watcher_arms, &target_type);
 
     let event_loop_call = generate_event_loop_call(
         normalized_template,
         &fn_name_str,
         &target_type,
-        &di_resolve_tokens,
+        &resolve_tokens,
         &call_expr,
         &template,
     );
@@ -146,27 +147,11 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Extracts and categorizes parameters from the function signature.
-///
-/// Returns a tuple of:
-/// - `clean_inputs`: Cleaned function inputs (with macro attributes stripped).
-/// - `di_resolve_tokens`: Tokens for resolving dependencies.
-/// - `call_args`: Arguments to pass to the user function.
-/// - `param_entries`: ServiceParam entries for registry.
-/// - `watcher_select_arms`: Select arms for the watcher function.
-fn extract_params(
-    sig: &syn::Signature,
-    _fn_name: &syn::Ident,
-) -> (
-    syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-    Vec<proc_macro2::TokenStream>,
-) {
-    let mut di_resolve_tokens = Vec::new();
+fn extract_params(sig: &syn::Signature) -> ExtractedParams {
+    let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
-    let mut watcher_select_arms = Vec::new();
+    let mut watcher_arms = Vec::new();
     let mut payload_arg_name: Option<syn::Ident> = None;
 
     let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
@@ -175,7 +160,7 @@ fn extract_params(
             let arg_name_str = arg_name.to_string();
 
             match intent {
-                crate::common::ParamIntent::Payload { is_arc, span: _ } => {
+                crate::common::ParamIntent::Payload { is_arc } => {
                     if payload_arg_name.is_some() {
                         abort!(
                             arg,
@@ -213,7 +198,7 @@ fn extract_params(
 
                     match wrapper {
                         crate::common::WrapperKind::Arc(arc_span) => {
-                            di_resolve_tokens.push(quote! {
+                            resolve_tokens.push(quote! {
                                 let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
                             });
                             clean_inputs.push(
@@ -222,14 +207,14 @@ fn extract_params(
                             );
                         }
                         crate::common::WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
-                            di_resolve_tokens.push(quote! {
+                            resolve_tokens.push(quote! {
                                 let #arg_name = #inner_type::rwlock().await;
                             });
                             let rw_path = quote_spanned! { rwlock_span => service_daemon::utils::managed_state::RwLock<#inner_type> };
                             clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> }).unwrap());
                         }
                         crate::common::WrapperKind::ArcMutex(arc_span, mutex_span) => {
-                            di_resolve_tokens.push(quote! {
+                            resolve_tokens.push(quote! {
                                 let #arg_name = #inner_type::mutex().await;
                             });
                             let mutex_path = quote_spanned! { mutex_span => service_daemon::utils::managed_state::Mutex<#inner_type> };
@@ -243,7 +228,7 @@ fn extract_params(
                         service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
                     });
 
-                    watcher_select_arms.push(quote! {
+                    watcher_arms.push(quote! {
                         _ = <#inner_type as service_daemon::Provided>::changed() => {}
                     });
                 }
@@ -254,11 +239,11 @@ fn extract_params(
         abort!(arg, "Unsupported parameter type in trigger.");
     }
 
-    (
+    ExtractedParams {
         clean_inputs,
-        di_resolve_tokens,
+        resolve_tokens,
         call_args,
         param_entries,
-        watcher_select_arms,
-    )
+        watcher_arms,
+    }
 }
