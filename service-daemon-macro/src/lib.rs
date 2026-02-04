@@ -15,6 +15,11 @@ mod provider;
 mod service;
 mod trigger;
 
+// Internal Module Structure:
+// - trigger/: Macro logic for #[trigger]. Split into mod.rs (main), parser.rs (attributes), and codegen.rs (logic).
+// - service/: Macro logic for #[service]. Split into mod.rs (main) and codegen.rs (helpers).
+// - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, templates.rs (special types), and struct_gen.rs (DI).
+
 /// Marks a synchronous function as intentionally not needing `async`.
 ///
 /// Use this attribute to suppress warnings about synchronous functions

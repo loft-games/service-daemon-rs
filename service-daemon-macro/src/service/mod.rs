@@ -1,4 +1,9 @@
 //! `#[service]` macro implementation.
+//!
+//! This module is split into submodules for better organization:
+//! - `codegen`: Code generation for watchers and call expressions.
+
+mod codegen;
 
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
@@ -6,6 +11,7 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::{ItemFn, parse_macro_input};
 
 use crate::common::has_allow_sync;
+use codegen::{generate_call_expr, generate_watcher};
 
 /// Implementation of the `#[service]` attribute macro.
 pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -23,6 +29,81 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &input.sig;
     let body = &input.block;
 
+    // Extract parameters and categorize them
+    let (clean_inputs, resolve_tokens, call_args, param_entries, watcher_select_arms) =
+        extract_params(sig);
+
+    let mut clean_sig = sig.clone();
+    clean_sig.inputs = clean_inputs;
+
+    let wrapper_name = format_ident!("{}_wrapper", fn_name);
+    let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
+
+    let is_async = input.sig.asyncness.is_some();
+    let allow_sync_present = has_allow_sync(attrs);
+    let call_expr = generate_call_expr(
+        fn_name,
+        &fn_name_str,
+        &call_args,
+        is_async,
+        allow_sync_present,
+    );
+
+    let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_select_arms);
+
+    let expanded = quote! {
+        #(#attrs)*
+        #vis #clean_sig {
+            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
+            #[allow(unused_imports)]
+            use service_daemon::utils::managed_state::{RwLock, Mutex};
+            #body
+        }
+
+        /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
+        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(async move {
+                #(#resolve_tokens)*
+                #call_expr
+            })
+        }
+
+        #watcher_fn
+
+        /// Auto-generated static registry entry - collected by linkme at link time
+        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
+        #[linkme(crate = service_daemon::linkme)]
+        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
+            name: #fn_name_str,
+            module: module_path!(),
+            params: &[#(#param_entries),*],
+            wrapper: #wrapper_name,
+            watcher: #watcher_ptr,
+            priority: #priority_tokens,
+        };
+
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Extracts and categorizes parameters from the function signature.
+///
+/// Returns a tuple of:
+/// - `clean_inputs`: Cleaned function inputs.
+/// - `resolve_tokens`: Tokens for resolving dependencies.
+/// - `call_args`: Arguments to pass to the user function.
+/// - `param_entries`: ServiceParam entries for registry.
+/// - `watcher_select_arms`: Select arms for the watcher function.
+fn extract_params(
+    sig: &syn::Signature,
+) -> (
+    syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
+    Vec<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
+    Vec<proc_macro2::TokenStream>,
+) {
     let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
@@ -103,83 +184,13 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         );
     }
 
-    let mut clean_sig = sig.clone();
-    clean_sig.inputs = clean_inputs;
-
-    let wrapper_name = format_ident!("{}_wrapper", fn_name);
-    let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
-
-    // The module path will be captured at the call site using module_path!() macro
-
-    let watcher_name = format_ident!("{}_watcher", fn_name);
-    let (watcher_fn, watcher_ptr) = if !watcher_select_arms.is_empty() {
-        (
-            quote! {
-                /// Auto-generated watcher for the service - notifies when dependencies change
-                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
-                    Box::pin(async move {
-                        service_daemon::tokio::select! {
-                            #(#watcher_select_arms),*
-                        }
-                    })
-                }
-            },
-            quote! { Some(#watcher_name) },
-        )
-    } else {
-        (quote! {}, quote! { None })
-    };
-
-    let is_async = input.sig.asyncness.is_some();
-    let allow_sync_present = has_allow_sync(attrs);
-    let call_expr = if is_async {
-        quote! { #fn_name(#(#call_args),*).await }
-    } else if allow_sync_present {
-        // User explicitly allowed sync, no warning
-        quote! { #fn_name(#(#call_args),*) }
-    } else {
-        quote! {
-            {
-                tracing::warn!("Service '{}' is synchronous. Consider switching to 'async fn' to avoid blocking the executor.", #fn_name_str);
-                #fn_name(#(#call_args),*)
-            }
-        }
-    };
-
-    let expanded = quote! {
-        #(#attrs)*
-        #vis #clean_sig {
-            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
-            #[allow(unused_imports)]
-            use service_daemon::utils::managed_state::{RwLock, Mutex};
-            #body
-        }
-
-        /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
-        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async move {
-                #(#resolve_tokens)*
-                #call_expr
-            })
-        }
-
-        #watcher_fn
-
-        /// Auto-generated static registry entry - collected by linkme at link time
-        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
-            name: #fn_name_str,
-            module: module_path!(),
-            params: &[#(#param_entries),*],
-            wrapper: #wrapper_name,
-            watcher: #watcher_ptr,
-            priority: #priority_tokens,
-        };
-
-    };
-
-    TokenStream::from(expanded)
+    (
+        clean_inputs,
+        resolve_tokens,
+        call_args,
+        param_entries,
+        watcher_select_arms,
+    )
 }
 
 fn parse_service_attr(attr_str: &str, key: &str) -> Option<String> {

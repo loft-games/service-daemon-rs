@@ -56,4 +56,21 @@ graph TD
     SCP -->|spawn| T
 ```
 
+## 4. Project Structure
+
+The framework is organized into specialized submodules to ensure maintainability as the codebase grows:
+
+### `service-daemon-macro`
+- **`trigger/`**: Handles attribute parsing and code generation for event-driven logic (Cron, Queues, Watchers).
+- **`service/`**: Core logic for wrapping functions as managed tasks and registering them with `linkme`.
+- **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `LBQueue`.
+
+### `service-daemon`
+- **`utils/service_daemon/`**: The core orchestrator.
+  - `policy.rs`: Resilience configuration (backoff, jitter).
+  - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
+- **`utils/context/`**: Task-local storage and status plane interactions.
+- **`utils/managed_state/`**: The reactive state engine with change tracking.
+
 [Back to README](../../README.md)
+
