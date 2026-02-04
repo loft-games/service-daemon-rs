@@ -18,17 +18,17 @@ uuid-trigger-ids = ["dep:uuid"]
 
 [dependencies]
 service-daemon-macro = { path = "../service-daemon-macro" }
-tokio = { version = "1.40", features = ["full", "tracing"] }
-tokio-cron-scheduler = { version = "0.13", optional = true }
+tokio = { version = "1.43", features = ["full", "tracing"] }
+tokio-cron-scheduler = { version = "0.15", optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "2.0"
 futures = "0.3"
 linkme = "0.3"
-uuid = { version = "1.0", features = ["v4"], optional = true }
+uuid = { version = "1.12", features = ["v4"], optional = true }
 tokio-util = "0.7"
-rand = "0.8"
-dashmap = "6.0"
+rand = "0.9"
+dashmap = "6.1"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }

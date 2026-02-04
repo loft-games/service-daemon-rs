@@ -51,7 +51,7 @@ impl RestartPolicy {
     pub fn next_delay(&self, current_delay: Duration) -> Duration {
         let base = current_delay.as_secs_f64() * self.multiplier;
         let jitter_range = base * self.jitter_factor;
-        let jitter = rand::thread_rng().gen_range(-jitter_range..=jitter_range);
+        let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
         let next = Duration::from_secs_f64((base + jitter).max(0.0));
         next.min(self.max_delay)
     }
