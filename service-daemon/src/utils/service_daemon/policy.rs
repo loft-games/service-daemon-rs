@@ -16,6 +16,10 @@ pub struct RestartPolicy {
     pub reset_after: Duration,
     /// Jitter factor (0.0 to 1.0) - randomizes delay to prevent thundering herd (default: 0.1)
     pub jitter_factor: f64,
+    /// Timeout for waiting for services to become healthy during wave startup (default: 5 seconds)
+    pub wave_spawn_timeout: Duration,
+    /// Timeout for waiting for services to stop during wave shutdown (default: 30 seconds)
+    pub wave_stop_timeout: Duration,
 }
 
 impl Default for RestartPolicy {
@@ -26,6 +30,8 @@ impl Default for RestartPolicy {
             multiplier: 2.0,
             reset_after: Duration::from_secs(60),
             jitter_factor: 0.1, // 10% jitter by default
+            wave_spawn_timeout: Duration::from_secs(5),
+            wave_stop_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -44,6 +50,8 @@ impl RestartPolicy {
             multiplier: 2.0,
             reset_after: Duration::from_secs(5),
             jitter_factor: 0.0, // No jitter for predictable tests
+            wave_spawn_timeout: Duration::from_millis(500),
+            wave_stop_timeout: Duration::from_secs(2),
         }
     }
 
@@ -86,6 +94,16 @@ impl RestartPolicyBuilder {
 
     pub fn jitter_factor(mut self, factor: f64) -> Self {
         self.policy.jitter_factor = factor.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn wave_spawn_timeout(mut self, timeout: Duration) -> Self {
+        self.policy.wave_spawn_timeout = timeout;
+        self
+    }
+
+    pub fn wave_stop_timeout(mut self, timeout: Duration) -> Self {
+        self.policy.wave_stop_timeout = timeout;
         self
     }
 

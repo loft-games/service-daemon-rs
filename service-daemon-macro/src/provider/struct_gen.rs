@@ -11,6 +11,81 @@ use super::templates::{
     generate_broadcast_queue_template, generate_lb_queue_template, generate_notify_template,
 };
 
+/// Attempts to generate a template-based provider if the default value matches a known template.
+/// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
+fn try_generate_template(
+    struct_name: &syn::Ident,
+    vis: &syn::Visibility,
+    attrs: &[syn::Attribute],
+    provider_attrs: &ProviderAttrs,
+) -> Option<TokenStream> {
+    let default_val = provider_attrs.default_value.as_ref()?;
+
+    match default_val.as_str() {
+        // Signal templates
+        "Notify" | "Event" => Some(generate_notify_template(struct_name, vis, attrs)),
+        // Broadcast queue templates (fanout - all handlers receive the event)
+        "BroadcastQueue" | "Queue" | "BQueue" => {
+            let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
+            let capacity = provider_attrs.capacity.unwrap_or(100);
+            Some(generate_broadcast_queue_template(
+                struct_name,
+                vis,
+                attrs,
+                item_type_str,
+                capacity,
+            ))
+        }
+        // Load-balancing queue templates (single consumer)
+        "LoadBalancingQueue" | "LBQueue" => {
+            let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
+            let capacity = provider_attrs.capacity.unwrap_or(100);
+            Some(generate_lb_queue_template(
+                struct_name,
+                vis,
+                attrs,
+                item_type_str,
+                capacity,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Information about a single-element tuple struct.
+struct TupleStructInfo {
+    inner_type: syn::Type,
+    is_string: bool,
+}
+
+impl TupleStructInfo {
+    /// Analyzes fields to determine if this is a single-element tuple struct.
+    fn from_fields(fields: &syn::Fields) -> Option<Self> {
+        if let syn::Fields::Unnamed(f) = fields
+            && f.unnamed.len() == 1
+        {
+            let inner_type = f.unnamed.first().unwrap().ty.clone();
+            let is_string = Self::is_string_type(&inner_type);
+            Some(Self {
+                inner_type,
+                is_string,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn is_string_type(ty: &syn::Type) -> bool {
+        if let syn::Type::Path(type_path) = ty
+            && let Some(seg) = type_path.path.segments.last()
+        {
+            seg.ident == "String"
+        } else {
+            false
+        }
+    }
+}
+
 /// Generates a provider for a struct with automatic field injection.
 pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream {
     let struct_name = &item.ident;
@@ -23,87 +98,22 @@ pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream
     // Parse attributes (default, env_name, item_type, capacity)
     let provider_attrs = parse_provider_attrs(attr_str);
 
-    // Check for magic template defaults
-    if let Some(ref default_val) = provider_attrs.default_value {
-        match default_val.as_str() {
-            // Signal templates
-            "Notify" | "Event" => {
-                return generate_notify_template(struct_name, vis, attrs);
-            }
-            // Broadcast queue templates (fanout - all handlers receive the event)
-            "BroadcastQueue" | "Queue" | "BQueue" => {
-                let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
-                let capacity = provider_attrs.capacity.unwrap_or(100);
-                return generate_broadcast_queue_template(
-                    struct_name,
-                    vis,
-                    attrs,
-                    item_type_str,
-                    capacity,
-                );
-            }
-            // Load-balancing queue templates (single consumer)
-            "LoadBalancingQueue" | "LBQueue" => {
-                let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
-                let capacity = provider_attrs.capacity.unwrap_or(100);
-                return generate_lb_queue_template(
-                    struct_name,
-                    vis,
-                    attrs,
-                    item_type_str,
-                    capacity,
-                );
-            }
-            _ => {}
-        }
+    // Check for magic template defaults first
+    if let Some(template_output) = try_generate_template(struct_name, vis, attrs, &provider_attrs) {
+        return template_output;
     }
 
     // Generate struct definition with proper syntax
-    let struct_def = if semi.is_some() {
-        // Tuple struct or unit struct
-        quote! {
-            #(#attrs)*
-            #vis struct #struct_name #generics #fields;
-        }
-    } else {
-        // Named struct
-        quote! {
-            #(#attrs)*
-            #vis struct #struct_name #generics #fields
-        }
-    };
+    let struct_def = generate_struct_definition(attrs, vis, struct_name, generics, fields, semi);
 
-    // Check if it's a single-element tuple struct
-    let is_single_tuple = matches!(fields, syn::Fields::Unnamed(f) if f.unnamed.len() == 1);
-
-    // Get the inner type for single-element tuple structs
-    let inner_type = if is_single_tuple {
-        if let syn::Fields::Unnamed(f) = fields {
-            Some(f.unnamed.first().unwrap().ty.clone())
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Check if inner type is String (for auto .to_owned() expansion)
-    let inner_is_string = inner_type.as_ref().is_some_and(|ty| {
-        if let syn::Type::Path(type_path) = ty
-            && let Some(seg) = type_path.path.segments.last()
-        {
-            seg.ident == "String"
-        } else {
-            false
-        }
-    });
+    // Analyze tuple struct properties
+    let tuple_info = TupleStructInfo::from_fields(fields);
 
     // Generate extra traits ONLY for single-element tuple structs
-    let extra_traits = generate_extra_traits(&inner_type, struct_name);
+    let extra_traits = generate_extra_traits(&tuple_info, struct_name);
 
     // Generate Default impl for single-element tuple structs
-    let default_impl =
-        generate_default_impl(&inner_type, inner_is_string, &provider_attrs, struct_name);
+    let default_impl = generate_default_impl(&tuple_info, &provider_attrs, struct_name);
 
     // Generate constructor based on field type (async for named structs with Arc deps)
     let constructor = generate_constructor(fields);
@@ -163,12 +173,37 @@ pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream
     })
 }
 
+/// Generates the struct definition with proper syntax for different struct kinds.
+fn generate_struct_definition(
+    attrs: &[syn::Attribute],
+    vis: &syn::Visibility,
+    struct_name: &syn::Ident,
+    generics: &syn::Generics,
+    fields: &syn::Fields,
+    semi: &Option<syn::token::Semi>,
+) -> proc_macro2::TokenStream {
+    if semi.is_some() {
+        // Tuple struct or unit struct
+        quote! {
+            #(#attrs)*
+            #vis struct #struct_name #generics #fields;
+        }
+    } else {
+        // Named struct
+        quote! {
+            #(#attrs)*
+            #vis struct #struct_name #generics #fields
+        }
+    }
+}
+
 /// Generates extra traits (Deref, Display) for single-element tuple structs.
 fn generate_extra_traits(
-    inner_type: &Option<syn::Type>,
+    tuple_info: &Option<TupleStructInfo>,
     struct_name: &syn::Ident,
 ) -> proc_macro2::TokenStream {
-    if let Some(inner) = inner_type {
+    if let Some(info) = tuple_info {
+        let inner = &info.inner_type;
         quote! {
             impl std::ops::Deref for #struct_name {
                 type Target = #inner;
@@ -190,18 +225,17 @@ fn generate_extra_traits(
 
 /// Generates the Default impl for single-element tuple structs.
 fn generate_default_impl(
-    inner_type: &Option<syn::Type>,
-    inner_is_string: bool,
+    tuple_info: &Option<TupleStructInfo>,
     provider_attrs: &ProviderAttrs,
     struct_name: &syn::Ident,
 ) -> proc_macro2::TokenStream {
+    let Some(info) = tuple_info else {
+        return quote! {};
+    };
+
     // Helper to generate the to_owned() expansion if needed
     let dot_owned_expansion = |val: &String| {
-        if inner_is_string
-            && val.as_str().starts_with('"')
-            && val.as_str().ends_with('"')
-            && !val.contains(".to_")
-        {
+        if info.is_string && val.starts_with('"') && val.ends_with('"') && !val.contains(".to_") {
             // It's a bare string literal for a String field - add .to_owned()
             format!("{}.to_owned()", val)
                 .parse()
@@ -212,41 +246,33 @@ fn generate_default_impl(
         }
     };
 
-    if inner_type.is_some() {
-        // Build the default expression
-        let default_expr = if let Some(ref env_name) = provider_attrs.env_name {
-            // Use env var with fallback to default
-            if let Some(ref default_val) = provider_attrs.default_value {
-                let default_tokens = dot_owned_expansion(default_val);
-                quote! {
-                    std::env::var(#env_name).unwrap_or_else(|_| #default_tokens)
-                }
-            } else {
-                quote! {
-                    std::env::var(#env_name).expect(concat!("Environment variable ", #env_name, " not set"))
-                }
-            }
-        } else if let Some(ref default_val) = provider_attrs.default_value {
+    // Build the default expression
+    let default_expr = if let Some(ref env_name) = provider_attrs.env_name {
+        // Use env var with fallback to default
+        if let Some(ref default_val) = provider_attrs.default_value {
             let default_tokens = dot_owned_expansion(default_val);
-            quote! { #default_tokens }
-        } else {
-            // No default specified, skip Default impl
-            quote! {}
-        };
-
-        if provider_attrs.default_value.is_some() || provider_attrs.env_name.is_some() {
             quote! {
-                impl Default for #struct_name {
-                    fn default() -> Self {
-                        Self(#default_expr)
-                    }
-                }
+                std::env::var(#env_name).unwrap_or_else(|_| #default_tokens)
             }
         } else {
-            quote! {}
+            quote! {
+                std::env::var(#env_name).expect(concat!("Environment variable ", #env_name, " not set"))
+            }
         }
+    } else if let Some(ref default_val) = provider_attrs.default_value {
+        let default_tokens = dot_owned_expansion(default_val);
+        quote! { #default_tokens }
     } else {
-        quote! {}
+        // No default specified, skip Default impl
+        return quote! {};
+    };
+
+    quote! {
+        impl Default for #struct_name {
+            fn default() -> Self {
+                Self(#default_expr)
+            }
+        }
     }
 }
 
@@ -254,30 +280,33 @@ fn generate_default_impl(
 fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
     match fields {
         syn::Fields::Named(named_fields) => {
-            let mut field_inits = Vec::new();
-            for field in &named_fields.named {
-                let field_name = field.ident.as_ref().unwrap();
-                let field_type = &field.ty;
+            let field_inits: Vec<_> = named_fields
+                .named
+                .iter()
+                .map(|field| {
+                    let field_name = field.ident.as_ref().unwrap();
+                    let field_type = &field.ty;
 
-                // Check if it's Arc<T>
-                if let Type::Path(syn::TypePath { path, .. }) = field_type
-                    && let (Some(segment), true) = (path.segments.last(), path.segments.len() == 1)
-                    && segment.ident == "Arc"
-                    && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                    && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
-                {
-                    // Async resolution with .await
-                    field_inits.push(quote! {
-                        #field_name: <#inner_type as service_daemon::Provided>::resolve().await
-                    });
-                    continue;
-                }
-
-                // For non-Arc fields, use Default
-                field_inits.push(quote! {
-                    #field_name: Default::default()
-                });
-            }
+                    // Check if it's Arc<T>
+                    if let Type::Path(syn::TypePath { path, .. }) = field_type
+                        && let (Some(segment), true) =
+                            (path.segments.last(), path.segments.len() == 1)
+                        && segment.ident == "Arc"
+                        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
+                    {
+                        // Async resolution with .await
+                        quote! {
+                            #field_name: <#inner_type as service_daemon::Provided>::resolve().await
+                        }
+                    } else {
+                        // For non-Arc fields, use Default
+                        quote! {
+                            #field_name: Default::default()
+                        }
+                    }
+                })
+                .collect();
 
             quote! {
                 std::sync::Arc::new(Self {

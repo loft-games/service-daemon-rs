@@ -2,7 +2,7 @@
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -10,33 +10,49 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
-use crate::models::{ServiceDescription, ServiceFn, ServiceStatus};
+use crate::models::{ServiceDescription, ServiceError, ServiceFn, ServiceStatus};
 use crate::utils::context::{__run_service_scope, DaemonResources, ServiceIdentity};
 
 use super::policy::RestartPolicy;
 
-/// Spawn a single service with the given restart policy.
-pub async fn spawn_service(
+/// Supervises a single service's lifecycle, including restarts and signal handling.
+struct ServiceSupervisor {
     name: String,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     policy: RestartPolicy,
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     resources: DaemonResources,
     cancellation_token: CancellationToken,
-) {
-    let name_for_task = name.clone();
-    let resources_clone = resources.clone();
-    let handle = tokio::spawn(async move {
-        let mut current_delay = policy.initial_delay;
-        let name = name_for_task;
-        let resources = resources_clone;
+    current_delay: Duration,
+}
 
-        // Spawn dependency watcher if present
-        if let Some(watcher) = watcher {
-            let n = name.clone();
-            let ct = cancellation_token.clone();
-            let res = resources.clone();
+impl ServiceSupervisor {
+    fn new(
+        name: String,
+        run: ServiceFn,
+        watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+        policy: RestartPolicy,
+        resources: DaemonResources,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        Self {
+            name,
+            run,
+            watcher,
+            policy,
+            resources,
+            cancellation_token,
+            current_delay: policy.initial_delay,
+        }
+    }
+
+    /// Spawns the dependency watcher if present.
+    fn spawn_watcher(&self) {
+        if let Some(watcher) = &self.watcher {
+            let n = self.name.clone();
+            let ct = self.cancellation_token.clone();
+            let res = self.resources.clone();
+            let watcher = watcher.clone();
             tokio::spawn(async move {
                 while !ct.is_cancelled() {
                     let reload_signal = res
@@ -55,214 +71,263 @@ pub async fn spawn_service(
                 }
             });
         }
+    }
+
+    /// Determines the initial status for a new service generation.
+    fn determine_start_status(&self) -> ServiceStatus {
+        let initial_status = self
+            .resources
+            .status_plane
+            .get(&self.name)
+            .map(|s| s.value().clone())
+            .unwrap_or(ServiceStatus::Initializing);
+
+        match initial_status {
+            ServiceStatus::Initializing => ServiceStatus::Initializing,
+            ServiceStatus::Recovering(e) => ServiceStatus::Recovering(e),
+            _ => ServiceStatus::Restoring,
+        }
+    }
+
+    /// Handles the outcome of a service execution.
+    /// Returns `true` if the service should be restarted, `false` if it should stop permanently.
+    fn handle_outcome(
+        &self,
+        result: Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>,
+        reload_token: &CancellationToken,
+    ) -> (ServiceStatus, bool) {
+        let mut should_restart = true;
+
+        let next_status = match result {
+            Ok(Ok(_)) => {
+                warn!("Service {} exited normally", self.name);
+                ServiceStatus::Initializing
+            }
+            Ok(Err(e)) => {
+                // Check for fatal error
+                if let Some(svc_err) = e.downcast_ref::<ServiceError>()
+                    && matches!(svc_err, ServiceError::Fatal(_))
+                {
+                    error!(
+                        "Service {} encountered fatal error: {:?}",
+                        self.name, svc_err
+                    );
+                    should_restart = false;
+                    return (ServiceStatus::Terminated, should_restart);
+                }
+                error!("Service {} failed: {:?}", self.name, e);
+                ServiceStatus::Recovering(format!("{:?}", e))
+            }
+            Err(panic) => {
+                let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic".to_string()
+                };
+                error!("Service {} panicked: {}", self.name, panic_msg);
+                ServiceStatus::Recovering(format!("Panic: {}", panic_msg))
+            }
+        };
+
+        // Check for explicit reload
+        if reload_token.is_cancelled() {
+            info!(
+                "Supervisor: Service {} exited after reload signal",
+                self.name
+            );
+            return (ServiceStatus::Restoring, true);
+        }
+
+        (next_status, should_restart)
+    }
+
+    /// Waits for the restart delay, allowing early exit on reload or cancellation.
+    /// Returns `true` if restart should proceed, `false` if shutdown was requested.
+    async fn wait_for_restart(&mut self) -> bool {
+        let reload_signal = self
+            .resources
+            .reload_signals
+            .entry(self.name.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .clone();
+
+        warn!(
+            "Restarting service {} in {:.1}s...",
+            self.name,
+            self.current_delay.as_secs_f64()
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(self.current_delay) => {}
+            _ = reload_signal.notified() => {
+                info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
+                self.current_delay = Duration::from_millis(0);
+            }
+            _ = self.cancellation_token.cancelled() => {
+                info!("Service {} received shutdown signal during restart delay", self.name);
+                self.resources.status_plane.insert(self.name.clone(), ServiceStatus::Terminated);
+                self.resources.status_changed.notify_waiters();
+                return false;
+            }
+        }
+
+        // Apply exponential backoff for next restart
+        self.current_delay = self.policy.next_delay(self.current_delay);
+        true
+    }
+
+    /// Main supervision loop.
+    async fn run_loop(mut self) {
+        self.spawn_watcher();
 
         loop {
-            // Determine initial status based on the previous generation
-            let initial_status = resources
-                .status_plane
-                .get(&name)
-                .map(|s| s.value().clone())
-                .unwrap_or(ServiceStatus::Initializing);
-
-            // Normalizing initial status: if we were reloading, the new instance starts as Restoring.
-            // If we were starting or recovering, we preserve that status.
-            let start_status = match initial_status {
-                ServiceStatus::Initializing => ServiceStatus::Initializing,
-                ServiceStatus::Recovering(e) => ServiceStatus::Recovering(e),
-                _ => ServiceStatus::Restoring,
-            };
-
-            if cancellation_token.is_cancelled() {
+            if self.cancellation_token.is_cancelled() {
                 info!(
                     "Service {} received shutdown signal, exiting gracefully",
-                    name
+                    self.name
                 );
-                resources
+                self.resources
                     .status_plane
-                    .insert(name.clone(), ServiceStatus::Terminated);
-                resources.status_changed.notify_waiters();
+                    .insert(self.name.clone(), ServiceStatus::Terminated);
+                self.resources.status_changed.notify_waiters();
                 break;
             }
 
-            info!("Starting service: {} with status {:?}", name, start_status);
-            resources
+            let start_status = self.determine_start_status();
+            info!(
+                "Starting service: {} with status {:?}",
+                self.name, start_status
+            );
+            self.resources
                 .status_plane
-                .insert(name.clone(), start_status.clone());
-            resources.status_changed.notify_waiters();
+                .insert(self.name.clone(), start_status);
+            self.resources.status_changed.notify_waiters();
             let start_time = std::time::Instant::now();
 
-            let span = tracing::info_span!("service", %name);
-            let token_clone = cancellation_token.clone();
+            let span = tracing::info_span!("service", name = %self.name);
 
             // Get or create reload signal
-            let reload_signal = resources
+            let reload_signal = self
+                .resources
                 .reload_signals
-                .entry(name.clone())
+                .entry(self.name.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
                 .clone();
 
-            // Create a reload token that we can cancel when a reload is requested.
-            // This allows state().await to return NeedReload immediately.
+            // Create reload token for this generation
             let reload_token = CancellationToken::new();
-            let rt_clone = reload_token.clone();
-            let rs_clone = reload_signal.clone();
-            let n = name.clone();
-            let bridge_task = tokio::spawn(async move {
-                rs_clone.notified().await;
-                rt_clone.cancel();
-                info!(
-                    "Supervisor: Reload triggered for {}, notifying service task",
-                    n
-                );
-            });
+            let identity = ServiceIdentity::new(
+                self.name.clone(),
+                self.cancellation_token.clone(),
+                reload_token.clone(),
+            );
 
-            let identity =
-                ServiceIdentity::new(name.clone(), token_clone.clone(), reload_token.clone());
-
-            // Wrapper to run service in TLS scope and capture errors
-            let run_clone = run.clone();
-            let token_for_run = token_clone.clone();
-            let resources_clone = resources.clone();
+            // Run the service with integrated signal handling (no bridge task)
+            let run_clone = self.run.clone();
+            let token_for_run = self.cancellation_token.clone();
+            let resources_clone = self.resources.clone();
+            let reload_token_clone = reload_token.clone();
 
             let result = __run_service_scope(identity, resources_clone, || async move {
-                std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
-                    .catch_unwind()
-                    .await
+                let service_future =
+                    std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
+                        .catch_unwind();
+
+                // Integrated signal handling - replaces the bridge_task
+                tokio::select! {
+                    res = service_future => res,
+                    _ = reload_signal.notified() => {
+                        reload_token_clone.cancel();
+                        info!("Service reload signal received, waiting for service to exit...");
+                        // Return Ok to indicate clean reload, not an error
+                        Ok(Ok(()))
+                    }
+                }
             })
             .await;
 
-            bridge_task.abort();
-
-            // Determine next status based on outcome
-            // Note: Shelf is preserved for recovery; service can decide whether to use it.
-            let mut next_status = ServiceStatus::Initializing;
-
-            match result {
-                Ok(Ok(_)) => {
-                    warn!("Service {} exited normally", name);
-                }
-                Ok(Err(e)) => {
-                    error!("Service {} failed: {:?}", name, e);
-                    next_status = ServiceStatus::Recovering(format!("{:?}", e));
-                }
-                Err(panic) => {
-                    let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = panic.downcast_ref::<String>() {
-                        s.clone()
-                    } else {
-                        "Unknown panic".to_string()
-                    };
-                    error!("Service {} panicked: {}", name, panic_msg);
-                    next_status = ServiceStatus::Recovering(format!("Panic: {}", panic_msg));
-                }
-            };
-
-            // Check for explicit reload or normal exit
-            if reload_token.is_cancelled() {
-                info!("Supervisor: Service {} exited after reload signal", name);
-                next_status = ServiceStatus::Restoring;
-            }
+            // Handle outcome
+            let (next_status, should_restart) = self.handle_outcome(result, &reload_token);
 
             // Check for cancellation after service exits
-            if cancellation_token.is_cancelled() {
-                info!("Service {} received shutdown signal, not restarting", name);
-                resources
+            if self.cancellation_token.is_cancelled() {
+                info!(
+                    "Service {} received shutdown signal, not restarting",
+                    self.name
+                );
+                self.resources
                     .status_plane
-                    .insert(name.clone(), ServiceStatus::Terminated);
-                resources.status_changed.notify_waiters();
+                    .insert(self.name.clone(), ServiceStatus::Terminated);
+                self.resources.status_changed.notify_waiters();
+                break;
+            }
+
+            if !should_restart {
+                info!("Service {} marked as fatal, not restarting", self.name);
+                self.resources
+                    .status_plane
+                    .insert(self.name.clone(), ServiceStatus::Terminated);
+                self.resources.status_changed.notify_waiters();
                 break;
             }
 
             info!(
                 "Supervisor: Setting next_status for {} to {:?}",
-                name, next_status
+                self.name, next_status
             );
-            resources.status_plane.insert(name.clone(), next_status);
-            resources.status_changed.notify_waiters();
+            self.resources
+                .status_plane
+                .insert(self.name.clone(), next_status);
+            self.resources.status_changed.notify_waiters();
 
             // Reset delay if service ran successfully for long enough
-            if start_time.elapsed() >= policy.reset_after {
-                current_delay = policy.initial_delay;
+            if start_time.elapsed() >= self.policy.reset_after {
+                self.current_delay = self.policy.initial_delay;
             }
 
-            warn!(
-                "Restarting service {} in {:.1}s...",
-                name,
-                current_delay.as_secs_f64()
-            );
-
-            // Use select to allow cancellation OR reload during sleep
-            tokio::select! {
-                _ = tokio::time::sleep(current_delay) => {}
-                _ = reload_signal.notified() => {
-                    info!("Supervisor: Service {} received immediate reload during restart delay", name);
-                    current_delay = Duration::from_millis(0); // Restart immediately
-                }
-                _ = cancellation_token.cancelled() => {
-                    info!("Service {} received shutdown signal during restart delay", name);
-                    resources.status_plane.insert(name.clone(), ServiceStatus::Terminated);
-                    resources.status_changed.notify_waiters();
-                    break;
-                }
+            if !self.wait_for_restart().await {
+                break;
             }
-
-            // Apply exponential backoff for next restart
-            current_delay = policy.next_delay(current_delay);
         }
-    });
-
-    running_tasks.lock().await.insert(name, handle);
+    }
 }
 
-/// Spawn all registered services using wave-based priorities.
-///
-/// This starts services in descending order of their `priority` value.
-/// Services with high priority (e.g. SYSTEM = 100) start first.
-pub async fn spawn_all_services(
-    services: &[ServiceDescription],
-    restart_policy: RestartPolicy,
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
-    resources: DaemonResources,
-) {
-    use std::collections::BTreeMap;
+/// Helper for wave-based service management.
+struct ServiceWave<'a> {
+    services: Vec<&'a ServiceDescription>,
+    priority: u8,
+}
 
-    info!("Beginning wave-based startup sequence...");
-
-    // Group services by priority
-    let mut waves: BTreeMap<u8, Vec<&ServiceDescription>> = BTreeMap::new();
-    for service in services {
-        waves.entry(service.priority).or_default().push(service);
+impl<'a> ServiceWave<'a> {
+    /// Groups services by priority into waves.
+    fn from_services(services: &'a [ServiceDescription]) -> BTreeMap<u8, ServiceWave<'a>> {
+        let mut waves: BTreeMap<u8, Vec<&'a ServiceDescription>> = BTreeMap::new();
+        for service in services {
+            waves.entry(service.priority).or_default().push(service);
+        }
+        waves
+            .into_iter()
+            .map(|(priority, svcs)| {
+                (
+                    priority,
+                    ServiceWave {
+                        services: svcs,
+                        priority,
+                    },
+                )
+            })
+            .collect()
     }
 
-    // Process waves in descending order of priority (u8)
-    for (priority, wave_services) in waves.into_iter().rev() {
-        info!(
-            "Starting wave priority {} ({} services)...",
-            priority,
-            wave_services.len()
-        );
-
-        for service in &wave_services {
-            spawn_service(
-                service.name.clone(),
-                service.run.clone(),
-                service.watcher.clone(),
-                restart_policy,
-                running_tasks.clone(),
-                resources.clone(),
-                service.cancellation_token.clone(),
-            )
-            .await;
-        }
-
-        // Sync Step: Wait for all services in this wave to become 'Healthy'
-        // This ensures Wave 100 actually initialized before Wave 80 starts.
+    /// Waits for all services in this wave to become healthy.
+    async fn wait_for_healthy(&self, resources: &DaemonResources, timeout: Duration) {
         let start = std::time::Instant::now();
         let mut all_healthy = false;
-        while !all_healthy && start.elapsed() < std::time::Duration::from_secs(5) {
+        while !all_healthy && start.elapsed() < timeout {
             all_healthy = true;
-            for service in &wave_services {
+            for service in &self.services {
                 let status = resources
                     .status_plane
                     .get(&service.name)
@@ -275,17 +340,82 @@ pub async fn spawn_all_services(
             if !all_healthy {
                 tokio::select! {
                     _ = resources.status_changed.notified() => {}
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
             }
         }
 
         if !all_healthy {
             warn!(
-                "Wave priority {} did not reach 'Healthy' status within 5s, proceeding anyway",
-                priority
+                "Wave priority {} did not reach 'Healthy' status within {:?}, proceeding anyway",
+                self.priority, timeout
             );
         }
+    }
+}
+
+/// Spawn a single service with the given restart policy.
+pub async fn spawn_service(
+    name: String,
+    run: ServiceFn,
+    watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+    policy: RestartPolicy,
+    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    resources: DaemonResources,
+    cancellation_token: CancellationToken,
+) {
+    let name_clone = name.clone();
+    let supervisor = ServiceSupervisor::new(
+        name.clone(),
+        run,
+        watcher,
+        policy,
+        resources,
+        cancellation_token,
+    );
+
+    let handle = tokio::spawn(supervisor.run_loop());
+    running_tasks.lock().await.insert(name_clone, handle);
+}
+
+/// Spawn all registered services using wave-based priorities.
+///
+/// This starts services in descending order of their `priority` value.
+/// Services with high priority (e.g. SYSTEM = 100) start first.
+pub async fn spawn_all_services(
+    services: &[ServiceDescription],
+    restart_policy: RestartPolicy,
+    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    resources: DaemonResources,
+) {
+    info!("Beginning wave-based startup sequence...");
+
+    let waves = ServiceWave::from_services(services);
+
+    // Process waves in descending order of priority
+    for (priority, wave) in waves.into_iter().rev() {
+        info!(
+            "Starting wave priority {} ({} services)...",
+            priority,
+            wave.services.len()
+        );
+
+        for service in &wave.services {
+            spawn_service(
+                service.name.clone(),
+                service.run.clone(),
+                service.watcher.clone(),
+                restart_policy,
+                running_tasks.clone(),
+                resources.clone(),
+                service.cancellation_token.clone(),
+            )
+            .await;
+        }
+
+        // Wait for services to become healthy using configurable timeout
+        wave.wait_for_healthy(&resources, restart_policy.wave_spawn_timeout)
+            .await;
     }
 
     info!("All startup waves initiated.");
@@ -300,29 +430,22 @@ pub async fn stop_all_services(
     running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
     resources: DaemonResources,
     daemon_token: CancellationToken,
+    grace_period: Duration,
 ) {
-    use std::collections::BTreeMap;
-
     info!("Beginning wave-based graceful shutdown...");
 
-    // Group services by priority
-    let mut waves: BTreeMap<u8, Vec<&ServiceDescription>> = BTreeMap::new();
-    for service in services {
-        waves.entry(service.priority).or_default().push(service);
-    }
+    let waves = ServiceWave::from_services(services);
 
-    let grace_period = std::time::Duration::from_secs(30);
-
-    // Process waves in ascending order of priority (u8)
-    for (priority, wave_services) in waves {
+    // Process waves in ascending order of priority
+    for (priority, wave) in waves {
         info!(
             "Shutting down wave priority {} ({} services)...",
             priority,
-            wave_services.len()
+            wave.services.len()
         );
 
         // 1. Parallel Signal: Cancel all services in this wave
-        for service in &wave_services {
+        for service in &wave.services {
             service.cancellation_token.cancel();
             resources
                 .status_plane
@@ -332,7 +455,7 @@ pub async fn stop_all_services(
 
         // 2. Parallel Wait: Wait for all services in this wave to finish
         let mut join_handles = Vec::new();
-        for service in wave_services {
+        for service in wave.services {
             let name = &service.name;
             let handle_opt = {
                 let mut guard = running_tasks.lock().await;

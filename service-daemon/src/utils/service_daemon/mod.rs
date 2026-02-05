@@ -234,6 +234,7 @@ impl ServiceDaemon {
             self.running_tasks.clone(),
             self.resources.clone(),
             self.cancellation_token.clone(),
+            self.restart_policy.wave_stop_timeout,
         )
         .await;
         info!("ServiceDaemon stopped.");
@@ -268,6 +269,7 @@ impl ServiceDaemon {
             self.running_tasks.clone(),
             self.resources.clone(),
             self.cancellation_token.clone(),
+            test_policy.wave_stop_timeout,
         )
         .await;
 

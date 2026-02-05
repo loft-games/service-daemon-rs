@@ -22,6 +22,11 @@ pub enum ServiceError {
     /// An internal task or channel error.
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    /// A fatal error that should permanently stop the service without restart.
+    /// Use this for unrecoverable errors (e.g., invalid configuration, license issues).
+    #[error("Fatal error in service: {0}")]
+    Fatal(String),
 }
 
 /// A specialized Result type for Service Daemon operations.
