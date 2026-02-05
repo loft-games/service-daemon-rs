@@ -35,6 +35,7 @@ The Status Plane provides services with lifecycle awareness via the `ServiceStat
 | `Healthy` | Normal operation |
 | `NeedReload` | Dependency changed, save state now |
 | `ShuttingDown` | Shutdown in progress |
+| `Terminated` | Service has exited and is ready for collection |
 
 ### Lifecycle Utilities
 - `state()`: Get current status.

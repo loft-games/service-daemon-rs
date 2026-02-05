@@ -4,7 +4,7 @@ The `ServiceDaemon` uses a sophisticated orchestration system to manage service 
 
 ## 1. Unified Status Plane
 
-All services share a central `GLOBAL_STATUS_PLANE` (`DashMap<String, ServiceStatus>`).
+All services share a central **Status Plane** (`DashMap<String, ServiceStatus>`) managed by `DaemonResources`.
 
 | Level | Transitions to | Triggered by |
 |--------|----------------|--------------|

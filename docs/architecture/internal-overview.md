@@ -69,8 +69,10 @@ The framework is organized into specialized submodules to ensure maintainability
 - **`utils/service_daemon/`**: The core orchestrator.
   - `policy.rs`: Resilience configuration (backoff, jitter).
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
-- **`utils/context/`**: Task-local storage and status plane interactions.
-- **`utils/managed_state/`**: The reactive state engine with change tracking.
+- **`utils/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
+- **`utils/triggers.rs`**: Host logic for event-driven triggers.
+- **`utils/context.rs`**: Task-local storage and status plane interactions.
+- **`utils/managed_state.rs`**: The reactive state engine with change tracking.
 
 [Back to README](../../README.md)
 

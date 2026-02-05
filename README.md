@@ -53,20 +53,20 @@ async fn main() -> anyhow::Result<()> {
 
 Explore our detailed documentation grouped by your needs:
 
-### 📖 User Guides
+### User Guides
 Learn how to build applications with `service-daemon-rs`.
 - [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, priorities, and shutdown.
 - [Event Triggers](docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
 - [State Management](docs/guide/state-management.md): Mutability, snapshots, and persistence.
 - [Testing & Troubleshooting](docs/guide/testing-troubleshooting.md): Framework patterns and error resolution.
 
-### ⚙️ Technical Reference
+### Technical Reference
 Deep dives into the internal mechanics.
 - [Architecture Overview](docs/architecture/internal-overview.md): System flow and registry design.
 - [Macros Deep Dive](docs/architecture/macros-deep-dive.md): The magic behind `#[service]` and tracked state.
 - [Lifecycle & Status Plane](docs/architecture/lifecycle-management.md): Orchestration and state transitions.
 
-### 🛠️ Contributor Guide
+### Contributor Guide
 Help us improve the framework.
 - [Contributing](docs/CONTRIBUTING.md): Environment setup and PR process.
 - [Extending the Framework](docs/development/extending-framework.md): How to add new triggers or providers.
