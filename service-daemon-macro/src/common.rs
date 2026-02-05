@@ -1,3 +1,5 @@
+use proc_macro_error2::abort;
+use quote::{quote, quote_spanned};
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type};
 
 /// Result of extracting and categorizing function parameters.
@@ -137,4 +139,115 @@ fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
         return (inner, Some(WrapperKind::Arc(arc_span)));
     }
     (ty, None)
+}
+
+/// Extracts and categorizes parameters from the function signature.
+/// Supported by both `#[service]` and `#[trigger]`.
+pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedParams {
+    let mut resolve_tokens = Vec::new();
+    let mut call_args = Vec::new();
+    let mut param_entries = Vec::new();
+    let mut watcher_arms = Vec::new();
+    let mut payload_arg_name: Option<syn::Ident> = None;
+
+    let mut clean_inputs = syn::punctuated::Punctuated::<syn::FnArg, syn::token::Comma>::new();
+    for arg in &sig.inputs {
+        if let Some((arg_name, intent)) = analyze_param(arg) {
+            let arg_name_str = arg_name.to_string();
+
+            match intent {
+                ParamIntent::Payload { is_arc } => {
+                    if !allow_payload {
+                        abort!(
+                            arg,
+                            "Services do not support event payloads. Only Arc<T> dependencies are allowed.";
+                            help = "Remove the payload parameter or use #[trigger] instead."
+                        );
+                    }
+
+                    if payload_arg_name.is_some() {
+                        abort!(
+                            arg,
+                            "Multiple payload parameters detected. Only one parameter can be the event payload."
+                        );
+                    }
+                    payload_arg_name = Some(arg_name.clone());
+
+                    let mut clean_arg = arg.clone();
+                    if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
+                        attrs.retain(|a| !a.path().is_ident("payload"));
+                    }
+                    clean_inputs.push(clean_arg);
+
+                    if is_arc {
+                        call_args.push(quote! { std::sync::Arc::new(payload) });
+                    } else {
+                        call_args.push(quote! { payload });
+                    }
+                }
+                ParamIntent::Dependency {
+                    inner_type,
+                    wrapper,
+                } => {
+                    let type_str = quote!(#inner_type).to_string().replace(" ", "");
+                    let arg_type_wrapper_str = match wrapper {
+                        WrapperKind::Arc(_) => format!("Arc<{}>", type_str),
+                        WrapperKind::ArcRwLock(_, _) => format!("Arc<RwLock<{}>>", type_str),
+                        WrapperKind::ArcMutex(_, _) => format!("Arc<Mutex<{}>>", type_str),
+                    };
+
+                    match wrapper {
+                        WrapperKind::Arc(arc_span) => {
+                            resolve_tokens.push(quote! {
+                                let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                            });
+                            clean_inputs.push(
+                                syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#inner_type> })
+                                    .unwrap(),
+                            );
+                        }
+                        WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
+                            resolve_tokens.push(quote! {
+                                let #arg_name = #inner_type::rwlock().await;
+                            });
+                            let rw_path = quote_spanned! { rwlock_span => service_daemon::utils::managed_state::RwLock<#inner_type> };
+                            clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> }).unwrap());
+                        }
+                        WrapperKind::ArcMutex(arc_span, mutex_span) => {
+                            resolve_tokens.push(quote! {
+                                let #arg_name = #inner_type::mutex().await;
+                            });
+                            let mutex_path = quote_spanned! { mutex_span => service_daemon::utils::managed_state::Mutex<#inner_type> };
+                            clean_inputs.push(syn::parse2(quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> }).unwrap());
+                        }
+                    }
+
+                    call_args.push(quote! { #arg_name });
+                    let key_str = format!("{}_{}", arg_name_str, arg_type_wrapper_str);
+                    param_entries.push(quote! {
+                        service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
+                    });
+
+                    watcher_arms.push(quote! {
+                        _ = <#inner_type as service_daemon::Provided>::changed() => {}
+                    });
+                }
+            }
+            continue;
+        }
+
+        abort!(
+            arg,
+            "Unsupported parameter type. Service parameters must be Arc wrappers.";
+            help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>."
+        );
+    }
+
+    ExtractedParams {
+        clean_inputs,
+        resolve_tokens,
+        call_args,
+        param_entries,
+        watcher_arms,
+    }
 }

@@ -68,7 +68,7 @@ Deep dives into the internal mechanics.
 
 ### 🛠️ Contributor Guide
 Help us improve the framework.
-- [Contributing](docs/development/contributing.md): Environment setup and PR process.
+- [Contributing](docs/CONTRIBUTING.md): Environment setup and PR process.
 - [Extending the Framework](docs/development/extending-framework.md): How to add new triggers or providers.
 
 ---
