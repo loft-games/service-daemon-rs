@@ -1,29 +1,3 @@
-[package]
-name = "service-daemon-rs"
-version = "0.1.0"
-edition = "2024"
-
-[[bin]]
-name = "service-daemon-rs"
-path = "src/main.rs"
-
-[features]
-default = []
-macros = ["service-daemon/macros"]
-
-[dependencies]
-service-daemon = { path = "service-daemon" }
-service-daemon-macro = { path = "service-daemon-macro" }
-tokio = { version = "1.40", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
-futures = "0.3"
-
-[dev-dependencies.service-daemon]
-path = "service-daemon"
-features = ["macros"]
-
 [workspace]
-members = [".", "service-daemon", "service-daemon-macro"]
+members = ["service-daemon", "service-daemon-macro", "examples/demo"]
 resolver = "2"

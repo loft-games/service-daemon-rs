@@ -1,6 +1,10 @@
+pub mod error;
 pub mod service;
+pub mod trigger;
 
+pub use error::{Result, ServiceError};
 pub use service::{
-    PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceDescription, ServiceEntry,
-    ServiceFn, ServiceParam,
+    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam, ServicePriority,
+    ServiceStatus,
 };
+pub use trigger::{TT, TriggerTemplate};
