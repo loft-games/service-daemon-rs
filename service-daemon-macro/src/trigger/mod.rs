@@ -145,4 +145,3 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-

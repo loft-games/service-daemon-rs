@@ -6,8 +6,7 @@
 mod codegen;
 
 use proc_macro::TokenStream;
-use proc_macro_error2::abort;
-use quote::{format_ident, quote, quote_spanned};
+use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
 use crate::common::{ExtractedParams, has_allow_sync};
@@ -91,7 +90,6 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
-
 
 fn parse_service_attr(attr_str: &str, key: &str) -> Option<String> {
     attr_str.split(',').find_map(|part| {
