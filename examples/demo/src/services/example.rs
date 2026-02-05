@@ -2,7 +2,7 @@ use crate::providers::trigger_providers::{TaskQueue, UserNotifier};
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::prelude::*;
 use service_daemon::{ServiceStatus, allow_sync, done, service, shelve, sleep, state, unshelve};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 #[service]
 pub async fn example_service(
@@ -283,5 +283,35 @@ pub async fn reloading_counter_service(stats: Arc<GlobalStats>) -> anyhow::Resul
         }
     }
     info!("Counter Service: Final count was: {}", count);
+    Ok(())
+}
+
+/// 5. Fatal Error Pattern:
+/// Demonstrates how a service can permanently stop itself when it encounters
+/// an unrecoverable condition (e.g. invalid config, missing dependencies).
+#[service]
+pub async fn fatal_error_service_demo() -> anyhow::Result<()> {
+    info!("Fatal Error Demo: Started.");
+
+    // Simulate a check that might fail fatally
+    let is_config_valid = std::env::var("DEMO_INVALID_CONFIG").is_err();
+
+    if !is_config_valid {
+        error!("Fatal Error Demo: UNRECOVERABLE error detected. Stopping permanently.");
+        // Returning ServiceError::Fatal tells the daemon NOT to restart this service.
+        return Err(service_daemon::models::ServiceError::Fatal(
+            "Configuration is invalid and cannot be recovered".into(),
+        )
+        .into());
+    }
+
+    info!("Fatal Error Demo: Config is valid, proceeding normally.");
+    done();
+
+    while !service_daemon::is_shutdown() {
+        sleep(std::time::Duration::from_secs(10)).await;
+        info!("Fatal Error Demo: Heartbeat");
+    }
+
     Ok(())
 }

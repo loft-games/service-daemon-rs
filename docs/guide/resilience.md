@@ -23,7 +23,39 @@ daemon.run().await?
 ### 1.1. Immediate Restart on Reload Signal
 Even if a service is in a restart delay period (e.g. after a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
 
-## 2. Advanced Resilience: Managing CPU-Intensive & Blocking Tasks
+### 1.2. Fatal Errors
+Sometimes a service encounters an error that it cannot recover from via a restart (e.g., a missing required environment variable or an invalid license). In such cases, the service can return `ServiceError::Fatal`.
+
+When a service returns a `Fatal` error, the `ServiceDaemon` will **permanently stop** that service and transition its status to `Terminated`, bypassing the restart policy entirely.
+
+```rust
+use service_daemon::models::ServiceError;
+
+#[service]
+async fn license_checker() -> anyhow::Result<()> {
+    if !check_license().await {
+        return Err(ServiceError::Fatal("Invalid license key".into()).into());
+    }
+    // ...
+    Ok(())
+}
+```
+
+## 2. Advanced Resilience: Wave Timeouts
+
+The `RestartPolicy` also controls how long the daemon waits for services during startup and shutdown waves.
+
+```rust
+let policy = RestartPolicy::builder()
+    .wave_spawn_timeout(Duration::from_secs(10)) // Wait up to 10s for Healthy status
+    .wave_stop_timeout(Duration::from_secs(45))  // Wait up to 45s for graceful stop
+    .build();
+```
+
+- **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`.
+- **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
+
+## 3. Managing CPU-Intensive & Blocking Tasks
 
 The asynchronous executor (Tokio) relies on cooperative multitasking. If a service performs a long-running CPU computation or a blocking I/O operation without yielding, it will **stall the entire daemon**.
 

@@ -6,7 +6,7 @@ The `ServiceDaemon` uses a sophisticated orchestration system to manage service 
 
 All services share a central `GLOBAL_STATUS_PLANE` (`DashMap<String, ServiceStatus>`).
 
-| Status | Transitions to | Triggered by |
+| Level | Transitions to | Triggered by |
 |--------|----------------|--------------|
 | `Initializing` | `Healthy` | `done()` or implicit handshake |
 | `Restoring` | `Healthy` | Successful warm start or implicit handshake |
@@ -14,6 +14,10 @@ All services share a central `GLOBAL_STATUS_PLANE` (`DashMap<String, ServiceStat
 | `Healthy` | `NeedReload` | Dependency mutation detected |
 | `NeedReload` | `Terminated` | Service cleanup + exit |
 | `ShuttingDown` | `Terminated` | Daemon shutdown signal |
+| (Any) | `Terminated` | `ServiceError::Fatal` encountered |
+
+> [!NOTE]
+> **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining perfect responsiveness to reload and shutdown signals.
 
 > [!NOTE]
 > **Immediate Reloads**: If a service is in a restart backoff delay (due to a failure) and a `NeedReload` signal is received (e.g. from an upstream dependency change), the `ServiceDaemon` will wake the service immediately, bypassing the remaining delay to ensure the system reaches a healthy state as quickly as possible.

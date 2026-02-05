@@ -9,7 +9,7 @@
 - **Declarative Services**: Mark functions as managed tasks with `#[service]`.
 - **Event-Driven Triggers**: Use `#[trigger]` for Cron, Queues, and State Watchers.
 - **Type-Safe DI**: Dependency injection resolved at compile-time with zero boilerplate.
-- **Resilient Lifecycle**: Exponential backoff, jitter, and wave-based startup/shutdown.
+- **Resilient Lifecycle**: Exponential backoff, jitter, wave-based startup/shutdown, and **fatal error handling**.
 - **Smart State**: Transparent change tracking and zero-copy state snapshots.
 
 ---
