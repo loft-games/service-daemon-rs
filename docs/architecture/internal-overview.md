@@ -71,8 +71,38 @@ The framework is organized into specialized submodules to ensure maintainability
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
 - **`utils/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
 - **`utils/triggers.rs`**: Host logic for event-driven triggers.
-- **`utils/context.rs`**: Task-local storage and status plane interactions.
+- **`utils/context.rs`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
 - **`utils/managed_state.rs`**: The reactive state engine with change tracking.
+
+## 5. Simulation Layer (Feature-Gated)
+
+All testing/simulation code lives behind the `simulation` Cargo feature, guaranteeing zero overhead in production builds.
+
+### Architecture
+
+```mermaid
+graph LR
+    subgraph "Production Path"
+        App["Business Logic"] -->|resolve()| SM["StateManager Singleton"]
+    end
+
+    subgraph "Simulation Path (feature = simulation)"
+        App -->|resolve()| SO["SimulationOverlay Check"]
+        SO -->|hit| Mock["Shadow Snapshot"]
+        SO -->|miss| SM
+    end
+
+    subgraph "MockContext Scope"
+        MC["MockContext::run()"] -->|task_local| SO
+        MC -->|task_local| Shelf["Isolated Shelf"]
+        MC -->|task_local| Status["Isolated Status Plane"]
+    end
+```
+
+- **`SimulationOverlay`**: A `task_local` `TypeId → Arc<dyn Any>` map for shadow Provider snapshots.
+- **`MockContext`**: Builder that configures isolated `DaemonResources` + `SimulationOverlay`, then scopes them into `task_local` via `run()`.
+- **Provider Masking**: Macro-generated `resolve()` checks `try_resolve_mock::<T>()` first (feature-gated), falling through to the real `StateManager` on miss.
+- **Log Drain**: Optional background subscriber for `LogQueue` that prints to stderr, solving the "log black hole" problem in tests.
 
 [Back to README](../../README.md)
 

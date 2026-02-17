@@ -15,6 +15,9 @@ macros = []
 cron = ["dep:tokio-cron-scheduler"]
 # Enable UUID-based trigger IDs (uses uuid crate)
 uuid-trigger-ids = ["dep:uuid"]
+# Enable simulation/testing support (MockContext, SimulationOverlay, log drain).
+# This feature gates all debugging utilities to guarantee zero overhead in production.
+simulation = []
 
 [dependencies]
 service-daemon-macro = { path = "../service-daemon-macro" }

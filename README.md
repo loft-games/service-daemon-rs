@@ -11,6 +11,7 @@
 - **Type-Safe DI**: Dependency injection resolved at compile-time with zero boilerplate.
 - **Resilient Lifecycle**: Exponential backoff, jitter, wave-based startup/shutdown, and **fatal error handling**.
 - **Smart State**: Transparent change tracking and zero-copy state snapshots.
+- **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
 
 ---
 

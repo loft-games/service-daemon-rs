@@ -53,6 +53,11 @@ pub use utils::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle,
 };
 
+// Re-export simulation utilities
+pub use utils::context::try_resolve_mock;
+#[cfg(feature = "simulation")]
+pub use utils::context::{MockContext, MockContextBuilder};
+
 // Re-export dependencies for use in macro-generated code
 pub use futures;
 pub use linkme;

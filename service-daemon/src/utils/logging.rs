@@ -134,3 +134,13 @@ pub async fn log_service() -> anyhow::Result<()> {
     eprintln!("LogService shutting down (Priority: SYSTEM)");
     Ok(())
 }
+
+/// Subscribes to the internal log queue, returning a broadcast receiver.
+///
+/// This is used by `MockContext` (under the `simulation` feature) to drain
+/// log events that would otherwise be silently discarded when `LogService`
+/// is not running in unit test environments.
+#[cfg(feature = "simulation")]
+pub fn subscribe_log_queue() -> tokio::sync::broadcast::Receiver<Arc<LogEvent>> {
+    get_log_queue().tx.subscribe()
+}
