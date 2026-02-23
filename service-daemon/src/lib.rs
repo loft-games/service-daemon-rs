@@ -64,6 +64,10 @@ pub use linkme;
 pub use tokio;
 pub use tokio_util;
 
+// Conditionally re-export file logging utilities
+#[cfg(feature = "file-logging")]
+pub use utils::logging::{FileLogConfig, enable_file_logging};
+
 // Conditionally re-export dependencies based on features
 #[cfg(feature = "cron")]
 pub use tokio_cron_scheduler;

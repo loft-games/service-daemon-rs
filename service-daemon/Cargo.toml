@@ -18,6 +18,8 @@ uuid-trigger-ids = ["dep:uuid"]
 # Enable simulation/testing support (MockContext, SimulationOverlay, log drain).
 # This feature gates all debugging utilities to guarantee zero overhead in production.
 simulation = []
+# Enable file-based log persistence with rotation (uses tracing-appender)
+file-logging = ["dep:tracing-appender", "dep:serde_json"]
 
 [dependencies]
 service-daemon-macro = { path = "../service-daemon-macro" }
@@ -35,3 +37,5 @@ rand = "0.9"
 dashmap = "6.1"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }
+tracing-appender = { version = "0.2", optional = true }
+serde_json = { version = "1.0", optional = true }

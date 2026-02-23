@@ -63,7 +63,7 @@ pub struct ServiceIdentity {
     pub reload_token: CancellationToken,
     /// Shared flag: true means the auto-handshake (Initializing->Healthy) has been performed.
     /// Uses Arc to persist the state across TLS clones within the same task generation.
-    handshake_done: Arc<AtomicBool>,
+    is_handshake_done: Arc<AtomicBool>,
 }
 
 impl ServiceIdentity {
@@ -77,7 +77,7 @@ impl ServiceIdentity {
             name,
             cancellation_token,
             reload_token,
-            handshake_done: Arc::new(AtomicBool::new(false)),
+            is_handshake_done: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -162,7 +162,7 @@ mod simulation {
         /// The service identity to use within the mock scope.
         pub(crate) identity: ServiceIdentity,
         /// Whether to drain the internal log queue during execution.
-        pub(crate) log_drain: bool,
+        pub(crate) has_log_drain: bool,
     }
 
     /// Builder for `MockContext`.
@@ -170,7 +170,7 @@ mod simulation {
         resources: DaemonResources,
         overlay: SimulationOverlay,
         service_name: String,
-        log_drain: bool,
+        has_log_drain: bool,
     }
 
     impl MockContext {
@@ -180,7 +180,7 @@ mod simulation {
                 resources: DaemonResources::new(),
                 overlay: SimulationOverlay::default(),
                 service_name: "mock_service".to_string(),
-                log_drain: false,
+                has_log_drain: false,
             }
         }
 
@@ -198,7 +198,7 @@ mod simulation {
             // Optionally spawn a background log drain task.
             // The `_drain_handle` MUST be kept alive (not dropped) until after `result`
             // is obtained, so the intentional `let result = ...` pattern is correct.
-            let _drain_handle = if self.log_drain {
+            let _drain_handle = if self.has_log_drain {
                 Some(spawn_log_drain())
             } else {
                 None
@@ -276,7 +276,7 @@ mod simulation {
         /// "log black hole" problem where logs are silently discarded because
         /// the `LogService` is not running in unit test environments.
         pub fn with_log_drain(mut self) -> Self {
-            self.log_drain = true;
+            self.has_log_drain = true;
             self
         }
 
@@ -290,7 +290,7 @@ mod simulation {
                     CancellationToken::new(),
                     CancellationToken::new(),
                 ),
-                log_drain: self.log_drain,
+                has_log_drain: self.has_log_drain,
             }
         }
     }
@@ -490,7 +490,7 @@ fn implicit_handshake() {
     };
 
     // Fast path: If already handshaked this generation, skip entirely
-    if id.handshake_done.load(Ordering::Relaxed) {
+    if id.is_handshake_done.load(Ordering::Relaxed) {
         return;
     }
 
@@ -525,7 +525,7 @@ fn implicit_handshake() {
     }
 
     // Mark as done for this task; subsequent calls skip all of the above
-    id.handshake_done.store(true, Ordering::Relaxed);
+    id.is_handshake_done.store(true, Ordering::Relaxed);
 }
 
 /// Checks if the current service or the daemon has been signaled to stop or reload.

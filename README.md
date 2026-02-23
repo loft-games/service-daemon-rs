@@ -42,10 +42,32 @@ pub async fn my_service(port: Arc<Port>) -> anyhow::Result<()> {
 
 ### 3. Run the Daemon
 ```rust
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Setup tracing with the built-in DaemonLayer
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(service_daemon::utils::logging::DaemonLayer)
+        .init();
+
     service_daemon::ServiceDaemon::auto_init().run().await
 }
+```
+
+### 4. (Optional) Enable File Logging
+Enable the `file-logging` feature in your `Cargo.toml`:
+```toml
+service-daemon = { version = "0.1", features = ["file-logging"] }
+```
+Then configure it before starting the daemon:
+```rust
+use service_daemon::{FileLogConfig, enable_file_logging};
+
+enable_file_logging(FileLogConfig::new("logs", "my-app"));
+// Logs will be persisted as JSON lines with daily rotation.
 ```
 
 ---

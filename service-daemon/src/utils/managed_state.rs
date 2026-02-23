@@ -164,7 +164,7 @@ impl<T: Clone> TrackedRwLock<T> {
             inner: self.inner.write().await,
             notify: self.notify.clone(),
             watch_tx: &self.watch_tx,
-            committed: false,
+            is_committed: false,
         }
     }
 }
@@ -187,7 +187,7 @@ pub struct TrackedWriteGuard<'a, T: Clone> {
     inner: TokioRwLockWriteGuard<'a, Arc<T>>,
     notify: Arc<tokio::sync::Notify>,
     watch_tx: &'a watch::Sender<Arc<T>>,
-    committed: bool,
+    is_committed: bool,
 }
 
 impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
@@ -197,7 +197,7 @@ impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
         let new_val = (*self.inner).clone();
         self.watch_tx.send_replace(new_val);
         self.notify.notify_waiters();
-        self.committed = true;
+        self.is_committed = true;
     }
 
     /// Replaces the entire state with a new Arc and commits it.
@@ -206,7 +206,7 @@ impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
         *self.inner = new_val.clone();
         self.watch_tx.send_replace(new_val);
         self.notify.notify_waiters();
-        self.committed = true;
+        self.is_committed = true;
     }
 }
 
@@ -225,7 +225,7 @@ impl<T: Clone> DerefMut for TrackedWriteGuard<'_, T> {
 
 impl<T: Clone> Drop for TrackedWriteGuard<'_, T> {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.is_committed {
             // Automatically commit on drop if not already committed
             let new_val = (*self.inner).clone();
             self.watch_tx.send_replace(new_val);
