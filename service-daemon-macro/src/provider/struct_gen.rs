@@ -255,6 +255,7 @@ fn generate_default_impl(
     };
 
     // Build the default expression
+    let struct_name_str = struct_name.to_string();
     let default_expr = if let Some(ref env_name) = provider_attrs.env_name {
         // Use env var with fallback to default
         if let Some(ref default_val) = provider_attrs.default_value {
@@ -263,8 +264,17 @@ fn generate_default_impl(
                 std::env::var(#env_name).unwrap_or_else(|_| #default_tokens)
             }
         } else {
+            // No fallback: env var is REQUIRED. Panic with a descriptive message
+            // that includes both the env var name and the provider type so
+            // operators can quickly locate the missing configuration.
             quote! {
-                std::env::var(#env_name).expect(concat!("Environment variable ", #env_name, " not set"))
+                std::env::var(#env_name).unwrap_or_else(|_| {
+                    panic!(
+                        "Required environment variable '{}' is not set (needed by provider '{}'). \
+                         Set it or add a default: #[provider(env_name = \"{}\", default = \"...\")]",
+                        #env_name, #struct_name_str, #env_name
+                    )
+                })
             }
         }
     } else if let Some(ref default_val) = provider_attrs.default_value {

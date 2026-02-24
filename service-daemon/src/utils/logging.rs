@@ -47,10 +47,13 @@ fn get_log_queue() -> &'static LogQueue {
     // Since this is called from a sync tracing layer, we use try_get or a sync fallback.
     // The LOG_QUEUE will be initialized on first use in either context.
     LOG_QUEUE.get().unwrap_or_else(|| {
-        // This is a fallback for sync contexts. Initialize synchronously.
-        // This is safe because LogQueue::default() doesn't require async.
+        // Fallback for sync contexts. Safe because LogQueue::default() is non-async.
+        // If set() fails (another thread raced us), get() still succeeds because the
+        // other thread's value is already stored. This is guaranteed by OnceCell semantics.
         let _ = LOG_QUEUE.set(LogQueue::default());
-        LOG_QUEUE.get().expect("LogQueue should be initialized")
+        LOG_QUEUE
+            .get()
+            .expect("OnceCell invariant violated: set() succeeded but get() returned None")
     })
 }
 

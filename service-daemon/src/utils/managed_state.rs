@@ -112,13 +112,22 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     }
 
     /// Convenience method to get a snapshot. Panics if not initialized.
+    ///
+    /// # Panics
+    /// Panics if neither `resolve_snapshot` nor `resolve_rwlock` has been
+    /// called for this `StateManager` yet. This typically indicates a provider
+    /// was accessed before the `ServiceDaemon` had a chance to initialize it.
     pub async fn snapshot(&self) -> Arc<T> {
         if let Some(rx) = self.watch_rx.get() {
             return rx.borrow().clone();
         }
         self.snapshot_cache
             .get()
-            .expect("StateManager not initialized")
+            .expect(
+                "StateManager::snapshot() called before initialization. \
+                 Ensure the corresponding provider is registered and the \
+                 ServiceDaemon has started before accessing this state.",
+            )
             .clone()
     }
 
