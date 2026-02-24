@@ -72,6 +72,23 @@ enable_file_logging(FileLogConfig::new("logs", "my-app"));
 
 ---
 
+## Examples
+
+The `examples/` directory contains focused examples organized by use case:
+
+| Example | Focus | Run Command |
+|:---|:---|:---|
+| **minimal** | `is_shutdown()` polling — simplest pattern | `cargo run -p example-minimal` |
+| **complete** | `state()` lifecycle — recovery, reload, priorities | `cargo run -p example-complete` |
+| **triggers** | Decoupled event-driven handlers (Cron, Queue, Watch) | `cargo run -p example-triggers` |
+| **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
+| **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
+| **demo** | Full-feature demo + cross-cutting integration tests | `cargo test -p service-daemon-demo` |
+
+> **⚠️ Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
+
+---
+
 ## Documentation Map
 
 Explore our detailed documentation grouped by your needs:

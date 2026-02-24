@@ -1,0 +1,13 @@
+[package]
+name = "example-minimal"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Minimal example: basic service with is_shutdown() polling loop."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon", features = ["macros"] }
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"

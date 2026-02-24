@@ -1,21 +1,16 @@
 [package]
-name = "service-daemon-demo"
+name = "example-logging"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Integration test hub and example index for service-daemon-rs."
+description = "Logging example: demonstrates file-based log persistence with JSON rotation."
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
     "macros",
-    "cron",
-    "uuid-trigger-ids",
+    "file-logging",
 ] }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-futures = "0.3"
-rand = "0.9"
-chrono = "0.4"
-serde = { version = "1.0", features = ["derive"] }

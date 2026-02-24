@@ -25,9 +25,9 @@ mod tests {
             .iter()
             .any(|e| e.name == "lb_worker_trigger");
         if !has_lb_worker {
-            println!("Registry contents:");
+            tracing::info!("Registry contents:");
             for entry in service_daemon::SERVICE_REGISTRY.iter() {
-                println!("  - {}", entry.name);
+                tracing::info!("  - {}", entry.name);
             }
         }
         assert!(has_lb_worker);
@@ -122,7 +122,7 @@ mod tests {
 
     #[service_daemon::trigger(template = Event, target = SyncTestSignal, priority = 50)]
     pub fn sync_handler() -> anyhow::Result<()> {
-        println!("Sync handler fired!");
+        tracing::info!("Sync handler fired!");
         Ok(())
     }
 

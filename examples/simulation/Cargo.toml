@@ -1,21 +1,16 @@
 [package]
-name = "service-daemon-demo"
+name = "example-simulation"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Integration test hub and example index for service-daemon-rs."
+description = "Simulation example: demonstrates MockContext for unit testing services without a real daemon."
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
     "macros",
-    "cron",
-    "uuid-trigger-ids",
+    "simulation",
 ] }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
-futures = "0.3"
-rand = "0.9"
-chrono = "0.4"
-serde = { version = "1.0", features = ["derive"] }

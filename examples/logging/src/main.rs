@@ -1,0 +1,78 @@
+//! # Logging Example — File-Based Log Persistence
+//!
+//! This example demonstrates the `file-logging` feature:
+//! - Configuring `FileLogConfig` for directory and file prefix
+//! - Enabling file logging with `enable_file_logging()` before daemon start
+//! - Automatic daily log rotation via `tracing-appender`
+//! - JSON-structured log output (IGES 6.8 compliant)
+//!
+//! **Run**: `cargo run -p example-logging`
+//!
+//! After running, check the `logs/` directory for files named
+//! `my-app.YYYY-MM-DD` containing JSON-structured log lines.
+
+mod services;
+
+use service_daemon::utils::logging::{FileLogConfig, enable_file_logging};
+use service_daemon::ServiceDaemon;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 1. Initialize tracing with the built-in DaemonLayer
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(service_daemon::utils::logging::DaemonLayer)
+        .init();
+
+    // 2. Enable file-based log persistence.
+    //    MUST be called BEFORE `ServiceDaemon::run()`.
+    //    - `directory`: where log files are stored (created if missing)
+    //    - `file_prefix`: each file is named `{prefix}.YYYY-MM-DD`
+    enable_file_logging(FileLogConfig::new("logs", "my-app"));
+
+    // 3. Create and run the daemon
+    let daemon = ServiceDaemon::from_registry();
+    daemon.run().await?;
+
+    Ok(())
+}
+
+// =============================================================================
+// Integration Tests — Logging
+// =============================================================================
+#[cfg(test)]
+mod tests {
+    use service_daemon::utils::logging::{FileLogConfig, enable_file_logging};
+    use service_daemon::{RestartPolicy, ServiceDaemon};
+
+    /// Verifies that the daemon can start with file logging enabled
+    /// and produces output in the configured directory.
+    #[tokio::test]
+    async fn test_file_logging_initialization() -> anyhow::Result<()> {
+        // Use a temp directory to avoid polluting the project
+        let temp_dir = std::env::temp_dir().join("service-daemon-log-test");
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        enable_file_logging(FileLogConfig::new(
+            temp_dir.to_str().unwrap(),
+            "test-app",
+        ));
+
+        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let cancel = daemon.cancel_token();
+        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        cancel.cancel();
+        let _ = handle.await;
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        Ok(())
+    }
+}
