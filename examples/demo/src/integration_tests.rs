@@ -47,7 +47,7 @@ mod tests {
     // --- 2. Watch Triggers & Promotion ---
     static WATCH_FIRED: AtomicU32 = AtomicU32::new(0);
 
-    #[service_daemon::trigger(template = Watch, target = GlobalStats, priority = 50)]
+    #[service_daemon::trigger(Watch(GlobalStats), priority = 50)]
     pub async fn stats_watcher(snapshot: Arc<GlobalStats>) -> anyhow::Result<()> {
         if !snapshot.last_status.is_empty() {
             WATCH_FIRED.fetch_add(1, Ordering::SeqCst);
@@ -120,7 +120,7 @@ mod tests {
     #[service_daemon::provider(default = Notify)]
     struct SyncTestSignal;
 
-    #[service_daemon::trigger(template = Event, target = SyncTestSignal, priority = 50)]
+    #[service_daemon::trigger(Event(SyncTestSignal), priority = 50)]
     pub fn sync_handler() -> anyhow::Result<()> {
         tracing::info!("Sync handler fired!");
         Ok(())

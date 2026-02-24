@@ -64,7 +64,11 @@ impl TupleStructInfo {
         if let syn::Fields::Unnamed(f) = fields
             && f.unnamed.len() == 1
         {
-            let inner_type = f.unnamed.first().unwrap().ty.clone();
+            let first_field = f
+                .unnamed
+                .first()
+                .expect("FieldsUnnamed checked for length 1");
+            let inner_type = first_field.ty.clone();
             let is_string = Self::is_string_type(&inner_type);
             Some(Self {
                 inner_type,
@@ -288,7 +292,7 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                 .named
                 .iter()
                 .map(|field| {
-                    let field_name = field.ident.as_ref().unwrap();
+                    let field_name = field.ident.as_ref().expect("Named fields must have idents");
                     let field_type = &field.ty;
 
                     // Check if it's Arc<T>

@@ -14,7 +14,7 @@ use syn::{ItemFn, parse_macro_input};
 
 use crate::common::{ExtractedParams, has_allow_sync};
 use codegen::{generate_call_expr, generate_event_loop_call, generate_watcher};
-use parser::{VALID_VARIANTS, normalize_template, parse_attrs};
+use parser::{TriggerArgs, VALID_VARIANTS, normalize_template};
 
 /// Implementation of the `#[trigger]` attribute macro.
 pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -26,49 +26,24 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &input.sig;
     let body = &input.block;
 
-    // Parse attributes robustly
-    let attr_str = attr.to_string();
-    let attrs_map = parse_attrs(&attr_str);
+    // Parse attributes using syn-based structured parsing
+    let args = parse_macro_input!(attr as TriggerArgs);
+    let template = args.template;
+    let target_type = args.target;
+    let priority_tokens = args.priority;
 
-    let template_raw = attrs_map
-        .get("template")
-        .cloned()
-        .unwrap_or_else(|| "TriggerTemplate::Custom".to_string());
-
-    // Extract variant name from path (e.g. TriggerTemplate::Cron -> Cron, or just Cron -> Cron)
-    let template = template_raw
-        .split("::")
-        .last()
-        .unwrap_or(&template_raw)
-        .trim()
-        .to_string();
-
-    // Strict Compile-Time Validation
+    // Strict compile-time validation of the template variant name
     if !VALID_VARIANTS.contains(&template.as_str()) {
         abort!(
-            input.sig.ident,
+            args.template_ident,
             format!(
                 "Invalid trigger template '{}'. Valid options are: {}. \n\
-                 Hint: To get IDE candidate lists, import the prelude: 'use service_daemon::prelude::*;' or use 'TT::Variant'.",
+                 Hint: Use variants like Watch(...), Cron(...), Queue(...), etc.",
                 template,
                 VALID_VARIANTS.join(", ")
             )
         );
     }
-
-    let priority_expr = attrs_map
-        .get("priority")
-        .cloned()
-        .unwrap_or_else(|| "50".to_string());
-    let priority_tokens: proc_macro2::TokenStream =
-        priority_expr.parse().unwrap_or_else(|_| quote!(50));
-
-    let target_str = attrs_map
-        .get("target")
-        .cloned()
-        .unwrap_or_else(|| "Unknown".to_string());
-    let target_type: proc_macro2::TokenStream =
-        target_str.parse().unwrap_or_else(|_| quote!(Unknown));
 
     // Extract parameters and categorize them
     let ExtractedParams {

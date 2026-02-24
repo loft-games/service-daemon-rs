@@ -134,35 +134,44 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// > Triggers are specialized services. Like normal services, they should
 /// > be asynchronous to avoid blocking the event loop host.
 ///
-/// # Attributes
-/// - `template`: The trigger template type. Options: `cron`, `queue`, `lb_queue`, `event`, `notify`, `custom`.
-/// - `target`: The provider type (struct) that supplies the event source.
+/// # Syntax
+/// `#[trigger(Template(Target))]` or `#[trigger(Template(Target), priority = N)]`
+///
+/// where `Template` is a valid trigger template variant and `Target` is the
+/// provider type that supplies the event source.
 ///
 /// # Template Types
-/// - `cron`: Uses cron expressions. Target should be a provider for `String` (the cron expression).
-/// - `queue`: Broadcast queue (fanout). Target should be a `#[provider(default = Queue)]`.
-/// - `lb_queue`: Load-balancing queue. Target should be a `#[provider(default = LBQueue)]`.
-/// - `event` / `notify` / `custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
+/// - `Cron`: Uses cron expressions. Target should be a provider for `String` (the cron expression).
+/// - `Queue`/`BQueue`: Broadcast queue (fanout). Target should be a `#[provider(default = Queue)]`.
+/// - `LBQueue`: Load-balancing queue. Target should be a `#[provider(default = LBQueue)]`.
+/// - `Event`/`Notify`/`Custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
+/// - `Watch`/`State`: State change trigger. Fires when the target provider is modified.
 ///
 /// # Example
 /// ```rust,ignore
 /// use service_daemon::trigger;
 ///
-/// #[trigger(template = event, target = MyNotifier)]
+/// #[trigger(Event(MyNotifier))]
 /// async fn on_event(payload: (), trigger_id: String) -> anyhow::Result<()> {
 ///     println!("Event triggered! ID: {}", trigger_id);
 ///     Ok(())
 /// }
 ///
-/// #[trigger(template = queue, target = TaskQueue)]
+/// #[trigger(Queue(TaskQueue))]
 /// async fn on_queue_item(item: String, trigger_id: String) -> anyhow::Result<()> {
 ///     println!("Received queue item: {} (trigger: {})", item, trigger_id);
 ///     Ok(())
 /// }
 ///
-/// #[trigger(template = cron, target = CleanupSchedule)]
+/// #[trigger(Cron(CleanupSchedule))]
 /// async fn on_cron_tick(tick_time: (), trigger_id: String) -> anyhow::Result<()> {
 ///     println!("Cron triggered! ID: {}", trigger_id);
+///     Ok(())
+/// }
+///
+/// #[trigger(Watch(MetricsData), priority = 80)]
+/// async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()> {
+///     println!("Metrics changed!");
 ///     Ok(())
 /// }
 /// ```

@@ -8,7 +8,7 @@ use service_daemon::{allow_sync, trigger};
 
 // --- Cron Trigger ---
 // Uses the schedule string from CleanupSchedule provider
-#[trigger(template = Cron, target = CleanupSchedule)]
+#[trigger(Cron(CleanupSchedule))]
 pub async fn cleanup_trigger(
     port: std::sync::Arc<Port>, // Now supports qualified paths!
 ) -> anyhow::Result<()> {
@@ -19,7 +19,7 @@ pub async fn cleanup_trigger(
 /// A trigger that demonstrates reading a snapshot of shared global state.
 /// By declaring Arc<GlobalStats>, we get a zero-lock snapshot.
 /// Even if writers are busy, this reader never blocks!
-#[trigger(template = Cron, target = CleanupSchedule)]
+#[trigger(Cron(CleanupSchedule))]
 pub async fn stats_viewer(
     stats: Arc<crate::providers::typed_providers::GlobalStats>,
 ) -> anyhow::Result<()> {
@@ -36,7 +36,7 @@ pub async fn stats_viewer(
 // --- Broadcast Queue Triggers ---
 // TaskQueue is a BroadcastQueue - BOTH handlers receive every message!
 
-#[trigger(template = Queue, target = TaskQueue)]
+#[trigger(Queue(TaskQueue))]
 pub async fn worker_trigger(
     payload: String,
     port: Arc<Port>,
@@ -51,7 +51,7 @@ pub async fn worker_trigger(
     Ok(())
 }
 
-#[trigger(template = BQueue, target = TaskQueue)]
+#[trigger(BQueue(TaskQueue))]
 pub async fn worker_trigger2(payload: String, port: Arc<Port>) -> anyhow::Result<()> {
     tracing::info!(
         ">>> Worker Trigger 2 [Broadcast] received: '{}', port: {}",
@@ -63,7 +63,7 @@ pub async fn worker_trigger2(payload: String, port: Arc<Port>) -> anyhow::Result
 
 // --- Load-Balancing Queue Trigger ---
 // WorkerQueue is an LBQueue - messages are distributed to one handler at a time
-#[trigger(template = LBQueue, target = WorkerQueue)]
+#[trigger(LBQueue(WorkerQueue))]
 pub async fn lb_worker_trigger(payload: String, port: Arc<Port>) -> anyhow::Result<()> {
     tracing::info!(
         ">>> LB Worker Trigger [LoadBalancing] received: '{}', port: {}",
@@ -75,7 +75,7 @@ pub async fn lb_worker_trigger(payload: String, port: Arc<Port>) -> anyhow::Resu
 
 // --- Complex Payload with Explicit Arc ---
 // Using #[payload] allows receiving the event payload wrapped in Arc
-#[trigger(template = LBQueue, target = crate::providers::trigger_providers::JobQueue)]
+#[trigger(LBQueue(crate::providers::trigger_providers::JobQueue))]
 pub async fn complex_job_handler(
     #[payload] job: Arc<crate::providers::trigger_providers::ComplexJob>,
     port: Arc<Port>,
@@ -91,7 +91,7 @@ pub async fn complex_job_handler(
 
 // --- Signal Trigger ---
 // Uses the Notify provider for event signaling
-#[trigger(template = Event, target = UserNotifier)]
+#[trigger(Event(UserNotifier))]
 pub async fn notify_trigger(port: Arc<Port>) -> anyhow::Result<()> {
     tracing::info!(">>> Notify Trigger [Event] received, port: {}", port);
     Ok(())
@@ -99,7 +99,7 @@ pub async fn notify_trigger(port: Arc<Port>) -> anyhow::Result<()> {
 
 // --- Sync Trigger ---
 #[allow_sync]
-#[trigger(template = Notify, target = UserNotifier)]
+#[trigger(Notify(UserNotifier))]
 pub fn sync_notify_trigger() -> anyhow::Result<()> {
     tracing::info!(">>> Sync Notify Trigger fired");
     Ok(())
@@ -107,7 +107,7 @@ pub fn sync_notify_trigger() -> anyhow::Result<()> {
 
 // --- Watch Trigger ---
 // Fires whenever GlobalStats is modified (via Arc<RwLock<GlobalStats>>)
-#[trigger(template = TT::Watch, target = crate::providers::typed_providers::GlobalStats)]
+#[trigger(Watch(crate::providers::typed_providers::GlobalStats))]
 pub async fn on_stats_changed(
     snapshot: Arc<crate::providers::typed_providers::GlobalStats>,
 ) -> anyhow::Result<()> {
@@ -120,7 +120,7 @@ pub async fn on_stats_changed(
 }
 
 // --- External Modification Watcher ---
-#[trigger(template = TT::Watch, target = crate::providers::trigger_providers::ExternalStatus)]
+#[trigger(Watch(crate::providers::trigger_providers::ExternalStatus))]
 pub async fn on_external_status_changed(
     snapshot: Arc<crate::providers::trigger_providers::ExternalStatus>,
 ) -> anyhow::Result<()> {

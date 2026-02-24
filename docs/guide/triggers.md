@@ -16,7 +16,7 @@ Triggers are specialized services with built-in event loops that execute your fu
 
 ### Cron Trigger
 ```rust
-#[trigger(template = Cron, target = CleanupSchedule)]
+#[trigger(Cron(CleanupSchedule))]
 async fn hourly_cleanup() -> anyhow::Result<()> {
     tracing::info!("Cleaning up...");
     Ok(())
@@ -28,7 +28,7 @@ async fn hourly_cleanup() -> anyhow::Result<()> {
 - **Load Balancing (`LBQueue`)**: Messages are distributed to one available worker.
 
 ```rust
-#[trigger(template = LBQueue, target = WorkerQueue)]
+#[trigger(LBQueue(WorkerQueue))]
 async fn worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
@@ -36,11 +36,18 @@ async fn worker(item: Task) -> anyhow::Result<()> { ... }
 Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified. Internally, this leverages the `ServiceDaemon`'s reload mechanism: the service is re-spawned with a fresh snapshot exactly when the state changes.
 
 ```rust
-#[trigger(template = Watch, target = MyData)]
+#[trigger(Watch(MyData))]
 pub async fn on_data_changed(snapshot: Arc<MyData>) -> anyhow::Result<()> {
     tracing::info!("New value: {}", snapshot.value);
     Ok(())
 }
+```
+
+### Priority
+All triggers support the `priority` parameter for wave-based startup/shutdown ordering:
+```rust
+#[trigger(Watch(MetricsData), priority = 80)]
+pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()> { ... }
 ```
 
 ## 3. Parameter Mapping Rules

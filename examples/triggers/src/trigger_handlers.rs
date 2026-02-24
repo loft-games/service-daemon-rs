@@ -13,7 +13,7 @@ use std::sync::Arc;
 // =============================================================================
 
 /// Fires every 30 seconds (per `CleanupSchedule`).
-#[trigger(template = Cron, target = CleanupSchedule)]
+#[trigger(Cron(CleanupSchedule))]
 pub async fn cleanup_trigger() -> anyhow::Result<()> {
     tracing::info!(">>> [Cron] Cleanup trigger fired");
     Ok(())
@@ -24,7 +24,7 @@ pub async fn cleanup_trigger() -> anyhow::Result<()> {
 // =============================================================================
 
 /// Handler 1: receives ALL messages from `TaskQueue`.
-#[trigger(template = Queue, target = TaskQueue)]
+#[trigger(Queue(TaskQueue))]
 pub async fn broadcast_handler_a(payload: String) -> anyhow::Result<()> {
     tracing::info!(">>> [Broadcast A] received: '{}'", payload);
     Ok(())
@@ -32,7 +32,7 @@ pub async fn broadcast_handler_a(payload: String) -> anyhow::Result<()> {
 
 /// Handler 2: also receives ALL messages from `TaskQueue`.
 /// This demonstrates the fanout behavior of broadcast queues.
-#[trigger(template = BQueue, target = TaskQueue)]
+#[trigger(BQueue(TaskQueue))]
 pub async fn broadcast_handler_b(payload: String) -> anyhow::Result<()> {
     tracing::info!(">>> [Broadcast B] received: '{}'", payload);
     Ok(())
@@ -44,7 +44,7 @@ pub async fn broadcast_handler_b(payload: String) -> anyhow::Result<()> {
 
 /// Receives messages from `WorkerQueue` in a round-robin fashion.
 /// Only ONE handler gets each message.
-#[trigger(template = LBQueue, target = WorkerQueue)]
+#[trigger(LBQueue(WorkerQueue))]
 pub async fn lb_worker_handler(payload: String) -> anyhow::Result<()> {
     tracing::info!(">>> [LBQueue] received: '{}'", payload);
     Ok(())
@@ -55,7 +55,7 @@ pub async fn lb_worker_handler(payload: String) -> anyhow::Result<()> {
 // =============================================================================
 
 /// Receives a `ComplexJob` wrapped in `Arc` — zero-copy payload delivery.
-#[trigger(template = LBQueue, target = crate::providers::JobQueue)]
+#[trigger(LBQueue(crate::providers::JobQueue))]
 pub async fn complex_job_handler(
     #[payload] job: Arc<crate::providers::ComplexJob>,
 ) -> anyhow::Result<()> {
@@ -68,7 +68,7 @@ pub async fn complex_job_handler(
 // =============================================================================
 
 /// Fires whenever `UserNotifier::notify()` is called.
-#[trigger(template = Event, target = UserNotifier)]
+#[trigger(Event(UserNotifier))]
 pub async fn on_user_notified() -> anyhow::Result<()> {
     tracing::info!(">>> [Event] User notification received");
     Ok(())
@@ -80,7 +80,7 @@ pub async fn on_user_notified() -> anyhow::Result<()> {
 
 /// Fires whenever `ExternalStatus` is modified via its RwLock.
 /// Receives a snapshot of the state AFTER the modification.
-#[trigger(template = TT::Watch, target = ExternalStatus)]
+#[trigger(Watch(ExternalStatus))]
 pub async fn on_external_status_changed(snapshot: Arc<ExternalStatus>) -> anyhow::Result<()> {
     tracing::info!(
         ">>> [Watch] ExternalStatus changed: '{}' (count: {})",
@@ -97,7 +97,7 @@ pub async fn on_external_status_changed(snapshot: Arc<ExternalStatus>) -> anyhow
 /// Demonstrates that triggers can also be synchronous.
 /// Uses `Notify` template (alias for `Event`).
 #[service_daemon::allow_sync]
-#[trigger(template = Notify, target = UserNotifier)]
+#[trigger(Notify(UserNotifier))]
 pub fn sync_notify_trigger() -> anyhow::Result<()> {
     tracing::info!(">>> [Sync Event] Sync notify trigger fired");
     Ok(())

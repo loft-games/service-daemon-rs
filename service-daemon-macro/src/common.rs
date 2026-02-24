@@ -227,7 +227,12 @@ impl ParamProcessor {
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#inner_type> },
                     )
-                    .unwrap(),
+                    .unwrap_or_else(|e| {
+                        abort!(
+                            arg_name,
+                            format!("Internal macro error parsing Arc dependency: {}", e)
+                        )
+                    }),
                 );
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
@@ -239,7 +244,12 @@ impl ParamProcessor {
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> },
                     )
-                    .unwrap(),
+                    .unwrap_or_else(|e| {
+                        abort!(
+                            arg_name,
+                            format!("Internal macro error parsing Arc<RwLock> dependency: {}", e)
+                        )
+                    }),
                 );
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
@@ -251,7 +261,12 @@ impl ParamProcessor {
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> },
                     )
-                    .unwrap(),
+                    .unwrap_or_else(|e| {
+                        abort!(
+                            arg_name,
+                            format!("Internal macro error parsing Arc<Mutex> dependency: {}", e)
+                        )
+                    }),
                 );
             }
         }

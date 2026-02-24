@@ -24,7 +24,7 @@ pub struct UserNotifier;
 // =============================================================================
 
 /// A cron schedule string. Triggers annotated with
-/// `#[trigger(template = Cron, target = CleanupSchedule)]`
+/// `#[trigger(Cron(CleanupSchedule))]`
 /// will fire according to this schedule.
 #[derive(Clone)]
 #[provider(default = "*/30 * * * * *")]
