@@ -38,7 +38,9 @@ pub mod core;
 pub mod models;
 
 // Re-export commonly used items
-pub use core::context::{done, is_shutdown, shelve, sleep, state, unshelve, wait_shutdown};
+pub use core::context::{
+    done, generate_message_id, is_shutdown, publish, shelve, sleep, state, unshelve, wait_shutdown,
+};
 pub use core::di::Provided;
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
@@ -46,7 +48,8 @@ pub use core::service_daemon::{
 pub use models::service::ServicePriority;
 pub use models::{
     Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ServiceDescription, ServiceEntry,
-    ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerTemplate,
+    ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage, TriggerTemplate,
 };
 pub use std::sync::Arc;
 

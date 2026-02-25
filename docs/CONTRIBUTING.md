@@ -15,7 +15,7 @@
 ### 标准工作流
 1. **修改核心/宏**: 在 `service-daemon` 或 `service-daemon-macro` 中进行更改。
 2. **运行测试**: 使用 `cargo test --workspace` 确保没有回归。
-3. **验证展开**: 使用 `cargo expand -p service-daemon-demo` 查看更改如何影响用户代码。
+3. **验证展开**: 使用 `cargo expand -p example-complete` 查看更改如何影响用户代码。
 4. **代码检查**: 遵循 `cargo clippy --workspace -- -D warnings` 的建议。
 
 ## 您遇到了一个 BUG?

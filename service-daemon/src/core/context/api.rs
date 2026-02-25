@@ -239,3 +239,74 @@ pub async fn sleep(duration: Duration) -> bool {
         true
     }
 }
+
+// ---------------------------------------------------------------------------
+// Event Publishing API — "Throwing stones into the water"
+// ---------------------------------------------------------------------------
+
+/// Generates a globally unique message ID for event tracing.
+///
+/// This is useful when you need to manually call a provider's `.push()` or
+/// `.notify()` method and want to correlate the event with a message ID.
+///
+/// # Example
+/// ```rust,ignore
+/// let message_id = service_daemon::generate_message_id();
+/// tracing::info!(%message_id, "Publishing event");
+/// MyQueue::push(payload).await;
+/// ```
+pub fn generate_message_id() -> String {
+    crate::core::triggers::generate_message_id()
+}
+
+/// Publishes an event from the current service context with full traceability.
+///
+/// This is the canonical way for a service to "throw a stone" — it wraps
+/// a provider call (e.g. `push()` or `notify()`) with structured tracing
+/// metadata including the source `ServiceId` and a unique `message_id`.
+///
+/// The closure receives no arguments; it should capture the provider and
+/// payload from the enclosing scope.
+///
+/// # Example
+/// ```rust,ignore
+/// use service_daemon::{publish, service};
+/// use std::sync::Arc;
+///
+/// #[service]
+/// pub async fn my_service(queue: Arc<TaskQueue>) -> anyhow::Result<()> {
+///     service_daemon::done();
+///     while !service_daemon::is_shutdown() {
+///         publish("order_created", async {
+///             TaskQueue::push("new order".to_string()).await;
+///         }).await;
+///         service_daemon::sleep(std::time::Duration::from_secs(5)).await;
+///     }
+///     Ok(())
+/// }
+/// ```
+pub async fn publish<F, Fut>(event_name: &str, action: F)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let message_id = generate_message_id();
+    let source_id = CURRENT_SERVICE
+        .try_with(|id| id.service_id)
+        .unwrap_or(crate::models::ServiceId::new(0));
+
+    let span = tracing::info_span!(
+        "publish",
+        event = %event_name,
+        %message_id,
+        source = %source_id,
+    );
+
+    let _guard = span.enter();
+    tracing::info!("Event published");
+    drop(_guard);
+
+    // Execute the user's publish action within the span
+    use tracing::Instrument;
+    action().instrument(span).await;
+}

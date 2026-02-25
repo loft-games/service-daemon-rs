@@ -351,4 +351,52 @@ mod tests {
 
         Ok(())
     }
+
+    /// Verifies that `resolve()` returns a non-blocking snapshot even while
+    /// a writer holds the RwLock. This guarantees zero-lockdown reads for
+    /// any service that holds `Arc<T>` (snapshot) rather than `Arc<RwLock<T>>`.
+    #[tokio::test]
+    async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
+        use crate::providers::typed_providers::GlobalStats;
+        use service_daemon::Provided;
+
+        // Acquire the RwLock (promotes to managed state)
+        let lock = GlobalStats::rwlock().await;
+        let lock_clone = lock.clone();
+
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let barrier_clone = barrier.clone();
+
+        // Spawn a writer that holds the write lock for 300ms
+        let writer = tokio::spawn(async move {
+            let mut guard = lock_clone.write().await;
+            guard.last_status = "Locked".to_string();
+            barrier_clone.wait().await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+
+        // Wait for writer to acquire the lock
+        barrier.wait().await;
+
+        // Snapshot read MUST NOT block despite the held write lock
+        let start = std::time::Instant::now();
+        let snapshot = GlobalStats::resolve().await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "resolve() blocked for {:?} — expected non-blocking",
+            elapsed
+        );
+        // Snapshot should see the DEFAULT value, not the locked value
+        assert_eq!(snapshot.last_status, "");
+
+        writer.await?;
+
+        // After writer releases, next snapshot should see the updated value
+        let final_snapshot = GlobalStats::resolve().await;
+        assert_eq!(final_snapshot.last_status, "Locked");
+
+        Ok(())
+    }
 }

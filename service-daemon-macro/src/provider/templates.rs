@@ -48,6 +48,11 @@ pub fn generate_notify_template(
             async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
+
+            async fn changed() {
+                // Signals are not watchable state. Wait indefinitely.
+                std::future::pending::<()>().await;
+            }
         }
 
         impl #struct_name {
@@ -117,6 +122,11 @@ pub fn generate_lb_queue_template(
             async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
+
+            async fn changed() {
+                // Queues are not watchable state. Wait indefinitely.
+                std::future::pending::<()>().await;
+            }
         }
 
         impl #struct_name {
@@ -176,6 +186,11 @@ pub fn generate_broadcast_queue_template(
 
             async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
+            }
+
+            async fn changed() {
+                // Queues are not watchable state. Wait indefinitely.
+                std::future::pending::<()>().await;
             }
         }
 

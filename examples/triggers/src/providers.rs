@@ -15,7 +15,7 @@ use service_daemon::provider;
 // =============================================================================
 
 /// A `Notify`-based signal. Calling `UserNotifier::notify()` wakes all
-/// subscribed `Event`/`Notify` triggers.
+/// subscribed `Event`/`Notify`/`Signal` triggers, demonstrating one-to-many fanout.
 #[provider(default = Notify)]
 pub struct UserNotifier;
 

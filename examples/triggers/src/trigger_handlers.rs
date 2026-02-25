@@ -5,7 +5,7 @@
 //! and are registered in the daemon's global registry via the `#[trigger]` macro.
 
 use crate::providers::{CleanupSchedule, ExternalStatus, TaskQueue, UserNotifier, WorkerQueue};
-use service_daemon::trigger;
+use service_daemon::{publish, trigger};
 use std::sync::Arc;
 
 // =============================================================================
@@ -100,5 +100,31 @@ pub async fn on_external_status_changed(snapshot: Arc<ExternalStatus>) -> anyhow
 #[trigger(Notify(UserNotifier))]
 pub fn sync_notify_trigger() -> anyhow::Result<()> {
     tracing::info!(">>> [Sync Event] Sync notify trigger fired");
+    Ok(())
+}
+
+// =============================================================================
+// Event Tracing Trigger — two-hop chain demo
+// =============================================================================
+
+/// Captures the notification signal and publishes a processed
+/// result to `TaskQueue`, creating a second ripple in the system.
+///
+/// Together with `on_user_notified` and `sync_notify_trigger`, this demonstrates
+/// one signal triggering multiple handlers simultaneously.
+#[trigger(Signal(UserNotifier))]
+pub async fn on_tick() -> anyhow::Result<()> {
+    tracing::info!("Tick signal captured! Processing...");
+
+    // Simulate some work
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Publish the result to the shared broadcast queue
+    publish("tick_processed", || async {
+        let _ = TaskQueue::push("Tick processed successfully".to_string()).await;
+    })
+    .await;
+
+    tracing::info!("Processing complete, result published to TaskQueue");
     Ok(())
 }

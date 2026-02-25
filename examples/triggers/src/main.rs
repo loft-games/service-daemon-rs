@@ -3,20 +3,44 @@
 //! This example demonstrates that **triggers are optional, decoupled components**
 //! that can be added to any daemon without modifying existing services.
 //!
-//! Trigger types demonstrated:
+//! ## Trigger types demonstrated
 //! - **Cron**: Fires on a cron schedule via `tokio-cron-scheduler`
 //! - **Broadcast Queue (BQueue)**: All subscribed handlers receive every message
 //! - **Load-Balancing Queue (LBQueue)**: Messages are distributed to one handler at a time
 //! - **Signal (Event/Notify)**: Fire-and-forget notification
 //! - **Watch**: Fires when a shared state value changes
 //!
-//! **Run**: `cargo run -p example-triggers`
+//! ## Event tracing demo (publish → trigger chain)
+//! ```text
+//!                                     ┌─────────────────┐
+//!                           publish() │  TickNotifier    │──► on_tick (Signal)
+//!                          ┌────────► │  (Notify)        │       │
+//!                          │          └─────────────────┘       │ publish("tick_processed")
+//!  ┌────────────────┐      │          ┌─────────────────┐       │
+//!  │ event_producer │──────┼─push()──►│  TaskQueue      │◄──────┘
+//!  │ (Service)      │      │          │  (Broadcast)    │──► handler_a, handler_b
+//!  └────────────────┘      │          └─────────────────┘
+//!                          │          ┌─────────────────┐
+//!                          ├─push()──►│  WorkerQueue    │──► lb_worker_handler
+//!                          │          │  (LBQueue)      │
+//!                          │          └─────────────────┘
+//!                          │          ┌─────────────────┐
+//!                          ├─push()──►│  JobQueue       │──► complex_job_handler
+//!                          │          │  (LBQueue)      │
+//!                          │          └─────────────────┘
+//!                          │          ┌─────────────────┐
+//!                          └────────► │  UserNotifier   │──► on_user_notified
+//!                                     │  (Notify)       │    sync_notify_trigger
+//!                                     └─────────────────┘
+//! ```
+//!
+//! **Run**: `RUST_LOG=info cargo run -p example-triggers`
 
 mod providers;
+mod services;
 mod trigger_handlers;
 
 use service_daemon::ServiceDaemon;
-use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,34 +53,6 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let daemon = ServiceDaemon::builder().build();
-
-    // Spawn a producer task that pushes messages to queues and fires signals.
-    // This simulates external events arriving in the system.
-    tokio::spawn(async move {
-        let mut job_id = 0u64;
-        loop {
-            tokio::time::sleep(Duration::from_secs(10)).await;
-
-            // Push to WorkerQueue (load-balanced)
-            let _ = crate::providers::WorkerQueue::push(format!("LB Work #{}", job_id)).await;
-
-            // Push to TaskQueue (broadcast to all handlers)
-            let _ = crate::providers::TaskQueue::push(format!("Broadcast #{}", job_id)).await;
-
-            // Push a complex payload
-            let _ = crate::providers::JobQueue::push(crate::providers::ComplexJob {
-                id: job_id,
-                data: format!("Complex Data #{}", job_id),
-            })
-            .await;
-
-            // Fire the signal
-            crate::providers::UserNotifier::notify().await;
-
-            job_id += 1;
-        }
-    });
-
     daemon.run().await?;
 
     Ok(())

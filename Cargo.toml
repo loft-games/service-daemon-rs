@@ -2,7 +2,6 @@
 members = [
     "service-daemon",
     "service-daemon-macro",
-    "examples/demo",
     "examples/minimal",
     "examples/complete",
     "examples/triggers",

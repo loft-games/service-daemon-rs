@@ -23,7 +23,8 @@ pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{
-    __run_service_scope, done, is_shutdown, shelve, sleep, state, unshelve, wait_shutdown,
+    __run_service_scope, done, generate_message_id, is_shutdown, publish, shelve, sleep, state,
+    unshelve, wait_shutdown,
 };
 
 #[cfg(feature = "simulation")]
