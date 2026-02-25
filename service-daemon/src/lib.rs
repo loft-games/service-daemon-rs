@@ -50,10 +50,9 @@ pub use models::{
 };
 pub use std::sync::Arc;
 
-// Re-export simulation utilities
-pub use core::context::try_resolve_mock;
+// Re-export simulation utilities (feature-gated toolbox)
 #[cfg(feature = "simulation")]
-pub use core::context::{MockContext, MockContextBuilder};
+pub use core::context::{MockContext, MockContextBuilder, SimulationHandle};
 
 // Re-export dependencies for use in macro-generated code
 pub use futures;

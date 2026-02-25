@@ -137,10 +137,6 @@ pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream
         // Type-based DI: impl Provided for the struct with intelligent state management
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
-                // Simulation overlay: check for shadow snapshot first
-                if let Some(mock) = service_daemon::try_resolve_mock::<Self>() {
-                    return mock;
-                }
                 #singleton_name.resolve_snapshot(|| async {
                     #constructor
                 }).await

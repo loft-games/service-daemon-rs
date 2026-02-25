@@ -92,10 +92,6 @@ fn generate_async_fn_provider(
         // Generate Provided impl for the return type using StateManager
         impl service_daemon::Provided for #return_type {
             async fn resolve() -> std::sync::Arc<Self> {
-                // Simulation overlay: check for shadow snapshot first
-                if let Some(mock) = service_daemon::try_resolve_mock::<Self>() {
-                    return mock;
-                }
                 #singleton_name.resolve_snapshot(|| async {
                     std::sync::Arc::new(#call_expr)
                 }).await

@@ -23,13 +23,11 @@ pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{
-    __run_service_scope, done, is_shutdown, shelve, sleep, state, try_resolve_mock, unshelve,
-    wait_shutdown,
+    __run_service_scope, done, is_shutdown, shelve, sleep, state, unshelve, wait_shutdown,
 };
 
-// Simulation types (feature-gated)
 #[cfg(feature = "simulation")]
-pub use simulation::{MockContext, MockContextBuilder, SimulationOverlay};
+pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
@@ -209,143 +207,127 @@ mod tests {
 #[cfg(test)]
 #[cfg(feature = "simulation")]
 mod simulation_tests {
-    use super::*;
+    use crate::MockContext;
     use crate::models::{ServiceId, ServiceStatus};
 
-    #[tokio::test]
-    async fn test_mock_context_shelf_injection() {
-        let ctx = MockContext::builder()
-            .with_service_name("shelf_test_svc")
-            .with_shelf::<i32>("counter", 42i32)
-            .with_status(ServiceStatus::Healthy)
+    #[test]
+    fn test_mock_context_shelf_pre_filling() {
+        // Verify that pre-filled shelf data is accessible through the handle.
+        let (builder, handle) = MockContext::builder()
+            .with_shelf::<i32>("test_svc", "counter", 42)
+            .with_shelf::<String>("test_svc", "name", "hello".to_string())
             .build();
 
-        ctx.run(|| async {
-            // unshelve should return the injected value
-            let val: Option<i32> = unshelve("counter").await;
-            assert_eq!(val, Some(42));
+        // The handle should see the pre-filled resources
+        let resources = handle.resources();
+        let shelf = resources.shelf.get("test_svc").unwrap();
+        let counter = shelf.get("counter").unwrap();
+        assert_eq!(counter.value().downcast_ref::<i32>(), Some(&42));
 
-            // After unshelve, the value is consumed
-            let val2: Option<i32> = unshelve("counter").await;
-            assert_eq!(val2, None);
-        })
-        .await;
+        // Builder should be valid (not consumed)
+        let _ = builder;
     }
 
-    #[tokio::test]
-    async fn test_mock_context_status_injection() {
-        let ctx = MockContext::builder()
-            .with_service_name("status_test_svc")
-            .with_status(ServiceStatus::Healthy)
+    #[test]
+    fn test_mock_context_status_pre_filling() {
+        let svc_id = ServiceId::new(1);
+        let (_, handle) = MockContext::builder()
+            .with_status(svc_id, ServiceStatus::Healthy)
             .build();
 
-        ctx.run(|| async {
-            assert_eq!(state(), ServiceStatus::Healthy);
-        })
-        .await;
+        let resources = handle.resources();
+        let status = resources.status_plane.get(&svc_id).unwrap().clone();
+        assert_eq!(status, ServiceStatus::Healthy);
     }
 
-    #[tokio::test]
-    async fn test_mock_context_provider_shadow() {
-        // Test that try_resolve_mock works correctly
-        let ctx = MockContext::builder()
-            .with_mock::<String>("hello_mock".to_string())
-            .build();
+    #[test]
+    fn test_simulation_handle_dynamic_shelf_update() {
+        let (_, handle) = MockContext::builder().build();
 
-        ctx.run(|| async {
-            let result = try_resolve_mock::<String>();
-            assert!(result.is_some());
-            assert_eq!(*result.unwrap(), "hello_mock");
+        // Initially empty
+        assert!(handle.resources().shelf.get("svc").is_none());
 
-            // Non-registered type should return None
-            let missing = try_resolve_mock::<i64>();
-            assert!(missing.is_none());
-        })
-        .await;
+        // Dynamic injection via God Hand
+        handle.set_shelf::<i32>("svc", "counter", 99);
+
+        // Now visible
+        let resources = handle.resources();
+        let shelf = resources.shelf.get("svc").unwrap();
+        let val = shelf.get("counter").unwrap();
+        assert_eq!(val.value().downcast_ref::<i32>(), Some(&99));
     }
 
-    #[tokio::test]
-    async fn test_mock_context_parallel_isolation() {
-        // Two parallel MockContexts with different values for the same type
-        // should not interfere with each other.
-        let ctx_a = MockContext::builder()
-            .with_service_name("svc_a")
-            .with_mock::<String>("value_a".to_string())
-            .with_status(ServiceStatus::Healthy)
+    #[test]
+    fn test_simulation_handle_dynamic_status_update() {
+        let svc_id = ServiceId::new(42);
+        let (_, handle) = MockContext::builder()
+            .with_status(svc_id, ServiceStatus::Initializing)
             .build();
 
-        let ctx_b = MockContext::builder()
-            .with_service_name("svc_b")
-            .with_mock::<String>("value_b".to_string())
-            .with_status(ServiceStatus::Initializing)
-            .build();
-
-        let (result_a, result_b) = tokio::join!(
-            ctx_a.run(|| async {
-                let mock = try_resolve_mock::<String>().unwrap();
-                let status = state();
-                ((*mock).clone(), status)
-            }),
-            ctx_b.run(|| async {
-                let mock = try_resolve_mock::<String>().unwrap();
-                let status = state();
-                ((*mock).clone(), status)
-            }),
+        // Phase 1: initial state
+        assert_eq!(
+            handle
+                .resources()
+                .status_plane
+                .get(&svc_id)
+                .unwrap()
+                .clone(),
+            ServiceStatus::Initializing
         );
 
-        assert_eq!(result_a.0, "value_a");
-        assert_eq!(result_a.1, ServiceStatus::Healthy);
-        assert_eq!(result_b.0, "value_b");
-        assert_eq!(result_b.1, ServiceStatus::Initializing);
+        // Phase 2: God Hand flips status
+        handle.set_status(svc_id, ServiceStatus::NeedReload);
+
+        assert_eq!(
+            handle
+                .resources()
+                .status_plane
+                .get(&svc_id)
+                .unwrap()
+                .clone(),
+            ServiceStatus::NeedReload
+        );
     }
 
-    #[tokio::test]
-    async fn test_mock_context_shelve_roundtrip() {
-        // Test that shelve() inside MockContext writes to isolated resources
-        let ctx = MockContext::builder()
-            .with_service_name("roundtrip_svc")
-            .with_status(ServiceStatus::Healthy)
+    #[test]
+    fn test_mock_context_isolation() {
+        // Two MockContexts should have completely separate resources.
+        let (_, handle_a) = MockContext::builder()
+            .with_status(ServiceId::new(1), ServiceStatus::Healthy)
+            .build();
+        let (_, handle_b) = MockContext::builder()
+            .with_status(ServiceId::new(1), ServiceStatus::Initializing)
             .build();
 
-        ctx.run(|| async {
-            shelve("key", "persisted_value".to_string()).await;
-            let val: Option<String> = unshelve("key").await;
-            assert_eq!(val, Some("persisted_value".to_string()));
-        })
-        .await;
-    }
+        assert_eq!(
+            handle_a
+                .resources()
+                .status_plane
+                .get(&ServiceId::new(1))
+                .unwrap()
+                .clone(),
+            ServiceStatus::Healthy
+        );
+        assert_eq!(
+            handle_b
+                .resources()
+                .status_plane
+                .get(&ServiceId::new(1))
+                .unwrap()
+                .clone(),
+            ServiceStatus::Initializing
+        );
 
-    #[tokio::test]
-    async fn test_mock_context_multi_injection() {
-        // Verify multiple chained injections work as expected
-        let ctx = MockContext::builder()
-            .with_service_name("multi_test_svc")
-            .with_mock::<i32>(100)
-            .with_mock::<String>("hello".to_string())
-            .with_shelf::<i32>("k1", 1)
-            .with_shelf::<i32>("k2", 2)
-            .with_status(ServiceStatus::Healthy)
-            .with_service_status(ServiceId::new(99), ServiceStatus::NeedReload)
-            .build();
-
-        ctx.run(|| async {
-            // Mocks
-            assert_eq!(*try_resolve_mock::<i32>().unwrap(), 100);
-            assert_eq!(*try_resolve_mock::<String>().unwrap(), "hello");
-
-            // Shelf
-            assert_eq!(unshelve::<i32>("k1").await, Some(1));
-            assert_eq!(unshelve::<i32>("k2").await, Some(2));
-
-            // Status
-            assert_eq!(state(), ServiceStatus::Healthy);
-            let dep_status = CURRENT_RESOURCES.with(|r| {
-                r.status_plane
-                    .get(&ServiceId::new(99))
-                    .map(|s| s.value().clone())
-            });
-            assert_eq!(dep_status, Some(ServiceStatus::NeedReload));
-        })
-        .await;
+        // Mutation in A should NOT affect B
+        handle_a.set_status(ServiceId::new(1), ServiceStatus::Terminated);
+        assert_eq!(
+            handle_b
+                .resources()
+                .status_plane
+                .get(&ServiceId::new(1))
+                .unwrap()
+                .clone(),
+            ServiceStatus::Initializing
+        );
     }
 }

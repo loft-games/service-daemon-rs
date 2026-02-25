@@ -76,33 +76,36 @@ The framework is organized into specialized submodules to ensure maintainability
 
 ## 5. Simulation Layer (Feature-Gated)
 
-All testing/simulation code lives behind the `simulation` Cargo feature, guaranteeing zero overhead in production builds.
+All testing/simulation code lives behind the `simulation` Cargo feature. It only controls **whether the toolbox is compiled** — it does NOT inject any runtime logic into the production `resolve()` path.
 
-### Architecture
+### Architecture: Interactive Simulation Sandbox
 
 ```mermaid
 graph LR
-    subgraph Production_Path ["Production Path"]
-        App["Business Logic"] -->|resolve| SM["StateManager Singleton"]
+    subgraph MockContext_Setup ["MockContext::builder().build()"]
+        MC["MockContextBuilder"] -->|pre-fill| Shelf["Shelf Data"]
+        MC -->|pre-fill| Status["Status Plane"]
+        MC -->|produces| Builder["ServiceDaemonBuilder"]
+        MC -->|produces| Handle["SimulationHandle"]
     end
 
-    subgraph Simulation_Path ["Simulation Path"]
-        App -->|resolve| SO["SimulationOverlay Check"]
-        SO -->|hit| Mock["Shadow Snapshot"]
-        SO -->|miss| SM
+    subgraph Daemon_Execution ["ServiceDaemon (real engine)"]
+        Builder -->|build + run| SD["ServiceDaemon"]
+        SD -->|owns| Resources["Private DaemonResources"]
+        SD -->|runs| RealSvc["Real Service Logic"]
     end
 
-    subgraph MockContext_Scope ["MockContext Scope"]
-        MC["MockContext run"] -->|task_local| SO
-        MC -->|task_local| Shelf["Isolated Shelf"]
-        MC -->|task_local| Status["Isolated Status Plane"]
+    subgraph God_Hand ["God Hand (Hot Injection)"]
+        Handle -->|set_shelf| Resources
+        Handle -->|set_status| Resources
+        Handle -->|trigger_reload| Resources
     end
 ```
 
-- **`SimulationOverlay`**: A `task_local` `TypeId → Arc<dyn Any>` map for shadow Provider snapshots.
-- **`MockContext`**: Builder that configures isolated `DaemonResources` + `SimulationOverlay`, then scopes them into `task_local` via `run()`.
-- **Provider Masking**: Macro-generated `resolve()` checks `try_resolve_mock::<T>()` first (feature-gated), falling through to the real `StateManager` on miss.
-- **Log Drain**: Optional background subscriber for `LogQueue` that prints to stderr, solving the "log black hole" problem in tests.
+- **`MockContext`**: A sandbox factory that produces a pre-configured `ServiceDaemonBuilder` and a `SimulationHandle`. No direct execution.
+- **`SimulationHandle`**: The "God Hand" — allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
+- **Real Engine**: Services run on the actual `ServiceDaemon` with real lifecycle management, restart policies, and dependency resolution.
+- **Strict Feature Gating**: All simulation types (`MockContext`, `SimulationHandle`, `with_resources()`, `resources()`) are `#[cfg(feature = "simulation")]` — physically absent from production builds.
 
 ## 6. Avoiding Service Interference
 

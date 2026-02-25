@@ -9,31 +9,10 @@ use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, Servi
 
 use std::any::Any;
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::models::ServiceStatus;
-
-/// Checks the simulation overlay for a shadow snapshot of type `T`.
-///
-/// This is called by macro-generated `Provided::resolve()` implementations
-/// to intercept resolution when running under a `MockContext`.
-///
-/// **Zero Overhead**: In production builds (simulation feature disabled),
-/// this function is a no-op that always returns `None`. Due to `#[inline(always)]`,
-/// the compiler will completely optimize away the overhead.
-#[inline(always)]
-pub fn try_resolve_mock<T: 'static + Send + Sync>() -> Option<Arc<T>> {
-    #[cfg(feature = "simulation")]
-    {
-        super::simulation::try_resolve_mock_internal::<T>()
-    }
-    #[cfg(not(feature = "simulation"))]
-    {
-        None
-    }
-}
 
 /// Runs a future within the context of a service.
 ///

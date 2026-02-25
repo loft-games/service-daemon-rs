@@ -1,248 +1,180 @@
-//! Simulation overlay for testing with `MockContext`.
+//! Testing context for service-level isolation.
 //!
 //! This entire module is gated behind the `simulation` feature flag and is
 //! physically removed from production builds.
+//!
+//! ## Architecture: Interactive Simulation Sandbox
+//!
+//! `MockContext` acts as a **simulation sandbox factory**: it collects pre-filled
+//! resources (shelf data, status overrides) and produces a `ServiceDaemonBuilder`
+//! that spawns a fully real `ServiceDaemon` with those resources injected.
+//!
+//! After the daemon starts, a `SimulationHandle` provides "God Hand" capabilities
+//! for dynamic intervention — modifying shelf data, flipping service status, or
+//! triggering reload signals while the daemon is running.
+//!
+//! All types in this module are **strictly gated** behind `#[cfg(feature = "simulation")]`.
 
-use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, ServiceIdentity};
+use crate::core::context::identity::DaemonResources;
+use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
 use crate::models::{ServiceId, ServiceStatus};
 
-use dashmap::DashMap;
-use std::any::{Any, TypeId};
-use std::future::Future;
-use std::sync::Arc;
-use tokio::task_local;
-use tokio_util::sync::CancellationToken;
+use std::any::Any;
 
-/// A type-erased store for Provider shadow snapshots.
+// =============================================================================
+// SimulationHandle — The "God Hand" for dynamic intervention
+// =============================================================================
+
+/// A handle for dynamically intervening in a running simulation.
 ///
-/// Each entry maps a `TypeId` to an `Arc<T>` stored as `Arc<dyn Any + Send + Sync>`.
-/// This allows `MockContext` to inject arbitrary provider values without touching
-/// the global `StateManager` singletons.
-#[derive(Clone, Default)]
-pub struct SimulationOverlay {
-    pub(crate) providers: Arc<DashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
-}
-
-impl SimulationOverlay {
-    /// Attempts to retrieve a shadow snapshot for type `T`.
-    /// Returns `Some(Arc<T>)` if a mock was registered, `None` otherwise.
-    pub fn get<T: 'static + Send + Sync>(&self) -> Option<Arc<T>> {
-        self.providers
-            .get(&TypeId::of::<T>())
-            .and_then(|entry| entry.value().clone().downcast::<T>().ok())
-    }
-
-    /// Inserts a shadow snapshot for type `T`.
-    pub fn insert<T: 'static + Send + Sync>(&self, value: T) {
-        self.providers.insert(TypeId::of::<T>(), Arc::new(value));
-    }
-}
-
-task_local! {
-    /// Task-local simulation overlay for Provider shadow snapshots.
-    pub(crate) static SIMULATION_OVERLAY: SimulationOverlay;
-}
-
-/// Builder for constructing a `MockContext` with injected mock data.
-///
-/// `MockContext` acts as an Environment Proxy, providing isolated shadow data
-/// for Providers, Shelf, and service Status within a scoped `task_local`
-/// execution context. All simulation logic is gated behind the `simulation`
-/// feature flag and is physically removed from production builds.
+/// `SimulationHandle` holds a reference to the daemon's internal `DaemonResources`
+/// (which are `Arc`-based), so mutations are immediately visible to all services.
 ///
 /// # Example
 /// ```rust,ignore
-/// use service_daemon::core::context::MockContext;
+/// let (daemon, handle) = ctx.run().await;
 ///
-/// #[tokio::test]
-/// async fn test_with_mocks() {
-///     let ctx = MockContext::builder()
-///         .with_mock::<AppConfig>(AppConfig { api_key: "test".into() })
-///         .with_shelf::<MyService>("checkpoint", SavedState { counter: 42 })
-///         .with_status(ServiceStatus::Healthy)
-///         .with_log_drain()
-///         .build();
-///
-///     ctx.run(|| async {
-///         // Business logic transparently hits shadow data
-///         let config = AppConfig::resolve().await;
-///         assert_eq!(config.api_key, "test");
-///     }).await;
-/// }
+/// // Phase 2: mid-flight mutation
+/// handle.set_shelf::<String>("config_svc", "db_url", "new://host".into());
+/// handle.set_status(svc_id, ServiceStatus::NeedReload);
 /// ```
-pub struct MockContext {
-    /// Isolated DaemonResources (status plane + shelf).
-    pub(crate) resources: DaemonResources,
-    /// Shadow Provider snapshots.
-    pub(crate) overlay: SimulationOverlay,
-    /// The service identity to use within the mock scope.
-    pub(crate) identity: ServiceIdentity,
-    /// Whether to drain the internal log queue during execution.
-    pub(crate) has_log_drain: bool,
+#[derive(Clone)]
+pub struct SimulationHandle {
+    /// Reference to the daemon's shared resources.
+    resources: DaemonResources,
 }
+
+impl SimulationHandle {
+    /// Creates a new `SimulationHandle` wrapping the given resources.
+    pub(crate) fn new(resources: DaemonResources) -> Self {
+        Self { resources }
+    }
+
+    /// Dynamically update a shelf entry for the specified service.
+    ///
+    /// This simulates external state changes (e.g., a config reload, crash recovery
+    /// data arriving mid-flight). The change is immediately visible to the service
+    /// on its next `unshelve()` call.
+    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &str, key: &str, value: T) {
+        let entry = self
+            .resources
+            .shelf
+            .entry(service_name.to_string())
+            .or_default();
+        entry.insert(key.to_string(), Box::new(value));
+    }
+
+    /// Dynamically override the lifecycle status of a service.
+    ///
+    /// This simulates external status transitions (e.g., a dependency going unhealthy,
+    /// or an operator manually marking a service for reload).
+    pub fn set_status(&self, service_id: ServiceId, status: ServiceStatus) {
+        self.resources.status_plane.insert(service_id, status);
+        // Notify any watchers that a status change occurred.
+        self.resources.status_changed.notify_waiters();
+    }
+
+    /// Triggers a reload signal for the specified service.
+    ///
+    /// If the service has a `Watch` trigger or calls `wait_reload()`, it will
+    /// be woken up immediately.
+    pub fn trigger_reload(&self, service_id: &ServiceId) {
+        if let Some(notify) = self.resources.reload_signals.get(service_id) {
+            notify.notify_one();
+        }
+    }
+
+    /// Returns a list of all `ServiceId`s currently visible in the status plane.
+    ///
+    /// This is useful for discovering the runtime IDs assigned by `Registry`,
+    /// which are needed for `set_status()` and `trigger_reload()`.
+    ///
+    /// **Note**: Services only appear here after the runner has spawned them
+    /// and written their initial status. Call this after a short delay to ensure
+    /// services have been registered.
+    pub fn service_ids(&self) -> Vec<ServiceId> {
+        self.resources
+            .status_plane
+            .iter()
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
+    /// Returns a clone of the underlying `DaemonResources` for advanced inspection.
+    ///
+    /// This is useful for asserting the final state of resources after a simulation run.
+    pub fn resources(&self) -> DaemonResources {
+        self.resources.clone()
+    }
+}
+
+// =============================================================================
+// MockContext — Simulation sandbox factory
+// =============================================================================
+
+/// Simulation sandbox factory.
+///
+/// `MockContext` is a zero-sized type that serves as the namespace for
+/// constructing simulation sandboxes via `MockContext::builder()`.
+pub struct MockContext;
 
 /// Builder for `MockContext`.
 pub struct MockContextBuilder {
     resources: DaemonResources,
-    overlay: SimulationOverlay,
-    service_id: ServiceId,
-    service_name: String,
-    has_log_drain: bool,
 }
 
 impl MockContext {
-    /// Creates a new `MockContextBuilder` for constructing a simulation environment.
+    /// Creates a new `MockContextBuilder` for constructing a simulation sandbox.
     pub fn builder() -> MockContextBuilder {
         MockContextBuilder {
             resources: DaemonResources::new(),
-            overlay: SimulationOverlay::default(),
-            service_id: ServiceId::new(0),
-            service_name: "mock_service".to_string(),
-            has_log_drain: false,
         }
-    }
-
-    /// Executes the given async closure within the mock environment.
-    ///
-    /// All calls to `resolve()`, `state()`, `shelve()`, and `unshelve()` inside
-    /// the closure will transparently hit the shadow data injected via the builder,
-    /// without touching any global static state.
-    #[allow(clippy::let_and_return)]
-    pub async fn run<F, Fut, R>(&self, f: F) -> R
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = R>,
-    {
-        // Optionally spawn a background log drain task.
-        // The `_drain_handle` MUST be kept alive (not dropped) until after `result`
-        // is obtained, so the intentional `let result = ...` pattern is correct.
-        let _drain_handle = if self.has_log_drain {
-            Some(spawn_log_drain())
-        } else {
-            None
-        };
-
-        let result = SIMULATION_OVERLAY
-            .scope(
-                self.overlay.clone(),
-                CURRENT_SERVICE.scope(
-                    self.identity.clone(),
-                    CURRENT_RESOURCES.scope(self.resources.clone(), f()),
-                ),
-            )
-            .await;
-
-        // `_drain_handle` drops here, stopping the background consumer.
-        result
     }
 }
 
 impl MockContextBuilder {
-    /// Sets the service name used for shelf isolation and identity.
-    pub fn with_service_name(mut self, name: impl Into<String>) -> Self {
-        self.service_name = name.into();
-        self
-    }
-
-    /// Injects a shadow Provider snapshot for type `T`.
-    ///
-    /// When business code calls `T::resolve()` inside `MockContext::run()`,
-    /// it will receive this value instead of initializing from the real provider.
-    pub fn with_mock<T: 'static + Send + Sync + Clone>(self, value: T) -> Self {
-        self.overlay.insert(value);
-        self
-    }
-
-    /// Pre-fills a Shelf entry for the configured service.
+    /// Pre-fills a shelf entry for the specified service.
     ///
     /// This simulates previously shelved data, useful for testing crash recovery
     /// and state persistence logic.
-    pub fn with_shelf<T: Any + Send + Sync>(self, key: &str, data: T) -> Self {
-        // Scope the DashMap RefMut guard so it drops before `self` is moved.
+    pub fn with_shelf<T: Any + Send + Sync>(self, service_name: &str, key: &str, data: T) -> Self {
         {
             let entry = self
                 .resources
                 .shelf
-                .entry(self.service_name.clone())
+                .entry(service_name.to_string())
                 .or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self
     }
 
-    /// Sets the initial lifecycle status for the mock service.
-    pub fn with_status(self, status: ServiceStatus) -> Self {
-        self.resources.status_plane.insert(self.service_id, status);
-        self
-    }
-
-    /// Sets the lifecycle status for a specific service in the mock environment.
+    /// Pre-sets the lifecycle status for a specific service.
     ///
-    /// This is useful for mocking the status of dependency services that the
-    /// current service might be watching or interacting with.
-    pub fn with_service_status(self, id: ServiceId, status: ServiceStatus) -> Self {
-        self.resources.status_plane.insert(id, status);
+    /// This is useful for simulating the status of dependency services or
+    /// setting the initial state of the service under test.
+    pub fn with_status(self, service_id: ServiceId, status: ServiceStatus) -> Self {
+        self.resources.status_plane.insert(service_id, status);
         self
     }
 
-    /// Enables automatic log queue draining during `MockContext::run()`.
+    /// Builds the `MockContext` and returns a pre-configured `ServiceDaemonBuilder`
+    /// along with a `SimulationHandle` for dynamic intervention.
     ///
-    /// When enabled, a background task subscribes to the internal `LogQueue`
-    /// and prints all captured log events to stderr. This prevents the
-    /// "log black hole" problem where logs are silently discarded because
-    /// the `LogService` is not running in unit test environments.
-    pub fn with_log_drain(mut self) -> Self {
-        self.has_log_drain = true;
-        self
+    /// The returned builder:
+    /// - Has `Registry` isolation enabled (empty registry, no auto-discovery).
+    /// - Uses a testing-friendly restart policy.
+    /// - Has the pre-filled `DaemonResources` injected.
+    ///
+    /// You can further customize it by calling `.with_service()` to add the
+    /// real service(s) you want to debug.
+    pub fn build(self) -> (ServiceDaemonBuilder, SimulationHandle) {
+        let handle = SimulationHandle::new(self.resources.clone());
+
+        let builder = ServiceDaemonBuilder::new_isolated()
+            .with_resources(self.resources)
+            .with_restart_policy(RestartPolicy::for_testing());
+
+        (builder, handle)
     }
-
-    /// Builds the `MockContext` from the configured builder state.
-    pub fn build(self) -> MockContext {
-        MockContext {
-            resources: self.resources,
-            overlay: self.overlay,
-            identity: ServiceIdentity::new(
-                self.service_id,
-                self.service_name,
-                CancellationToken::new(),
-                CancellationToken::new(),
-            ),
-            has_log_drain: self.has_log_drain,
-        }
-    }
-}
-
-/// Spawns a background task that drains the internal log queue to stderr.
-///
-/// Returns a `JoinHandle` that, when dropped (via `abort_on_drop`), will stop
-/// the drain task. This ensures the drain lives only as long as the `MockContext::run` scope.
-fn spawn_log_drain() -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async {
-        let mut rx = crate::core::logging::subscribe_log_queue();
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    eprintln!(
-                        "[MockContext] [{}] {:<5} [{}] {}",
-                        event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                        event.level,
-                        event.target,
-                        event.message
-                    );
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("[MockContext] LogDrain lagged by {} messages", n);
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
-}
-
-/// Checks the simulation overlay for a shadow snapshot of type `T`.
-pub(crate) fn try_resolve_mock_internal<T: 'static + Send + Sync>() -> Option<Arc<T>> {
-    SIMULATION_OVERLAY
-        .try_with(|overlay| overlay.get::<T>())
-        .ok()
-        .flatten()
 }

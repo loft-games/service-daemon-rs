@@ -89,6 +89,20 @@ impl ServiceDaemon {
         }
     }
 
+    /// **[Simulation Only]** Returns a clone of the daemon's internal resources.
+    ///
+    /// This is used by `SimulationHandle` to perform dynamic injection ("God Hand")
+    /// during a running simulation. Since `DaemonResources` uses `Arc` internally,
+    /// modifications through the returned clone are immediately visible to all services.
+    ///
+    /// # Safety
+    /// This method is gated behind the `simulation` feature to prevent misuse
+    /// in production environments.
+    #[cfg(feature = "simulation")]
+    pub fn resources(&self) -> DaemonResources {
+        self.resources.clone()
+    }
+
     /// Get the current status of a service by its `ServiceId`.
     pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
         self.handle().get_service_status(id).await
@@ -193,7 +207,7 @@ impl ServiceDaemon {
                 test_policy,
                 self.running_tasks.clone(),
                 self.resources.clone(),
-                self.cancellation_token.clone(),
+                service.cancellation_token.clone(),
             )
             .await;
         }
@@ -224,6 +238,9 @@ pub struct ServiceDaemonBuilder {
     registry: Option<Registry>,
     restart_policy: RestartPolicy,
     extra_services: Vec<ServiceDescription>,
+    /// Pre-filled resources for simulation (only available with `simulation` feature).
+    #[cfg(feature = "simulation")]
+    resources: Option<DaemonResources>,
 }
 
 impl ServiceDaemonBuilder {
@@ -232,6 +249,26 @@ impl ServiceDaemonBuilder {
             registry: None,
             restart_policy: RestartPolicy::default(),
             extra_services: Vec::new(),
+            #[cfg(feature = "simulation")]
+            resources: None,
+        }
+    }
+
+    /// **[Simulation Only]** Creates an isolated builder with an empty registry.
+    ///
+    /// This prevents auto-discovery of statically registered services, ensuring
+    /// the simulation sandbox only runs explicitly added services.
+    #[cfg(feature = "simulation")]
+    pub(crate) fn new_isolated() -> Self {
+        Self {
+            registry: Some(
+                crate::models::Registry::builder()
+                    .with_tag("__simulation_isolation__")
+                    .build(),
+            ),
+            restart_policy: RestartPolicy::default(),
+            extra_services: Vec::new(),
+            resources: None,
         }
     }
 
@@ -272,6 +309,21 @@ impl ServiceDaemonBuilder {
         self
     }
 
+    /// **[Simulation Only]** Inject pre-filled `DaemonResources` into the daemon.
+    ///
+    /// This allows `MockContext` to pre-populate shelf data, status plane entries,
+    /// and other resources before the daemon starts running services.
+    ///
+    /// # Safety
+    /// This method is gated behind the `simulation` feature to prevent misuse
+    /// in production environments.
+    #[cfg(feature = "simulation")]
+    #[must_use]
+    pub fn with_resources(mut self, resources: DaemonResources) -> Self {
+        self.resources = Some(resources);
+        self
+    }
+
     /// Build the `ServiceDaemon`.
     ///
     /// This method is **infallible** — it always returns a valid daemon.
@@ -283,12 +335,18 @@ impl ServiceDaemonBuilder {
         let mut services = registry.into_services();
         services.extend(self.extra_services);
 
+        // Use injected resources if provided (simulation), otherwise create fresh ones.
+        #[cfg(feature = "simulation")]
+        let resources = self.resources.unwrap_or_default();
+        #[cfg(not(feature = "simulation"))]
+        let resources = DaemonResources::new();
+
         ServiceDaemon {
             services,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: CancellationToken::new(),
-            resources: DaemonResources::new(),
+            resources,
         }
     }
 }
