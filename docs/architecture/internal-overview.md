@@ -25,23 +25,23 @@ The daemon maintains a **Unified Status Plane** to track service health. To elim
 
 ```mermaid
 graph TD
-    subgraph "User Code"
+    subgraph User_Code ["User Code"]
         S["#[service] Function"]
         P["#[provider] Struct/Fn"]
         T["#[trigger] Function"]
     end
 
-    subgraph "Macros"
+    subgraph Macro_Gen ["Macros"]
         M_S[Service Wrapper]
         M_P[Provided Trait Impl]
         M_T[Trigger Wrapper]
     end
 
-    subgraph "Static Registry"
-        SR[(SERVICE_REGISTRY)]
+    subgraph Static_Registry ["Static Registry"]
+        SR[("SERVICE_REGISTRY")]
     end
 
-    subgraph "Core Daemon"
+    subgraph Core_Daemon ["Core Daemon"]
         SD[ServiceDaemon]
         SCP[Service Control Plane]
     end
@@ -82,18 +82,18 @@ All testing/simulation code lives behind the `simulation` Cargo feature, guarant
 
 ```mermaid
 graph LR
-    subgraph "Production Path"
-        App["Business Logic"] -->|resolve()| SM["StateManager Singleton"]
+    subgraph Production_Path ["Production Path"]
+        App["Business Logic"] -->|resolve| SM["StateManager Singleton"]
     end
 
-    subgraph "Simulation Path (feature = simulation)"
-        App -->|resolve()| SO["SimulationOverlay Check"]
+    subgraph Simulation_Path ["Simulation Path"]
+        App -->|resolve| SO["SimulationOverlay Check"]
         SO -->|hit| Mock["Shadow Snapshot"]
         SO -->|miss| SM
     end
 
-    subgraph "MockContext Scope"
-        MC["MockContext::run()"] -->|task_local| SO
+    subgraph MockContext_Scope ["MockContext Scope"]
+        MC["MockContext run"] -->|task_local| SO
         MC -->|task_local| Shelf["Isolated Shelf"]
         MC -->|task_local| Status["Isolated Status Plane"]
     end
