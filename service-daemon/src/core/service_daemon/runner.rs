@@ -10,13 +10,14 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
-use crate::models::{ServiceDescription, ServiceError, ServiceFn, ServiceStatus};
-use crate::utils::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+use crate::models::{ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus};
 
 use super::policy::RestartPolicy;
 
 /// Supervises a single service's lifecycle, including restarts and signal handling.
 struct ServiceSupervisor {
+    service_id: ServiceId,
     name: String,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
@@ -28,6 +29,7 @@ struct ServiceSupervisor {
 
 impl ServiceSupervisor {
     fn new(
+        service_id: ServiceId,
         name: String,
         run: ServiceFn,
         watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
@@ -36,6 +38,7 @@ impl ServiceSupervisor {
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
+            service_id,
             name,
             run,
             watcher,
@@ -50,6 +53,7 @@ impl ServiceSupervisor {
     fn spawn_watcher(&self) {
         if let Some(watcher) = &self.watcher {
             let n = self.name.clone();
+            let sid = self.service_id;
             let ct = self.cancellation_token.clone();
             let res = self.resources.clone();
             let watcher = watcher.clone();
@@ -57,7 +61,7 @@ impl ServiceSupervisor {
                 while !ct.is_cancelled() {
                     let reload_signal = res
                         .reload_signals
-                        .entry(n.clone())
+                        .entry(sid)
                         .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
                         .clone();
 
@@ -78,7 +82,7 @@ impl ServiceSupervisor {
         let initial_status = self
             .resources
             .status_plane
-            .get(&self.name)
+            .get(&self.service_id)
             .map(|s| s.value().clone())
             .unwrap_or(ServiceStatus::Initializing);
 
@@ -149,7 +153,7 @@ impl ServiceSupervisor {
         let reload_signal = self
             .resources
             .reload_signals
-            .entry(self.name.clone())
+            .entry(self.service_id)
             .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
             .clone();
 
@@ -167,7 +171,7 @@ impl ServiceSupervisor {
             }
             _ = self.cancellation_token.cancelled() => {
                 info!("Service {} received shutdown signal during restart delay", self.name);
-                self.resources.status_plane.insert(self.name.clone(), ServiceStatus::Terminated);
+                self.resources.status_plane.insert(self.service_id, ServiceStatus::Terminated);
                 self.resources.status_changed.notify_waiters();
                 return false;
             }
@@ -190,7 +194,7 @@ impl ServiceSupervisor {
                 );
                 self.resources
                     .status_plane
-                    .insert(self.name.clone(), ServiceStatus::Terminated);
+                    .insert(self.service_id, ServiceStatus::Terminated);
                 self.resources.status_changed.notify_waiters();
                 break;
             }
@@ -202,7 +206,7 @@ impl ServiceSupervisor {
             );
             self.resources
                 .status_plane
-                .insert(self.name.clone(), start_status);
+                .insert(self.service_id, start_status);
             self.resources.status_changed.notify_waiters();
             let start_time = std::time::Instant::now();
 
@@ -212,13 +216,14 @@ impl ServiceSupervisor {
             let reload_signal = self
                 .resources
                 .reload_signals
-                .entry(self.name.clone())
+                .entry(self.service_id)
                 .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
                 .clone();
 
             // Create reload token for this generation
             let reload_token = CancellationToken::new();
             let identity = ServiceIdentity::new(
+                self.service_id,
                 self.name.clone(),
                 self.cancellation_token.clone(),
                 reload_token.clone(),
@@ -248,27 +253,28 @@ impl ServiceSupervisor {
             })
             .await;
 
-            // Handle outcome
-            let (next_status, should_restart) = self.handle_outcome(result, &reload_token);
-
-            // Check for cancellation after service exits
+            // Fast path: If shutdown was requested while the service was running,
+            // skip outcome processing entirely — no error logging, no restart.
             if self.cancellation_token.is_cancelled() {
                 info!(
-                    "Service {} received shutdown signal, not restarting",
+                    "Service {} exited during shutdown, marking as Terminated",
                     self.name
                 );
                 self.resources
                     .status_plane
-                    .insert(self.name.clone(), ServiceStatus::Terminated);
+                    .insert(self.service_id, ServiceStatus::Terminated);
                 self.resources.status_changed.notify_waiters();
                 break;
             }
+
+            // Handle outcome (only reached if NOT shutting down)
+            let (next_status, should_restart) = self.handle_outcome(result, &reload_token);
 
             if !should_restart {
                 info!("Service {} marked as fatal, not restarting", self.name);
                 self.resources
                     .status_plane
-                    .insert(self.name.clone(), ServiceStatus::Terminated);
+                    .insert(self.service_id, ServiceStatus::Terminated);
                 self.resources.status_changed.notify_waiters();
                 break;
             }
@@ -279,7 +285,7 @@ impl ServiceSupervisor {
             );
             self.resources
                 .status_plane
-                .insert(self.name.clone(), next_status);
+                .insert(self.service_id, next_status);
             self.resources.status_changed.notify_waiters();
 
             // Reset delay if service ran successfully for long enough
@@ -330,7 +336,7 @@ impl<'a> ServiceWave<'a> {
             for service in &self.services {
                 let status = resources
                     .status_plane
-                    .get(&service.name)
+                    .get(&service.id)
                     .map(|r| r.value().clone());
                 if status != Some(ServiceStatus::Healthy) {
                     all_healthy = false;
@@ -355,18 +361,20 @@ impl<'a> ServiceWave<'a> {
 }
 
 /// Spawn a single service with the given restart policy.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_service(
+    service_id: ServiceId,
     name: String,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     policy: RestartPolicy,
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: DaemonResources,
     cancellation_token: CancellationToken,
 ) {
-    let name_clone = name.clone();
     let supervisor = ServiceSupervisor::new(
-        name.clone(),
+        service_id,
+        name,
         run,
         watcher,
         policy,
@@ -375,7 +383,7 @@ pub async fn spawn_service(
     );
 
     let handle = tokio::spawn(supervisor.run_loop());
-    running_tasks.lock().await.insert(name_clone, handle);
+    running_tasks.lock().await.insert(service_id, handle);
 }
 
 /// Spawn all registered services using wave-based priorities.
@@ -385,7 +393,7 @@ pub async fn spawn_service(
 pub async fn spawn_all_services(
     services: &[ServiceDescription],
     restart_policy: RestartPolicy,
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: DaemonResources,
 ) {
     info!("Beginning wave-based startup sequence...");
@@ -402,6 +410,7 @@ pub async fn spawn_all_services(
 
         for service in &wave.services {
             spawn_service(
+                service.id,
                 service.name.clone(),
                 service.run.clone(),
                 service.watcher.clone(),
@@ -427,7 +436,7 @@ pub async fn spawn_all_services(
 /// Services with the same priority are shut down concurrently.
 pub async fn stop_all_services(
     services: &[ServiceDescription],
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: DaemonResources,
     daemon_token: CancellationToken,
     grace_period: Duration,
@@ -449,26 +458,27 @@ pub async fn stop_all_services(
             service.cancellation_token.cancel();
             resources
                 .status_plane
-                .insert(service.name.clone(), ServiceStatus::ShuttingDown);
+                .insert(service.id, ServiceStatus::ShuttingDown);
             resources.status_changed.notify_waiters();
         }
 
         // 2. Parallel Wait: Wait for all services in this wave to finish
         let mut join_handles = Vec::new();
         for service in wave.services {
-            let name = &service.name;
+            let sid = service.id;
+            let name = service.name.clone();
             let handle_opt = {
                 let mut guard = running_tasks.lock().await;
-                guard.remove(name)
+                guard.remove(&sid)
             };
             if let Some(handle) = handle_opt {
-                join_handles.push((name.clone(), handle));
+                join_handles.push((sid, name, handle));
             }
         }
 
         let resources_for_shutdown = resources.clone();
         let mut shutdown_futures = Vec::new();
-        for (name, mut handle) in join_handles {
+        for (sid, name, mut handle) in join_handles {
             let res = resources_for_shutdown.clone();
             shutdown_futures.push(async move {
                 info!("Waiting for service '{}' to stop...", name);
@@ -488,7 +498,7 @@ pub async fn stop_all_services(
                         let _ = handle.await;
                     }
                 }
-                res.status_plane.insert(name, ServiceStatus::Terminated);
+                res.status_plane.insert(sid, ServiceStatus::Terminated);
                 res.status_changed.notify_waiters();
             });
         }

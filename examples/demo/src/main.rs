@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::utils::logging::DaemonLayer)
+        .with(service_daemon::core::logging::DaemonLayer)
         .init();
 
     tracing::info!("=== service-daemon-rs Example Index ===");
@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
         .multiplier(1.5)
         .build();
 
-    let daemon = ServiceDaemon::from_registry_with_policy(policy);
+    let daemon = ServiceDaemon::builder().with_restart_policy(policy).build();
 
     // Demonstration: fire events periodically
     tokio::spawn(async move {
@@ -88,13 +88,16 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Demonstration: query service status
+    // Demonstration: query service status (ServiceId is assigned by Registry)
     let daemon_ref = daemon.handle();
     tokio::spawn(async move {
+        use service_daemon::ServiceId;
         loop {
             tokio::time::sleep(Duration::from_secs(25)).await;
-            let status = daemon_ref.get_service_status("example_service").await;
-            tracing::info!("--- [Main] example_service status: {:?} ---", status);
+            // Note: ServiceId is assigned at Registry::build() time based on static registration order.
+            // In production, you would obtain the ServiceId from Registry metadata.
+            let status = daemon_ref.get_service_status(&ServiceId::new(0)).await;
+            tracing::info!("--- [Main] service#0 status: {:?} ---", status);
         }
     });
 

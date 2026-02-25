@@ -8,7 +8,7 @@ Both standard services and event-driven triggers are collected into a single `SE
 
 This enables "distributed registration":
 - **Zero Configuration**: No central list of services is needed.
-- **Automatic Discovery**: `ServiceDaemon::auto_init()` automatically finds all annotated functions across the entire workspace.
+- **Automatic Discovery**: `ServiceDaemon::builder().build()` automatically finds all annotated functions across the entire workspace via the `Registry`.
 
 ## 2. Decentralized Dependency Injection
 
@@ -66,13 +66,13 @@ The framework is organized into specialized submodules to ensure maintainability
 - **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `LBQueue`.
 
 ### `service-daemon`
-- **`utils/service_daemon/`**: The core orchestrator.
+- **`core/service_daemon/`**: The core orchestrator.
   - `policy.rs`: Resilience configuration (backoff, jitter).
-  - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
-- **`utils/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
-- **`utils/triggers.rs`**: Host logic for event-driven triggers.
-- **`utils/context.rs`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
-- **`utils/managed_state.rs`**: The reactive state engine with change tracking.
+  - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
+- **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
+- **`core/triggers.rs`**: Host logic for event-driven triggers.
+- **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
+- **`core/managed_state.rs`**: The reactive state engine with change tracking.
 
 ## 5. Simulation Layer (Feature-Gated)
 

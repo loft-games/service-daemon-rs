@@ -4,7 +4,7 @@ pub mod trigger;
 
 pub use error::{Result, ServiceError};
 pub use service::{
-    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn, ServiceParam, ServicePriority,
-    ServiceStatus,
+    Registry, RegistryBuilder, SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceFn,
+    ServiceId, ServiceParam, ServicePriority, ServiceStatus,
 };
 pub use trigger::{TT, TriggerTemplate};

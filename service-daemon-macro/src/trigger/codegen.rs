@@ -23,7 +23,7 @@ pub fn generate_event_loop_call(
         "notify" => {
             quote! {
                 let notifier_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
-                service_daemon::utils::triggers::signal_trigger_host(
+                service_daemon::core::triggers::signal_trigger_host(
                     #fn_name_str,
                     notifier_wrapper.0.clone(),
                     move || {
@@ -40,7 +40,7 @@ pub fn generate_event_loop_call(
         "queue" => {
             quote! {
                 let receiver = #target_type::subscribe().await;
-                service_daemon::utils::triggers::queue_trigger_host(
+                service_daemon::core::triggers::queue_trigger_host(
                     #fn_name_str,
                     receiver,
                     move |payload| {
@@ -56,7 +56,7 @@ pub fn generate_event_loop_call(
         "lb_queue" => {
             quote! {
                 let queue_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
-                service_daemon::utils::triggers::lb_queue_trigger_host(
+                service_daemon::core::triggers::lb_queue_trigger_host(
                     #fn_name_str,
                     queue_wrapper.rx.clone(),
                     move |payload| {
@@ -72,7 +72,7 @@ pub fn generate_event_loop_call(
         "cron" => {
             quote! {
                 let schedule_wrapper = <#target_type as service_daemon::Provided>::resolve().await;
-                service_daemon::utils::triggers::cron_trigger_host(
+                service_daemon::core::triggers::cron_trigger_host(
                     #fn_name_str,
                     schedule_wrapper.as_str(),
                     move || {
@@ -88,7 +88,7 @@ pub fn generate_event_loop_call(
         }
         "watch" => {
             quote! {
-                service_daemon::utils::triggers::watch_trigger_host::<#target_type, _>(
+                service_daemon::core::triggers::watch_trigger_host::<#target_type, _>(
                     #fn_name_str,
                     move |payload| {
                         Box::pin(async move {

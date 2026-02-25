@@ -4,7 +4,7 @@ use tokio::sync::{Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
-use crate::utils::context;
+use crate::core::context;
 
 /// Helper to generate a unique trigger ID if the feature is enabled.
 fn generate_trigger_id() -> String {
@@ -213,7 +213,7 @@ pub async fn watch_trigger_host<T, F>(
     _cancellation_token: CancellationToken,
 ) -> anyhow::Result<()>
 where
-    T: crate::utils::di::Provided + Send + Sync + 'static,
+    T: crate::core::di::Provided + Send + Sync + 'static,
     F: Fn(Arc<T>) -> BoxFuture<'static, anyhow::Result<()>> + Clone + Send + Sync + 'static,
 {
     // Resolve a fresh snapshot to pass to the handler

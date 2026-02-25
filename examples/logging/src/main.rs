@@ -13,8 +13,8 @@
 
 mod services;
 
-use service_daemon::utils::logging::{FileLogConfig, enable_file_logging};
 use service_daemon::ServiceDaemon;
+use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::utils::logging::DaemonLayer)
+        .with(service_daemon::core::logging::DaemonLayer)
         .init();
 
     // 2. Enable file-based log persistence.
@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     enable_file_logging(FileLogConfig::new("logs", "my-app"));
 
     // 3. Create and run the daemon
-    let daemon = ServiceDaemon::from_registry();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await?;
 
     Ok(())
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
 // =============================================================================
 #[cfg(test)]
 mod tests {
-    use service_daemon::utils::logging::{FileLogConfig, enable_file_logging};
+    use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
     use service_daemon::{RestartPolicy, ServiceDaemon};
 
     /// Verifies that the daemon can start with file logging enabled
@@ -56,12 +56,9 @@ mod tests {
         let temp_dir = std::env::temp_dir().join("service-daemon-log-test");
         let _ = std::fs::create_dir_all(&temp_dir);
 
-        enable_file_logging(FileLogConfig::new(
-            temp_dir.to_str().unwrap(),
-            "test-app",
-        ));
+        enable_file_logging(FileLogConfig::new(temp_dir.to_str().unwrap(), "test-app"));
 
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 

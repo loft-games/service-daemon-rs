@@ -239,7 +239,7 @@ impl ParamProcessor {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = #inner_type::rwlock().await;
                 });
-                let rw_path = quote_spanned! { rwlock_span => service_daemon::utils::managed_state::RwLock<#inner_type> };
+                let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
                 self.clean_inputs.push(
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> },
@@ -256,7 +256,7 @@ impl ParamProcessor {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = #inner_type::mutex().await;
                 });
-                let mutex_path = quote_spanned! { mutex_span => service_daemon::utils::managed_state::Mutex<#inner_type> };
+                let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
                 self.clean_inputs.push(
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> },
@@ -326,4 +326,47 @@ pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedPar
         processor.process_param(arg);
     }
     processor.finish()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tags parsing (shared by #[service] and #[trigger])
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A parsed list of static tag strings from `tags = ["a", "b"]` syntax.
+///
+/// Implements `syn::Parse` so it can be used inline by both macro parsers.
+pub struct TagsList {
+    pub tags: Vec<syn::LitStr>,
+}
+
+impl syn::parse::Parse for TagsList {
+    /// Parses the bracket-delimited list: `["tag_a", "tag_b"]`
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let content;
+        syn::bracketed!(content in input);
+        let punctuated =
+            content.parse_terminated(|input| input.parse::<syn::LitStr>(), syn::Token![,])?;
+        Ok(Self {
+            tags: punctuated.into_iter().collect(),
+        })
+    }
+}
+
+impl TagsList {
+    /// Generates the `tags: &[...]` expression for the `ServiceEntry` codegen.
+    pub fn to_tokens(&self) -> proc_macro2::TokenStream {
+        let tag_strs: Vec<_> = self
+            .tags
+            .iter()
+            .map(|lit| {
+                let s = lit.value();
+                quote::quote! { #s }
+            })
+            .collect();
+        if tag_strs.is_empty() {
+            quote::quote! { &[] }
+        } else {
+            quote::quote! { &[#(#tag_strs),*] }
+        }
+    }
 }

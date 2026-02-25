@@ -1,4 +1,4 @@
-use crate::utils::managed_state::{Mutex, RwLock};
+use crate::core::managed_state::{Mutex, RwLock};
 use std::sync::Arc;
 
 /// A trait for types that can be provided by the DI system.

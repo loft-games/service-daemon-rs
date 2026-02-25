@@ -5,7 +5,7 @@ This guide is for developers looking to add new capabilities to the `service-dae
 ## 1. Adding a New Trigger Template
 
 Triggers are implemented as specialized services with a host wrapper.
-1. **Define the Host**: Add a new host function in `service-daemon/src/utils/triggers.rs` (e.g., `mqtt_trigger_host`).
+1. **Define the Host**: Add a new host function in `service-daemon/src/core/triggers.rs` (e.g., `mqtt_trigger_host`).
 2. **Update the Macro**: Modify `service-daemon-macro/src/trigger/codegen.rs` to recognize the new template name and generate the appropriate call. Update `trigger/parser.rs` if new attributes are needed.
 3. **Map Parameters**: Use the macro utilities in `trigger/mod.rs` to correctly distinguish between event payloads and DI resources.
 

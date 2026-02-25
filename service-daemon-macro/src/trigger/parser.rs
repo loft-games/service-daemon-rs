@@ -12,6 +12,8 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{Ident, Token, parenthesized};
 
+use crate::common::TagsList;
+
 /// The list of valid trigger template variant names.
 ///
 /// These correspond to variants of `TriggerTemplate` in the runtime crate.
@@ -44,6 +46,8 @@ pub struct TriggerArgs {
     pub target: TokenStream,
     /// Optional priority value (defaults to 50 if not specified).
     pub priority: TokenStream,
+    /// Optional tags for registry filtering (defaults to empty).
+    pub tags: TokenStream,
 }
 
 /// Parses the token stream inside `#[trigger(...)]`.
@@ -75,6 +79,7 @@ impl Parse for TriggerArgs {
 
         // Step 3: Parse optional trailing named arguments.
         let mut priority: TokenStream = quote!(50);
+        let mut tags: TokenStream = quote!(&[]);
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
 
@@ -91,10 +96,17 @@ impl Parse for TriggerArgs {
                     let value: syn::Expr = input.parse()?;
                     priority = quote!(#value);
                 }
+                "tags" => {
+                    let tag_list: TagsList = input.parse()?;
+                    tags = tag_list.to_tokens();
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("Unknown trigger attribute '{}'. Supported: priority", other),
+                        format!(
+                            "Unknown trigger attribute '{}'. Supported: priority, tags",
+                            other
+                        ),
                     ));
                 }
             }
@@ -105,6 +117,7 @@ impl Parse for TriggerArgs {
             template_ident,
             target,
             priority,
+            tags,
         })
     }
 }

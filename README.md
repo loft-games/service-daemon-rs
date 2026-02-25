@@ -12,6 +12,7 @@
 - **Resilient Lifecycle**: Exponential backoff, jitter, wave-based startup/shutdown, and **fatal error handling**.
 - **Smart State**: Transparent change tracking and zero-copy state snapshots.
 - **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
+- **Tag-based Registry**: Filter services by tags for selective loading (`#[service(tags = ["infra"])]`).
 
 ---
 
@@ -50,11 +51,25 @@ async fn main() -> anyhow::Result<()> {
     // Setup tracing with the built-in DaemonLayer
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::utils::logging::DaemonLayer)
+        .with(service_daemon::core::logging::DaemonLayer)
         .init();
 
-    service_daemon::ServiceDaemon::auto_init().run().await
+    // Infallible build — always succeeds
+    service_daemon::ServiceDaemon::builder().build().run().await
 }
+```
+
+### 3b. (Optional) Tag-based Registry
+```rust
+use service_daemon::{ServiceDaemon, Registry};
+
+// Only load services tagged with "infra"
+let reg = Registry::builder().with_tag("infra").build();
+ServiceDaemon::builder()
+    .with_registry(reg)
+    .build()
+    .run()
+    .await?;
 ```
 
 ### 4. (Optional) Enable File Logging

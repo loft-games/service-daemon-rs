@@ -68,7 +68,7 @@ fn get_log_queue() -> &'static LogQueue {
 ///
 /// # Example
 /// ```rust,ignore
-/// use service_daemon::utils::logging::FileLogConfig;
+/// use service_daemon::core::logging::FileLogConfig;
 ///
 /// let config = FileLogConfig::new("logs", "app");
 /// ```
@@ -122,7 +122,7 @@ static FILE_LOG_CONFIG: OnceCell<FileLogConfig> = OnceCell::const_new();
 ///
 /// # Example
 /// ```rust,ignore
-/// use service_daemon::utils::logging::{FileLogConfig, enable_file_logging};
+/// use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
 ///
 /// enable_file_logging(FileLogConfig::new("logs", "my-app"));
 /// ```

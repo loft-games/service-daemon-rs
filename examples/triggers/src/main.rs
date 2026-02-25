@@ -25,10 +25,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::utils::logging::DaemonLayer)
+        .with(service_daemon::core::logging::DaemonLayer)
         .init();
 
-    let daemon = ServiceDaemon::from_registry();
+    let daemon = ServiceDaemon::builder().build();
 
     // Spawn a producer task that pushes messages to queues and fires signals.
     // This simulates external events arriving in the system.
@@ -73,7 +73,7 @@ mod tests {
     /// and the daemon can start/stop with them present.
     #[tokio::test]
     async fn test_trigger_registration() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -89,7 +89,7 @@ mod tests {
     /// Verifies that Signal triggers fire when notified.
     #[tokio::test]
     async fn test_signal_trigger_fires() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -109,7 +109,7 @@ mod tests {
     async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
         use crate::providers::ExternalStatus;
 
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 

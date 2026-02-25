@@ -34,18 +34,18 @@ pub fn generate_notify_template(
             }
         }
 
-        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+        static #singleton_name: service_daemon::core::managed_state::StateManager<#struct_name> = service_daemon::core::managed_state::StateManager::new();
 
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
                 #singleton_name.resolve_snapshot(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
@@ -103,18 +103,18 @@ pub fn generate_lb_queue_template(
             }
         }
 
-        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+        static #singleton_name: service_daemon::core::managed_state::StateManager<#struct_name> = service_daemon::core::managed_state::StateManager::new();
 
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
                 #singleton_name.resolve_snapshot(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }
@@ -163,18 +163,18 @@ pub fn generate_broadcast_queue_template(
             }
         }
 
-        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+        static #singleton_name: service_daemon::core::managed_state::StateManager<#struct_name> = service_daemon::core::managed_state::StateManager::new();
 
         impl service_daemon::Provided for #struct_name {
             async fn resolve() -> std::sync::Arc<Self> {
                 #singleton_name.resolve_snapshot(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async { std::sync::Arc::new(Self::default()) }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async { std::sync::Arc::new(Self::default()) }).await
             }
         }

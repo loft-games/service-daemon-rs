@@ -7,7 +7,6 @@
 mod policy;
 mod runner;
 
-use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,11 +16,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
 use crate::models::{
-    Result as ServiceResult, SERVICE_REGISTRY, ServiceDescription, ServiceFn, ServiceStatus,
+    Registry, Result as ServiceResult, ServiceDescription, ServiceId, ServiceStatus,
 };
-use crate::utils::context::DaemonResources;
+use crate::core::context::DaemonResources;
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
+
+// ---------------------------------------------------------------------------
+// ServiceDaemonHandle — lightweight status query interface
+// ---------------------------------------------------------------------------
 
 /// A handle to the ServiceDaemon that can be used to query status and interact with services.
 #[derive(Clone)]
@@ -30,126 +33,48 @@ pub struct ServiceDaemonHandle {
 }
 
 impl ServiceDaemonHandle {
-    /// Get the current status of a service by name.
-    pub async fn get_service_status(&self, name: &str) -> ServiceStatus {
+    /// Get the current status of a service by its `ServiceId`.
+    pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
         self.resources
             .status_plane
-            .get(name)
+            .get(id)
             .map(|s| s.clone())
             .unwrap_or(ServiceStatus::Terminated)
     }
 }
 
+// ---------------------------------------------------------------------------
+// ServiceDaemon — Infallible Builder pattern
+// ---------------------------------------------------------------------------
+
+/// The main orchestrator for managed services.
+///
+/// Constructed via `ServiceDaemon::builder()`, which provides an **infallible**
+/// `.build()` method that always succeeds.
+///
+/// # Examples
+/// ```rust,ignore
+/// // Full startup (all registered services)
+/// ServiceDaemon::builder().build().run().await?;
+///
+/// // Tag-based startup
+/// let reg = Registry::builder().with_tag("infra").build();
+/// ServiceDaemon::builder().with_registry(reg).build().run().await?;
+/// ```
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
-    running_tasks: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: DaemonResources,
 }
 
-impl Default for ServiceDaemon {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl ServiceDaemon {
-    /// Create a new empty daemon with default restart policy.
+    /// Start building a new `ServiceDaemon`.
     #[must_use]
-    pub fn new() -> Self {
-        Self {
-            services: Vec::new(),
-            running_tasks: Arc::new(Mutex::new(HashMap::new())),
-            restart_policy: RestartPolicy::default(),
-            cancellation_token: CancellationToken::new(),
-            resources: DaemonResources::new(),
-        }
-    }
-
-    /// Create a new daemon with a custom restart policy.
-    #[must_use]
-    pub fn with_restart_policy(restart_policy: RestartPolicy) -> Self {
-        Self {
-            services: Vec::new(),
-            running_tasks: Arc::new(Mutex::new(HashMap::new())),
-            restart_policy,
-            cancellation_token: CancellationToken::new(),
-            resources: DaemonResources::new(),
-        }
-    }
-
-    /// Automatically initialize the daemon by registering all auto-registered Services.
-    ///
-    /// Note: With Type-Based DI, providers are resolved lazily via `Provided::resolve()`
-    /// when services first request them. No explicit provider initialization is needed.
-    #[must_use]
-    pub fn auto_init() -> Self {
-        // Load services - providers are resolved lazily via Provided::resolve()
-        Self::from_registry()
-    }
-
-    /// Create a new daemon with all services from the auto-generated registry.
-    /// Services register themselves via the #[service] macro using linkme.
-    /// NOTE: This does NOT initialize providers. Use auto_init() for full setup.
-    #[must_use]
-    pub fn from_registry() -> Self {
-        Self::from_registry_with_policy(RestartPolicy::default())
-    }
-
-    /// Create a new daemon from registry with custom restart policy.
-    #[must_use]
-    pub fn from_registry_with_policy(restart_policy: RestartPolicy) -> Self {
-        let mut daemon = Self::with_restart_policy(restart_policy);
-
-        for entry in SERVICE_REGISTRY {
-            info!(
-                "Registering service '{}' from module '{}' with priority {} and {} params: {:?}",
-                entry.name,
-                entry.module,
-                entry.priority,
-                entry.params.len(),
-                entry
-                    .params
-                    .iter()
-                    .map(|p| p.container_key())
-                    .collect::<Vec<_>>()
-            );
-
-            let wrapper = entry.wrapper;
-            let watcher_ptr = entry.watcher;
-            daemon.register_with_watcher(
-                entry.name,
-                Arc::new(wrapper),
-                watcher_ptr.map(|w| Arc::new(w) as _),
-                entry.priority,
-            );
-        }
-
-        daemon
-    }
-
-    /// Register a service manually.
-    pub fn register(&mut self, name: &str, run: ServiceFn, priority: u8) {
-        self.register_with_watcher(name, run, None, priority);
-    }
-
-    /// Register a service with an optional watcher for dependency reloads.
-    pub fn register_with_watcher(
-        &mut self,
-        name: &str,
-        run: ServiceFn,
-        watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
-        priority: u8,
-    ) {
-        self.services.push(ServiceDescription {
-            name: name.to_string(),
-            run,
-            watcher,
-            priority,
-            cancellation_token: CancellationToken::new(),
-        });
+    pub fn builder() -> ServiceDaemonBuilder {
+        ServiceDaemonBuilder::new()
     }
 
     /// Get the cancellation token for this daemon.
@@ -164,17 +89,27 @@ impl ServiceDaemon {
         }
     }
 
-    /// Get the current status of a service by name.
-    pub async fn get_service_status(&self, name: &str) -> ServiceStatus {
-        self.handle().get_service_status(name).await
+    /// Get the current status of a service by its `ServiceId`.
+    pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
+        self.handle().get_service_status(id).await
     }
 
     /// Run the daemon until interrupted by Ctrl+C (SIGINT) or SIGTERM.
     ///
     /// This method spawns all registered services and waits for a shutdown signal.
     /// Services are automatically restarted on failure using exponential backoff.
+    ///
+    /// # Signal Guard (Layer 1 Defense)
+    /// If signal handler registration fails (e.g. restricted container environment),
+    /// this method returns `Err` immediately to prevent an uncontrollable daemon.
     #[instrument(skip(self))]
     pub async fn run(self) -> ServiceResult<()> {
+        if self.services.is_empty() {
+            info!(
+                "ServiceDaemon has no services to run. Entering idle mode, waiting for shutdown signal..."
+            );
+        }
+
         // Spawn all services
         runner::spawn_all_services(
             &self.services,
@@ -251,6 +186,7 @@ impl ServiceDaemon {
 
         for service in &self.services {
             runner::spawn_service(
+                service.id,
                 service.name.clone(),
                 service.run.clone(),
                 service.watcher.clone(),
@@ -277,6 +213,86 @@ impl ServiceDaemon {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ServiceDaemonBuilder — Infallible, zero-config default
+// ---------------------------------------------------------------------------
+
+/// Builder for constructing a `ServiceDaemon`.
+///
+/// The `.build()` method is **infallible** — it always returns a valid daemon.
+pub struct ServiceDaemonBuilder {
+    registry: Option<Registry>,
+    restart_policy: RestartPolicy,
+    extra_services: Vec<ServiceDescription>,
+}
+
+impl ServiceDaemonBuilder {
+    fn new() -> Self {
+        Self {
+            registry: None,
+            restart_policy: RestartPolicy::default(),
+            extra_services: Vec::new(),
+        }
+    }
+
+    /// Use a pre-built `Registry` for service discovery.
+    ///
+    /// If not called, the daemon will automatically include all services
+    /// discovered via the static `SERVICE_REGISTRY` (linkme).
+    #[must_use]
+    pub fn with_registry(mut self, registry: Registry) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Set a custom restart policy for the daemon.
+    #[must_use]
+    pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
+        self.restart_policy = policy;
+        self
+    }
+
+    /// Add a manually constructed `ServiceDescription` to the daemon.
+    ///
+    /// This is the primary way to inject ad-hoc services in integration tests
+    /// without going through the static `#[service]` registration pipeline.
+    ///
+    /// **Note**: You are responsible for assigning unique `ServiceId` values
+    /// via `ServiceId::new()`.
+    #[must_use]
+    pub fn with_service(mut self, service: ServiceDescription) -> Self {
+        self.extra_services.push(service);
+        self
+    }
+
+    /// Add multiple manually constructed `ServiceDescription` entries at once.
+    #[must_use]
+    pub fn with_services(mut self, services: Vec<ServiceDescription>) -> Self {
+        self.extra_services.extend(services);
+        self
+    }
+
+    /// Build the `ServiceDaemon`.
+    ///
+    /// This method is **infallible** — it always returns a valid daemon.
+    /// If no registry was provided, all statically registered services are included.
+    /// Any extra services added via `with_service()` are appended after registry services.
+    #[must_use]
+    pub fn build(self) -> ServiceDaemon {
+        let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
+        let mut services = registry.into_services();
+        services.extend(self.extra_services);
+
+        ServiceDaemon {
+            services,
+            running_tasks: Arc::new(Mutex::new(HashMap::new())),
+            restart_policy: self.restart_policy,
+            cancellation_token: CancellationToken::new(),
+            resources: DaemonResources::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,89 +300,67 @@ mod tests {
     use std::time::Duration;
     use tracing::debug;
 
+    use crate::models::ServiceFn;
+
     fn setup_tracing() {
         let _ = tracing_subscriber::fmt::try_init();
     }
 
     #[tokio::test]
-    async fn test_service_daemon_new() {
+    async fn test_service_daemon_builder_default() {
         setup_tracing();
-        let daemon = ServiceDaemon::new();
-        assert!(daemon.services.is_empty());
-        debug!("test_service_daemon_new passed");
-    }
-
-    #[tokio::test]
-    async fn test_service_daemon_register() {
-        setup_tracing();
-        let mut daemon = ServiceDaemon::new();
-
-        let run_count = Arc::new(AtomicU32::new(0));
-        let run_count_clone = run_count.clone();
-
-        let service_fn: ServiceFn = Arc::new(move |_cancel| {
-            let count = run_count_clone.clone();
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-        });
-
-        daemon.register("test_service", service_fn, 50);
-
-        assert_eq!(daemon.services.len(), 1);
-        assert_eq!(daemon.services[0].name, "test_service");
-        debug!("test_service_daemon_register passed");
+        let daemon = ServiceDaemon::builder().build();
+        // With empty static registry in test context, services may be empty
+        debug!("test_service_daemon_builder_default passed");
+        let _ = daemon;
     }
 
     #[tokio::test]
     async fn test_service_daemon_handle() {
         setup_tracing();
-        let daemon = ServiceDaemon::new();
+        let daemon = ServiceDaemon::builder().build();
         let handle = daemon.handle();
 
         // Initially, unknown service should be Terminated
-        let status = handle.get_service_status("unknown").await;
+        let status = handle.get_service_status(&ServiceId(999)).await;
         assert_eq!(status, ServiceStatus::Terminated);
 
         // Insert a status manually and verify
         daemon
             .resources
             .status_plane
-            .insert("test_svc".to_string(), ServiceStatus::Healthy);
-        let status = handle.get_service_status("test_svc").await;
+            .insert(ServiceId(1), ServiceStatus::Healthy);
+        let status = handle.get_service_status(&ServiceId(1)).await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
     #[tokio::test]
     async fn test_service_status_update() {
         setup_tracing();
-        let daemon = ServiceDaemon::new();
+        let daemon = ServiceDaemon::builder().build();
         let handle = daemon.handle();
 
         // Insert status
         daemon
             .resources
             .status_plane
-            .insert("my_service".to_string(), ServiceStatus::Initializing);
+            .insert(ServiceId(0), ServiceStatus::Initializing);
 
-        let status = handle.get_service_status("my_service").await;
+        let status = handle.get_service_status(&ServiceId(0)).await;
         assert_eq!(status, ServiceStatus::Initializing);
 
         // Update status
         daemon
             .resources
             .status_plane
-            .insert("my_service".to_string(), ServiceStatus::Healthy);
-        let status = handle.get_service_status("my_service").await;
+            .insert(ServiceId(0), ServiceStatus::Healthy);
+        let status = handle.get_service_status(&ServiceId(0)).await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
     #[tokio::test]
     async fn test_short_run() {
         setup_tracing();
-        let mut daemon = ServiceDaemon::with_restart_policy(RestartPolicy::for_testing());
-
         let run_count = Arc::new(AtomicU32::new(0));
         let run_count_clone = run_count.clone();
 
@@ -380,7 +374,22 @@ mod tests {
             })
         });
 
-        daemon.register("counting_service", service_fn, 50);
+        // Build manually with a service
+        let daemon = ServiceDaemon {
+            services: vec![ServiceDescription {
+                id: ServiceId(0),
+                name: "counting_service".to_string(),
+                run: service_fn,
+                watcher: None,
+                priority: 50,
+                cancellation_token: CancellationToken::new(),
+                tags: vec![],
+            }],
+            running_tasks: Arc::new(Mutex::new(HashMap::new())),
+            restart_policy: RestartPolicy::for_testing(),
+            cancellation_token: CancellationToken::new(),
+            resources: DaemonResources::new(),
+        };
 
         let start = std::time::Instant::now();
         daemon

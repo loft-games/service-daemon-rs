@@ -9,15 +9,54 @@ mod tests {
     use crate::providers::trigger_providers::{ExternalStatus, UserNotifier};
     use crate::providers::typed_providers::GlobalStats;
     use service_daemon::prelude::*;
-    use service_daemon::{RestartPolicy, ServiceDaemon};
+    use service_daemon::{RestartPolicy, ServiceDaemon, ServiceId};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Helper: Build a ServiceDaemon with ONLY manually constructed service descriptions.
+    /// Uses a tag filter that matches nothing to produce an empty auto-registry,
+    /// ensuring only the injected services are spawned.
+    fn build_daemon_with_services(
+        policy: RestartPolicy,
+        services: Vec<(ServiceId, &str, service_daemon::ServiceFn, u8)>,
+    ) -> ServiceDaemon {
+        use service_daemon::tokio_util::sync::CancellationToken;
+
+        let descriptions: Vec<service_daemon::ServiceDescription> = services
+            .into_iter()
+            .map(
+                |(id, name, run, priority)| service_daemon::ServiceDescription {
+                    id,
+                    name: name.to_string(),
+                    run,
+                    watcher: None,
+                    priority,
+                    cancellation_token: CancellationToken::new(),
+                    tags: vec![],
+                },
+            )
+            .collect();
+
+        // Use a tag that no real service has, producing an empty auto-registry.
+        // Only the manually injected services will run.
+        let empty_registry = service_daemon::Registry::builder()
+            .with_tag("__test_isolation__")
+            .build();
+
+        ServiceDaemon::builder()
+            .with_registry(empty_registry)
+            .with_restart_policy(policy)
+            .with_services(descriptions)
+            .build()
+    }
 
     // --- 1. Declarative Patterns ---
     #[tokio::test]
     async fn test_declarative_queues_and_signals() {
         let _ = tracing_subscriber::fmt::try_init();
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder()
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
 
         // Check for triggers. Triggers are registered as services.
@@ -57,7 +96,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_and_dynamic_promotion() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder()
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -128,7 +169,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_trigger_support() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder()
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -146,62 +189,57 @@ mod tests {
         use std::sync::Mutex as StdMutex;
         let exit_sequence = Arc::new(StdMutex::new(Vec::new()));
 
-        let mut daemon = ServiceDaemon::new();
-
         // Priority 0: Takes 100ms to exit
         let seq1 = exit_sequence.clone();
-        daemon.register(
-            "priority_0",
-            Arc::new(move |_| {
-                let s = seq1.clone();
-                Box::pin(async move {
-                    service_daemon::done(); // Signal ready
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    s.lock().unwrap().push(0);
-                    Ok(())
-                })
-            }),
-            0,
-        );
+        let fn1: service_daemon::ServiceFn = Arc::new(move |_| {
+            let s = seq1.clone();
+            Box::pin(async move {
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                s.lock().unwrap().push(0);
+                Ok(())
+            })
+        });
 
         // Priority 50: Takes 50ms to exit
         let seq2 = exit_sequence.clone();
-        daemon.register(
-            "priority_50",
-            Arc::new(move |_| {
-                let s = seq2.clone();
-                Box::pin(async move {
-                    service_daemon::done(); // Signal ready
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    s.lock().unwrap().push(50);
-                    Ok(())
-                })
-            }),
-            50,
-        );
+        let fn2: service_daemon::ServiceFn = Arc::new(move |_| {
+            let s = seq2.clone();
+            Box::pin(async move {
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                s.lock().unwrap().push(50);
+                Ok(())
+            })
+        });
 
         // Priority 100: Exit immediately
         let seq3 = exit_sequence.clone();
-        daemon.register(
-            "priority_100",
-            Arc::new(move |_| {
-                let s = seq3.clone();
-                Box::pin(async move {
-                    service_daemon::done(); // Signal ready
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    s.lock().unwrap().push(100);
-                    Ok(())
-                })
-            }),
-            100,
+        let fn3: service_daemon::ServiceFn = Arc::new(move |_| {
+            let s = seq3.clone();
+            Box::pin(async move {
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                s.lock().unwrap().push(100);
+                Ok(())
+            })
+        });
+
+        let daemon = build_daemon_with_services(
+            RestartPolicy::for_testing(),
+            vec![
+                (ServiceId::new(0), "priority_0", fn1, 0),
+                (ServiceId::new(1), "priority_50", fn2, 50),
+                (ServiceId::new(2), "priority_100", fn3, 100),
+            ],
         );
 
         let cancel = daemon.cancel_token();
@@ -228,60 +266,55 @@ mod tests {
         use std::sync::Mutex as StdMutex;
         let start_sequence = Arc::new(StdMutex::new(Vec::new()));
 
-        let mut daemon = ServiceDaemon::new();
-
         // Priority 100
         let seq1 = start_sequence.clone();
-        daemon.register(
-            "priority_100",
-            Arc::new(move |_| {
-                let s = seq1.clone();
-                Box::pin(async move {
-                    s.lock().unwrap().push(100);
-                    service_daemon::done(); // Signal ready
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Ok(())
-                })
-            }),
-            100,
-        );
+        let fn1: service_daemon::ServiceFn = Arc::new(move |_| {
+            let s = seq1.clone();
+            Box::pin(async move {
+                s.lock().unwrap().push(100);
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        });
 
         // Priority 50
         let seq2 = start_sequence.clone();
-        daemon.register(
-            "priority_50",
-            Arc::new(move |_| {
-                let s = seq2.clone();
-                Box::pin(async move {
-                    s.lock().unwrap().push(50);
-                    service_daemon::done(); // Signal ready
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Ok(())
-                })
-            }),
-            50,
-        );
+        let fn2: service_daemon::ServiceFn = Arc::new(move |_| {
+            let s = seq2.clone();
+            Box::pin(async move {
+                s.lock().unwrap().push(50);
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        });
 
         // Priority 0
         let seq3 = start_sequence.clone();
-        daemon.register(
-            "priority_0",
-            Arc::new(move |_| {
-                let s = seq3.clone();
-                Box::pin(async move {
-                    s.lock().unwrap().push(0);
-                    service_daemon::done(); // Signal ready
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Ok(())
-                })
-            }),
-            0,
+        let fn3: service_daemon::ServiceFn = Arc::new(move |_| {
+            let s = seq3.clone();
+            Box::pin(async move {
+                s.lock().unwrap().push(0);
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        });
+
+        let daemon = build_daemon_with_services(
+            RestartPolicy::for_testing(),
+            vec![
+                (ServiceId::new(0), "priority_100", fn1, 100),
+                (ServiceId::new(1), "priority_50", fn2, 50),
+                (ServiceId::new(2), "priority_0", fn3, 0),
+            ],
         );
 
         let cancel = daemon.cancel_token();
@@ -310,47 +343,46 @@ mod tests {
     async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
         use std::sync::Mutex as StdMutex;
         let start_log = Arc::new(StdMutex::new(Vec::new()));
-        let mut daemon = ServiceDaemon::new();
 
         // Higher priority: 100 - sleeps 200ms before done()
         let log1 = start_log.clone();
-        daemon.register(
-            "high_prio_100",
-            Arc::new(move |_| {
-                let l = log1.clone();
-                Box::pin(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    l.lock()
-                        .unwrap()
-                        .push(("high_done", std::time::Instant::now()));
-                    service_daemon::done();
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Ok(())
-                })
-            }),
-            100,
-        );
+        let fn1: service_daemon::ServiceFn = Arc::new(move |_| {
+            let l = log1.clone();
+            Box::pin(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                l.lock()
+                    .unwrap()
+                    .push(("high_done", std::time::Instant::now()));
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        });
 
         // Lower priority: 50 - should not start until high_prio_100 is Healthy
         let log2 = start_log.clone();
-        daemon.register(
-            "low_prio_50",
-            Arc::new(move |_| {
-                let l = log2.clone();
-                Box::pin(async move {
-                    l.lock()
-                        .unwrap()
-                        .push(("low_start", std::time::Instant::now()));
-                    service_daemon::done();
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Ok(())
-                })
-            }),
-            50,
+        let fn2: service_daemon::ServiceFn = Arc::new(move |_| {
+            let l = log2.clone();
+            Box::pin(async move {
+                l.lock()
+                    .unwrap()
+                    .push(("low_start", std::time::Instant::now()));
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        });
+
+        let daemon = build_daemon_with_services(
+            RestartPolicy::for_testing(),
+            vec![
+                (ServiceId::new(0), "high_prio_100", fn1, 100),
+                (ServiceId::new(1), "low_prio_50", fn2, 50),
+            ],
         );
 
         let cancel = daemon.cancel_token();
@@ -385,38 +417,38 @@ mod tests {
         static GENERATION_COUNTER: AtomicU32 = AtomicU32::new(0);
         let recovered_value = Arc::new(StdMutex::new(None::<u32>));
 
-        let mut daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
         let rv = recovered_value.clone();
-        daemon.register(
-            "crash_test_service",
-            Arc::new(move |_| {
-                let rv_clone = rv.clone();
-                Box::pin(async move {
-                    let generation = GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst);
-                    match service_daemon::state() {
-                        ServiceStatus::Recovering(_) => {
-                            // Second generation: unshelve and confirm
-                            if let Some(v) = service_daemon::unshelve::<u32>("crash_data").await {
-                                *rv_clone.lock().unwrap() = Some(v);
-                            }
-                            service_daemon::done();
+        let crash_fn: service_daemon::ServiceFn = Arc::new(move |_| {
+            let rv_clone = rv.clone();
+            Box::pin(async move {
+                let generation = GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst);
+                match service_daemon::state() {
+                    ServiceStatus::Recovering(_) => {
+                        // Second generation: unshelve and confirm
+                        if let Some(v) = service_daemon::unshelve::<u32>("crash_data").await {
+                            *rv_clone.lock().unwrap() = Some(v);
                         }
-                        _ => {
-                            // First generation: shelve and crash
-                            service_daemon::shelve("crash_data", 42u32).await;
-                            if generation == 0 {
-                                panic!("Simulated crash on first generation!");
-                            }
-                            service_daemon::done();
+                        service_daemon::done();
+                    }
+                    _ => {
+                        // First generation: shelve and crash
+                        service_daemon::shelve("crash_data", 42u32).await;
+                        if generation == 0 {
+                            panic!("Simulated crash on first generation!");
                         }
+                        service_daemon::done();
                     }
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Ok(())
-                })
-            }),
-            50,
+                }
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Ok(())
+            })
+        });
+
+        let daemon = build_daemon_with_services(
+            RestartPolicy::for_testing(),
+            vec![(ServiceId::new(0), "crash_test_service", crash_fn, 50)],
         );
 
         let cancel = daemon.cancel_token();

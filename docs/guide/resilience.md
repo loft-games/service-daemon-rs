@@ -17,7 +17,9 @@ let policy = RestartPolicy::builder()
     .jitter_factor(0.1) // 10% randomization
     .build();
 
-let daemon = ServiceDaemon::from_registry_with_policy(policy);
+let daemon = ServiceDaemon::builder()
+    .with_restart_policy(policy)
+    .build();
 daemon.run().await?
 ```
 ### 1.1. Immediate Restart on Reload Signal
@@ -104,7 +106,8 @@ pub async fn log_flush() { ... }
 
 The daemon uses `CancellationToken` to signal services to stop. 
 1. **Notification**: All services are notified via `is_shutdown()`.
-2. **Grace Period**: The daemon waits for a grace period (default: 30s) per wave.
-3. **Forced Abort**: Services that don't exit within the period are aborted.
+2. **Error Suppression**: If a service exits with an error *after* the shutdown signal has been sent, the daemon treats it as a successful exit. This prevents irrelevant error logs (e.g., "channel closed" or "network unreachable") that naturally occur during the teardown of dependencies.
+3. **Grace Period**: The daemon waits for a grace period (default: 30s) per wave.
+4. **Forced Abort**: Services that don't exit within the period are aborted.
 
 [Back to README](../../README.md)

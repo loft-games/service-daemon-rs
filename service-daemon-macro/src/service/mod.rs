@@ -7,18 +7,76 @@ mod codegen;
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{ItemFn, parse_macro_input};
+use syn::parse::Parse;
+use syn::{ItemFn, Token, parse_macro_input};
 
-use crate::common::{ExtractedParams, has_allow_sync};
+use crate::common::{ExtractedParams, TagsList, has_allow_sync};
 use codegen::{generate_call_expr, generate_watcher};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Structured attribute parser (replaces the old string-based parse_service_attr)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parsed result of `#[service(...)]` attributes.
+///
+/// Supports the following syntax:
+/// ```ignore
+/// #[service]                                        // all defaults
+/// #[service(priority = 80)]                         // priority only
+/// #[service(tags = ["infra", "core"])]              // tags only
+/// #[service(priority = 80, tags = ["infra"])]       // both
+/// ```
+struct ServiceAttr {
+    priority: proc_macro2::TokenStream,
+    tags: proc_macro2::TokenStream,
+}
+
+impl Parse for ServiceAttr {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut priority: proc_macro2::TokenStream = quote!(50);
+        let mut tags: proc_macro2::TokenStream = quote!(&[]);
+
+        // Parse comma-separated key=value pairs
+        while !input.is_empty() {
+            let key: syn::Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+
+            match key.to_string().as_str() {
+                "priority" => {
+                    let value: syn::Expr = input.parse()?;
+                    priority = quote!(#value);
+                }
+                "tags" => {
+                    let tag_list: TagsList = input.parse()?;
+                    tags = tag_list.to_tokens();
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "Unknown service attribute '{}'. Supported: priority, tags",
+                            other
+                        ),
+                    ));
+                }
+            }
+
+            // Consume optional trailing comma
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(ServiceAttr { priority, tags })
+    }
+}
 
 /// Implementation of the `#[service]` attribute macro.
 pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attr_str = attr.to_string();
-    let priority_expr =
-        parse_service_attr(&attr_str, "priority").unwrap_or_else(|| "50".to_string());
-    let priority_tokens: proc_macro2::TokenStream =
-        priority_expr.parse().unwrap_or_else(|_| quote!(50));
+    // Parse attributes using syn-based structured parsing
+    let args = parse_macro_input!(attr as ServiceAttr);
+    let priority_tokens = args.priority;
+    let tags_tokens = args.tags;
 
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
@@ -60,7 +118,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #vis #clean_sig {
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
-            use service_daemon::utils::managed_state::{RwLock, Mutex};
+            use service_daemon::core::managed_state::{RwLock, Mutex};
             #body
         }
 
@@ -84,22 +142,10 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,
             priority: #priority_tokens,
+            tags: #tags_tokens,
         };
 
     };
 
     TokenStream::from(expanded)
-}
-
-fn parse_service_attr(attr_str: &str, key: &str) -> Option<String> {
-    attr_str.split(',').find_map(|part| {
-        let part = part.trim();
-        if part.starts_with(key)
-            && let Some((_, val)) = part.split_once('=')
-        {
-            Some(val.trim().to_string())
-        } else {
-            None
-        }
-    })
 }

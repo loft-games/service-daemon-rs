@@ -26,12 +26,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::utils::logging::DaemonLayer)
+        .with(service_daemon::core::logging::DaemonLayer)
         .init();
 
     // 2. Create a daemon from the global service registry.
     //    All `#[service]`-annotated functions in this crate are auto-registered.
-    let daemon = ServiceDaemon::from_registry();
+    let daemon = ServiceDaemon::builder().build();
 
     // 3. Run the daemon. It blocks until Ctrl+C / SIGTERM is received,
     //    then performs ordered, graceful shutdown.
@@ -51,7 +51,9 @@ mod tests {
     /// without any complex lifecycle management.
     #[tokio::test]
     async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::from_registry_with_policy(RestartPolicy::for_testing());
+        let daemon = ServiceDaemon::builder()
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -69,28 +71,37 @@ mod tests {
     /// allowing services to exit their polling loops.
     #[tokio::test]
     async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
+        use service_daemon::tokio_util::sync::CancellationToken;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let exited = Arc::new(AtomicBool::new(false));
         let exited_clone = exited.clone();
 
-        let mut daemon = ServiceDaemon::new();
-        daemon.register(
-            "shutdown_test",
-            Arc::new(move |_| {
-                let flag = exited_clone.clone();
-                Box::pin(async move {
-                    service_daemon::done();
-                    while !service_daemon::is_shutdown() {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    flag.store(true, Ordering::SeqCst);
-                    Ok(())
-                })
-            }),
-            50,
-        );
+        let shutdown_fn: service_daemon::ServiceFn = Arc::new(move |_| {
+            let flag = exited_clone.clone();
+            Box::pin(async move {
+                service_daemon::done();
+                while !service_daemon::is_shutdown() {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let daemon = ServiceDaemon::builder()
+            .with_restart_policy(RestartPolicy::for_testing())
+            .with_service(service_daemon::ServiceDescription {
+                id: service_daemon::ServiceId::new(0),
+                name: "shutdown_test".to_string(),
+                run: shutdown_fn,
+                watcher: None,
+                priority: 50,
+                cancellation_token: CancellationToken::new(),
+                tags: vec![],
+            })
+            .build();
 
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });

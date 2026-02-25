@@ -31,6 +31,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let template = args.template;
     let target_type = args.target;
     let priority_tokens = args.priority;
+    let tags_tokens = args.tags;
 
     // Strict compile-time validation of the template variant name
     if !VALID_VARIANTS.contains(&template.as_str()) {
@@ -90,7 +91,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #vis #clean_sig {
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
-            use service_daemon::utils::managed_state::{RwLock, Mutex};
+            use service_daemon::core::managed_state::{RwLock, Mutex};
             #body
         }
 
@@ -114,6 +115,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,
             priority: #priority_tokens,
+            tags: #tags_tokens,
         };
 
     };
