@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
-    use service_daemon::{RestartPolicy, ServiceDaemon};
+    use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 
     /// Verifies that the daemon can start with file logging enabled
     /// and produces output in the configured directory.
@@ -58,7 +58,10 @@ mod tests {
 
         enable_file_logging(FileLogConfig::new(temp_dir.to_str().unwrap(), "test-app"));
 
-        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(Registry::builder().with_tag("__test_isolation__").build())
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 

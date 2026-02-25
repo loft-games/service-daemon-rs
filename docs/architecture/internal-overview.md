@@ -104,5 +104,14 @@ graph LR
 - **Provider Masking**: Macro-generated `resolve()` checks `try_resolve_mock::<T>()` first (feature-gated), falling through to the real `StateManager` on miss.
 - **Log Drain**: Optional background subscriber for `LogQueue` that prints to stderr, solving the "log black hole" problem in tests.
 
+## 6. Avoiding Service Interference
+
+Because of the automatic service discovery, testing a subsystem in a large project can lead to "Service Interference" where production services are unintentionally started during tests.
+
+**Best Practices:**
+1. **Use Tags**: Group services logically using `#[service(tags = ["core", "api"])]`.
+2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment, then inject only the services under test via `.with_services()`.
+3. **ServiceId Safety**: The `ServiceDaemonBuilder` automatically detects `ServiceId` collisions at startup, preventing two services from competing for the same status plane slot.
+
 [Back to README](../../README.md)
 

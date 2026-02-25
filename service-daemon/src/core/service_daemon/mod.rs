@@ -15,10 +15,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
+use crate::core::context::DaemonResources;
 use crate::models::{
     Registry, Result as ServiceResult, ServiceDescription, ServiceId, ServiceStatus,
 };
-use crate::core::context::DaemonResources;
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
 
@@ -302,6 +302,11 @@ mod tests {
 
     use crate::models::ServiceFn;
 
+    /// Helper: Create an isolated registry that filters out all auto-registered services.
+    fn isolated_registry() -> Registry {
+        Registry::builder().with_tag("__test_isolation__").build()
+    }
+
     fn setup_tracing() {
         let _ = tracing_subscriber::fmt::try_init();
     }
@@ -309,8 +314,9 @@ mod tests {
     #[tokio::test]
     async fn test_service_daemon_builder_default() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder().build();
-        // With empty static registry in test context, services may be empty
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
         debug!("test_service_daemon_builder_default passed");
         let _ = daemon;
     }
@@ -318,7 +324,9 @@ mod tests {
     #[tokio::test]
     async fn test_service_daemon_handle() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder().build();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
         let handle = daemon.handle();
 
         // Initially, unknown service should be Terminated
@@ -337,7 +345,9 @@ mod tests {
     #[tokio::test]
     async fn test_service_status_update() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder().build();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
         let handle = daemon.handle();
 
         // Insert status

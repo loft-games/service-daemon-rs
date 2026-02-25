@@ -79,7 +79,10 @@ mod tests {
             })
             .collect();
 
+        use service_daemon::Registry;
+
         ServiceDaemon::builder()
+            .with_registry(Registry::builder().with_tag("__test_isolation__").build())
             .with_restart_policy(policy)
             .with_services(descriptions)
             .build()

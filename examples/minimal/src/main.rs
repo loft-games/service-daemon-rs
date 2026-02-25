@@ -45,13 +45,14 @@ async fn main() -> anyhow::Result<()> {
 // =============================================================================
 #[cfg(test)]
 mod tests {
-    use service_daemon::{RestartPolicy, ServiceDaemon};
+    use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 
     /// Verifies that a minimal daemon can start and stop cleanly
     /// without any complex lifecycle management.
     #[tokio::test]
     async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
         let daemon = ServiceDaemon::builder()
+            .with_registry(Registry::builder().with_tag("__test_isolation__").build())
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
@@ -91,6 +92,7 @@ mod tests {
         });
 
         let daemon = ServiceDaemon::builder()
+            .with_registry(Registry::builder().with_tag("__test_isolation__").build())
             .with_restart_policy(RestartPolicy::for_testing())
             .with_service(service_daemon::ServiceDescription {
                 id: service_daemon::ServiceId::new(0),

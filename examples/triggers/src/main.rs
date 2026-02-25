@@ -67,13 +67,21 @@ async fn main() -> anyhow::Result<()> {
 // =============================================================================
 #[cfg(test)]
 mod tests {
-    use service_daemon::{RestartPolicy, ServiceDaemon};
+    use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
+
+    /// Helper: Create an isolated registry that filters out all auto-registered services.
+    fn isolated_registry() -> Registry {
+        Registry::builder().with_tag("__test_isolation__").build()
+    }
 
     /// Verifies that Cron, Queue, and Signal triggers are all registered
     /// and the daemon can start/stop with them present.
     #[tokio::test]
     async fn test_trigger_registration() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -89,7 +97,10 @@ mod tests {
     /// Verifies that Signal triggers fire when notified.
     #[tokio::test]
     async fn test_signal_trigger_fires() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
@@ -109,7 +120,10 @@ mod tests {
     async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
         use crate::providers::ExternalStatus;
 
-        let daemon = ServiceDaemon::builder().with_restart_policy(RestartPolicy::for_testing()).build();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
         let cancel = daemon.cancel_token();
         let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
 
