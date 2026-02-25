@@ -70,7 +70,7 @@ The framework is organized into specialized submodules to ensure maintainability
   - `policy.rs`: Resilience configuration (backoff, jitter).
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
 - **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
-- **`core/triggers.rs`**: Host logic for event-driven triggers.
+- **`core/triggers.rs`**: Host logic for event-driven triggers. Implements the `TriggerHost` trait for standardized message dispatch and traceability.
 - **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
 - **`core/managed_state.rs`**: The reactive state engine with change tracking.
 
@@ -115,6 +115,14 @@ Because of the automatic service discovery, testing a subsystem in a large proje
 1. **Use Tags**: Group services logically using `#[service(tags = ["core", "api"])]`.
 2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment, then inject only the services under test via `.with_services()`.
 3. **ServiceId Safety**: The `ServiceDaemonBuilder` automatically detects `ServiceId` collisions at startup, preventing two services from competing for the same status plane slot.
+
+## 7. Event Traceability Architecture
+
+The system uses a unified messaging layer for all cross-service events:
+
+- **TriggerMessage**: Encapsulates the payload with a `TriggerContext` (Source ID, Instance ID, Message ID).
+- **Publish API**: Services use `publish()` to inject these messages into providers.
+- **Unified Dispatch**: `TriggerHost` implementations ensure that every trigger execution is wrapped in a tracing span that preserves the original event's context.
 
 [Back to README](../../README.md)
 

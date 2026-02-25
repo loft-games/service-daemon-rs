@@ -56,4 +56,33 @@ pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()
 2. **Explicit Payload**: Any parameter marked with `#[payload]` is the payload (allows `Arc<Payload>`).
 3. **DI Resources**: All other `Arc<T>` parameters are resolved via the DI system.
 
+## 4. Event Traceability (Publishing)
+
+Starting from v0.1.0, any event published within a service can be traced throughout the entire system.
+
+### Using `publish()`
+Wrap your event production logic in `service_daemon::publish()` to capture the current `InstanceId` and generate a unique `MessageId`.
+
+```rust
+use service_daemon::publish;
+
+#[service]
+async fn my_service() -> anyhow::Result<()> {
+    while !service_daemon::is_shutdown() {
+        // Traceable event publishing
+        publish("my_event", || async {
+            MyProvider::notify().await;
+        }).await;
+
+        service_daemon::sleep(Duration::from_secs(10)).await;
+    }
+    Ok(())
+}
+```
+
+### Traceability Benefits
+- **Source Attribution**: See exactly which service instance fired a signal.
+- **Message IDs**: Correlation of logs across multiple trigger handlers.
+- **Debug Visibility**: High-priority diagnostics via `DaemonLayer`.
+
 [Back to README](../../README.md)

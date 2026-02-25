@@ -152,20 +152,20 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// use service_daemon::trigger;
 ///
 /// #[trigger(Event(MyNotifier))]
-/// async fn on_event(payload: (), trigger_id: String) -> anyhow::Result<()> {
-///     println!("Event triggered! ID: {}", trigger_id);
+/// async fn on_event() -> anyhow::Result<()> {
+///     println!("Event triggered!");
 ///     Ok(())
 /// }
 ///
 /// #[trigger(Queue(TaskQueue))]
-/// async fn on_queue_item(item: String, trigger_id: String) -> anyhow::Result<()> {
-///     println!("Received queue item: {} (trigger: {})", item, trigger_id);
+/// async fn on_queue_item(item: String) -> anyhow::Result<()> {
+///     println!("Received queue item: {}", item);
 ///     Ok(())
 /// }
 ///
 /// #[trigger(Cron(CleanupSchedule))]
-/// async fn on_cron_tick(tick_time: (), trigger_id: String) -> anyhow::Result<()> {
-///     println!("Cron triggered! ID: {}", trigger_id);
+/// async fn on_cron_tick() -> anyhow::Result<()> {
+///     println!("Cron triggered!");
 ///     Ok(())
 /// }
 ///
