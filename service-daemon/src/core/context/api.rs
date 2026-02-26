@@ -284,7 +284,7 @@ pub async fn sleep(duration: Duration) -> bool {
 /// MyQueue::push(payload).await;
 /// ```
 pub fn generate_message_id() -> String {
-    crate::models::trigger::generate_message_id()
+    crate::core::trigger_runner::generate_message_id()
 }
 
 /// Publishes an event from the current service context with full traceability.

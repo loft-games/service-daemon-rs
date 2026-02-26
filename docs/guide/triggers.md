@@ -6,8 +6,8 @@ Triggers are specialized services with built-in event loops that execute your fu
 
 Starting from v0.1.0, triggers follow a decoupled **Policy-Engine** architecture:
 
-- **Engine (Generic)**: Handles the main event loop, tracing, monotonically increasing instance IDs, and standard shutdown/reload logic. It's provided automatically by the framework.
-- **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `handle_step` method.
+- **Engine (Generic)**: The `TriggerRunner` manages the main event loop, middleware pipeline, tracing, retry logic, and standard shutdown/reload handling. It's provided automatically by the framework.
+- **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `TriggerHost` trait's `setup` (one-time initialization) and `handle_step` (per-event waiting) methods.
 
 ### The `TriggerTransition` Protocol
 Policies communicate with the engine using a transition enum:
@@ -105,10 +105,10 @@ Starting from v0.1.0, individual trigger handler failures (returning `Err`) are 
 
 ### How it works
 When a handler fails:
-1. The framework creates a `TriggerInvocation` "mini-host" for that specific event.
-2. It uses a `BackoffController` to calculate the next wait time.
-3. The payload is shared via `Arc` internally — retries **never** deep-copy business data.
-4. Retries continue until the handler succeeds or the system shuts down.
+1. The `TriggerRunner` uses its internal `invoke_handler_with_retry` method, which manages retry logic with a `BackoffController`.
+2. The payload is shared via `Arc` internally — retries **never** deep-copy business data.
+3. Retries continue until the handler succeeds or the system shuts down.
+4. Shutdown signals are respected during backoff waits — no hanging retries.
 
 ### Payload Handling
 

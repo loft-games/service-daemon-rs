@@ -4,8 +4,9 @@
 //!
 //! - **Policy** (`handle_step`): Defined by each trigger host. It only cares about
 //!   *"how to wait for the next event"* and returns a [`TriggerTransition`].
-//! - **Engine** (`run_as_service` default impl): Manages the event loop, tracing,
-//!   instance ID issuance, and graceful shutdown. Host implementors get this for free.
+//! - **Engine** (`run_as_service` default impl → [`TriggerRunner`](crate::core::trigger_runner::TriggerRunner)):
+//!   Manages the event loop, tracing, retry, middleware pipeline, and graceful
+//!   shutdown. Host implementors get this for free.
 //!
 //! ## Extension Model
 //!
@@ -16,7 +17,14 @@
 //!
 //! impl<T: Provided + ...> TriggerHost<T> for MyHost {
 //!     type Payload = MyEvent;
-//!     fn handle_step(target: Arc<T>) -> BoxFuture<'static, TriggerTransition<Self::Payload>> {
+//!
+//!     fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+//!         Box::pin(async { Ok(MyHost) })
+//!     }
+//!
+//!     fn handle_step<'a>(&'a mut self, target: &'a Arc<T>)
+//!         -> BoxFuture<'a, TriggerTransition<Self::Payload>>
+//!     {
 //!         Box::pin(async move {
 //!             let event = target.wait_for_event().await;
 //!             TriggerTransition::Next(event)
@@ -37,11 +45,8 @@
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, info, warn};
 
-use super::policy::{BackoffController, RestartPolicy};
 use super::service::ServiceId;
 use crate::core::context;
 
@@ -241,7 +246,7 @@ pub enum TriggerTransition<P> {
 ///     }
 /// }
 /// ```
-pub trait TriggerHost<T: Send + Sync + 'static>: Sized {
+pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// The business payload type carried by each event.
     ///
     /// Does **not** require `Clone`. The framework wraps the payload in
@@ -249,6 +254,15 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized {
     /// handler receives a bare `T` (not `Arc<T>`), the macro will
     /// auto-clone — in that case `T` must implement `Clone`.
     type Payload: Send + Sync + 'static;
+
+    /// **Setup**: One-time initialization for the host.
+    ///
+    /// Called once when the trigger service starts. Use this to acquire
+    /// resources (subscribers, scheduler jobs, etc.) that persist across
+    /// `handle_step` iterations.
+    ///
+    /// Hosts that need no initialization can simply return `Ok(Self)`.
+    fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>>;
 
     /// **Policy**: Define how to wait for the next event and what transition
     /// to make.
@@ -261,19 +275,23 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized {
     /// - `TriggerTransition::Next(payload)` — dispatch and loop again.
     /// - `TriggerTransition::Reload(payload)` — dispatch, then idle for reload.
     /// - `TriggerTransition::Stop` — exit the loop cleanly.
-    fn handle_step(target: Arc<T>) -> BoxFuture<'static, TriggerTransition<Self::Payload>>;
+    fn handle_step<'a>(
+        &'a mut self,
+        target: &'a Arc<T>,
+    ) -> BoxFuture<'a, TriggerTransition<Self::Payload>>;
 
     /// **Engine**: Start the trigger's event loop as a long-running service.
     ///
     /// The default implementation provides a complete event loop that:
-    /// 1. Calls `handle_step` in a `tokio::select!` with shutdown monitoring.
-    /// 2. Dispatches payloads through a tracing-instrumented handler pipeline.
-    /// 3. Issues monotonically increasing instance sequence IDs.
-    /// 4. On `Reload`, idles via `wait_shutdown()` so the framework's
+    /// 1. Calls `setup` once to initialize the host.
+    /// 2. Calls `handle_step` in a `tokio::select!` with shutdown monitoring.
+    /// 3. Dispatches payloads through a middleware-instrumented handler pipeline.
+    /// 4. Issues monotonically increasing instance sequence IDs.
+    /// 5. On `Reload`, idles via `wait_shutdown()` so the framework's
     ///    `ServiceWatcher` can restart us when dependencies change.
     ///
-    /// Override this only for hosts that cannot fit the `handle_step` model
-    /// (e.g., `CronHost` which relies on external scheduler callbacks).
+    /// Override this only for hosts that cannot fit the `setup` + `handle_step`
+    /// model.
     fn run_as_service(
         name: String,
         target: Arc<T>,
@@ -282,41 +300,12 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized {
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async move {
             let service_id = current_service_id();
-            let instance_counter = AtomicU64::new(0);
 
-            while !context::is_shutdown() {
-                // Race: policy step vs shutdown signal
-                let transition = tokio::select! {
-                    t = Self::handle_step(target.clone()) => t,
-                    _ = context::wait_shutdown() => {
-                        info!("Trigger '{}' received shutdown, exiting", name);
-                        break;
-                    }
-                };
+            let mut host = Self::setup(target.clone()).await?;
 
-                match transition {
-                    TriggerTransition::Next(payload) => {
-                        dispatch_event(&name, service_id, &instance_counter, payload, &handler)
-                            .await;
-                    }
-                    TriggerTransition::Reload(payload) => {
-                        dispatch_event(&name, service_id, &instance_counter, payload, &handler)
-                            .await;
-                        // Idle until the framework's ServiceWatcher aborts us
-                        // for a dependency-driven reload. This keeps the
-                        // service status as "Running" in the meantime.
-                        info!("Trigger '{}' entering reload-wait state", name);
-                        context::wait_shutdown().await;
-                        break;
-                    }
-                    TriggerTransition::Stop => {
-                        info!("Trigger '{}' stopping", name);
-                        break;
-                    }
-                }
-            }
+            let runner = crate::core::trigger_runner::TriggerRunner::new(name, service_id, handler);
 
-            Ok(())
+            runner.run_with_host::<T, Self>(&mut host, target).await
         })
     }
 }
@@ -331,135 +320,6 @@ fn current_service_id() -> ServiceId {
     context::identity::CURRENT_SERVICE
         .try_with(|identity| identity.service_id)
         .unwrap_or(ServiceId::new(0))
-}
-
-/// Generates a globally unique message ID for each trigger event.
-pub(crate) fn generate_message_id() -> String {
-    #[cfg(feature = "uuid-trigger-ids")]
-    {
-        uuid::Uuid::new_v4().to_string()
-    }
-    #[cfg(not(feature = "uuid-trigger-ids"))]
-    {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("msg-{}", id)
-    }
-}
-
-/// Dispatches a single trigger event through the tracing + handler pipeline.
-///
-/// This is the engine's internal dispatch primitive. It handles:
-/// 1. Building a [`TriggerContext`] with traceability metadata.
-/// 2. Wrapping the payload in `Arc` for sharing across retry attempts.
-/// 3. Creating a [`TriggerInvocation`] which manages the retry loop.
-/// 4. Invoking the user handler with backoff on failure.
-async fn dispatch_event<P: Send + Sync + 'static>(
-    name: &str,
-    service_id: ServiceId,
-    instance_counter: &AtomicU64,
-    payload: P,
-    handler: &TriggerHandler<P>,
-) {
-    let seq = instance_counter.fetch_add(1, Ordering::Relaxed);
-    let message_id = generate_message_id();
-
-    let invocation = TriggerInvocation {
-        service_id,
-        instance_seq: seq,
-        message_id: message_id.clone(),
-        payload: Arc::new(payload),
-        backoff: BackoffController::new(RestartPolicy::default()),
-    };
-
-    let span = tracing::info_span!("trigger", %name, instance_id = %format!("{}:{}", service_id, seq), %message_id);
-    let h = handler.clone();
-    async move {
-        info!("Trigger fired");
-        invocation.run(h).await;
-    }
-    .instrument(span)
-    .await;
-}
-
-// ---------------------------------------------------------------------------
-// TriggerInvocation — per-event retry host
-// ---------------------------------------------------------------------------
-
-/// A short-lived host that manages a single trigger event's lifecycle.
-///
-/// `TriggerInvocation` is the "small supervisor" for individual trigger
-/// handler calls. It owns the payload via `Arc<P>` and uses a
-/// [`BackoffController`] to retry failed handler executions with
-/// exponential backoff.
-///
-/// # Relationship to ServiceSupervisor
-///
-/// | Component          | Scope                | Retry Target        |
-/// |--------------------|----------------------|---------------------|
-/// | `ServiceSupervisor`| Service lifetime     | Service crashes     |
-/// | `TriggerInvocation`| Single event         | Handler errors      |
-///
-/// Both share the same [`BackoffController`] abstraction for consistent
-/// retry behavior across the framework.
-struct TriggerInvocation<P> {
-    service_id: ServiceId,
-    instance_seq: u64,
-    message_id: String,
-    /// The payload wrapped in `Arc` — cloning only increments the
-    /// reference count, so retries are always cheap regardless of
-    /// whether the business type `P` implements `Clone`.
-    payload: Arc<P>,
-    backoff: BackoffController,
-}
-
-impl<P: Send + Sync + 'static> TriggerInvocation<P> {
-    /// Execute the handler with retry logic.
-    ///
-    /// On success, returns immediately. On failure, waits using
-    /// exponential backoff before retrying. Respects shutdown signals
-    /// during the backoff wait.
-    ///
-    /// The payload is shared via `Arc`, so each retry only clones the
-    /// pointer (not the business data).
-    async fn run(mut self, handler: TriggerHandler<P>) {
-        loop {
-            let ctx = TriggerContext {
-                service_id: self.service_id,
-                instance_seq: self.instance_seq,
-                message: TriggerMessage {
-                    message_id: self.message_id.clone(),
-                    source_id: self.service_id,
-                    timestamp: Utc::now(),
-                    payload: self.payload.clone(), // Arc clone — cheap pointer copy
-                },
-            };
-
-            match handler(ctx).await {
-                Ok(()) => break,
-                Err(e) => {
-                    warn!(
-                        attempt = self.backoff.attempt_count() + 1,
-                        error = %e,
-                        "Trigger handler failed, scheduling retry"
-                    );
-                    self.backoff.record_failure();
-
-                    // Check if shutdown was requested before waiting
-                    if context::is_shutdown() {
-                        warn!("Trigger handler retry aborted due to shutdown");
-                        break;
-                    }
-
-                    // Use interruptible sleep via context::sleep
-                    if !context::sleep(self.backoff.current_delay()).await {
-                        warn!("Trigger handler retry interrupted by shutdown");
-                        break;
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ===========================================================================

@@ -70,7 +70,8 @@ The framework is organized into specialized submodules to ensure maintainability
   - `policy.rs`: Resilience configuration (backoff, jitter).
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
 - **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
-- **`core/triggers.rs`**: Host logic for event-driven triggers. Implements the `TriggerHost` trait for standardized message dispatch and traceability.
+- **`core/triggers.rs`**: Built-in trigger host implementations. Each host implements the `TriggerHost` trait with `setup` (one-time initialization) and `handle_step` (per-event policy).
+- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerMiddleware` pipeline. Encapsulates the `select!`/shutdown logic, middleware hooks, context construction, tracing spans, and retry-with-backoff — all decomposed into focused private methods.
 - **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
 - **`core/managed_state.rs`**: The reactive state engine with change tracking.
 
@@ -122,7 +123,8 @@ The system uses a unified messaging layer for all cross-service events:
 
 - **TriggerMessage**: Encapsulates the payload with a `TriggerContext` (Source ID, Instance ID, Message ID).
 - **Publish API**: Services use `publish()` to inject these messages into providers.
-- **Unified Dispatch**: `TriggerHost` implementations ensure that every trigger execution is wrapped in a tracing span that preserves the original event's context.
+- **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context, with retry logic managed by `invoke_handler_with_retry`.
+- **Middleware Pipeline**: `TriggerMiddleware` hooks execute before and after each dispatch cycle (onion model), enabling pluggable observability and control.
 
 [Back to README](../../README.md)
 

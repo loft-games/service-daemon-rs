@@ -9,8 +9,8 @@ To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 ## 1. The Policy vs. Engine Model
 
 Starting from v0.1.0, triggers are split into two parts:
-1.  **Engine (Framework)**: Handles the infinite loop, tracing, monotonically increasing instance IDs, recovery, and standard shutdown logic.
-2.  **Policy (Your Host)**: Defines only *how to wait* for the next event.
+1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, middleware pipeline, tracing, retry with backoff, and standard shutdown logic.
+2.  **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
 
 ### Why `Clone` for Payloads?
 The framework wraps every payload in `Arc<P>` internally so that retries only clone a pointer. If your handler receives a **bare `T`**, the framework must clone the data out of the `Arc` — so `T` must implement `Clone`. If your handler receives `Arc<T>`, no cloning happens at all.
@@ -26,6 +26,8 @@ This decoupled design means you spend zero time on boilerplate and focus entirel
 
 Let's imagine you want a trigger that fires whenever a file is created.
 
+### Stateless Host (No Initialization Needed)
+
 ```rust
 use service_daemon::{TriggerHost, TriggerTransition, Provided};
 use service_daemon::futures::future::BoxFuture;
@@ -38,13 +40,16 @@ impl<T> TriggerHost<T> for FileWatcherHost
 where 
     T: Provided + std::ops::Deref<Target = PathBuf> + Send + Sync + 'static 
 {
-    /// **Payload**: Must implement `Clone` to support automatic retries.
-    type Payload = String; 
+    type Payload = String;
 
-    /// **Policy**: Define how to wait for the next event.
-    fn handle_step(target: Arc<T>) -> BoxFuture<'static, TriggerTransition<Self::Payload>> {
+    fn setup(_target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+        Box::pin(async { Ok(FileWatcherHost) })
+    }
+
+    fn handle_step<'a>(&'a mut self, target: &'a Arc<T>)
+        -> BoxFuture<'a, TriggerTransition<Self::Payload>>
+    {
         Box::pin(async move {
-            // Your custom event logic (e.g., using the `notify` crate)
             match wait_for_file_system_event(&target).await {
                 Ok(filename) => TriggerTransition::Next(filename),
                 Err(_) => TriggerTransition::Stop,
@@ -54,35 +59,54 @@ where
 }
 ```
 
+### Stateful Host (With Initialization)
+
+If your trigger needs to set up resources (like a network connection or scheduler job), do it in `setup` and store them as struct fields:
+
+```rust
+pub struct WebSocketHost {
+    connection: WebSocketConnection,
+}
+
+impl<T> TriggerHost<T> for WebSocketHost
+where
+    T: Provided + std::ops::Deref<Target = String> + Send + Sync + 'static,
+{
+    type Payload = Message;
+
+    fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+        Box::pin(async move {
+            let conn = WebSocketConnection::connect(&*target).await?;
+            Ok(WebSocketHost { connection: conn })
+        })
+    }
+
+    fn handle_step<'a>(&'a mut self, _target: &'a Arc<T>)
+        -> BoxFuture<'a, TriggerTransition<Self::Payload>>
+    {
+        Box::pin(async move {
+            // Access initialized resources directly via self
+            match self.connection.next_message().await {
+                Ok(msg) => TriggerTransition::Next(msg),
+                Err(_) => TriggerTransition::Stop,
+            }
+        })
+    }
+}
+```
+
+> [!TIP]
+> The `setup` → `handle_step(&mut self)` pattern eliminates the need for `shelve`-based state persistence in most cases. Resources initialized in `setup` are available as struct fields in every `handle_step` call.
+
 ### The `TriggerTransition` Protocol
-Your `handle_step` method returns a instruction to the engine:
+Your `handle_step` method returns an instruction to the engine:
 *   `TriggerTransition::Next(payload)`: Dispatch event and loop immediately.
 *   `TriggerTransition::Reload(payload)`: Dispatch event, then wait for a framework restart (ideal for state-watchers).
 *   `TriggerTransition::Stop`: Cleanly exit the loop.
 
-## 3. Handling Continuity (Shelving)
+## 3. The Ultimate Escape Hatch: `run_as_service`
 
-What if your trigger has state that must persist across `handle_step` calls (like a network connection or a library's `Receiver`)? Use the **Shelf**!
-
-```rust
-use service_daemon::context::{shelve, shelve_clone};
-
-// Inside handle_step...
-let rx = match shelve_clone::<MyRx>("bridge").await {
-    Some(rx) => rx,
-    None => {
-        let rx = create_new_rx();
-        shelve("bridge", rx.clone()).await;
-        rx
-    }
-};
-```
-
-By leveraging `shelve_clone`, your trigger remains stateless in its signature but maintains perfect continuity in its execution.
-
-## 4. The Ultimate Escape Hatch: `run_as_service`
-
-Sometimes, `handle_step` is simply not enough. If you’re integrating a legacy C library with weird threading requirements, or a high-performance system that requires full control over the execution loop, you can override the **`run_as_service`** engine itself.
+Sometimes, `handle_step` is simply not enough. If you're integrating a legacy C library with weird threading requirements, or a high-performance system that requires full control over the execution loop, you can override the **`run_as_service`** engine itself.
 
 ```rust
 impl<T> TriggerHost<T> for MyUltimateHost {
@@ -106,7 +130,7 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 ```
 
 > [!CAUTION]
-> **With great power comes great responsibility.** If you override the engine, you lose the framework's automatic traceability (monotonically increasing IDs, tracing spans) unless you implement them manually using `TriggerContext` and `Instrument`. Use this only as a last resort!
+> **With great power comes great responsibility.** If you override the engine, you lose the framework's automatic traceability (monotonically increasing IDs, tracing spans), middleware pipeline, and retry logic unless you implement them manually. Use this only as a last resort!
 
 ---
 
