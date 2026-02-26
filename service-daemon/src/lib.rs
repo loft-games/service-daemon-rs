@@ -39,7 +39,8 @@ pub mod models;
 
 // Re-export commonly used items
 pub use core::context::{
-    done, generate_message_id, is_shutdown, publish, shelve, sleep, state, unshelve, wait_shutdown,
+    done, generate_message_id, is_shutdown, publish, shelve, shelve_clone, sleep, state, unshelve,
+    wait_shutdown,
 };
 pub use core::di::Provided;
 pub use core::service_daemon::{
@@ -49,7 +50,7 @@ pub use models::service::ServicePriority;
 pub use models::{
     Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ServiceDescription, ServiceEntry,
     ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerContext,
-    TriggerHandler, TriggerHost, TriggerMessage, TriggerTemplate,
+    TriggerHandler, TriggerHost, TriggerMessage,
 };
 pub use std::sync::Arc;
 
@@ -82,11 +83,12 @@ pub use service_daemon_macro::{allow_sync, provider, service, trigger};
 /// Importing this allows using short variant names like `Cron` or `Watch` and
 /// provides IDE autocompletion for `#[trigger]` attributes.
 pub mod prelude {
-    pub use crate::core::context::{is_shutdown, shelve, sleep, state, unshelve, wait_shutdown};
+    pub use crate::core::context::{
+        is_shutdown, shelve, shelve_clone, sleep, state, unshelve, wait_shutdown,
+    };
     pub use crate::core::di::Provided;
     pub use crate::models::service::ServicePriority;
     pub use crate::models::service::ServiceStatus;
-    pub use crate::models::trigger::TriggerTemplate;
-    pub use crate::models::trigger::TriggerTemplate as TT;
-    pub use crate::models::trigger::TriggerTemplate::*;
+    pub use crate::models::trigger::TT;
+    pub use crate::models::trigger::TT::*;
 }

@@ -123,7 +123,9 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 }
 
 /// Retrieves a shelved managed value previously submitted by this service.
-/// The value is retrieved from the service's isolated bucket.
+/// The value is **removed** from the service's isolated bucket.
+///
+/// For a non-destructive read, use [`shelve_clone`] instead.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
     let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
         Ok(n) => n,
@@ -135,6 +137,32 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
+            })
+        })
+        .ok()
+        .flatten()
+}
+
+/// Retrieves a **clone** of a shelved value without removing it from the shelf.
+///
+/// This is useful when trigger hosts need to access the same shelved state
+/// across multiple `handle_step` iterations (e.g., a bridge `Arc<Notify>`
+/// for cron triggers).
+///
+/// # Requirements
+/// The stored type `T` must implement `Clone`. This is naturally satisfied
+/// by `Arc<T>` values, which are the primary use case.
+pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+        Ok(n) => n,
+        Err(_) => return None,
+    };
+    CURRENT_RESOURCES
+        .try_with(|r| {
+            r.shelf.get(&name).and_then(|entry| {
+                entry
+                    .get(key)
+                    .and_then(|val| val.downcast_ref::<T>().cloned())
             })
         })
         .ok()
@@ -256,7 +284,7 @@ pub async fn sleep(duration: Duration) -> bool {
 /// MyQueue::push(payload).await;
 /// ```
 pub fn generate_message_id() -> String {
-    crate::core::triggers::generate_message_id()
+    crate::models::trigger::generate_message_id()
 }
 
 /// Publishes an event from the current service context with full traceability.

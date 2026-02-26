@@ -48,24 +48,20 @@ The Status Plane provides services with lifecycle awareness via the `ServiceStat
 - `is_shutdown()`: Check if service should stop.
 - `sleep(duration)`: Interruptible async sleep.
 
-## 3. State Handoff (Shelving)
-
-Persist small amounts of state across service restarts or reloads:
-
+### Standard Handoff (Destructive)
+Use `unshelve()` when you only need to read the data once (e.g., at startup).
 ```rust
-use service_daemon::{shelve, unshelve};
-
-#[service]
-async fn persistence_service() -> anyhow::Result<()> {
-    // 1. Restore
-    let history: Option<Vec<String>> = unshelve("history").await;
-    
-    // 2. Work...
-    
-    // 3. Save for next generation
-    shelve("history", vec!["event".into()]).await;
-    Ok(())
-}
+let history: Option<Vec<String>> = unshelve("history").await;
 ```
+
+### Persistent Read (Non-Destructive)
+Use `shelve_clone()` when you need to read the same data repeatedly without removing it from the shelf (e.g., inside a trigger's `handle_step`).
+```rust
+use service_daemon::shelve_clone;
+let config: Option<AppConfig> = shelve_clone("app_config").await;
+```
+
+---
+
 
 [Back to README](../../README.md)

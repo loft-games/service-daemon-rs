@@ -59,7 +59,24 @@ async fn cleanup_handler() -> anyhow::Result<()> {
 }
 ```
 
-## 3. Why use Triggers instead of Loops?
+## 3. Explicit Payloads with `#[payload]`
+
+By default, the framework treats the first argument that is *not* an `Arc<T>` as the event payload. 
+
+However, if your payload is also wrapped in an `Arc` (common for zero-copy job processing) or if you want to be explicit, use the **`#[payload]`** attribute:
+
+```rust
+#[trigger(LBQueue(JobQueue))]
+async fn complex_worker(
+    #[payload] job: Arc<ComplexJob>, // Explicitly marked as payload
+    db: Arc<Database>               // This is a DI resource
+) -> anyhow::Result<()> {
+    tracing::info!("Working on job {}", job.id);
+    Ok(())
+}
+```
+
+## 4. Why use Triggers instead of Loops?
 
 1.  **Efficiency**: Triggers consume zero CPU while waiting. 
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.

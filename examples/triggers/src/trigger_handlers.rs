@@ -5,6 +5,7 @@
 //! and are registered in the daemon's global registry via the `#[trigger]` macro.
 
 use crate::providers::{CleanupSchedule, ExternalStatus, TaskQueue, UserNotifier, WorkerQueue};
+use service_daemon::TT::*;
 use service_daemon::{publish, trigger};
 use std::sync::Arc;
 

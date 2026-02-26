@@ -4,44 +4,26 @@
 //!   `#[trigger(Watch(MetricsData), priority = 80)]`
 //!
 //! The first argument is always a template call in the form `Template(Target)`.
+//! `Template` is any type path that implements `TriggerHost<Target>` — no
+//! keyword validation is performed here; the compiler will catch invalid types.
 //! Optional named arguments like `priority = N` follow after a comma.
 
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
-use syn::spanned::Spanned;
 use syn::{Ident, Token, parenthesized};
 
 use crate::common::TagsList;
 
-/// The list of valid trigger template variant names.
-///
-/// These correspond to variants of `TriggerTemplate` in the runtime crate.
-/// Multiple aliases may map to the same internal template via `normalize_template`.
-pub const VALID_VARIANTS: &[&str] = &[
-    "Notify",
-    "Event",
-    "Signal",
-    "Custom",
-    "Queue",
-    "BQueue",
-    "BroadcastQueue",
-    "LBQueue",
-    "LoadBalancingQueue",
-    "Cron",
-    "Watch",
-    "State",
-];
-
 /// Parsed result of `#[trigger(...)]` attributes.
 ///
-/// Captures the template variant name, the target type, and optional
+/// Captures the host type path, the target type, and optional
 /// named parameters like `priority`.
 pub struct TriggerArgs {
-    /// The template variant name (e.g., "Watch", "Cron", "Queue").
-    pub template: String,
-    /// The span of the template identifier, for error reporting.
-    pub template_ident: Ident,
+    /// The host type as a full path (e.g., `Notify`, `TT::Queue`, `crate::MyHost`).
+    /// This is passed directly to the generated code as
+    /// `<#host_path as TriggerHost<#target>>::run_as_service(...)`.
+    pub host_path: syn::Path,
     /// The target type as a token stream (e.g., `MetricsData`, `crate::providers::JobQueue`).
     pub target: TokenStream,
     /// Optional priority value (defaults to 50 if not specified).
@@ -53,23 +35,20 @@ pub struct TriggerArgs {
 /// Parses the token stream inside `#[trigger(...)]`.
 ///
 /// Expected grammar:
-///   `Template(TargetType)` [, `priority` = EXPR]*
+///   `HostPath(TargetType)` [, `priority` = EXPR]*
 ///
-/// Where `Template` is a valid trigger template variant (see `VALID_VARIANTS`)
-/// and `TargetType` is any valid Rust type path.
+/// Where `HostPath` is any valid Rust type path (e.g., `Watch`, `TT::Queue`,
+/// `service_daemon::TT::Cron`) and `TargetType` is any valid Rust type path.
+///
+/// No compile-time validation of the host path is performed — if the path
+/// does not refer to a type implementing `TriggerHost<Target>`, the Rust
+/// compiler will emit a clear error at the call site.
 impl Parse for TriggerArgs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        // Step 1: Parse the template as a Path (e.g., Watch, TT::Watch, service_daemon::TT::Watch)
+        // Step 1: Parse the host as a Path (e.g., Watch, TT::Watch, service_daemon::TT::Watch)
         //         Using syn::Path allows LSPs like rust-analyzer to "see" a Rust path
         //         and provide completions based on what's in scope.
-        let path: syn::Path = input.parse()?;
-        let template_ident = path
-            .segments
-            .last()
-            .ok_or_else(|| syn::Error::new(path.span(), "Empty template path"))?
-            .ident
-            .clone();
-        let template = template_ident.to_string();
+        let host_path: syn::Path = input.parse()?;
 
         // Step 2: Parse the parenthesized target type.
         //         e.g., `(MetricsData)` or `(crate::providers::JobQueue)`
@@ -113,30 +92,10 @@ impl Parse for TriggerArgs {
         }
 
         Ok(TriggerArgs {
-            template,
-            template_ident,
+            host_path,
             target,
             priority,
             tags,
         })
-    }
-}
-
-/// Normalizes the template variant name to a canonical internal form.
-///
-/// This allows multiple aliases (e.g., "Event", "Signal", "Custom") to map to
-/// the same internal template ("notify"), simplifying code generation.
-///
-/// Returns `(normalized_template, template_variant)` where:
-/// - `normalized_template` is a lowercase key used in `match` statements for code generation.
-/// - `template_variant` is the canonical enum variant name (e.g., "Notify").
-pub fn normalize_template(template: &str) -> (&'static str, &'static str) {
-    match template {
-        "Notify" | "Event" | "Signal" | "Custom" => ("notify", "Notify"),
-        "Queue" | "BQueue" | "BroadcastQueue" => ("queue", "Queue"),
-        "LBQueue" | "LoadBalancingQueue" => ("lb_queue", "LBQueue"),
-        "Cron" => ("cron", "Cron"),
-        "Watch" | "State" => ("watch", "Watch"),
-        _ => ("unknown", "Unknown"),
     }
 }

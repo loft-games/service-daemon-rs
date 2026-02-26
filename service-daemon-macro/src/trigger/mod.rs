@@ -1,22 +1,25 @@
 //! `#[trigger]` macro implementation.
 //!
 //! This module is split into submodules for better organization:
-//! - `parser`: Attribute parsing and validation.
+//! - `parser`: Attribute parsing (host path + target type).
 //! - `codegen`: Code generation for event loops and watchers.
 
 mod codegen;
 mod parser;
 
 use proc_macro::TokenStream;
-use proc_macro_error2::abort;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
 use crate::common::{ExtractedParams, has_allow_sync};
 use codegen::{generate_call_expr, generate_event_loop_call, generate_watcher};
-use parser::{TriggerArgs, VALID_VARIANTS, normalize_template};
+use parser::TriggerArgs;
 
 /// Implementation of the `#[trigger]` attribute macro.
+///
+/// The macro resolves the host type via the Rust type system rather than
+/// keyword matching. Any type implementing `TriggerHost<Target>` can be
+/// used as the first argument.
 pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as ItemFn);
     let fn_name = &input.sig.ident;
@@ -26,25 +29,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let sig = &input.sig;
     let body = &input.block;
 
-    // Parse attributes using syn-based structured parsing
+    // Parse attributes using syn-based structured parsing.
+    // The host path is now a real Rust path — no keyword validation needed.
     let args = parse_macro_input!(attr as TriggerArgs);
-    let template = args.template;
+    let host_path = &args.host_path;
     let target_type = args.target;
     let priority_tokens = args.priority;
     let tags_tokens = args.tags;
-
-    // Strict compile-time validation of the template variant name
-    if !VALID_VARIANTS.contains(&template.as_str()) {
-        abort!(
-            args.template_ident,
-            format!(
-                "Invalid trigger template '{}'. Valid options are: {}. \n\
-                 Hint: Use variants like Watch(...), Cron(...), Queue(...), etc.",
-                template,
-                VALID_VARIANTS.join(", ")
-            )
-        );
-    }
 
     // Extract parameters and categorize them
     let ExtractedParams {
@@ -54,9 +45,6 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         param_entries,
         watcher_arms,
     } = crate::common::extract_params(sig, true);
-
-    // Compute normalized template name and enum variant
-    let (normalized_template, _template_variant) = normalize_template(&template);
 
     let is_async = input.sig.asyncness.is_some();
     let allow_sync_present = has_allow_sync(attrs);
@@ -68,16 +56,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         allow_sync_present,
     );
 
-    let (watcher_fn, watcher_ptr) =
-        generate_watcher(fn_name, normalized_template, &watcher_arms, &target_type);
+    let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms, &target_type);
 
     let event_loop_call = generate_event_loop_call(
-        normalized_template,
+        host_path,
         &fn_name_str,
         &target_type,
         &resolve_tokens,
         &call_expr,
-        &template,
     );
 
     let wrapper_name = format_ident!("{}_trigger_wrapper", fn_name);

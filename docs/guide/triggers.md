@@ -2,6 +2,20 @@
 
 Triggers are specialized services with built-in event loops that execute your functions when specific events occur.
 
+## 0. Architecture: Policy vs. Engine
+
+Starting from v0.1.0, triggers follow a decoupled **Policy-Engine** architecture:
+
+- **Engine (Generic)**: Handles the main event loop, tracing, monotonically increasing instance IDs, and standard shutdown/reload logic. It's provided automatically by the framework.
+- **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `handle_step` method.
+
+### The `TriggerTransition` Protocol
+Policies communicate with the engine using a transition enum:
+- `Next(payload)`: Dispatch the event and continue the loop.
+- `Reload(payload)`: Dispatch the event, then enter an idle state, waiting for the framework to restart the service (used by state-based triggers like `Watch`).
+- `Stop`: Terminate the trigger loop cleanly.
+
+
 ## 1. Trigger Template Reference
 
 | Template | Alias | Functionality |

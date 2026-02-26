@@ -135,6 +135,14 @@ pub fn generate_lb_queue_template(
                 <Self as service_daemon::Provided>::resolve().await.tx.send(item).await
             }
         }
+
+        impl service_daemon::core::triggers::LBQueueTarget for #struct_name {
+            type Item = #item_type;
+
+            fn receiver(&self) -> &std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<#item_type>>> {
+                &self.rx
+            }
+        }
     };
 
     TokenStream::from(expanded)
