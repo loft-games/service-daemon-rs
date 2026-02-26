@@ -14,25 +14,15 @@
 - **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
 - **Tag-based Registry**: Filter services by tags for selective loading (`#[service(tags = ["infra"])]`).
 
----
+## Get Started
 
-## Get Started (Read This First!)
+Looking to build your first reliable background system? Follow our **[Grand Tour](docs/guide/tutorial/grand-tour.md)** tutorial series!
 
-New to `service-daemon-rs`? Avoid common traps and get your first service running in 5 minutes:
-
-[**5-Minute Get Started Guide**](docs/guide/get-started.md)
-
----
-
-## Quick Overview
-
-`service-daemon-rs` allows you to build complex system daemons by simply annotating your components. 
-
-To get your first service running safely and avoid common architectural pitfalls, please refer to our primary entry point:
-
-[**5-Minute Get Started Guide**](docs/guide/get-started.md)
-
----
+1. [**Hello, Heartbeat!**](docs/guide/tutorial/hello-heartbeat.md) - Your first background service. 
+2. [**Reactive Triggers**](docs/guide/tutorial/reactive-triggers.md) - Events and automation.
+3. [**The Art of Recovery**](docs/guide/tutorial/art-of-recovery.md) - State management and resilience.
+4. [**Waves of Orchestration**](docs/guide/tutorial/orchestration-waves.md) - Startup and shutdown order.
+5. ...and much more in the **[Full Tutorial](docs/guide/tutorial/grand-tour.md)**.
 
 ---
 
@@ -52,14 +42,10 @@ The `examples/` directory contains focused examples organized by use case:
 
 ---
 
-## Documentation Map
+### Documentation Map
 
 Explore our detailed documentation grouped by your needs:
 
-### User Guides
-Learn how to build applications with `service-daemon-rs`.
-- [**5-Minute Get Started**](docs/guide/get-started.md): The absolute first place to look.
-- [Provider Best Practices](docs/guide/provider-best-practices.md): Choosing between simple, async, and magic providers.
 - [Concept Clarification & Pitfalls](docs/guide/pitfalls-faq.md): Avoiding common architectural traps and misconceptions.
 - [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, priorities, and shutdown.
 - [Event Triggers](docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
