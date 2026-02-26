@@ -85,4 +85,11 @@ async fn my_service() -> anyhow::Result<()> {
 - **Message IDs**: Correlation of logs across multiple trigger handlers.
 - **Debug Visibility**: High-priority diagnostics via `DaemonLayer`.
 
+---
+
+## 5. More Information
+
+- [Provider Best Practices](provider-best-practices.md): Deep dive into defining custom providers.
+- [Concept Clarification (FAQ)](pitfalls-faq.md#2-lifecycle--paradigms): Understanding the difference between managed triggers and standard services.
+
 [Back to README](../../README.md)

@@ -16,74 +16,23 @@
 
 ---
 
-## Quick Start
+## Get Started (Read This First!)
 
-### 1. Define a Provider
-```rust
-use service_daemon::provider;
+New to `service-daemon-rs`? Avoid common traps and get your first service running in 5 minutes:
 
-#[provider(default = 8080)]
-pub struct Port(pub i32);
-```
+[**5-Minute Get Started Guide**](docs/guide/get-started.md)
 
-### 2. Create a Service
-```rust
-use service_daemon::service;
-use std::sync::Arc;
+---
 
-#[service]
-pub async fn my_service(port: Arc<Port>) -> anyhow::Result<()> {
-    service_daemon::done(); // Signal we are ready
-    while !service_daemon::is_shutdown() {
-        service_daemon::sleep(std::time::Duration::from_secs(1)).await;
-    }
-    Ok(())
-}
-```
+## Quick Overview
 
-### 3. Run the Daemon
-```rust
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
+`service-daemon-rs` allows you to build complex system daemons by simply annotating your components. 
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Setup tracing with the built-in DaemonLayer
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::core::logging::DaemonLayer)
-        .init();
+To get your first service running safely and avoid common architectural pitfalls, please refer to our primary entry point:
 
-    // Infallible build — always succeeds
-    service_daemon::ServiceDaemon::builder().build().run().await
-}
-```
+[**5-Minute Get Started Guide**](docs/guide/get-started.md)
 
-### 3b. (Optional) Tag-based Registry
-```rust
-use service_daemon::{ServiceDaemon, Registry};
-
-// Only load services tagged with "infra"
-let reg = Registry::builder().with_tag("infra").build();
-ServiceDaemon::builder()
-    .with_registry(reg)
-    .build()
-    .run()
-    .await?;
-```
-
-### 4. (Optional) Enable File Logging
-Enable the `file-logging` feature in your `Cargo.toml`:
-```toml
-service-daemon = { version = "0.1", features = ["file-logging"] }
-```
-Then configure it before starting the daemon:
-```rust
-use service_daemon::{FileLogConfig, enable_file_logging};
-
-enable_file_logging(FileLogConfig::new("logs", "my-app"));
-// Logs will be persisted as JSON lines with daily rotation.
-```
+---
 
 ---
 
@@ -99,7 +48,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
-> **⚠️ Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
+> **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
 
 ---
 
@@ -109,6 +58,9 @@ Explore our detailed documentation grouped by your needs:
 
 ### User Guides
 Learn how to build applications with `service-daemon-rs`.
+- [**5-Minute Get Started**](docs/guide/get-started.md): The absolute first place to look.
+- [Provider Best Practices](docs/guide/provider-best-practices.md): Choosing between simple, async, and magic providers.
+- [Concept Clarification & Pitfalls](docs/guide/pitfalls-faq.md): Avoiding common architectural traps and misconceptions.
 - [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, priorities, and shutdown.
 - [Event Triggers](docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
 - [State Management](docs/guide/state-management.md): Mutability, snapshots, and persistence.

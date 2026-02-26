@@ -90,20 +90,28 @@ async fn test_my_service_complex_logic() {
 
 ## 3. Troubleshooting
 
-### `the trait Provided is not implemented for T`
-**Cause**: Missing `#[provider]` annotation on type `T` or its initializer fn.
-**Fix**: Add `#[provider]`.
+For common architectural traps and conceptual questions, please refer to the [Concept Clarification & Pitfalls (FAQ)](pitfalls-faq.md).
 
-### Trigger Not Firing
-**Cause**: Usually the module containing the trigger is not included in `main.rs` via `mod`.
-**Fix**: Ensure `linkme` can find the trigger by including the module in the compilation tree.
+### Quick Fixes
 
-### Sync Warning in Logs
-**Cause**: Using `#[service]` on a `fn` instead of `async fn`.
-**Fix**: Convert to `async fn` or use `#[allow_sync]` if truly non-blocking.
+| Issue | Potential Solution |
+| :--- | :--- |
+| **Provided trait error** | Ensure the type has a `#[provider]` annotation. |
+| **Trigger not firing** | Check if the module is included in `main.rs`. See [Registry Discovery](pitfalls-faq.md#1-registry--discovery). |
+| **Sync warning in logs** | Use `async fn` or `#[allow_sync]` on your service. |
+| **Logs missing in tests** | Use `MockContext::builder().with_log_drain().build()`. |
 
-### Logs Not Visible in Tests
-**Cause**: In unit tests, the `LogService` is not running, so internal log events are silently discarded.
-**Fix**: Use `MockContext::builder().with_log_drain().build()` to drain logged events to stderr. Run with `cargo test -- --nocapture` to see them.
+### Registry Isolation in Tests
+
+Because `linkme` registers all services in the workspace, you may encounter interference between tests. 
+
+**Best Practice**:
+1. Tag your services: `#[service(tags = ["core"])]`.
+2. In your test, create a filtered registry:
+   ```rust
+   let reg = Registry::builder().with_tag("core").build();
+   ServiceDaemon::builder().with_registry(reg)...
+   ```
+For a deep dive into why this happens, see [Registry Isolation in FAQ](pitfalls-faq.md#4-testing--simulation).
 
 [Back to README](../../README.md)

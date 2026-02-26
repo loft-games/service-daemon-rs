@@ -12,6 +12,12 @@ Triggers are implemented as specialized services with a host wrapper.
 ## 2. Adding a "Magic Provider"
 
 Magic providers (like `Notify` or `Queue`) provide specialized behavior automatically when used as a default.
+
+> [!IMPORTANT]
+> **Stop!** Do not add a Magic Provider for business-specific components (e.g., MQTT, Database, Redis). Instead, use a regular `#[provider]` on an `async fn` in your application code. This is easier to maintain and provides full control over initialization.
+> 
+> Only add a "Magic Provider" if you are introducing a **generic architectural primitive** that requires specialized code-generation (like automatically adding convenience methods via macro).
+
 1. Add a new template generator function in `service-daemon-macro/src/provider/templates.rs`.
 2. Update `generate_struct_provider` in `service-daemon-macro/src/provider/struct_gen.rs` to detect your new template name in the `#[provider(default = ...)]` attribute.
 

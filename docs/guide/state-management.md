@@ -1,4 +1,9 @@
-# Intelligent State Management
+# Intelligent# State Management
+
+Effective state management is key to building reactive applications. This guide covers how to manage shared state and persistent service data.
+
+> [!TIP]
+> Unsure whether to use a Provider (State) or the Shelf? See the [State vs. Shelf comparison in the FAQ](pitfalls-faq.md#3-providers--state).
 
 `service-daemon-rs` optimizes shared state synchronization based on how your services declare their dependencies.
 
