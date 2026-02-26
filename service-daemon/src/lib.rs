@@ -48,9 +48,9 @@ pub use core::service_daemon::{
 };
 pub use models::service::ServicePriority;
 pub use models::{
-    Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ServiceDescription, ServiceEntry,
-    ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerContext,
-    TriggerHandler, TriggerHost, TriggerMessage,
+    BackoffController, Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ServiceDescription,
+    ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT,
+    TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
 };
 pub use std::sync::Arc;
 

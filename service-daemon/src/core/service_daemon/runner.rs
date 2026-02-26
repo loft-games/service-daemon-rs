@@ -11,7 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
-use crate::models::{ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus};
+use crate::models::{
+    BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
+};
 
 use super::policy::RestartPolicy;
 
@@ -21,10 +23,9 @@ struct ServiceSupervisor {
     name: String,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
-    policy: RestartPolicy,
+    backoff: BackoffController,
     resources: DaemonResources,
     cancellation_token: CancellationToken,
-    current_delay: Duration,
 }
 
 impl ServiceSupervisor {
@@ -42,10 +43,9 @@ impl ServiceSupervisor {
             name,
             run,
             watcher,
-            policy,
+            backoff: BackoffController::new(policy),
             resources,
             cancellation_token,
-            current_delay: policy.initial_delay,
         }
     }
 
@@ -160,14 +160,15 @@ impl ServiceSupervisor {
         warn!(
             "Restarting service {} in {:.1}s...",
             self.name,
-            self.current_delay.as_secs_f64()
+            self.backoff.current_delay().as_secs_f64()
         );
 
         tokio::select! {
-            _ = tokio::time::sleep(self.current_delay) => {}
+            _ = tokio::time::sleep(self.backoff.current_delay()) => {}
             _ = reload_signal.notified() => {
                 info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
-                self.current_delay = Duration::from_millis(0);
+                // Immediate reload — reset backoff so we restart right away
+                self.backoff.record_success();
             }
             _ = self.cancellation_token.cancelled() => {
                 info!("Service {} received shutdown signal during restart delay", self.name);
@@ -177,8 +178,8 @@ impl ServiceSupervisor {
             }
         }
 
-        // Apply exponential backoff for next restart
-        self.current_delay = self.policy.next_delay(self.current_delay);
+        // Advance backoff for the next potential restart
+        self.backoff.record_failure();
         true
     }
 
@@ -288,10 +289,8 @@ impl ServiceSupervisor {
                 .insert(self.service_id, next_status);
             self.resources.status_changed.notify_waiters();
 
-            // Reset delay if service ran successfully for long enough
-            if start_time.elapsed() >= self.policy.reset_after {
-                self.current_delay = self.policy.initial_delay;
-            }
+            // Reset backoff if service ran successfully for long enough
+            self.backoff.maybe_reset(start_time.elapsed());
 
             if !self.wait_for_restart().await {
                 break;

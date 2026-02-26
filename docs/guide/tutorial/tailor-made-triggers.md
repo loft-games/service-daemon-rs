@@ -12,6 +12,14 @@ Starting from v0.1.0, triggers are split into two parts:
 1.  **Engine (Framework)**: Handles the infinite loop, tracing, monotonically increasing instance IDs, recovery, and standard shutdown logic.
 2.  **Policy (Your Host)**: Defines only *how to wait* for the next event.
 
+### Why `Clone` for Payloads?
+The framework wraps every payload in `Arc<P>` internally so that retries only clone a pointer. If your handler receives a **bare `T`**, the framework must clone the data out of the `Arc` — so `T` must implement `Clone`. If your handler receives `Arc<T>`, no cloning happens at all.
+
+> [!TIP]
+> **What if my data isn't `Clone`?**
+> If your payload is large or cannot implement `Clone`, wrap it in an `Arc`: `type Payload = Arc<MyData>`, and declare your handler parameter as `Arc<Arc<MyData>>` or simply use `#[payload] data: Arc<MyData>`. 
+> Since `Arc` itself is always `Clone`, the retry mechanism will work perfectly without touching the underlying data.
+
 This decoupled design means you spend zero time on boilerplate and focus entirely on the event-waiting logic.
 
 ## 2. Implementing a Custom Trigger
@@ -30,7 +38,8 @@ impl<T> TriggerHost<T> for FileWatcherHost
 where 
     T: Provided + std::ops::Deref<Target = PathBuf> + Send + Sync + 'static 
 {
-    type Payload = String; // We send the filename as the payload
+    /// **Payload**: Must implement `Clone` to support automatic retries.
+    type Payload = String; 
 
     /// **Policy**: Define how to wait for the next event.
     fn handle_step(target: Arc<T>) -> BoxFuture<'static, TriggerTransition<Self::Payload>> {

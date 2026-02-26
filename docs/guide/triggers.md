@@ -99,9 +99,32 @@ async fn my_service() -> anyhow::Result<()> {
 - **Message IDs**: Correlation of logs across multiple trigger handlers.
 - **Debug Visibility**: High-priority diagnostics via `DaemonLayer`.
 
+## 5. Resilience: Automatic Handler Retries
+
+Starting from v0.1.0, individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
+
+### How it works
+When a handler fails:
+1. The framework creates a `TriggerInvocation` "mini-host" for that specific event.
+2. It uses a `BackoffController` to calculate the next wait time.
+3. The payload is shared via `Arc` internally — retries **never** deep-copy business data.
+4. Retries continue until the handler succeeds or the system shuts down.
+
+### Payload Handling
+
+The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the payload reaches your handler depends on your function signature:
+
+| Handler Signature | What Happens | `Clone` Required? |
+|:---|:---|:---|
+| `async fn handler(data: T)` | Macro auto-clones from `Arc` | **Yes** |
+| `async fn handler(data: Arc<T>)` | Zero-copy pointer pass | **No** |
+
+> [!TIP]
+> For large payloads or types that cannot implement `Clone`, declare your handler parameter as `Arc<T>`. This gives you true zero-copy access and works with any type.
+
 ---
 
-## 5. More Information
+## 6. More Information
 
 - [Provider Best Practices](provider-best-practices.md): Deep dive into defining custom providers.
 - [Concept Clarification (FAQ)](pitfalls-faq.md#2-lifecycle--paradigms): Understanding the difference between managed triggers and standard services.

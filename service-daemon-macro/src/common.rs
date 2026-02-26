@@ -177,6 +177,16 @@ impl ParamProcessor {
     }
 
     /// Processes a payload parameter.
+    ///
+    /// The framework now wraps every payload in `Arc<P>` internally.
+    /// This method generates the correct extraction code based on
+    /// whether the user's handler expects `Arc<T>` or bare `T`:
+    ///
+    /// - **`is_arc == true`**: user declared `Arc<T>` — pass the
+    ///   framework's `Arc` directly (zero-copy, no `Clone` needed).
+    /// - **`is_arc == false`**: user declared `T` — dereference the
+    ///   `Arc` and clone the data. Uses a descriptive trait call
+    ///   to produce a friendly compiler error if `T: Clone` is missing.
     fn process_payload(&mut self, arg: &FnArg, arg_name: syn::Ident, is_arc: bool) {
         if !self.allow_payload {
             abort!(
@@ -201,9 +211,16 @@ impl ParamProcessor {
         self.clean_inputs.push(clean_arg);
 
         if is_arc {
-            self.call_args.push(quote! { std::sync::Arc::new(payload) });
-        } else {
+            // User wants Arc<T> — pass the framework's Arc pointer
+            // directly. This is a zero-copy path and does NOT require
+            // the inner type to implement Clone.
             self.call_args.push(quote! { payload });
+        } else {
+            // User wants bare T — must clone out of the Arc.
+            // Uses a descriptive helper to produce a clear compiler
+            // error when T does not implement Clone.
+            self.call_args
+                .push(quote! { service_daemon::trigger_clone_payload(&*payload) });
         }
     }
 

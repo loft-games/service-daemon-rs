@@ -81,6 +81,7 @@ async fn complex_worker(
 1.  **Efficiency**: Triggers consume zero CPU while waiting. 
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
+4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
 
 ---
 

@@ -39,10 +39,44 @@ use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info};
+use tracing::{Instrument, info, warn};
 
+use super::policy::{BackoffController, RestartPolicy};
 use super::service::ServiceId;
 use crate::core::context;
+
+// ---------------------------------------------------------------------------
+// Payload extraction helper (used by macro-generated code)
+// ---------------------------------------------------------------------------
+
+/// Clones a payload out of its `Arc` wrapper for handlers that receive
+/// the payload by value (i.e. `fn handler(data: T)` instead of
+/// `fn handler(data: Arc<T>)`).
+///
+/// # Purpose
+///
+/// The `#[trigger]` macro generates calls to this function when the
+/// user's handler parameter is a bare `T` (not `Arc<T>`). By routing
+/// through a named function, the compiler error when `T: Clone` is
+/// missing will reference this function name, making it clear **why**
+/// `Clone` is required:
+///
+/// ```text
+/// error[E0277]: the trait bound `MyType: Clone` is not satisfied
+///   --> src/trigger_handlers.rs:10:1
+///    |
+///    = note: required by `service_daemon::trigger_clone_payload`
+///    = help: wrap the payload in `Arc<MyType>` to avoid cloning
+/// ```
+///
+/// If you see this error, you have two options:
+/// 1. Derive `Clone` for your payload type.
+/// 2. Change the handler parameter to `Arc<MyType>` for zero-copy access.
+#[doc(hidden)]
+#[inline(always)]
+pub fn trigger_clone_payload<T: Clone>(arc_payload: &T) -> T {
+    arc_payload.clone()
+}
 
 // ---------------------------------------------------------------------------
 // TriggerMessage — traceable event payload (the "stone" in the ripple model)
@@ -69,7 +103,11 @@ pub struct TriggerMessage<P> {
     /// Timestamp when the message was created.
     pub timestamp: DateTime<Utc>,
     /// The business payload carried by this message.
-    pub payload: P,
+    ///
+    /// Wrapped in `Arc` at the framework level so that the retry host
+    /// can share the payload across multiple attempts without requiring
+    /// the business type `P` to implement `Clone`.
+    pub payload: Arc<P>,
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +243,11 @@ pub enum TriggerTransition<P> {
 /// ```
 pub trait TriggerHost<T: Send + Sync + 'static>: Sized {
     /// The business payload type carried by each event.
+    ///
+    /// Does **not** require `Clone`. The framework wraps the payload in
+    /// `Arc<P>` internally, so retries only clone the pointer. If your
+    /// handler receives a bare `T` (not `Arc<T>`), the macro will
+    /// auto-clone — in that case `T` must implement `Clone`.
     type Payload: Send + Sync + 'static;
 
     /// **Policy**: Define how to wait for the next event and what transition
@@ -308,8 +351,9 @@ pub(crate) fn generate_message_id() -> String {
 ///
 /// This is the engine's internal dispatch primitive. It handles:
 /// 1. Building a [`TriggerContext`] with traceability metadata.
-/// 2. Creating a tracing span for the invocation.
-/// 3. Invoking the user handler and logging any errors.
+/// 2. Wrapping the payload in `Arc` for sharing across retry attempts.
+/// 3. Creating a [`TriggerInvocation`] which manages the retry loop.
+/// 4. Invoking the user handler with backoff on failure.
 async fn dispatch_event<P: Send + Sync + 'static>(
     name: &str,
     service_id: ServiceId,
@@ -318,28 +362,104 @@ async fn dispatch_event<P: Send + Sync + 'static>(
     handler: &TriggerHandler<P>,
 ) {
     let seq = instance_counter.fetch_add(1, Ordering::Relaxed);
-    let ctx = TriggerContext {
+    let message_id = generate_message_id();
+
+    let invocation = TriggerInvocation {
         service_id,
         instance_seq: seq,
-        message: TriggerMessage {
-            message_id: generate_message_id(),
-            source_id: service_id,
-            timestamp: Utc::now(),
-            payload,
-        },
+        message_id: message_id.clone(),
+        payload: Arc::new(payload),
+        backoff: BackoffController::new(RestartPolicy::default()),
     };
-    let instance_id = ctx.trigger_instance_id();
-    let message_id = ctx.message.message_id.clone();
-    let span = tracing::info_span!("trigger", %name, %instance_id, %message_id);
+
+    let span = tracing::info_span!("trigger", %name, instance_id = %format!("{}:{}", service_id, seq), %message_id);
     let h = handler.clone();
     async move {
         info!("Trigger fired");
-        if let Err(e) = h(ctx).await {
-            error!("Trigger error: {:?}", e);
-        }
+        invocation.run(h).await;
     }
     .instrument(span)
     .await;
+}
+
+// ---------------------------------------------------------------------------
+// TriggerInvocation — per-event retry host
+// ---------------------------------------------------------------------------
+
+/// A short-lived host that manages a single trigger event's lifecycle.
+///
+/// `TriggerInvocation` is the "small supervisor" for individual trigger
+/// handler calls. It owns the payload via `Arc<P>` and uses a
+/// [`BackoffController`] to retry failed handler executions with
+/// exponential backoff.
+///
+/// # Relationship to ServiceSupervisor
+///
+/// | Component          | Scope                | Retry Target        |
+/// |--------------------|----------------------|---------------------|
+/// | `ServiceSupervisor`| Service lifetime     | Service crashes     |
+/// | `TriggerInvocation`| Single event         | Handler errors      |
+///
+/// Both share the same [`BackoffController`] abstraction for consistent
+/// retry behavior across the framework.
+struct TriggerInvocation<P> {
+    service_id: ServiceId,
+    instance_seq: u64,
+    message_id: String,
+    /// The payload wrapped in `Arc` — cloning only increments the
+    /// reference count, so retries are always cheap regardless of
+    /// whether the business type `P` implements `Clone`.
+    payload: Arc<P>,
+    backoff: BackoffController,
+}
+
+impl<P: Send + Sync + 'static> TriggerInvocation<P> {
+    /// Execute the handler with retry logic.
+    ///
+    /// On success, returns immediately. On failure, waits using
+    /// exponential backoff before retrying. Respects shutdown signals
+    /// during the backoff wait.
+    ///
+    /// The payload is shared via `Arc`, so each retry only clones the
+    /// pointer (not the business data).
+    async fn run(mut self, handler: TriggerHandler<P>) {
+        loop {
+            let ctx = TriggerContext {
+                service_id: self.service_id,
+                instance_seq: self.instance_seq,
+                message: TriggerMessage {
+                    message_id: self.message_id.clone(),
+                    source_id: self.service_id,
+                    timestamp: Utc::now(),
+                    payload: self.payload.clone(), // Arc clone — cheap pointer copy
+                },
+            };
+
+            match handler(ctx).await {
+                Ok(()) => break,
+                Err(e) => {
+                    warn!(
+                        attempt = self.backoff.attempt_count() + 1,
+                        error = %e,
+                        "Trigger handler failed, scheduling retry"
+                    );
+                    self.backoff.record_failure();
+
+                    // Check if shutdown was requested before waiting
+                    if context::is_shutdown() {
+                        warn!("Trigger handler retry aborted due to shutdown");
+                        break;
+                    }
+
+                    // Use interruptible sleep via context::sleep
+                    if !context::sleep(self.backoff.current_delay()).await {
+                        warn!("Trigger handler retry interrupted by shutdown");
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ===========================================================================

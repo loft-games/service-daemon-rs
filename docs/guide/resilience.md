@@ -22,7 +22,17 @@ let daemon = ServiceDaemon::builder()
     .build();
 daemon.run().await?
 ```
-### 1.1. Immediate Restart on Reload Signal
+
+### 1.1. The `BackoffController` Abstraction
+
+Internal to the framework, retry logic is managed by the **`BackoffController`**. This stateful component tracks:
+- Current retry delay.
+- Consecutive failure count.
+- Interruption-aware waiting (respecting shutdown/reload signals during the sleep period).
+
+Because this controller is now a shared abstraction, **Trigger Handlers** also benefit from identical exponential backoff and jitter behavior when they encounter errors.
+
+### 1.2. Immediate Restart on Reload Signal
 Even if a service is in a restart delay period (e.g. after a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
 
 ### 1.2. Fatal Errors
