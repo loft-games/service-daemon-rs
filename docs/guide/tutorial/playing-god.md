@@ -17,25 +17,88 @@ service_daemon = { version = "...", features = ["simulation"] }
 
 ## 2. Using `MockContext`
 
-In a simulation test, you don't run a real daemon. You use a `MockContext` to create a "God's eye view" of the system.
+In a simulation test, you run a **fully functional but isolated Daemon**. Instead of global auto-discovery, you use a `MockContext` to inject controlled resources and specific services into a sandbox.
 
 ```rust
-#[tokio::test]
-async fn test_my_service_logic() {
-    // 1. Build a sandbox
-    let (builder, handle) = MockContext::builder()
-        .with_shelf::<u32>("my_service", "counter", 10) // Pre-fill the shelf
-        .build();
+use service_daemon::prelude::*;
+use std::time::Duration;
 
-    // 2. Run your daemon in the sandbox
-    let daemon = builder.build();
-    
-    // The handle gives you "God Powers" over the running services
-    let runner = tokio::spawn(async move {
-        daemon.run_for_duration(Duration::from_millis(500)).await.ok();
-    });
+// --- 1. The Robust Tested Service ---
+#[service(tags = ["sim_shelf"])]
+async fn shelf_reader_service() -> anyhow::Result<()> {
+    loop {
+        match state() {
+            ServiceStatus::Initializing | ServiceStatus::Restoring => {
+                // Phase 1: Try to read data pre-filled by the MockContext
+                if let Some(val) = unshelve::<String>("config_key").await {
+                    shelve("read_result", val).await;
+                }
+                done();
+            }
+            ServiceStatus::Healthy => {
+                // Phase 2: React to dynamic/mid-flight injection
+                if let Some(val) = unshelve::<String>("dynamic_key").await {
+                    shelve("dynamic_result", val).await;
+                    // In a real test, we might stop or continue working
+                }
 
-    // ... perform your test assertions ...
+                if !sleep(Duration::from_millis(100)).await {
+                    continue;
+                }
+            }
+            ServiceStatus::ShuttingDown => break,
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+// --- 2. The God's Eye Test Suite ---
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use service_daemon::{MockContext, Registry};
+
+    #[tokio::test]
+    async fn test_two_phase_simulation() -> anyhow::Result<()> {
+        // Phase 1: Pre-fill some initial state (Sandbox setup)
+        let (builder, handle) = MockContext::builder()
+            .with_shelf::<String>("shelf_reader_service", "config_key", "initial_val".into())
+            .build();
+
+        let daemon = builder
+            .with_registry(Registry::builder().with_tag("sim_shelf").build())
+            .build();
+
+        // Start the daemon in the background
+        let cancel = daemon.cancel_token();
+        let daemon_task = tokio::spawn(async move { daemon.run().await });
+
+        // Verify Phase 1: service initialized and read pre-filled value
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        {
+            let resources = handle.resources();
+            let shelf = resources.shelf.get("shelf_reader_service").unwrap();
+            let result = shelf.get("read_result").unwrap();
+            assert_eq!(result.value().downcast_ref::<String>(), Some(&"initial_val".into()));
+        }
+
+        // Phase 2: Mid-flight Intervention (The God Hand)
+        handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "mid_flight_val".into());
+
+        // Verify Phase 2: service observed the dynamic mutation
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        {
+            let resources = handle.resources();
+            let shelf = resources.shelf.get("shelf_reader_service").unwrap();
+            let result = shelf.get("dynamic_result").unwrap();
+            assert_eq!(result.value().downcast_ref::<String>(), Some(&"mid_flight_val".into()));
+        }
+
+        cancel.cancel();
+        let _ = daemon_task.await;
+        Ok(())
+    }
 }
 ```
 

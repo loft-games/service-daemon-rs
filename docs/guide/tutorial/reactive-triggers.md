@@ -13,11 +13,8 @@ The most common trigger is the `Queue`. Imagine you have a background job queue,
 ```rust
 use service_daemon::prelude::*; // TT is here!
 
-#[derive(Debug, Clone)]
-pub struct Job {
-    pub id: String,
-    pub payload: String,
-}
+#[provider(default = Queue, item_type = "Job")]
+pub struct JobQueue;
 
 #[trigger(Queue(JobQueue))]
 async fn job_worker(job: Job) -> anyhow::Result<()> {
@@ -38,16 +35,19 @@ Let's say after processing a `Job`, we want to notify a cleanup service.
 
 ```rust
 // A simple signal provider
-#[provider]
+#[provider(default = Notify)]
 pub struct CleanupSignal;
 
 #[trigger(Queue(JobQueue))]
-async fn process_and_notify(job: Job) -> anyhow::Result<()> {
+async fn process_and_notify(
+    job: Job, 
+    signal: Arc<CleanupSignal> // The framework injects this automatically!
+) -> anyhow::Result<()> {
     tracing::info!("Work done on {}", job.id);
     
-    // Notify the cleanup signal! 
-    // We use the global `publish` function to send events.
-    service_daemon::publish(CleanupSignal).await;
+    // Fire the signal directly. 
+    // The framework handles the back-end orchestration.
+    signal.notify().await;
     
     Ok(())
 }

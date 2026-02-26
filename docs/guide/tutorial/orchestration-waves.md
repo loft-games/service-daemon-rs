@@ -19,12 +19,19 @@ async fn logger_service() { ... }
 #[service(priority = ServicePriority::STORAGE)] // 80
 async fn database_pool() { ... }
 
+// You can also use raw u8 numbers!
+#[service(priority = 60)] 
+async fn important_worker() { ... }
+
 #[service(priority = ServicePriority::DEFAULT)] // 50
 async fn business_logic() { ... }
 
 #[service(priority = ServicePriority::EXTERNAL)] // 0
 async fn web_api() { ... }
 ```
+
+### The Magic Number
+Under the hood, `priority` is a simple **`u8`** value. You are not limited to the pre-defined constants! Feel free to use any number between `0` and `255` to fine-tune your startup waves.
 
 ## 2. Startup: High to Low
 
