@@ -6,7 +6,7 @@ Triggers are specialized services with built-in event loops that execute your fu
 
 Starting from v0.1.0, triggers follow a decoupled **Policy-Engine** architecture:
 
-- **Engine (Generic)**: The `TriggerRunner` manages the main event loop, middleware pipeline, tracing, retry logic, and standard shutdown/reload handling. It's provided automatically by the framework.
+- **Engine (Generic)**: The `TriggerRunner` manages the main event loop, interceptor pipeline, and standard shutdown/reload handling. Built-in interceptors (`TracingInterceptor`, `RetryInterceptor`) provide tracing and retry for free. It's provided automatically by the framework.
 - **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `TriggerHost` trait's `setup` (one-time initialization) and `handle_step` (per-event waiting) methods.
 
 ### The `TriggerTransition` Protocol
@@ -105,10 +105,12 @@ Starting from v0.1.0, individual trigger handler failures (returning `Err`) are 
 
 ### How it works
 When a handler fails:
-1. The `TriggerRunner` uses its internal `invoke_handler_with_retry` method, which manages retry logic with a `BackoffController`.
+1. The built-in `RetryInterceptor` catches the error and manages retry logic with a `BackoffController`.
 2. The payload is shared via `Arc` internally -- retries **never** deep-copy business data.
 3. Errors are automatically logged with structured context.
 4. Shutdown signals are respected during backoff waits -- no hanging retries.
+
+The retry logic is implemented as an interceptor layer, part of the composable `TriggerInterceptor` pipeline. See [Interceptor Middleware](interceptor-middleware.md) for details on customizing the dispatch pipeline.
 
 ### Payload Handling
 

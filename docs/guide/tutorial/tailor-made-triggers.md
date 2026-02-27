@@ -9,7 +9,7 @@ To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 ## 1. The Policy vs. Engine Model
 
 Starting from v0.1.0, triggers are split into two parts:
-1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, middleware pipeline, tracing, retry with backoff, and standard shutdown logic.
+1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), and standard shutdown logic.
 2.  **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
 
 ### Why `Clone` for Payloads?
@@ -130,8 +130,8 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 ```
 
 > [!CAUTION]
-> **With great power comes great responsibility.** If you override the engine, you lose the framework's automatic traceability (monotonically increasing IDs, tracing spans), middleware pipeline, and retry logic unless you implement them manually. Use this only as a last resort!
+> **With great power comes great responsibility.** If you override the engine, you lose the framework's automatic traceability (monotonically increasing IDs, tracing spans), interceptor pipeline, and retry logic unless you implement them manually. Use this only as a last resort!
 
 ---
 
-[**<- Previous Step: Under the Hood**](under-the-hood.md) | [**Next Step: Macro Magic Unleashed ->**](macro-magic.md)
+[**<- Previous Step: Under the Hood**](under-the-hood.md) | [**Next Step: The Interceptor Gauntlet ->**](interceptor-gauntlet.md)

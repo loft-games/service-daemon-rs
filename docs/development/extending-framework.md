@@ -55,16 +55,44 @@ Magic providers (like `Notify` or `Queue`) provide specialized behavior automati
 1. Add a new template generator function in `service-daemon-macro/src/provider/templates.rs`.
 2. Update `generate_struct_provider` in `service-daemon-macro/src/provider/struct_gen.rs` to detect your new template name in the `#[provider(default = ...)]` attribute.
 
-## 3. Adding Custom Middleware
+## 3. Adding Custom Interceptors
 
-The `TriggerMiddleware` trait allows pluggable hooks around each trigger dispatch cycle.
+The `TriggerInterceptor<P>` trait provides a composable, onion-model middleware layer for trigger dispatch. Each interceptor wraps the next layer and has full control over the dispatch lifecycle (unlike the previous observer-pattern `TriggerMiddleware`).
 
-1. Implement `TriggerMiddleware` with `before_dispatch` and `after_dispatch` methods.
-2. Register your middleware via `TriggerRunner::with_middleware()`.
-3. Middlewares execute in registration order for `before_dispatch` and in **reverse** order for `after_dispatch` (onion model).
+1. Implement `TriggerInterceptor<P>` with an `intercept(ctx, next)` method.
+2. Register your interceptor via `TriggerRunner::with_interceptor()`.
+3. Interceptors execute in registration order (first registered = outermost layer).
+4. Each interceptor decides **if, when, and how many times** to call `next`.
 
-> [!NOTE]
-> The current middleware trait is an **observer pattern** -- middleware can inspect but not control the dispatch. A future **interceptor pattern** (Tower-like chaining) is documented in `docs/future_interceptor_middleware.md`.
+For a generic interceptor (works with any payload type), use a blanket impl:
+
+```rust
+pub struct RateLimitInterceptor;
+
+impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RateLimitInterceptor {
+    fn intercept<'a>(
+        &'a self,
+        ctx: DispatchContext<P>,
+        next: Next<'a, P>,
+    ) -> BoxFuture<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            // Pre-processing: check rate limit
+            // ... rate limit logic ...
+
+            // Call the next layer in the chain
+            let result = next(ctx).await;
+
+            // Post-processing: record metrics
+            // ... metrics logic ...
+
+            result
+        })
+    }
+}
+```
+
+> [!TIP]
+> See [Interceptor Middleware Guide](../guide/interceptor-middleware.md) for detailed usage patterns and examples.
 
 ## 4. Modifying Registry Mechanics
 

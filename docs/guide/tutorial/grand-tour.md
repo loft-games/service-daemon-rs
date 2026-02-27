@@ -25,3 +25,9 @@ In this tutorial, we will walk through the progression of a real-world system:
 We recommend following the chapters in order, but feel free to jump around if you're looking for specific solutions.
 
 [**Start the Journey: Hello, Heartbeat! ->**](hello-heartbeat.md)
+
+### Additional Chapters
+
+-  [**Tailor-Made Triggers**](tailor-made-triggers.md) -- Build your own trigger types from scratch.
+-  [**The Interceptor Gauntlet**](interceptor-gauntlet.md) -- Add custom middleware to the trigger dispatch pipeline.
+-  [**Macro Magic Unleashed**](macro-magic.md) -- Deep dive into the `#[service]` and `#[trigger]` macros.
