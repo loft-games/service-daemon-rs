@@ -85,7 +85,7 @@ async fn complex_worker(
 5.  **Elastic Scaling**: The framework dispatches handlers asynchronously and automatically scales concurrency based on pressure — zero configuration needed.
 
 > [!TIP]
-> **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../../triggers.md).
+> **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../triggers.md).
 
 ---
 
