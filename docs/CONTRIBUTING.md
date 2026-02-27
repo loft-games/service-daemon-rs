@@ -40,4 +40,6 @@ To develop the core framework or macros, you need:
 
 `service-daemon-rs` is now a volunteer-maintained project, and we welcome and encourage you to join us.
 
-Thank you!
+Thank you! :heart: :heart: :heart:
+
+Loft Games Teams
