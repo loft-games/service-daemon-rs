@@ -74,7 +74,7 @@ mod tests {
         let cancel = daemon.cancel_token();
         let daemon_task = tokio::spawn(async move {
             let mut daemon = daemon;
-            daemon.run().await.unwrap();
+            daemon.run().await;
             daemon.wait().await.unwrap();
         });
 

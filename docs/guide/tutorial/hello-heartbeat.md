@@ -63,8 +63,16 @@ use service_daemon::ServiceDaemon;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // build() find all services, run() starts the engine!
-    ServiceDaemon::builder().build().run().await
+    // 1. build() find all services
+    let mut daemon = ServiceDaemon::builder().build();
+
+    // 2. run() starts the engine in the background
+    daemon.run().await;
+
+    // 3. wait() blocks until Ctrl+C/SIGTERM and performs graceful shutdown
+    daemon.wait().await?;
+
+    Ok(())
 }
 ```
 

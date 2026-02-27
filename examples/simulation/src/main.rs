@@ -258,7 +258,7 @@ mod tests {
         // Run the daemon in the background -- tests should not call wait()
         // inline because it blocks the test thread waiting for OS signals.
         let daemon_task = tokio::spawn(async move {
-            daemon.run().await.unwrap();
+            daemon.run().await;
             daemon.wait().await.unwrap();
         });
 

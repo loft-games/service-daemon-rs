@@ -21,7 +21,17 @@ In your `main.rs`, you can choose which "personality" the process assumes:
 ```rust
 // Only run the critical API services in this container
 let reg = Registry::builder().with_tag("api").build();
-ServiceDaemon::builder().with_registry(reg).build().run().await?;
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(reg)
+        .build();
+
+    daemon.run().await;
+    daemon.wait().await?;
+    
+    Ok(())
+}
 ```
 
 ## 2. Accessing Metadata via `ServiceEntry`

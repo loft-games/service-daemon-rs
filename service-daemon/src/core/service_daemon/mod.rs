@@ -59,7 +59,7 @@ impl ServiceDaemonHandle {
 /// ```rust,ignore
 /// // Non-blocking start, then wait for Ctrl+C:
 /// let mut daemon = ServiceDaemon::builder().build();
-/// daemon.run().await?;
+/// daemon.run().await;
 /// daemon.wait().await?;
 ///
 /// // Hierarchical integration with external CancellationToken:
@@ -67,7 +67,7 @@ impl ServiceDaemonHandle {
 /// let mut daemon = ServiceDaemon::builder()
 ///     .with_cancel_token(root_token.clone())
 ///     .build();
-/// daemon.run().await?;
+/// daemon.run().await;
 /// // ... other work using root_token ...
 /// daemon.wait().await?;
 /// ```
@@ -129,7 +129,7 @@ impl ServiceDaemon {
     /// Use [`wait()`](ServiceDaemon::wait) to block until a shutdown signal,
     /// or [`shutdown()`](ServiceDaemon::shutdown) to trigger graceful termination.
     #[instrument(skip(self))]
-    pub async fn run(&mut self) -> ServiceResult<()> {
+    pub async fn run(&mut self) -> &mut Self {
         if self.services.is_empty() {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
@@ -149,7 +149,7 @@ impl ServiceDaemon {
             self.services.len()
         );
 
-        Ok(())
+        self
     }
 
     /// Wait for the daemon to stop.

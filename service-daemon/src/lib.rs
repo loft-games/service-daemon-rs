@@ -16,7 +16,10 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     // Infallible build -- always succeeds
-//!     ServiceDaemon::builder().build().run().await
+//!     let mut daemon = ServiceDaemon::builder().build();
+//!     daemon.run().await;
+//!     daemon.wait().await?;
+//!     Ok(())
 //! }
 //! ```
 //!
@@ -29,7 +32,8 @@
 //!     .with_registry(reg)
 //!     .build()
 //!     .run()
-//!     .await?;
+//!     .await;
+//! daemon.wait().await?;
 //! ```
 
 extern crate self as service_daemon;

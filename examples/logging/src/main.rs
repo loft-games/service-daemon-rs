@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 
     // 3. Create and run the daemon (non-blocking)
     let mut daemon = ServiceDaemon::builder().build();
-    daemon.run().await?;
+    daemon.run().await;
 
     // 4. Wait for shutdown signal (Ctrl+C / SIGTERM)
     daemon.wait().await?;
@@ -67,7 +67,7 @@ mod tests {
             .build();
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 

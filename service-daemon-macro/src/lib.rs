@@ -75,7 +75,7 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Then in main.rs:
 /// ```rust,ignore
 /// let mut daemon = ServiceDaemon::builder().build();
-/// daemon.run().await?;
+/// daemon.run().await;
 /// daemon.wait().await?;
 /// ```
 #[proc_macro_attribute]

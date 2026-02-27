@@ -23,11 +23,14 @@ async fn main() -> anyhow::Result<()> {
         .jitter_factor(0.1)                    // Add 10% randomness to prevent "thundering herd"
         .build();
 
-    ServiceDaemon::builder()
+    let mut daemon = ServiceDaemon::builder()
         .with_restart_policy(policy)
-        .build()
-        .run()
-        .await
+        .build();
+
+    daemon.run().await;
+    daemon.wait().await?;
+
+    Ok(())
 }
 ```
 

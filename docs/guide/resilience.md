@@ -20,7 +20,7 @@ let policy = RestartPolicy::builder()
 let mut daemon = ServiceDaemon::builder()
     .with_restart_policy(policy)
     .build();
-daemon.run().await?;
+daemon.run().await;
 daemon.wait().await?;
 ```
 

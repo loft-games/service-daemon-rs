@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let mut daemon = ServiceDaemon::builder().build();
-    daemon.run().await?;
+    daemon.run().await;
     daemon.wait().await?;
 
     Ok(())
@@ -81,7 +81,7 @@ mod tests {
             .build();
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         // Allow time for trigger initialization
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -101,7 +101,7 @@ mod tests {
             .build();
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -125,7 +125,7 @@ mod tests {
             .build();
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         // Wait for services to initialize
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;

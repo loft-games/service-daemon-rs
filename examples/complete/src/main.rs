@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let mut daemon = ServiceDaemon::builder().with_restart_policy(policy).build();
 
     // 4. Start daemon (non-blocking)
-    daemon.run().await?;
+    daemon.run().await;
 
     // 5. Wait for shutdown signal (Ctrl+C / SIGTERM)
     daemon.wait().await?;
@@ -147,7 +147,7 @@ mod tests {
 
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         cancel.cancel();
@@ -221,7 +221,7 @@ mod tests {
 
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         cancel.cancel();
@@ -279,7 +279,7 @@ mod tests {
 
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         cancel.cancel();
@@ -339,7 +339,7 @@ mod tests {
 
         let cancel = daemon.cancel_token();
 
-        daemon.run().await.unwrap();
+        daemon.run().await;
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         cancel.cancel();
