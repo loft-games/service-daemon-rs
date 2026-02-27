@@ -71,9 +71,20 @@ Verification methods used:
 - **`cargo expand`**: Confirmed the presence/absence of `tracing::warn!` in generated code.
 - **Runtime execution**: Ran the binary and inspected logs for each configuration.
 
-**Why both orders work**: `#[allow(...)]` is a built-in (inert) attribute. When the compiler prepares the token stream for an attribute macro like `#[service]`, built-in attributes on the same item are included in the `item` `TokenStream` — regardless of whether they appear above or below the proc macro attribute. This differs from the behavior between two proc macro attributes, where only attributes below are visible.
+**Why both orders work**: This behavior is rooted in the Rust compiler's execution pipeline and the nature of **Inert Attributes**:
+
+1.  **Built-in vs. Custom**: `#[allow(...)]` is a built-in attribute recognized by the compiler's core. Unlike custom proc-macro attributes, it doesn't require discovery.
+2.  **Inertia**: In Rust, built-in attributes (like `allow`, `cfg`, `derive`) are considered "inert." When the compiler calls an attribute macro like `#[service]`, it includes *all* inert attributes attached to the item in the `item` `TokenStream`, regardless of whether they appear above or below the proc-macro attribute.
+3.  **Lint Check Timing**: The compiler's **Lint Checker** (which flags `unknown_lints`) runs much later in the pipeline than **Macro Expansion**. 
+
+**The Execution Flow**:
+1.  **Expansion Phase**: The compiler sees `#[allow(sync_handler)] #[service]`.
+2.  **Macro Call**: It calls the `service` macro, passing the function and the `allow` attribute in the `item` stream.
+3.  **Stripping**: Our `extract_sync_handler_flag` function intercepts the `TokenStream`, identifies `sync_handler`, and physically removes it.
+4.  **Re-emission**: The macro returns a "clean" `TokenStream` to the compiler.
+5.  **Lint Phase**: When the Lint Checker finally runs, the `sync_handler` string has already been "deleted" from the source. Since it's gone, no "unknown lint" warning is ever triggered.
 
 > [!NOTE]
-> **For maintainers**: If this behavior changes in a future Rust edition, the `extract_sync_handler_flag` function and this section should be revisited. The safest place for `#[allow(sync_handler)]` is below the macro attribute, as that is guaranteed by the proc macro specification.
+> **For maintainers**: This relies on `#[allow]` being an inert built-in attribute and the expansion-before-linting order. If a future Rust edition changes these rules (e.g., if `allow` becomes a proc-macro itself or if linting moves earlier), the ordering might become sensitive. Maintaining the "macro first, permit second" order is still recommended for maximum robustness.
 
 [Back to README](../../README.md)
