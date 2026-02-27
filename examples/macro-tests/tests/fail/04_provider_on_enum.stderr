@@ -1,0 +1,12 @@
+error: #[provider] can only be applied to struct or async fn items
+
+         = help: Use #[provider] on a struct definition or an async function
+         = note: Example: #[provider(default = 8080)] pub struct Port(pub i32);
+
+  --> tests/fail/04_provider_on_enum.rs:9:1
+   |
+ 9 | / pub enum BadProvider {
+10 | |     A,
+11 | |     B,
+12 | | }
+   | |_^

@@ -1,0 +1,8 @@
+error: Services do not support event payloads. Only Arc<T> dependencies are allowed.
+
+         = help: Remove the payload parameter or use #[trigger] instead.
+
+ --> tests/fail/01_service_bare_param.rs:9:26
+  |
+9 | pub async fn bad_service(port: i32) -> anyhow::Result<()> {
+  |                          ^^^^^^^^^

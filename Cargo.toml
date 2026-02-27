@@ -7,5 +7,6 @@ members = [
     "examples/triggers",
     "examples/logging",
     "examples/simulation",
+    "examples/macro-tests",
 ]
 resolver = "2"
