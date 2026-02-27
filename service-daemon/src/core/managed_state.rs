@@ -95,7 +95,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         Arc::new(TrackedMutex { inner: lock })
     }
 
-    /// Resolves as a snapshot Arc<T>.
+    /// Resolves as a snapshot `Arc<T>`.
     /// Provides "Zero Lockdown" reads - never blocks even if a writer is holding the lock.
     pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
     where

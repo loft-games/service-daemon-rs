@@ -1,7 +1,6 @@
 //! Pass case: A service with priority and tags compiles successfully.
 
 use service_daemon::{provider, service};
-use std::sync::Arc;
 
 #[derive(Clone)]
 #[provider(default = "localhost:5432")]

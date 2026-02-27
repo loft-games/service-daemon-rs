@@ -28,11 +28,10 @@
 //! use service_daemon::{ServiceDaemon, Registry};
 //!
 //! let reg = Registry::builder().with_tag("infra").build();
-//! ServiceDaemon::builder()
+//! let mut daemon = ServiceDaemon::builder()
 //!     .with_registry(reg)
-//!     .build()
-//!     .run()
-//!     .await;
+//!     .build();
+//! daemon.run().await;
 //! daemon.wait().await?;
 //! ```
 

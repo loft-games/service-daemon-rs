@@ -222,7 +222,7 @@ pub struct TriggerRunner<P: Send + Sync + 'static> {
 impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// Create a new runner with the given name, handler, and policy.
     ///
-    /// The built-in [`TracingInterceptor`] and [`RetryInterceptor`] are
+    /// The built-in `TracingInterceptor` and `RetryInterceptor` are
     /// automatically registered, providing per-dispatch tracing and
     /// exponential-backoff retry for free.
     ///
