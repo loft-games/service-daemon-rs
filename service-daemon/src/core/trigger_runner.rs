@@ -1,4 +1,4 @@
-//! Trigger interceptor infrastructure (Plan C architecture).
+//! Trigger interceptor infrastructure.
 //!
 //! This module provides [`TriggerInterceptor`], a composable middleware trait
 //! that gives each interceptor full control over the dispatch lifecycle. Combined
@@ -90,7 +90,7 @@ pub struct DispatchContext<P> {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerInterceptor -- the Plan C composable middleware trait
+// TriggerInterceptor -- the composable middleware trait
 // ---------------------------------------------------------------------------
 
 /// The remainder of the interceptor chain after the current interceptor.
@@ -166,7 +166,7 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 /// Encapsulates the trigger event loop, signal handling, and interceptor pipeline.
 ///
 /// `TriggerRunner` replaces the inline `while/select!/match` structure that was
-/// previously embedded in `TriggerHost::run_as_service`. It uses the Plan C
+/// previously embedded in `TriggerHost::run_as_service`. It uses the
 /// interceptor architecture where each cross-cutting concern (tracing, retry)
 /// is a composable [`TriggerInterceptor`] layer.
 ///
