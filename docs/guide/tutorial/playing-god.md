@@ -106,14 +106,14 @@ mod tests {
 
 The `SimulationHandle` allows you to reach into the running sandbox and change things while the services are active. It provides a **Safe Read API** specifically designed to prevent deadlocks in tests.
 
-### Safe Accessors (Recommended)
-These methods acquire and release internal locks instantly, making them safe to use even if you `await` other things later in your test.
+### Snapshot Inspection
+These methods allow you to inspect the current state of a service or the shelf without interfering with the running daemon. 
 
 ```rust
-// Inspect shelf values without holding locks
+// Inspect shelf values
 let val: Option<String> = handle.get_shelf("svc", "key");
 
-// Inspect service status safely
+// Inspect service status
 let status = handle.get_status(svc_id);
 
 // Check if a key exists
@@ -129,19 +129,14 @@ handle.set_status(service_id, ServiceStatus::NeedReload);
 handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 ```
 
-## 4. WARNING: Deadlock Risk
-
-Directly accessing `handle.resources()` and holding a `DashMap::Ref` across an `.await` point will cause a **deadlock**. 
-
-**Why?** If your test holds a read lock on a shelf while you `await` the daemon tasks, and one of those services tries to call `shelve()` (which needs a write lock), the system will hang forever.
-
-**Always use `get_shelf()` and `get_status()`** instead of digging into `resources()`.
-
-## 5. Summary of Powers
+## 4. Summary of Powers
 
 *   **Pre-populate the Shelf**: Test state recovery without waiting for a real crash.
 *   **Dynamic Injection**: Overwrite dependencies at runtime.
 *   **Status Flipping**: Force services into `NeedReload`, `Recovering`, or `ShuttingDown` to test their reaction logic.
+
+> [!NOTE]
+> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](../../testing-troubleshooting.md).
 
 ---
 

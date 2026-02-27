@@ -132,6 +132,9 @@ INFO counter_service: Count is: 3
 
 To the user, it looks like a seamless update. To the developer, it's a clean state migration.
 
+> [!NOTE]
+> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](../../state-management.md) design document.
+
 ## 3. Why this matters? (The Provider Update)
 
 Imagine `counter_service` depends on an `ApiKey`. If the `ApiKey` is updated in another service, the framework will:
@@ -139,8 +142,6 @@ Imagine `counter_service` depends on an `ApiKey`. If the `ApiKey` is updated in 
 2.  The service sees this, **shelves** its count, and exits.
 3.  The framework instantly restarts the service with the **new** `ApiKey`.
 4.  The new instance **unshelves** the count and continues from where it left off.
-
-To the user, it looks like a seamless update. To the developer, it's a clean state migration.
 
 ## 4. Shared Mutable State & Warm Restarts
 

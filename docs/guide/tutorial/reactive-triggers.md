@@ -83,6 +83,9 @@ async fn complex_worker(
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
 4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
 
+> [!TIP]
+> **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../../triggers.md).
+
 ---
 
 [**<- Previous Step: Hello, Heartbeat!**](hello-heartbeat.md) | [**Next Step: The Art of Recovery ->**](art-of-recovery.md)

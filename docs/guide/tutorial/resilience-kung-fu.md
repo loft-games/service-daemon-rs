@@ -72,6 +72,9 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 *   `wave_spawn_timeout`: The maximum time to wait for services in a wave to become `Healthy`. If this limit is reached, the daemon logs a warning and **proceeds to the next wave anyway**. The services continue their startup in the background.
 *   `wave_stop_timeout`: Maximum time to wait for a service to exit before forcefully killing it.
 
+> [!NOTE]
+> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](../../resilience.md) design document.
+
 ---
 
 [**<- Previous Step: DIY Providers**](diy-providers.md) | [**Next Step: Waves of Orchestration ->**](orchestration-waves.md)

@@ -58,6 +58,9 @@ async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
 *   **Don't Block**: Always use `async` providers for network/disk operations.
 *   **Fail Fast**: If a provider cannot be initialized, use `.expect()` or `panic!`. The framework will catch this and report it as a startup error.
 
+> [!TIP]
+> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../../provider-best-practices.md) guide.
+
 ---
 
 [**<- Previous Step: The Art of Recovery**](art-of-recovery.md) | [**Next Step: Resilience Kung-Fu ->**](resilience-kung-fu.md)

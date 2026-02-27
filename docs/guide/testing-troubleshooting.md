@@ -3,7 +3,7 @@
 ## 1. Common Patterns
 
 ### Resource Pooling
-Use `#[provider]` for shared resources like database pools.
+Use `#[provider]` for shared resources like database pools. This ensures that the resource is initialized once and injected safely into services.
 
 ```rust
 #[provider]
@@ -21,97 +21,97 @@ pub async fn db_pool() -> MyDbPool {
 The framework is designed for testability. Use `cargo test` to run the integrated suites.
 
 ### Integration Tests
-Verify:
+Integration tests verify the full lifecycle of the daemon:
 - Priority-based startup/shutdown order.
 - Status transitions and shelving correctness.
 - Signal propagation and trigger execution.
 
 ### Unit Testing with MockContext
 
-For isolated unit tests that don't spin up the full daemon, enable the `simulation` feature and use `MockContext`:
+For isolated unit tests that don't spin up the full production registry, enable the `simulation` feature and use `MockContext`:
 
 ```toml
 [dev-dependencies]
 service-daemon = { path = "...", features = ["simulation"] }
 ```
 
-`MockContext` provides a scoped, task-local environment proxy that shadows Providers, Shelf, and Status without touching global state. Multiple `MockContext` instances can run **in parallel** without interference.
+`MockContext` acts as a **simulation sandbox factory**. It prepares isolated resources (Shelf, Status Plane) and yields a `SimulationHandle` (the "God Hand") to safely inspect or mutate state while the daemon is running in the background.
 
 ```rust
-use service_daemon::{MockContext, ServiceStatus};
+use service_daemon::{MockContext, ServiceStatus, Registry, ServiceId};
+use std::time::Duration;
 
 #[tokio::test]
-async fn test_my_service_complex_logic() {
-    let ctx = MockContext::builder()
-        .with_service_name("my_service")
-        // Multiple providers can be mocked by chaining calls
-        .with_mock::<AppConfig>(AppConfig { port: 9090 })
-        .with_mock::<DatabaseConfig>(DatabaseConfig { url: "test_db".into() })
-        // Multiple shelf entries for the same service
-        .with_shelf::<i32>("counter", 100)
-        .with_shelf::<String>("id", "uuid-123".into())
-        // Mocking the status of dependency services
-        .with_status(ServiceStatus::Healthy) // current service
-        .with_service_status("AuthService", ServiceStatus::Healthy) // dependency
-        .with_log_drain()
+async fn test_service_recovery_flow() {
+    // 1. Setup Phase: Pre-fill isolated resources
+    let (builder, handle) = MockContext::builder()
+        .with_shelf::<String>("my_service", "last_job_id", "job-99".into())
+        .with_status(ServiceId::new(0), ServiceStatus::Recovering("Previous crash".into()))
         .build();
 
-    ctx.run(|| async {
-        // AppConfig resolve() will return the mock value
-        let config = AppConfig::resolve().await;
-        assert_eq!(config.port, 9090);
+    // 2. Build the Sandbox Daemon
+    // Note: Simulation defaults to an isolated (empty) registry.
+    let daemon = builder
+        .with_service(my_service_description) // add the real service under test
+        .build();
 
-        // DatabaseConfig also returns its respective mock value
-        let db_config = DatabaseConfig::resolve().await;
-        assert_eq!(db_config.url, "test_db");
+    let cancel = daemon.cancel_token();
+    let daemon_handle = tokio::spawn(async move {
+        let mut d = daemon;
+        d.run().await;
+        d.wait().await.unwrap();
+    });
 
-        // unshelve() reads from the isolated shelf
-        let counter: Option<i32> = service_daemon::unshelve("counter").await;
-        assert_eq!(counter, Some(100));
+    // 3. Inspection & Mutation Phase (The God Hand)
+    // Snapshot accessors are cross-await friendly (lock-free)
+    let shelf_val: Option<String> = handle.get_shelf("my_service", "last_job_id");
+    assert_eq!(shelf_val, Some("job-99".into()));
 
-        // state() returns the injected status
-        assert_eq!(service_daemon::state(), ServiceStatus::Healthy);
-    }).await;
+    // Mid-flight intervention: force a reload
+    handle.set_status(ServiceId::new(0), ServiceStatus::NeedReload);
+    
+    // cleanup
+    cancel.cancel();
+    let _ = daemon_handle.await;
 }
 ```
 
-#### MockContext Capabilities
+#### MockContext & SimulationHandle Capabilities
 
-| Builder Method       | Description                                                |
-|---------------------|------------------------------------------------------------|
-| `with_service_name` | Sets the service identity for shelf and status isolation.  |
-| `with_mock::<T>`    | Injects a shadow Provider snapshot for type `T`. (Chainable) |
-| `with_shelf`        | Pre-fills a Shelf entry. (Chainable for multiple keys)      |
-| `with_status`       | Sets the current service lifecycle status.                 |
-| `with_service_status` | Sets the status for a specific service (e.g. dependency). |
-| `with_log_drain`    | Drains the internal log queue to stderr during the test.   |
+| Component | Method | Description |
+| :--- | :--- | :--- |
+| **Builder** | `with_shelf` | Pre-fills a Shelf entry for a specific service. |
+| **Builder** | `with_status` | Pre-sets a lifecycle status in the isolated status plane. |
+| **Handle** | `get_shelf` | Reads a cloned value from the shelf (Safe/Lock-free). |
+| **Handle** | `get_status` | Reads a cloned status value (Safe/Lock-free). |
+| **Handle** | `set_shelf` | Dynamically injects/overwrites a value in the shelf. |
+| **Handle** | `set_status` | Dynamically flips a service's status (triggers reloads). |
+| **Handle** | `trigger_reload` | Manually fires a reload signal for a service. |
 
-> **Note**: The `simulation` feature is stripped from production builds via `#[cfg(feature = "simulation")]`, guaranteeing zero runtime overhead.
+> [!WARNING]
+> **Deadlock Risk**: Avoid using `handle.resources()` directly in tests if you plan to `await` anything afterwards. Holding a reference to internal `DashMap` guards across `.await` points will cause an immediate deadlock when a service tries to access those same resources. Always prefer `get_shelf()` and `get_status()`.
 
 ## 3. Troubleshooting
-
-For common architectural traps and conceptual questions, please refer to the [Concept Clarification & Pitfalls (FAQ)](pitfalls-faq.md).
-
-### Quick Fixes
 
 | Issue | Potential Solution |
 | :--- | :--- |
 | **Provided trait error** | Ensure the type has a `#[provider]` annotation. |
 | **Trigger not firing** | Check if the module is included in `main.rs`. See [Registry Discovery](pitfalls-faq.md#1-registry--discovery). |
 | **Sync warning in logs** | Use `async fn` or `#[allow_sync]` on your service. |
-| **Logs missing in tests** | Use `MockContext::builder().with_log_drain().build()`. |
+| **Simulation hang in CI** | Likely a deadlock caused by holding `resources()` locks across an `.await`. Use `get_shelf()`. |
+| **Registry interference** | All tests share the same `linkme` registry. Use `Registry::builder().with_tag("...")` to isolate. |
 
 ### Registry Isolation in Tests
 
-Because `linkme` registers all services in the workspace, you may encounter interference between tests. 
+Because `linkme` registers all services in the workspace, you may encounter interference between tests if multiple daemons try to run the same auto-registered service.
 
 **Best Practice**:
 1. Tag your services: `#[service(tags = ["core"])]`.
 2. In your test, create a filtered registry:
    ```rust
    let reg = Registry::builder().with_tag("core").build();
-   ServiceDaemon::builder().with_registry(reg)...
+   ServiceDaemon::builder().with_registry(reg).build();
    ```
-For a deep dive into why this happens, see [Registry Isolation in FAQ](pitfalls-faq.md#4-testing--simulation).
+For more details, see [Registry Isolation in FAQ](pitfalls-faq.md#4-testing--simulation).
 
 [Back to README](../../README.md)
