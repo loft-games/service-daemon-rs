@@ -15,49 +15,61 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let daemon = ServiceDaemon::auto_init();
-//!     daemon.run().await?;
+//!     // Infallible build -- always succeeds
+//!     let mut daemon = ServiceDaemon::builder().build();
+//!     daemon.run().await;
+//!     daemon.wait().await?;
 //!     Ok(())
 //! }
 //! ```
 //!
-//! # Custom Restart Policy
+//! # Tag-based Registry
 //! ```rust,ignore
-//! use service_daemon::{ServiceDaemon, RestartPolicy};
-//! use std::time::Duration;
+//! use service_daemon::{ServiceDaemon, Registry};
 //!
-//! let policy = RestartPolicy::builder()
-//!     .initial_delay(Duration::from_secs(5))
-//!     .max_delay(Duration::from_secs(300))
-//!     .multiplier(1.5)
+//! let reg = Registry::builder().with_tag("infra").build();
+//! let mut daemon = ServiceDaemon::builder()
+//!     .with_registry(reg)
 //!     .build();
-//!
-//! let daemon = ServiceDaemon::from_registry_with_policy(policy);
+//! daemon.run().await;
+//! daemon.wait().await?;
 //! ```
 
 extern crate self as service_daemon;
 
+pub mod core;
 pub mod models;
-pub mod utils;
 
 // Re-export commonly used items
+pub use core::context::{
+    done, generate_message_id, is_shutdown, publish, shelve, shelve_clone, sleep, state, unshelve,
+    wait_shutdown,
+};
+pub use core::di::Provided;
+pub use core::service_daemon::{
+    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
+};
 pub use models::service::ServicePriority;
 pub use models::{
-    Result, SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceError, ServiceFn,
-    ServiceParam, ServiceStatus, TT, TriggerTemplate,
+    BackoffController, Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ServiceDescription,
+    ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT,
+    TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
 };
 pub use std::sync::Arc;
-pub use utils::context::{done, is_shutdown, shelve, sleep, state, unshelve, wait_shutdown};
-pub use utils::di::Provided;
-pub use utils::service_daemon::{
-    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonHandle,
-};
+
+// Re-export simulation utilities (feature-gated toolbox)
+#[cfg(feature = "simulation")]
+pub use core::context::{MockContext, MockContextBuilder, SimulationHandle};
 
 // Re-export dependencies for use in macro-generated code
 pub use futures;
 pub use linkme;
 pub use tokio;
 pub use tokio_util;
+
+// Conditionally re-export file logging utilities
+#[cfg(feature = "file-logging")]
+pub use core::logging::{FileLogConfig, enable_file_logging};
 
 // Conditionally re-export dependencies based on features
 #[cfg(feature = "cron")]
@@ -74,11 +86,12 @@ pub use service_daemon_macro::{allow_sync, provider, service, trigger};
 /// Importing this allows using short variant names like `Cron` or `Watch` and
 /// provides IDE autocompletion for `#[trigger]` attributes.
 pub mod prelude {
+    pub use crate::core::context::{
+        is_shutdown, shelve, shelve_clone, sleep, state, unshelve, wait_shutdown,
+    };
+    pub use crate::core::di::Provided;
     pub use crate::models::service::ServicePriority;
     pub use crate::models::service::ServiceStatus;
-    pub use crate::models::trigger::TriggerTemplate;
-    pub use crate::models::trigger::TriggerTemplate as TT;
-    pub use crate::models::trigger::TriggerTemplate::*;
-    pub use crate::utils::context::{is_shutdown, shelve, sleep, state, unshelve, wait_shutdown};
-    pub use crate::utils::di::Provided;
+    pub use crate::models::trigger::TT;
+    pub use crate::models::trigger::TT::*;
 }

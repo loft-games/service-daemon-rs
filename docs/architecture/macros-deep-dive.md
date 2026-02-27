@@ -9,6 +9,9 @@ When you annotate a function, the macro generates:
 2. **Wrapper Generation**: An `async move` block that resolves all dependencies before calling the original function.
 3. **Registry Entry**: A `static` entry collected by `linkme`.
 
+> [!IMPORTANT]
+> **Distributed Registration Requirement**: Because `linkme` works at the linker level, any module containing a `#[service]` or `#[trigger]` **must** be included in your compilation tree (e.g., via `mod my_module;`). If a module is not reachable from `main.rs`, its services will not be discovered.
+
 ## 2. The `#[trigger]` Transformation
 
 Triggers are specialized services. The macro generates a **Host Wrapper** that:

@@ -1,3 +1,12 @@
 [workspace]
-members = ["service-daemon", "service-daemon-macro", "examples/demo"]
+members = [
+    "service-daemon",
+    "service-daemon-macro",
+    "examples/minimal",
+    "examples/complete",
+    "examples/triggers",
+    "examples/logging",
+    "examples/simulation",
+    "examples/macro-tests",
+]
 resolver = "2"

@@ -11,50 +11,42 @@
 - **Type-Safe DI**: Dependency injection resolved at compile-time with zero boilerplate.
 - **Resilient Lifecycle**: Exponential backoff, jitter, wave-based startup/shutdown, and **fatal error handling**.
 - **Smart State**: Transparent change tracking and zero-copy state snapshots.
+- **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
+- **Tag-based Registry**: Filter services by tags for selective loading (`#[service(tags = ["infra"])]`).
+
+## Get Started
+
+Looking to build your first reliable background system? Follow our **[Grand Tour](docs/guide/tutorial/grand-tour.md)** tutorial series!
+
+1. [**Hello, Heartbeat!**](docs/guide/tutorial/hello-heartbeat.md) - Your first background service. 
+2. [**Reactive Triggers**](docs/guide/tutorial/reactive-triggers.md) - Events and automation.
+3. [**The Art of Recovery**](docs/guide/tutorial/art-of-recovery.md) - State management and resilience.
+4. [**Waves of Orchestration**](docs/guide/tutorial/orchestration-waves.md) - Startup and shutdown order.
+5. ...and much more in the **[Full Tutorial](docs/guide/tutorial/grand-tour.md)**.
 
 ---
 
-## Quick Start
+## Examples
 
-### 1. Define a Provider
-```rust
-use service_daemon::provider;
+The `examples/` directory contains focused examples organized by use case:
 
-#[provider(default = 8080)]
-pub struct Port(pub i32);
-```
+| Example | Focus | Run Command |
+|:---|:---|:---|
+| **minimal** | `is_shutdown()` polling -- simplest pattern | `cargo run -p example-minimal` |
+| **complete** | `state()` lifecycle -- recovery, reload, priorities | `cargo run -p example-complete` |
+| **triggers** | Decoupled event-driven handlers (Cron, Queue, Watch) | `cargo run -p example-triggers` |
+| **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
+| **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
-### 2. Create a Service
-```rust
-use service_daemon::service;
-use std::sync::Arc;
-
-#[service]
-pub async fn my_service(port: Arc<Port>) -> anyhow::Result<()> {
-    service_daemon::done(); // Signal we are ready
-    while !service_daemon::is_shutdown() {
-        service_daemon::sleep(std::time::Duration::from_secs(1)).await;
-    }
-    Ok(())
-}
-```
-
-### 3. Run the Daemon
-```rust
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    service_daemon::ServiceDaemon::auto_init().run().await
-}
-```
+> **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
 
 ---
 
-## Documentation Map
+### Documentation Map
 
 Explore our detailed documentation grouped by your needs:
 
-### User Guides
-Learn how to build applications with `service-daemon-rs`.
+- [Concept Clarification & Pitfalls](docs/guide/pitfalls-faq.md): Avoiding common architectural traps and misconceptions.
 - [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, priorities, and shutdown.
 - [Event Triggers](docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
 - [State Management](docs/guide/state-management.md): Mutability, snapshots, and persistence.

@@ -27,6 +27,24 @@ pub enum ServiceError {
     /// Use this for unrecoverable errors (e.g., invalid configuration, license issues).
     #[error("Fatal error in service: {0}")]
     Fatal(String),
+
+    /// Invalid or missing configuration that prevents the service from starting.
+    /// Distinct from `Fatal` in that it specifically identifies configuration issues
+    /// which may be resolved by the operator without code changes.
+    #[error("Configuration error: {0}")]
+    ConfigurationError(String),
+
+    /// An illegal state transition was attempted.
+    /// This typically indicates a logic bug where the service lifecycle was violated.
+    #[error("Invalid state transition in '{service}': from {from} to {to}")]
+    InvalidState {
+        /// Name of the service where the invalid transition occurred.
+        service: String,
+        /// The state the service was in when the invalid transition was attempted.
+        from: String,
+        /// The target state that was rejected.
+        to: String,
+    },
 }
 
 /// A specialized Result type for Service Daemon operations.

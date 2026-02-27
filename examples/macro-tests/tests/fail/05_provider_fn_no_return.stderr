@@ -1,0 +1,8 @@
+error: #[provider] async fn must have a return type
+
+         = help: Add a return type, e.g., `async fn config() -> MyConfig { ... }`
+
+ --> tests/fail/05_provider_fn_no_return.rs:9:5
+  |
+9 | pub async fn no_return_provider() {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

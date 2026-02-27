@@ -1,0 +1,16 @@
+[package]
+name = "example-simulation"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Simulation example: demonstrates MockContext for unit testing services without a real daemon."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon", features = [
+    "macros",
+    "simulation",
+] }
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"

@@ -1,0 +1,16 @@
+[package]
+name = "example-logging"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Logging example: demonstrates file-based log persistence with JSON rotation."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon", features = [
+    "macros",
+    "file-logging",
+] }
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"

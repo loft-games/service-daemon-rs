@@ -177,6 +177,16 @@ impl ParamProcessor {
     }
 
     /// Processes a payload parameter.
+    ///
+    /// The framework now wraps every payload in `Arc<P>` internally.
+    /// This method generates the correct extraction code based on
+    /// whether the user's handler expects `Arc<T>` or bare `T`:
+    ///
+    /// - **`is_arc == true`**: user declared `Arc<T>` — pass the
+    ///   framework's `Arc` directly (zero-copy, no `Clone` needed).
+    /// - **`is_arc == false`**: user declared `T` — dereference the
+    ///   `Arc` and clone the data. Uses a descriptive trait call
+    ///   to produce a friendly compiler error if `T: Clone` is missing.
     fn process_payload(&mut self, arg: &FnArg, arg_name: syn::Ident, is_arc: bool) {
         if !self.allow_payload {
             abort!(
@@ -201,9 +211,16 @@ impl ParamProcessor {
         self.clean_inputs.push(clean_arg);
 
         if is_arc {
-            self.call_args.push(quote! { std::sync::Arc::new(payload) });
-        } else {
+            // User wants Arc<T> — pass the framework's Arc pointer
+            // directly. This is a zero-copy path and does NOT require
+            // the inner type to implement Clone.
             self.call_args.push(quote! { payload });
+        } else {
+            // User wants bare T — must clone out of the Arc.
+            // Uses a descriptive helper to produce a clear compiler
+            // error when T does not implement Clone.
+            self.call_args
+                .push(quote! { service_daemon::trigger_clone_payload(&*payload) });
         }
     }
 
@@ -227,31 +244,46 @@ impl ParamProcessor {
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#inner_type> },
                     )
-                    .unwrap(),
+                    .unwrap_or_else(|e| {
+                        abort!(
+                            arg_name,
+                            format!("Internal macro error parsing Arc dependency: {}", e)
+                        )
+                    }),
                 );
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = #inner_type::rwlock().await;
                 });
-                let rw_path = quote_spanned! { rwlock_span => service_daemon::utils::managed_state::RwLock<#inner_type> };
+                let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
                 self.clean_inputs.push(
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> },
                     )
-                    .unwrap(),
+                    .unwrap_or_else(|e| {
+                        abort!(
+                            arg_name,
+                            format!("Internal macro error parsing Arc<RwLock> dependency: {}", e)
+                        )
+                    }),
                 );
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = #inner_type::mutex().await;
                 });
-                let mutex_path = quote_spanned! { mutex_span => service_daemon::utils::managed_state::Mutex<#inner_type> };
+                let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
                 self.clean_inputs.push(
                     syn::parse2(
                         quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> },
                     )
-                    .unwrap(),
+                    .unwrap_or_else(|e| {
+                        abort!(
+                            arg_name,
+                            format!("Internal macro error parsing Arc<Mutex> dependency: {}", e)
+                        )
+                    }),
                 );
             }
         }
@@ -311,4 +343,47 @@ pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedPar
         processor.process_param(arg);
     }
     processor.finish()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tags parsing (shared by #[service] and #[trigger])
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A parsed list of static tag strings from `tags = ["a", "b"]` syntax.
+///
+/// Implements `syn::Parse` so it can be used inline by both macro parsers.
+pub struct TagsList {
+    pub tags: Vec<syn::LitStr>,
+}
+
+impl syn::parse::Parse for TagsList {
+    /// Parses the bracket-delimited list: `["tag_a", "tag_b"]`
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let content;
+        syn::bracketed!(content in input);
+        let punctuated =
+            content.parse_terminated(|input| input.parse::<syn::LitStr>(), syn::Token![,])?;
+        Ok(Self {
+            tags: punctuated.into_iter().collect(),
+        })
+    }
+}
+
+impl TagsList {
+    /// Generates the `tags: &[...]` expression for the `ServiceEntry` codegen.
+    pub fn to_tokens(&self) -> proc_macro2::TokenStream {
+        let tag_strs: Vec<_> = self
+            .tags
+            .iter()
+            .map(|lit| {
+                let s = lit.value();
+                quote::quote! { #s }
+            })
+            .collect();
+        if tag_strs.is_empty() {
+            quote::quote! { &[] }
+        } else {
+            quote::quote! { &[#(#tag_strs),*] }
+        }
+    }
 }

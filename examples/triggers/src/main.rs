@@ -1,0 +1,59 @@
+//! # Triggers Example -- Decoupled Event-Driven Handlers
+//!
+//! This example demonstrates that **triggers are optional, decoupled components**
+//! that can be added to any daemon without modifying existing services.
+//!
+//! ## Trigger types demonstrated
+//! - **Cron**: Fires on a cron schedule via `tokio-cron-scheduler`
+//! - **Broadcast Queue (Queue)**: All subscribed handlers receive every message
+//! - **Signal (Event/Notify)**: Fire-and-forget notification
+//! - **Watch**: Fires when a shared state value changes
+//!
+//! ## Event tracing demo (publish -> trigger chain)
+//! ```text
+//!                                     +-----------------+
+//!                           publish() |  TickNotifier    |--> on_tick (Signal)
+//!                          +--------> |  (Notify)        |       |
+//!                          |          +-----------------+       | publish("tick_processed")
+//!  +----------------+      |          +-----------------+       |
+//!  | event_producer |------+--push()-->|  TaskQueue      |<------+
+//!  | (Service)      |      |          |  (Broadcast)    |--> handler_a, handler_b
+//!  +----------------+      |          +-----------------+
+//!                          |          +-----------------+
+//!                          +--push()-->|  WorkerQueue    |--> lb_worker_handler
+//!                          |          |  (Queue)        |
+//!                          |          +-----------------+
+//!                          |          +-----------------+
+//!                          +--push()-->|  JobQueue       |--> complex_job_handler
+//!                          |          |  (Queue)        |
+//!                          |          +-----------------+
+//!                          |          +-----------------+
+//!                          +--------> |  UserNotifier   |--> on_user_notified
+//!                                     |  (Notify)       |    sync_notify_trigger
+//!                                     +-----------------+
+//! ```
+//!
+//! **Run**: `RUST_LOG=info cargo run -p example-triggers`
+
+use service_daemon::ServiceDaemon;
+
+// Import library modules so that `#[service]`, `#[trigger]`, and `#[provider]`
+// registrations are linked into this binary.
+use example_triggers as _;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(service_daemon::core::logging::DaemonLayer)
+        .init();
+
+    let mut daemon = ServiceDaemon::builder().build();
+    daemon.run().await;
+    daemon.wait().await?;
+
+    Ok(())
+}

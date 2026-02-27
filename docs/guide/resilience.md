@@ -17,10 +17,23 @@ let policy = RestartPolicy::builder()
     .jitter_factor(0.1) // 10% randomization
     .build();
 
-let daemon = ServiceDaemon::from_registry_with_policy(policy);
-daemon.run().await?
+let mut daemon = ServiceDaemon::builder()
+    .with_restart_policy(policy)
+    .build();
+daemon.run().await;
+daemon.wait().await?;
 ```
-### 1.1. Immediate Restart on Reload Signal
+
+### 1.1. The `BackoffController` Abstraction
+
+Internal to the framework, retry logic is managed by the **`BackoffController`**. This stateful component tracks:
+- Current retry delay.
+- Consecutive failure count.
+- Interruption-aware waiting (respecting shutdown/reload signals during the sleep period).
+
+Because this controller is now a shared abstraction, **Trigger Handlers** also benefit from identical exponential backoff and jitter behavior when they encounter errors. The `TriggerRunner` uses `BackoffController` internally via its built-in `RetryInterceptor`, which receives the same `RestartPolicy` configured on the `ServiceDaemon`.
+
+### 1.2. Immediate Restart on Reload Signal
 Even if a service is in a restart delay period (e.g. after a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
 
 ### 1.2. Fatal Errors
@@ -52,7 +65,7 @@ let policy = RestartPolicy::builder()
     .build();
 ```
 
-- **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`.
+- **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`. If the timeout is reached, the daemon logs a warning and proceeds to the next wave to avoid blocking the entire system.
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
 ## 3. Managing CPU-Intensive & Blocking Tasks
@@ -104,7 +117,8 @@ pub async fn log_flush() { ... }
 
 The daemon uses `CancellationToken` to signal services to stop. 
 1. **Notification**: All services are notified via `is_shutdown()`.
-2. **Grace Period**: The daemon waits for a grace period (default: 30s) per wave.
-3. **Forced Abort**: Services that don't exit within the period are aborted.
+2. **Error Suppression**: If a service exits with an error *after* the shutdown signal has been sent, the daemon treats it as a successful exit. This prevents irrelevant error logs (e.g., "channel closed" or "network unreachable") that naturally occur during the teardown of dependencies.
+3. **Grace Period**: The daemon waits for a grace period (default: 30s) per wave.
+4. **Forced Abort**: Services that don't exit within the period are aborted.
 
 [Back to README](../../README.md)

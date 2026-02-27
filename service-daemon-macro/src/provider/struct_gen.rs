@@ -7,9 +7,7 @@ use quote::{format_ident, quote};
 use syn::{ItemStruct, Type};
 
 use super::parser::{ProviderAttrs, parse_provider_attrs};
-use super::templates::{
-    generate_broadcast_queue_template, generate_lb_queue_template, generate_notify_template,
-};
+use super::templates::{generate_broadcast_queue_template, generate_notify_template};
 
 /// Attempts to generate a template-based provider if the default value matches a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
@@ -36,18 +34,6 @@ fn try_generate_template(
                 capacity,
             ))
         }
-        // Load-balancing queue templates (single consumer)
-        "LoadBalancingQueue" | "LBQueue" => {
-            let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
-            let capacity = provider_attrs.capacity.unwrap_or(100);
-            Some(generate_lb_queue_template(
-                struct_name,
-                vis,
-                attrs,
-                item_type_str,
-                capacity,
-            ))
-        }
         _ => None,
     }
 }
@@ -64,7 +50,11 @@ impl TupleStructInfo {
         if let syn::Fields::Unnamed(f) = fields
             && f.unnamed.len() == 1
         {
-            let inner_type = f.unnamed.first().unwrap().ty.clone();
+            let first_field = f
+                .unnamed
+                .first()
+                .expect("FieldsUnnamed checked for length 1");
+            let inner_type = first_field.ty.clone();
             let is_string = Self::is_string_type(&inner_type);
             Some(Self {
                 inner_type,
@@ -128,7 +118,7 @@ pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream
 
         #default_impl
 
-        static #singleton_name: service_daemon::utils::managed_state::StateManager<#struct_name> = service_daemon::utils::managed_state::StateManager::new();
+        static #singleton_name: service_daemon::core::managed_state::StateManager<#struct_name> = service_daemon::core::managed_state::StateManager::new();
 
         // Type-based DI: impl Provided for the struct with intelligent state management
         impl service_daemon::Provided for #struct_name {
@@ -138,13 +128,13 @@ pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream
                 }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
                     #constructor
                 }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async {
                     #constructor
                 }).await
@@ -157,12 +147,12 @@ pub fn generate_struct_provider(item: ItemStruct, attr_str: &str) -> TokenStream
 
         impl #struct_name {
             /// Resolves a tracked RwLock for this provider.
-            pub async fn rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            pub async fn rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 <Self as service_daemon::Provided>::resolve_rwlock().await
             }
 
             /// Resolves a tracked Mutex for this provider.
-            pub async fn mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            pub async fn mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 <Self as service_daemon::Provided>::resolve_mutex().await
             }
         }
@@ -247,6 +237,7 @@ fn generate_default_impl(
     };
 
     // Build the default expression
+    let struct_name_str = struct_name.to_string();
     let default_expr = if let Some(ref env_name) = provider_attrs.env_name {
         // Use env var with fallback to default
         if let Some(ref default_val) = provider_attrs.default_value {
@@ -255,8 +246,17 @@ fn generate_default_impl(
                 std::env::var(#env_name).unwrap_or_else(|_| #default_tokens)
             }
         } else {
+            // No fallback: env var is REQUIRED. Panic with a descriptive message
+            // that includes both the env var name and the provider type so
+            // operators can quickly locate the missing configuration.
             quote! {
-                std::env::var(#env_name).expect(concat!("Environment variable ", #env_name, " not set"))
+                std::env::var(#env_name).unwrap_or_else(|_| {
+                    panic!(
+                        "Required environment variable '{}' is not set (needed by provider '{}'). \
+                         Set it or add a default: #[provider(env_name = \"{}\", default = \"...\")]",
+                        #env_name, #struct_name_str, #env_name
+                    )
+                })
             }
         }
     } else if let Some(ref default_val) = provider_attrs.default_value {
@@ -284,7 +284,7 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                 .named
                 .iter()
                 .map(|field| {
-                    let field_name = field.ident.as_ref().unwrap();
+                    let field_name = field.ident.as_ref().expect("Named fields must have idents");
                     let field_type = &field.ty;
 
                     // Check if it's Arc<T>

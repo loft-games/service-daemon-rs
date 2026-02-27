@@ -8,7 +8,7 @@ Both standard services and event-driven triggers are collected into a single `SE
 
 This enables "distributed registration":
 - **Zero Configuration**: No central list of services is needed.
-- **Automatic Discovery**: `ServiceDaemon::auto_init()` automatically finds all annotated functions across the entire workspace.
+- **Automatic Discovery**: `ServiceDaemon::builder().build()` automatically finds all annotated functions across the entire workspace via the `Registry`.
 
 ## 2. Decentralized Dependency Injection
 
@@ -25,23 +25,23 @@ The daemon maintains a **Unified Status Plane** to track service health. To elim
 
 ```mermaid
 graph TD
-    subgraph "User Code"
+    subgraph User_Code ["User Code"]
         S["#[service] Function"]
         P["#[provider] Struct/Fn"]
         T["#[trigger] Function"]
     end
 
-    subgraph "Macros"
+    subgraph Macro_Gen ["Macros"]
         M_S[Service Wrapper]
         M_P[Provided Trait Impl]
         M_T[Trigger Wrapper]
     end
 
-    subgraph "Static Registry"
-        SR[(SERVICE_REGISTRY)]
+    subgraph Static_Registry ["Static Registry"]
+        SR[("SERVICE_REGISTRY")]
     end
 
-    subgraph "Core Daemon"
+    subgraph Core_Daemon ["Core Daemon"]
         SD[ServiceDaemon]
         SCP[Service Control Plane]
     end
@@ -63,16 +63,68 @@ The framework is organized into specialized submodules to ensure maintainability
 ### `service-daemon-macro`
 - **`trigger/`**: Handles attribute parsing and code generation for event-driven logic (Cron, Queues, Watchers).
 - **`service/`**: Core logic for wrapping functions as managed tasks and registering them with `linkme`.
-- **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `LBQueue`.
+- **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `Queue`.
 
 ### `service-daemon`
-- **`utils/service_daemon/`**: The core orchestrator.
+- **`core/service_daemon/`**: The core orchestrator.
   - `policy.rs`: Resilience configuration (backoff, jitter).
-  - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
-- **`utils/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
-- **`utils/triggers.rs`**: Host logic for event-driven triggers.
-- **`utils/context.rs`**: Task-local storage and status plane interactions.
-- **`utils/managed_state.rs`**: The reactive state engine with change tracking.
+  - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
+- **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
+- **`core/triggers.rs`**: Built-in trigger host implementations. Each host implements the `TriggerHost` trait with `setup` (one-time initialization) and `handle_step` (per-event policy).
+- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerInterceptor` pipeline. Uses an onion-model interceptor chain (stored as `Arc<dyn>` for safe cross-task sharing) where each layer (tracing, retry, user-defined) has full control over the dispatch lifecycle. Dispatch is **asynchronous** -- each event is spawned into a `tokio::spawn` task gated by a `Semaphore`. A background `scale_monitor` dynamically adjusts the concurrency limit based on pressure ratio.
+- **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
+- **`core/managed_state.rs`**: The reactive state engine with change tracking.
+
+## 5. Simulation Layer (Feature-Gated)
+
+All testing/simulation code lives behind the `simulation` Cargo feature. It only controls **whether the toolbox is compiled** -- it does NOT inject any runtime logic into the production `resolve()` path.
+
+### Architecture: Interactive Simulation Sandbox
+
+```mermaid
+graph LR
+    subgraph MockContext_Setup ["MockContext::builder().build()"]
+        MC["MockContextBuilder"] -->|pre-fill| Shelf["Shelf Data"]
+        MC -->|pre-fill| Status["Status Plane"]
+        MC -->|produces| Builder["ServiceDaemonBuilder"]
+        MC -->|produces| Handle["SimulationHandle"]
+    end
+
+    subgraph Daemon_Execution ["ServiceDaemon (real engine)"]
+        Builder -->|build + run| SD["ServiceDaemon"]
+        SD -->|owns| Resources["Private DaemonResources"]
+        SD -->|runs| RealSvc["Real Service Logic"]
+    end
+
+    subgraph God_Hand ["God Hand (Hot Injection)"]
+        Handle -->|set_shelf| Resources
+        Handle -->|set_status| Resources
+        Handle -->|trigger_reload| Resources
+    end
+```
+
+- **`MockContext`**: A sandbox factory that produces a pre-configured `ServiceDaemonBuilder` and a `SimulationHandle`. No direct execution.
+- **`SimulationHandle`**: The "God Hand" -- allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
+- **Service Registration**: How `#[service]` works internal machinery.
+- **Strict Feature Gating**: All simulation types (`MockContext`, `SimulationHandle`, `with_resources()`, `resources()`) are `#[cfg(feature = "simulation")]` -- physically absent from production builds.
+
+## 6. Avoiding Service Interference
+
+Because of the automatic service discovery, testing a subsystem in a large project can lead to "Service Interference" where production services are unintentionally started during tests.
+
+**Best Practices:**
+1. **Use Tags**: Group services logically using `#[service(tags = ["core", "api"])]`.
+2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment, then inject only the services under test via `.with_services()`.
+3. **ServiceId Safety**: The `ServiceDaemonBuilder` automatically detects `ServiceId` collisions at startup, preventing two services from competing for the same status plane slot.
+
+## 7. Event Traceability Architecture
+
+The system uses a unified messaging layer for all cross-service events:
+
+- **TriggerMessage**: Encapsulates the payload with a `TriggerContext` (Source ID, Instance ID, Message ID).
+- **Publish API**: Services use `publish()` to inject these messages into providers.
+- **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context.
+- **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). User-defined interceptors can be added for rate limiting, authentication, metrics, etc.
 
 [Back to README](../../README.md)
 

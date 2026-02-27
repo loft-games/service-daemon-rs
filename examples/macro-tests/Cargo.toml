@@ -1,0 +1,21 @@
+[package]
+name = "example-macro-tests"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Compile-time macro verification: trybuild pass/fail tests for #[service], #[trigger], and #[provider]."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon", features = [
+    "macros",
+    "cron",
+    "simulation",
+    "uuid-trigger-ids",
+] }
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+
+[dev-dependencies]
+trybuild = "1.0"

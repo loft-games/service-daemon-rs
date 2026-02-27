@@ -2,7 +2,7 @@
 //!
 //! This module is split into submodules for better organization:
 //! - `parser`: Attribute parsing and configuration.
-//! - `templates`: Template generators for Notify, Queue, LBQueue.
+//! - `templates`: Template generators for Notify, Queue.
 //! - `struct_gen`: Struct provider generation with field injection.
 
 mod parser;
@@ -87,7 +87,7 @@ fn generate_async_fn_provider(
         #fn_vis #fn_asyncness fn #fn_name() -> #return_type
             #fn_block
 
-        static #singleton_name: service_daemon::utils::managed_state::StateManager<#return_type> = service_daemon::utils::managed_state::StateManager::new();
+        static #singleton_name: service_daemon::core::managed_state::StateManager<#return_type> = service_daemon::core::managed_state::StateManager::new();
 
         // Generate Provided impl for the return type using StateManager
         impl service_daemon::Provided for #return_type {
@@ -97,13 +97,13 @@ fn generate_async_fn_provider(
                 }).await
             }
 
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
                     std::sync::Arc::new(#call_expr)
                 }).await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async {
                     std::sync::Arc::new(#call_expr)
                 }).await
@@ -116,12 +116,12 @@ fn generate_async_fn_provider(
 
         impl #return_type {
             /// Resolves a tracked RwLock for this provider.
-            pub async fn rwlock() -> std::sync::Arc<service_daemon::utils::managed_state::RwLock<Self>> {
+            pub async fn rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 <Self as service_daemon::Provided>::resolve_rwlock().await
             }
 
             /// Resolves a tracked Mutex for this provider.
-            pub async fn mutex() -> std::sync::Arc<service_daemon::utils::managed_state::Mutex<Self>> {
+            pub async fn mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 <Self as service_daemon::Provided>::resolve_mutex().await
             }
         }
