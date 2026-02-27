@@ -2,9 +2,9 @@
 //!
 //! Each host implements [`TriggerHost<T>`] with a two-phase lifecycle:
 //!
-//! 1. **`setup`**: One-time initialisation — acquire receivers, register cron
+//! 1. **`setup`**: One-time initialisation -- acquire receivers, register cron
 //!    jobs, etc. Resources are stored as struct fields.
-//! 2. **`handle_step`**: Per-iteration logic — wait for the next event using
+//! 2. **`handle_step`**: Per-iteration logic -- wait for the next event using
 //!    the resources initialised in `setup`.
 //!
 //! This eliminates the `shelve` / `shelve_clone` pattern that previously
@@ -27,7 +27,7 @@ use crate::core::di::Provided;
 use crate::models::trigger::{TriggerHost, TriggerTransition};
 
 // ===========================================================================
-// SignalHost — Signal (Notify) Trigger Host
+// SignalHost -- Signal (Notify) Trigger Host
 // ===========================================================================
 
 /// Signal-based trigger host.
@@ -92,7 +92,7 @@ where
     fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
         Box::pin(async move {
             // Subscribe and shelve the receiver for handle_step iterations.
-            // This is a targeted use of shelve — the receiver type is only known
+            // This is a targeted use of shelve -- the receiver type is only known
             // at this impl level, not at the struct level.
             let rx = Arc::new(Mutex::new(target.subscribe()));
             context::shelve(TOPIC_BRIDGE_KEY, rx).await;
@@ -128,7 +128,7 @@ where
 }
 
 // ===========================================================================
-// LBTopicHost — Load-Balancing Queue Trigger Host
+// LBTopicHost -- Load-Balancing Queue Trigger Host
 // ===========================================================================
 
 /// Load-balancing queue trigger host.
@@ -177,7 +177,7 @@ where
 }
 
 // ===========================================================================
-// CronHost — Cron Trigger Host
+// CronHost -- Cron Trigger Host
 // ===========================================================================
 
 /// Cron-based scheduled trigger host.
@@ -253,7 +253,7 @@ where
 }
 
 // ===========================================================================
-// WatchHost — State Change Trigger Host
+// WatchHost -- State Change Trigger Host
 // ===========================================================================
 
 /// State-watch trigger host.

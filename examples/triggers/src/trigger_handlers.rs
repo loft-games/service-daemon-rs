@@ -55,7 +55,7 @@ pub async fn lb_worker_handler(payload: String) -> anyhow::Result<()> {
 // Complex Payload with Arc
 // =============================================================================
 
-/// Receives a `ComplexJob` wrapped in `Arc` — zero-copy payload delivery.
+/// Receives a `ComplexJob` wrapped in `Arc` -- zero-copy payload delivery.
 #[trigger(LBQueue(crate::providers::JobQueue))]
 pub async fn complex_job_handler(
     #[payload] job: Arc<crate::providers::ComplexJob>,
@@ -92,7 +92,7 @@ pub async fn on_external_status_changed(snapshot: Arc<ExternalStatus>) -> anyhow
 }
 
 // =============================================================================
-// Sync Trigger (via #[allow_sync] — no async overhead)
+// Sync Trigger (via #[allow_sync] -- no async overhead)
 // =============================================================================
 
 /// Demonstrates that triggers can also be synchronous.
@@ -105,7 +105,7 @@ pub fn sync_notify_trigger() -> anyhow::Result<()> {
 }
 
 // =============================================================================
-// Event Tracing Trigger — two-hop chain demo
+// Event Tracing Trigger -- two-hop chain demo
 // =============================================================================
 
 /// Captures the notification signal and publishes a processed

@@ -1,6 +1,6 @@
 # Macro Magic Unleashed
 
-The `#[service]` and `#[trigger]` macros are the soul of the framework's "Invisible" design. But they are not just for basic registration—they are highly extensible.
+The `#[service]` and `#[trigger]` macros are the soul of the framework's "Invisible" design. But they are not just for basic registration--they are highly extensible.
 
 ---
 
@@ -52,4 +52,4 @@ You've completed the Grand Tour. You've gone from a simple heartbeat to understa
 
 Now, go forth and build something reliable!
 
-[**← Previous Step: Tailor-Made Triggers**](tailor-made-triggers.md) | [**Back to the Grand Tour →**](grand-tour.md)
+[**<- Previous Step: Tailor-Made Triggers**](tailor-made-triggers.md) | [**Back to the Grand Tour ->**](grand-tour.md)

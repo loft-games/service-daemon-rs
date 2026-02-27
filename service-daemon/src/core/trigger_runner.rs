@@ -9,16 +9,16 @@
 //! # Architecture
 //!
 //! ```text
-//!   handle_step ──► TriggerRunner.run_with_host()
-//!                       │
-//!                       ▼
+//!   handle_step --> TriggerRunner.run_with_host()
+//!                       |
+//!                       v
 //!                   dispatch_with_middleware(payload)
-//!                       ├── middleware.before_dispatch()
-//!                       ├── invoke_handler_with_retry()
-//!                       │       ├── build TriggerContext
-//!                       │       ├── call handler
-//!                       │       └── backoff on failure
-//!                       └── middleware.after_dispatch()
+//!                       +-- middleware.before_dispatch()
+//!                       +-- invoke_handler_with_retry()
+//!                       |       +-- build TriggerContext
+//!                       |       +-- call handler
+//!                       |       +-- backoff on failure
+//!                       +-- middleware.after_dispatch()
 //! ```
 //!
 //! The `TriggerRunner` owns the `select!` + shutdown logic, so that trigger
@@ -97,7 +97,7 @@ pub trait TriggerMiddleware: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerRunner — the flat event-loop driver
+// TriggerRunner -- the flat event-loop driver
 // ---------------------------------------------------------------------------
 
 /// Encapsulates the trigger event loop, signal handling, and middleware pipeline.
@@ -281,7 +281,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     message_id: message_id.clone(),
                     source_id: self.service_id,
                     timestamp: Utc::now(),
-                    payload: payload.clone(), // Arc clone — cheap pointer copy
+                    payload: payload.clone(), // Arc clone -- cheap pointer copy
                 },
             };
 

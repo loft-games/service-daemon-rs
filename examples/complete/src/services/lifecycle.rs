@@ -41,7 +41,7 @@ pub async fn advanced_lifecycle_service() -> anyhow::Result<()> {
             ServiceStatus::Healthy => {
                 info!("[Lifecycle] Working in Healthy state.");
                 if !sleep(std::time::Duration::from_secs(5)).await {
-                    continue; // Interrupted — re-check state
+                    continue; // Interrupted -- re-check state
                 }
             }
             ServiceStatus::NeedReload => {
@@ -145,7 +145,7 @@ pub async fn stats_writer(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()>
                     guard.total_processed += 1;
                     guard.last_status = format!("Processed {}", guard.total_processed);
                     info!("[Stats Writer] Updated: {}", guard.total_processed);
-                } // Guard dropped — triggers any Watch triggers on GlobalStats
+                } // Guard dropped -- triggers any Watch triggers on GlobalStats
 
                 if !sleep(std::time::Duration::from_secs(5)).await {
                     continue;
@@ -335,7 +335,7 @@ pub async fn external_service(port: Arc<Port>) -> anyhow::Result<()> {
 /// Demonstrates permanent service termination on unrecoverable errors.
 ///
 /// When `ServiceError::Fatal` is returned, the daemon does NOT restart
-/// this service — it is marked as permanently failed.
+/// this service -- it is marked as permanently failed.
 #[service]
 pub async fn fatal_error_demo() -> anyhow::Result<()> {
     info!("[Fatal] Service started, checking config...");
@@ -387,7 +387,7 @@ pub async fn fatal_error_demo() -> anyhow::Result<()> {
 #[service]
 pub fn sync_service(port: Arc<Port>) -> anyhow::Result<()> {
     info!("[Sync] Sync service started on port {}", port);
-    done(); // Signal ready — without this, the daemon won't proceed to the next wave.
+    done(); // Signal ready -- without this, the daemon won't proceed to the next wave.
 
     // Block the thread until the daemon signals shutdown.
     // `is_shutdown()` is checked periodically with a small sleep to avoid busy-wait.

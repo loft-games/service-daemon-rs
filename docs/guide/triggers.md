@@ -106,9 +106,9 @@ Starting from v0.1.0, individual trigger handler failures (returning `Err`) are 
 ### How it works
 When a handler fails:
 1. The `TriggerRunner` uses its internal `invoke_handler_with_retry` method, which manages retry logic with a `BackoffController`.
-2. The payload is shared via `Arc` internally — retries **never** deep-copy business data.
-3. Retries continue until the handler succeeds or the system shuts down.
-4. Shutdown signals are respected during backoff waits — no hanging retries.
+2. The payload is shared via `Arc` internally -- retries **never** deep-copy business data.
+3. Errors are automatically logged with structured context.
+4. Shutdown signals are respected during backoff waits -- no hanging retries.
 
 ### Payload Handling
 

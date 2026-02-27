@@ -1,4 +1,4 @@
-//! Source services — the "stone throwers" of the system.
+//! Source services -- the "stone throwers" of the system.
 //!
 //! These services generate events (publish) that flow through the trigger
 //! system, demonstrating full traceability via `publish()`.

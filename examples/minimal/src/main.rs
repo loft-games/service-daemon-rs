@@ -1,4 +1,4 @@
-//! # Minimal Example — `is_shutdown()` Polling Pattern
+//! # Minimal Example -- `is_shutdown()` Polling Pattern
 //!
 //! This is the simplest way to use `service-daemon`. It demonstrates:
 //! - Defining a service with `#[service]`
@@ -31,17 +31,20 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. Create a daemon from the global service registry.
     //    All `#[service]`-annotated functions in this crate are auto-registered.
-    let daemon = ServiceDaemon::builder().build();
+    let mut daemon = ServiceDaemon::builder().build();
 
-    // 3. Run the daemon. It blocks until Ctrl+C / SIGTERM is received,
-    //    then performs ordered, graceful shutdown.
+    // 3. Start the daemon (non-blocking).
     daemon.run().await?;
+
+    // 4. Wait for shutdown signal (Ctrl+C / SIGTERM),
+    //    then perform ordered, graceful shutdown.
+    daemon.wait().await?;
 
     Ok(())
 }
 
 // =============================================================================
-// Integration Tests — Minimal
+// Integration Tests -- Minimal
 // =============================================================================
 #[cfg(test)]
 mod tests {
@@ -51,19 +54,20 @@ mod tests {
     /// without any complex lifecycle management.
     #[tokio::test]
     async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::builder()
+        let mut daemon = ServiceDaemon::builder()
             .with_registry(Registry::builder().with_tag("__test_isolation__").build())
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         // Allow services to initialize
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         // Trigger graceful shutdown
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         Ok(())
     }
@@ -91,7 +95,7 @@ mod tests {
             })
         });
 
-        let daemon = ServiceDaemon::builder()
+        let mut daemon = ServiceDaemon::builder()
             .with_registry(Registry::builder().with_tag("__test_isolation__").build())
             .with_restart_policy(RestartPolicy::for_testing())
             .with_service(service_daemon::ServiceDescription {
@@ -106,14 +110,15 @@ mod tests {
             .build();
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         // Wait for service to reach Healthy
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         assert!(!exited.load(Ordering::SeqCst), "Service exited prematurely");
 
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         assert!(
             exited.load(Ordering::SeqCst),

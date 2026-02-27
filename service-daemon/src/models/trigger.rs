@@ -4,7 +4,7 @@
 //!
 //! - **Policy** (`handle_step`): Defined by each trigger host. It only cares about
 //!   *"how to wait for the next event"* and returns a [`TriggerTransition`].
-//! - **Engine** (`run_as_service` default impl → [`TriggerRunner`](crate::core::trigger_runner::TriggerRunner)):
+//! - **Engine** (`run_as_service` default impl --> [`TriggerRunner`](crate::core::trigger_runner::TriggerRunner)):
 //!   Manages the event loop, tracing, retry, middleware pipeline, and graceful
 //!   shutdown. Host implementors get this for free.
 //!
@@ -33,7 +33,7 @@
 //! }
 //! ```
 //!
-//! No changes to the macro crate are needed — the `#[trigger]` macro resolves
+//! No changes to the macro crate are needed -- the `#[trigger]` macro resolves
 //! everything through the type system at compile time.
 //!
 //! ## Built-in Aliases
@@ -84,7 +84,7 @@ pub fn trigger_clone_payload<T: Clone>(arc_payload: &T) -> T {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerMessage — traceable event payload (the "stone" in the ripple model)
+// TriggerMessage -- traceable event payload (the "stone" in the ripple model)
 // ---------------------------------------------------------------------------
 
 /// A traceable event message that flows through the trigger system.
@@ -116,7 +116,7 @@ pub struct TriggerMessage<P> {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerContext — runtime context available to every trigger handler
+// TriggerContext -- runtime context available to every trigger handler
 // ---------------------------------------------------------------------------
 
 /// Runtime context passed to a trigger handler when an event is captured.
@@ -149,7 +149,7 @@ impl<P> TriggerContext<P> {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerHandler — unified async handler signature
+// TriggerHandler -- unified async handler signature
 // ---------------------------------------------------------------------------
 
 /// The canonical function signature for trigger event handlers.
@@ -161,7 +161,7 @@ pub type TriggerHandler<P> = Arc<
 >;
 
 // ---------------------------------------------------------------------------
-// TriggerTransition — lifecycle handshake protocol
+// TriggerTransition -- lifecycle handshake protocol
 // ---------------------------------------------------------------------------
 
 /// Lifecycle transition returned by [`TriggerHost::handle_step`].
@@ -194,7 +194,7 @@ pub enum TriggerTransition<P> {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerHost — the sole extension point for all trigger types
+// TriggerHost -- the sole extension point for all trigger types
 // ---------------------------------------------------------------------------
 
 /// Defines a pluggable trigger engine, parameterized by target type `T`.
@@ -252,7 +252,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// Does **not** require `Clone`. The framework wraps the payload in
     /// `Arc<P>` internally, so retries only clone the pointer. If your
     /// handler receives a bare `T` (not `Arc<T>`), the macro will
-    /// auto-clone — in that case `T` must implement `Clone`.
+    /// auto-clone -- in that case `T` must implement `Clone`.
     type Payload: Send + Sync + 'static;
 
     /// **Setup**: One-time initialization for the host.
@@ -272,9 +272,9 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// issuance, dispatch, and shutdown automatically.
     ///
     /// # Return values
-    /// - `TriggerTransition::Next(payload)` — dispatch and loop again.
-    /// - `TriggerTransition::Reload(payload)` — dispatch, then idle for reload.
-    /// - `TriggerTransition::Stop` — exit the loop cleanly.
+    /// - `TriggerTransition::Next(payload)` -- dispatch and loop again.
+    /// - `TriggerTransition::Reload(payload)` -- dispatch, then idle for reload.
+    /// - `TriggerTransition::Stop` -- exit the loop cleanly.
     fn handle_step<'a>(
         &'a mut self,
         target: &'a Arc<T>,
@@ -311,7 +311,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
 }
 
 // ---------------------------------------------------------------------------
-// Engine internals — dispatch and tracing helpers
+// Engine internals -- dispatch and tracing helpers
 // ---------------------------------------------------------------------------
 
 /// Attempts to retrieve the current service's `ServiceId` from the task-local

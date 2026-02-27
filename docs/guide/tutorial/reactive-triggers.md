@@ -85,4 +85,4 @@ async fn complex_worker(
 
 ---
 
-[**← Previous Step: Hello, Heartbeat!**](hello-heartbeat.md) | [**Next Step: The Art of Recovery →**](art-of-recovery.md)
+[**<- Previous Step: Hello, Heartbeat!**](hello-heartbeat.md) | [**Next Step: The Art of Recovery ->**](art-of-recovery.md)

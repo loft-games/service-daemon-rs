@@ -17,10 +17,11 @@ let policy = RestartPolicy::builder()
     .jitter_factor(0.1) // 10% randomization
     .build();
 
-let daemon = ServiceDaemon::builder()
+let mut daemon = ServiceDaemon::builder()
     .with_restart_policy(policy)
     .build();
-daemon.run().await?
+daemon.run().await?;
+daemon.wait().await?;
 ```
 
 ### 1.1. The `BackoffController` Abstraction
@@ -64,7 +65,7 @@ let policy = RestartPolicy::builder()
     .build();
 ```
 
-- **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`.
+- **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`. If the timeout is reached, the daemon logs a warning and proceeds to the next wave to avoid blocking the entire system.
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
 ## 3. Managing CPU-Intensive & Blocking Tasks

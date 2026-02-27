@@ -71,13 +71,13 @@ The framework is organized into specialized submodules to ensure maintainability
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
 - **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
 - **`core/triggers.rs`**: Built-in trigger host implementations. Each host implements the `TriggerHost` trait with `setup` (one-time initialization) and `handle_step` (per-event policy).
-- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerMiddleware` pipeline. Encapsulates the `select!`/shutdown logic, middleware hooks, context construction, tracing spans, and retry-with-backoff — all decomposed into focused private methods.
+- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerMiddleware` pipeline. Encapsulates the `select!`/shutdown logic, middleware hooks, context construction, tracing spans, and retry-with-backoff -- all decomposed into focused private methods.
 - **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
 - **`core/managed_state.rs`**: The reactive state engine with change tracking.
 
 ## 5. Simulation Layer (Feature-Gated)
 
-All testing/simulation code lives behind the `simulation` Cargo feature. It only controls **whether the toolbox is compiled** — it does NOT inject any runtime logic into the production `resolve()` path.
+All testing/simulation code lives behind the `simulation` Cargo feature. It only controls **whether the toolbox is compiled** -- it does NOT inject any runtime logic into the production `resolve()` path.
 
 ### Architecture: Interactive Simulation Sandbox
 
@@ -104,9 +104,9 @@ graph LR
 ```
 
 - **`MockContext`**: A sandbox factory that produces a pre-configured `ServiceDaemonBuilder` and a `SimulationHandle`. No direct execution.
-- **`SimulationHandle`**: The "God Hand" — allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
-- **Real Engine**: Services run on the actual `ServiceDaemon` with real lifecycle management, restart policies, and dependency resolution.
-- **Strict Feature Gating**: All simulation types (`MockContext`, `SimulationHandle`, `with_resources()`, `resources()`) are `#[cfg(feature = "simulation")]` — physically absent from production builds.
+- **`SimulationHandle`**: The "God Hand" -- allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
+- **Service Registration**: How `#[service]` works internal machinery.
+- **Strict Feature Gating**: All simulation types (`MockContext`, `SimulationHandle`, `with_resources()`, `resources()`) are `#[cfg(feature = "simulation")]` -- physically absent from production builds.
 
 ## 6. Avoiding Service Interference
 

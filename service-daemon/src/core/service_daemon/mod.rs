@@ -23,7 +23,7 @@ use crate::models::{
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
 
 // ---------------------------------------------------------------------------
-// ServiceDaemonHandle — lightweight status query interface
+// ServiceDaemonHandle -- lightweight status query interface
 // ---------------------------------------------------------------------------
 
 /// A handle to the ServiceDaemon that can be used to query status and interact with services.
@@ -44,28 +44,41 @@ impl ServiceDaemonHandle {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceDaemon — Infallible Builder pattern
+// ServiceDaemon -- Infallible Builder pattern
 // ---------------------------------------------------------------------------
 
 /// The main orchestrator for managed services.
 ///
-/// Constructed via `ServiceDaemon::builder()`, which provides an **infallible**
-/// `.build()` method that always succeeds.
+/// `ServiceDaemon` acts as both a lifecycle manager and a control handle.
+/// After calling [`run()`](ServiceDaemon::run), the daemon starts services
+/// in the background and returns control to the caller. Use
+/// [`wait()`](ServiceDaemon::wait) to block until shutdown, or
+/// [`shutdown()`](ServiceDaemon::shutdown) to trigger graceful termination.
 ///
 /// # Examples
 /// ```rust,ignore
-/// // Full startup (all registered services)
-/// ServiceDaemon::builder().build().run().await?;
+/// // Non-blocking start, then wait for Ctrl+C:
+/// let mut daemon = ServiceDaemon::builder().build();
+/// daemon.run().await?;
+/// daemon.wait().await?;
 ///
-/// // Tag-based startup
-/// let reg = Registry::builder().with_tag("infra").build();
-/// ServiceDaemon::builder().with_registry(reg).build().run().await?;
+/// // Hierarchical integration with external CancellationToken:
+/// let root_token = CancellationToken::new();
+/// let mut daemon = ServiceDaemon::builder()
+///     .with_cancel_token(root_token.clone())
+///     .build();
+/// daemon.run().await?;
+/// // ... other work using root_token ...
+/// daemon.wait().await?;
 /// ```
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
+    /// Optional external token for hierarchical lifecycle management.
+    /// When cancelled, the daemon treats it as a shutdown signal.
+    external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: DaemonResources,
 }
@@ -108,37 +121,54 @@ impl ServiceDaemon {
         self.handle().get_service_status(id).await
     }
 
-    /// Run the daemon until interrupted by Ctrl+C (SIGINT) or SIGTERM.
+    /// Start the daemon in the background (non-blocking).
     ///
-    /// This method spawns all registered services and waits for a shutdown signal.
-    /// Services are automatically restarted on failure using exponential backoff.
+    /// This method spawns all registered services using wave-based priorities
+    /// and returns immediately. The daemon continues running in the background.
     ///
-    /// # Signal Guard (Layer 1 Defense)
-    /// If signal handler registration fails (e.g. restricted container environment),
-    /// this method returns `Err` immediately to prevent an uncontrollable daemon.
+    /// Use [`wait()`](ServiceDaemon::wait) to block until a shutdown signal,
+    /// or [`shutdown()`](ServiceDaemon::shutdown) to trigger graceful termination.
     #[instrument(skip(self))]
-    pub async fn run(self) -> ServiceResult<()> {
+    pub async fn run(&mut self) -> ServiceResult<()> {
         if self.services.is_empty() {
-            info!(
-                "ServiceDaemon has no services to run. Entering idle mode, waiting for shutdown signal..."
-            );
+            info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
 
-        // Spawn all services
+        // Spawn all services in the background
         runner::spawn_all_services(
             &self.services,
             self.restart_policy,
             self.running_tasks.clone(),
             self.resources.clone(),
+            &self.cancellation_token,
         )
         .await;
 
         info!(
-            "ServiceDaemon running with {} service(s). Press Ctrl+C to stop.",
+            "ServiceDaemon running with {} service(s).",
             self.services.len()
         );
 
-        // Wait for shutdown signal (Ctrl+C or SIGTERM)
+        Ok(())
+    }
+
+    /// Wait for the daemon to stop.
+    ///
+    /// This method blocks until one of the following events occurs:
+    /// - An OS signal is received (SIGINT / SIGTERM / Ctrl+C).
+    /// - The internal cancellation token is cancelled (via [`shutdown()`](ServiceDaemon::shutdown)).
+    /// - An external cancellation token is cancelled (if provided via
+    ///   [`with_cancel_token()`](ServiceDaemonBuilder::with_cancel_token)).
+    ///
+    /// After the trigger event, this method performs a graceful shutdown
+    /// of all services using wave-based priorities.
+    ///
+    /// # Signal Guard (Layer 1 Defense)
+    /// If signal handler registration fails (e.g. restricted container environment),
+    /// this method returns `Err` immediately to prevent an uncontrollable daemon.
+    #[instrument(skip(self))]
+    pub async fn wait(&mut self) -> ServiceResult<()> {
+        // Wait for shutdown signal (Ctrl+C, SIGTERM, or token cancellation)
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
@@ -162,6 +192,9 @@ impl ServiceDaemon {
                 _ = self.cancellation_token.cancelled() => {
                     info!("Received internal cancellation signal, shutting down...");
                 }
+                _ = Self::wait_external_token(&self.external_cancel_token) => {
+                    info!("Received external cancellation signal, shutting down...");
+                }
             }
         }
 
@@ -174,10 +207,35 @@ impl ServiceDaemon {
                 _ = self.cancellation_token.cancelled() => {
                     info!("Received internal cancellation signal, shutting down...");
                 }
+                _ = Self::wait_external_token(&self.external_cancel_token) => {
+                    info!("Received external cancellation signal, shutting down...");
+                }
             }
         }
 
         // Graceful shutdown
+        self.do_shutdown().await;
+
+        Ok(())
+    }
+
+    /// Trigger graceful shutdown of the daemon.
+    ///
+    /// This cancels the internal `CancellationToken`, which will cause
+    /// [`wait()`](ServiceDaemon::wait) to proceed with the shutdown sequence.
+    /// If an external token was provided, it is also cancelled to propagate
+    /// the shutdown signal to other components sharing that token.
+    pub fn shutdown(&self) {
+        info!("ServiceDaemon::shutdown() called, triggering graceful termination...");
+        self.cancellation_token.cancel();
+        // Propagate shutdown to external token if present
+        if let Some(ref external) = self.external_cancel_token {
+            external.cancel();
+        }
+    }
+
+    /// Internal helper: perform the actual graceful shutdown sequence.
+    async fn do_shutdown(&self) {
         runner::stop_all_services(
             &self.services,
             self.running_tasks.clone(),
@@ -187,8 +245,15 @@ impl ServiceDaemon {
         )
         .await;
         info!("ServiceDaemon stopped.");
+    }
 
-        Ok(())
+    /// Internal helper: wait on an external CancellationToken if present.
+    /// If no external token was provided, this future never resolves.
+    async fn wait_external_token(token: &Option<CancellationToken>) {
+        match token {
+            Some(t) => t.cancelled().await,
+            None => std::future::pending().await,
+        }
     }
 
     /// Run for a limited duration (for testing).
@@ -228,16 +293,18 @@ impl ServiceDaemon {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceDaemonBuilder — Infallible, zero-config default
+// ServiceDaemonBuilder -- Infallible, zero-config default
 // ---------------------------------------------------------------------------
 
 /// Builder for constructing a `ServiceDaemon`.
 ///
-/// The `.build()` method is **infallible** — it always returns a valid daemon.
+/// The `.build()` method is **infallible** -- it always returns a valid daemon.
 pub struct ServiceDaemonBuilder {
     registry: Option<Registry>,
     restart_policy: RestartPolicy,
     extra_services: Vec<ServiceDescription>,
+    /// External cancellation token for hierarchical lifecycle management.
+    external_cancel_token: Option<CancellationToken>,
     /// Pre-filled resources for simulation (only available with `simulation` feature).
     #[cfg(feature = "simulation")]
     resources: Option<DaemonResources>,
@@ -249,6 +316,7 @@ impl ServiceDaemonBuilder {
             registry: None,
             restart_policy: RestartPolicy::default(),
             extra_services: Vec::new(),
+            external_cancel_token: None,
             #[cfg(feature = "simulation")]
             resources: None,
         }
@@ -268,6 +336,7 @@ impl ServiceDaemonBuilder {
             ),
             restart_policy: RestartPolicy::default(),
             extra_services: Vec::new(),
+            external_cancel_token: None,
             resources: None,
         }
     }
@@ -324,9 +393,23 @@ impl ServiceDaemonBuilder {
         self
     }
 
+    /// Link the daemon to an external `CancellationToken` for hierarchical
+    /// lifecycle management.
+    ///
+    /// When the external token is cancelled, the daemon will treat it as a
+    /// shutdown signal and begin graceful termination. Conversely, when the
+    /// daemon's [`shutdown()`](ServiceDaemon::shutdown) is called, it will
+    /// also cancel this token, propagating the signal to all other components
+    /// sharing it.
+    #[must_use]
+    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
+        self.external_cancel_token = Some(token);
+        self
+    }
+
     /// Build the `ServiceDaemon`.
     ///
-    /// This method is **infallible** — it always returns a valid daemon.
+    /// This method is **infallible** -- it always returns a valid daemon.
     /// If no registry was provided, all statically registered services are included.
     /// Any extra services added via `with_service()` are appended after registry services.
     #[must_use]
@@ -346,6 +429,7 @@ impl ServiceDaemonBuilder {
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: CancellationToken::new(),
+            external_cancel_token: self.external_cancel_token,
             resources,
         }
     }
@@ -456,6 +540,7 @@ mod tests {
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: RestartPolicy::for_testing(),
             cancellation_token: CancellationToken::new(),
+            external_cancel_token: None,
             resources: DaemonResources::new(),
         };
 

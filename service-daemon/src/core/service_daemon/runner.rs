@@ -5,9 +5,9 @@
 //! The FSM transitions through the following states:
 //!
 //! ```text
-//!   Starting ──► Running ──► Outcome ──► Backoff ──► Starting (loop)
-//!      │            │           │                        │
-//!      └────────────┴───────────┴── Terminated ◄─────────┘
+//!   Starting --> Running --> Outcome --> Backoff --> Starting (loop)
+//!      |            |           |                        |
+//!      +------------+-----------+-- Terminated <---------+
 //! ```
 
 use futures::FutureExt;
@@ -44,13 +44,13 @@ enum SupervisorState {
     Outcome(Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>),
     /// Wait for the backoff delay before looping back to `Starting`.
     Backoff,
-    /// Terminal state — exit the supervision loop.
+    /// Terminal state -- exit the supervision loop.
     Terminated,
 }
 
 /// Supervises a single service's lifecycle, including restarts and signal handling.
 ///
-/// Internally driven by a [`SupervisorState`] FSM — see module-level docs.
+/// Internally driven by a [`SupervisorState`] FSM -- see module-level docs.
 struct ServiceSupervisor {
     // -- Immutable service identity --
     service_id: ServiceId,
@@ -209,7 +209,7 @@ impl ServiceSupervisor {
             _ = tokio::time::sleep(self.backoff.current_delay()) => {}
             _ = reload_signal.notified() => {
                 info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
-                // Immediate reload — reset backoff so we restart right away
+                // Immediate reload -- reset backoff so we restart right away
                 self.backoff.record_success();
             }
             _ = self.cancellation_token.cancelled() => {
@@ -229,7 +229,7 @@ impl ServiceSupervisor {
     // FSM State Handlers
     // -----------------------------------------------------------------------
 
-    /// **Starting** — prepare resources for a new service generation.
+    /// **Starting** -- prepare resources for a new service generation.
     ///
     /// If shutdown was already requested, transition directly to `Terminated`.
     async fn on_starting(&mut self) -> SupervisorState {
@@ -258,7 +258,7 @@ impl ServiceSupervisor {
         SupervisorState::Running
     }
 
-    /// **Running** — execute the service future with integrated signal handling.
+    /// **Running** -- execute the service future with integrated signal handling.
     ///
     /// Owns the `tokio::select!` that races the service against reload signals,
     /// then hands the raw result off to `Outcome`.
@@ -296,7 +296,7 @@ impl ServiceSupervisor {
                 std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
                     .catch_unwind();
 
-            // Integrated signal handling — replaces the bridge_task
+            // Integrated signal handling -- replaces the bridge_task
             tokio::select! {
                 res = service_future => res,
                 _ = reload_signal.notified() => {
@@ -312,16 +312,16 @@ impl ServiceSupervisor {
         SupervisorState::Outcome(result)
     }
 
-    /// **Outcome** — analyse the service's exit result.
+    /// **Outcome** -- analyse the service's exit result.
     ///
-    /// Decides whether the service should restart (→ `Backoff`) or stop
-    /// permanently (→ `Terminated`).
+    /// Decides whether the service should restart (--> `Backoff`) or stop
+    /// permanently (--> `Terminated`).
     async fn on_outcome(
         &mut self,
         result: Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>,
     ) -> SupervisorState {
         // Fast path: If shutdown was requested while the service was running,
-        // skip outcome processing entirely — no error logging, no restart.
+        // skip outcome processing entirely -- no error logging, no restart.
         if self.cancellation_token.is_cancelled() {
             info!(
                 "Service {} exited during shutdown, marking as Terminated",
@@ -359,7 +359,7 @@ impl ServiceSupervisor {
         SupervisorState::Backoff
     }
 
-    /// **Backoff** — wait for the restart delay before looping back to `Starting`.
+    /// **Backoff** -- wait for the restart delay before looping back to `Starting`.
     ///
     /// Returns `Terminated` if shutdown is requested during the wait.
     async fn on_backoff(&mut self) -> SupervisorState {
@@ -383,7 +383,7 @@ impl ServiceSupervisor {
         SupervisorState::Terminated
     }
 
-    /// Main supervision loop — a flat FSM driver.
+    /// Main supervision loop -- a flat FSM driver.
     async fn run_loop(mut self) {
         self.spawn_watcher();
 
@@ -428,10 +428,27 @@ impl<'a> ServiceWave<'a> {
     }
 
     /// Waits for all services in this wave to become healthy.
-    async fn wait_for_healthy(&self, resources: &DaemonResources, timeout: Duration) {
+    ///
+    /// Returns early if the `daemon_token` is cancelled, allowing the daemon
+    /// to skip waiting during shutdown.
+    async fn wait_for_healthy(
+        &self,
+        resources: &DaemonResources,
+        timeout: Duration,
+        daemon_token: &CancellationToken,
+    ) {
         let start = std::time::Instant::now();
         let mut all_healthy = false;
         while !all_healthy && start.elapsed() < timeout {
+            // Early exit if daemon shutdown was requested
+            if daemon_token.is_cancelled() {
+                info!(
+                    "Wave priority {} startup interrupted by shutdown signal, skipping health check",
+                    self.priority
+                );
+                return;
+            }
+
             all_healthy = true;
             for service in &self.services {
                 let status = resources
@@ -447,6 +464,13 @@ impl<'a> ServiceWave<'a> {
                 tokio::select! {
                     _ = resources.status_changed.notified() => {}
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    _ = daemon_token.cancelled() => {
+                        info!(
+                            "Wave priority {} startup interrupted by shutdown signal",
+                            self.priority
+                        );
+                        return;
+                    }
                 }
             }
         }
@@ -490,11 +514,16 @@ pub async fn spawn_service(
 ///
 /// This starts services in descending order of their `priority` value.
 /// Services with high priority (e.g. SYSTEM = 100) start first.
+///
+/// The `daemon_token` is threaded through to `wait_for_healthy` so that
+/// the wave startup sequence can be interrupted immediately if the daemon
+/// receives a shutdown signal during startup.
 pub async fn spawn_all_services(
     services: &[ServiceDescription],
     restart_policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: DaemonResources,
+    daemon_token: &CancellationToken,
 ) {
     info!("Beginning wave-based startup sequence...");
 
@@ -502,6 +531,12 @@ pub async fn spawn_all_services(
 
     // Process waves in descending order of priority
     for (priority, wave) in waves.into_iter().rev() {
+        // Skip remaining waves if shutdown was requested
+        if daemon_token.is_cancelled() {
+            info!("Startup sequence interrupted by shutdown signal, skipping remaining waves");
+            break;
+        }
+
         info!(
             "Starting wave priority {} ({} services)...",
             priority,
@@ -523,7 +558,7 @@ pub async fn spawn_all_services(
         }
 
         // Wait for services to become healthy using configurable timeout
-        wave.wait_for_healthy(&resources, restart_policy.wave_spawn_timeout)
+        wave.wait_for_healthy(&resources, restart_policy.wave_spawn_timeout, daemon_token)
             .await;
     }
 

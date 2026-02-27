@@ -217,7 +217,7 @@ pub async fn log_service() -> anyhow::Result<()> {
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
-                        // Console output (always active) — human-readable format
+                        // Console output (always active) -- human-readable format
                         // Uses stderr to avoid infinite recursion if tracing subscriber
                         // is also watching stdout.
                         eprintln!(

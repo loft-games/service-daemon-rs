@@ -1,4 +1,4 @@
-//! # Triggers Example — Decoupled Event-Driven Handlers
+//! # Triggers Example -- Decoupled Event-Driven Handlers
 //!
 //! This example demonstrates that **triggers are optional, decoupled components**
 //! that can be added to any daemon without modifying existing services.
@@ -10,28 +10,28 @@
 //! - **Signal (Event/Notify)**: Fire-and-forget notification
 //! - **Watch**: Fires when a shared state value changes
 //!
-//! ## Event tracing demo (publish → trigger chain)
+//! ## Event tracing demo (publish -> trigger chain)
 //! ```text
-//!                                     ┌─────────────────┐
-//!                           publish() │  TickNotifier    │──► on_tick (Signal)
-//!                          ┌────────► │  (Notify)        │       │
-//!                          │          └─────────────────┘       │ publish("tick_processed")
-//!  ┌────────────────┐      │          ┌─────────────────┐       │
-//!  │ event_producer │──────┼─push()──►│  TaskQueue      │◄──────┘
-//!  │ (Service)      │      │          │  (Broadcast)    │──► handler_a, handler_b
-//!  └────────────────┘      │          └─────────────────┘
-//!                          │          ┌─────────────────┐
-//!                          ├─push()──►│  WorkerQueue    │──► lb_worker_handler
-//!                          │          │  (LBQueue)      │
-//!                          │          └─────────────────┘
-//!                          │          ┌─────────────────┐
-//!                          ├─push()──►│  JobQueue       │──► complex_job_handler
-//!                          │          │  (LBQueue)      │
-//!                          │          └─────────────────┘
-//!                          │          ┌─────────────────┐
-//!                          └────────► │  UserNotifier   │──► on_user_notified
-//!                                     │  (Notify)       │    sync_notify_trigger
-//!                                     └─────────────────┘
+//!                                     +-----------------+
+//!                           publish() |  TickNotifier    |--> on_tick (Signal)
+//!                          +--------> |  (Notify)        |       |
+//!                          |          +-----------------+       | publish("tick_processed")
+//!  +----------------+      |          +-----------------+       |
+//!  | event_producer |------+--push()-->|  TaskQueue      |<------+
+//!  | (Service)      |      |          |  (Broadcast)    |--> handler_a, handler_b
+//!  +----------------+      |          +-----------------+
+//!                          |          +-----------------+
+//!                          +--push()-->|  WorkerQueue    |--> lb_worker_handler
+//!                          |          |  (LBQueue)      |
+//!                          |          +-----------------+
+//!                          |          +-----------------+
+//!                          +--push()-->|  JobQueue       |--> complex_job_handler
+//!                          |          |  (LBQueue)      |
+//!                          |          +-----------------+
+//!                          |          +-----------------+
+//!                          +--------> |  UserNotifier   |--> on_user_notified
+//!                                     |  (Notify)       |    sync_notify_trigger
+//!                                     +-----------------+
 //! ```
 //!
 //! **Run**: `RUST_LOG=info cargo run -p example-triggers`
@@ -52,14 +52,15 @@ async fn main() -> anyhow::Result<()> {
         .with(service_daemon::core::logging::DaemonLayer)
         .init();
 
-    let daemon = ServiceDaemon::builder().build();
+    let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await?;
+    daemon.wait().await?;
 
     Ok(())
 }
 
 // =============================================================================
-// Integration Tests — Triggers
+// Integration Tests -- Triggers
 // =============================================================================
 #[cfg(test)]
 mod tests {
@@ -74,18 +75,19 @@ mod tests {
     /// and the daemon can start/stop with them present.
     #[tokio::test]
     async fn test_trigger_registration() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::builder()
+        let mut daemon = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         // Allow time for trigger initialization
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         Ok(())
     }
@@ -93,12 +95,13 @@ mod tests {
     /// Verifies that Signal triggers fire when notified.
     #[tokio::test]
     async fn test_signal_trigger_fires() -> anyhow::Result<()> {
-        let daemon = ServiceDaemon::builder()
+        let mut daemon = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -107,7 +110,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
         Ok(())
     }
 
@@ -116,17 +119,18 @@ mod tests {
     async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
         use crate::providers::ExternalStatus;
 
-        let daemon = ServiceDaemon::builder()
+        let mut daemon = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         // Wait for services to initialize
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        // Modify ExternalStatus — this should trigger the Watch handler
+        // Modify ExternalStatus -- this should trigger the Watch handler
         {
             let lock = ExternalStatus::rwlock().await;
             let mut guard = lock.write().await;
@@ -137,7 +141,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
         Ok(())
     }
 }

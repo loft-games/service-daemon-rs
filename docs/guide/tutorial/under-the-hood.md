@@ -40,4 +40,4 @@ Explore advanced [Lifecycle Management](../../architecture/lifecycle-management.
 
 ---
 
-[**← Previous Step: Playing God: Simulator**](playing-god.md) | [**Next Step: Tailor-Made Triggers →**](tailor-made-triggers.md)
+[**<- Previous Step: Playing God: Simulator**](playing-god.md) | [**Next Step: Tailor-Made Triggers ->**](tailor-made-triggers.md)

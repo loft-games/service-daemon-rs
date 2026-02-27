@@ -1,6 +1,6 @@
 # Tailor-Made Triggers
 
-The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State). But world-class systems often need more—like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
+The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State). But world-class systems often need more--like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
 
 To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 
@@ -13,7 +13,7 @@ Starting from v0.1.0, triggers are split into two parts:
 2.  **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
 
 ### Why `Clone` for Payloads?
-The framework wraps every payload in `Arc<P>` internally so that retries only clone a pointer. If your handler receives a **bare `T`**, the framework must clone the data out of the `Arc` — so `T` must implement `Clone`. If your handler receives `Arc<T>`, no cloning happens at all.
+The framework wraps every payload in `Arc<P>` internally so that retries only clone a pointer. If your handler receives a **bare `T`**, the framework must clone the data out of the `Arc` -- so `T` must implement `Clone`. If your handler receives `Arc<T>`, no cloning happens at all.
 
 > [!TIP]
 > **What if my data isn't `Clone`?**
@@ -96,7 +96,7 @@ where
 ```
 
 > [!TIP]
-> The `setup` → `handle_step(&mut self)` pattern eliminates the need for `shelve`-based state persistence in most cases. Resources initialized in `setup` are available as struct fields in every `handle_step` call.
+> The `setup` -> `handle_step(&mut self)` pattern eliminates the need for `shelve`-based state persistence in most cases. Resources initialized in `setup` are available as struct fields in every `handle_step` call.
 
 ### The `TriggerTransition` Protocol
 Your `handle_step` method returns an instruction to the engine:
@@ -134,4 +134,4 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 
 ---
 
-[**← Previous Step: Under the Hood**](under-the-hood.md) | [**Next Step: Macro Magic Unleashed →**](macro-magic.md)
+[**<- Previous Step: Under the Hood**](under-the-hood.md) | [**Next Step: Macro Magic Unleashed ->**](macro-magic.md)

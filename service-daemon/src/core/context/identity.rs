@@ -66,9 +66,9 @@ impl Default for DaemonResources {
 /// `CURRENT_RESOURCES` (internal, not exposed to users).
 #[derive(Clone)]
 pub struct ServiceIdentity {
-    /// Unique runtime ID — the strong identity for resource lookups.
+    /// Unique runtime ID -- the strong identity for resource lookups.
     pub service_id: ServiceId,
-    /// Human-readable name — the weak identity for logging only.
+    /// Human-readable name -- the weak identity for logging only.
     pub name: String,
     pub cancellation_token: CancellationToken,
     pub reload_token: CancellationToken,

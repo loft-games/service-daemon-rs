@@ -21,7 +21,7 @@ pub async fn heartbeat_service(port: Arc<Port>) -> anyhow::Result<()> {
     info!("Heartbeat service started on port {}", port);
 
     while !service_daemon::is_shutdown() {
-        // `sleep()` is interruptible — it returns `false` if a shutdown
+        // `sleep()` is interruptible -- it returns `false` if a shutdown
         // signal arrives during the sleep, allowing immediate exit.
         if !service_daemon::sleep(std::time::Duration::from_secs(5)).await {
             break;

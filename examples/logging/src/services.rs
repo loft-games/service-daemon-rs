@@ -7,7 +7,7 @@ use tracing::{info, warn};
 /// These appear both on stderr (console) and in the log file (JSON).
 #[service]
 pub async fn log_generator() -> anyhow::Result<()> {
-    info!("[LogGenerator] Service started — file logging is active");
+    info!("[LogGenerator] Service started -- file logging is active");
 
     let mut tick = 0u32;
     while !service_daemon::is_shutdown() {

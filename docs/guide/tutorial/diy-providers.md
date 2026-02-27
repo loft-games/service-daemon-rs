@@ -60,4 +60,4 @@ async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
 
 ---
 
-[**← Previous Step: The Art of Recovery**](art-of-recovery.md) | [**Next Step: Resilience Kung-Fu →**](resilience-kung-fu.md)
+[**<- Previous Step: The Art of Recovery**](art-of-recovery.md) | [**Next Step: Resilience Kung-Fu ->**](resilience-kung-fu.md)

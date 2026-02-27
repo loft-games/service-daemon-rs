@@ -1,4 +1,4 @@
-//! # Logging Example — File-Based Log Persistence
+//! # Logging Example -- File-Based Log Persistence
 //!
 //! This example demonstrates the `file-logging` feature:
 //! - Configuring `FileLogConfig` for directory and file prefix
@@ -33,15 +33,18 @@ async fn main() -> anyhow::Result<()> {
     //    - `file_prefix`: each file is named `{prefix}.YYYY-MM-DD`
     enable_file_logging(FileLogConfig::new("logs", "my-app"));
 
-    // 3. Create and run the daemon
-    let daemon = ServiceDaemon::builder().build();
+    // 3. Create and run the daemon (non-blocking)
+    let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await?;
+
+    // 4. Wait for shutdown signal (Ctrl+C / SIGTERM)
+    daemon.wait().await?;
 
     Ok(())
 }
 
 // =============================================================================
-// Integration Tests — Logging
+// Integration Tests -- Logging
 // =============================================================================
 #[cfg(test)]
 mod tests {
@@ -58,17 +61,18 @@ mod tests {
 
         enable_file_logging(FileLogConfig::new(temp_dir.to_str().unwrap(), "test-app"));
 
-        let daemon = ServiceDaemon::builder()
+        let mut daemon = ServiceDaemon::builder()
             .with_registry(Registry::builder().with_tag("__test_isolation__").build())
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);

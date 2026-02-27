@@ -15,7 +15,7 @@ Triggers are implemented as stateful hosts with a two-phase lifecycle: **setup**
 5. **Map Parameters**: Use the macro utilities in `trigger/mod.rs` to correctly distinguish between event payloads and DI resources.
 
 > [!NOTE]
-> The `#[trigger]` macro calls `TriggerHost::run_as_service`, whose default implementation handles `setup` → `TriggerRunner::run_with_host` automatically. Most custom hosts do **not** need to override `run_as_service`.
+> The `#[trigger]` macro calls `TriggerHost::run_as_service`, whose default implementation handles `setup` -> `TriggerRunner::run_with_host` automatically. Most custom hosts do **not** need to override `run_as_service`.
 
 ### Example: Minimal Custom Host
 
@@ -64,7 +64,7 @@ The `TriggerMiddleware` trait allows pluggable hooks around each trigger dispatc
 3. Middlewares execute in registration order for `before_dispatch` and in **reverse** order for `after_dispatch` (onion model).
 
 > [!NOTE]
-> The current middleware trait is an **observer pattern** — middleware can inspect but not control the dispatch. A future **interceptor pattern** (Tower-like chaining) is documented in `docs/future_interceptor_middleware.md`.
+> The current middleware trait is an **observer pattern** -- middleware can inspect but not control the dispatch. A future **interceptor pattern** (Tower-like chaining) is documented in `docs/future_interceptor_middleware.md`.
 
 ## 4. Modifying Registry Mechanics
 

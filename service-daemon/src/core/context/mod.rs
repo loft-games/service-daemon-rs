@@ -1,4 +1,4 @@
-//! Context module — service lifecycle management infrastructure.
+//! Context module -- service lifecycle management infrastructure.
 //!
 //! This module is split into focused sub-modules:
 //! - `identity`: Core data structures (`DaemonResources`, `ServiceIdentity`, task-locals)
@@ -11,9 +11,9 @@ pub(crate) mod identity;
 #[cfg(feature = "simulation")]
 pub mod simulation;
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Re-exports for backward compatibility
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 // Identity types (used by runner.rs, service_daemon, macros)
 // These re-exports are used by tests and by simulation_tests
@@ -30,9 +30,9 @@ pub use api::{
 #[cfg(feature = "simulation")]
 pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Tests
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,9 +202,9 @@ mod tests {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Simulation Tests (feature-gated: "simulation")
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 #[cfg(test)]
 #[cfg(feature = "simulation")]
 mod simulation_tests {

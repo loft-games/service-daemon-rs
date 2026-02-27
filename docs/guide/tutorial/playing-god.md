@@ -72,28 +72,28 @@ mod tests {
 
         // Start the daemon in the background
         let cancel = daemon.cancel_token();
-        let daemon_task = tokio::spawn(async move { daemon.run().await });
+        let daemon_task = tokio::spawn(async move {
+            let mut daemon = daemon;
+            daemon.run().await.unwrap();
+            daemon.wait().await.unwrap();
+        });
 
         // Verify Phase 1: service initialized and read pre-filled value
         tokio::time::sleep(Duration::from_millis(200)).await;
-        {
-            let resources = handle.resources();
-            let shelf = resources.shelf.get("shelf_reader_service").unwrap();
-            let result = shelf.get("read_result").unwrap();
-            assert_eq!(result.value().downcast_ref::<String>(), Some(&"initial_val".into()));
-        }
+        
+        // Recommended: Use the safe, lock-free get_shelf() API
+        let result: Option<String> = handle.get_shelf("shelf_reader_service", "read_result");
+        assert_eq!(result, Some("initial_val".into()));
 
         // Phase 2: Mid-flight Intervention (The God Hand)
         handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "mid_flight_val".into());
 
         // Verify Phase 2: service observed the dynamic mutation
         tokio::time::sleep(Duration::from_millis(200)).await;
-        {
-            let resources = handle.resources();
-            let shelf = resources.shelf.get("shelf_reader_service").unwrap();
-            let result = shelf.get("dynamic_result").unwrap();
-            assert_eq!(result.value().downcast_ref::<String>(), Some(&"mid_flight_val".into()));
-        }
+        
+        // Safe access across .await points
+        let result: Option<String> = handle.get_shelf("shelf_reader_service", "dynamic_result");
+        assert_eq!(result, Some("mid_flight_val".into()));
 
         cancel.cancel();
         let _ = daemon_task.await;
@@ -104,19 +104,38 @@ mod tests {
 
 ## 3. The "God Hand" (`SimulationHandle`)
 
-The `SimulationHandle` allows you to reach into the running sandbox and change things while the services are active.
+The `SimulationHandle` allows you to reach into the running sandbox and change things while the services are active. It provides a **Safe Read API** specifically designed to prevent deadlocks in tests.
+
+### Safe Accessors (Recommended)
+These methods acquire and release internal locks instantly, making them safe to use even if you `await` other things later in your test.
 
 ```rust
-// Mid-test: Change the status of a service to force a reload
-handle.set_status(&service_id, ServiceStatus::NeedReload).await;
+// Inspect shelf values without holding locks
+let val: Option<String> = handle.get_shelf("svc", "key");
 
-// Mid-test: Inject a new value into the shelf
-handle.set_shelf::<String>("target_svc", "config_override", "MALICIOUS".into()).await;
+// Inspect service status safely
+let status = handle.get_status(svc_id);
+
+// Check if a key exists
+if handle.has_shelf("svc", "key") { ... }
 ```
 
-## 4. Time Travel
+### Mutation API
+```rust
+// Mid-test: Change the status of a service to force a reload
+handle.set_status(service_id, ServiceStatus::NeedReload);
 
-Because the simulator can be used with `run_for_duration`, you can effectively "teleport" through time to see how your services behave over long periods (e.g., testing a log rotation service after 24 hours of uptime) without actually waiting for real hours to pass.
+// Mid-test: Inject a new value into the shelf
+handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
+```
+
+## 4. WARNING: Deadlock Risk
+
+Directly accessing `handle.resources()` and holding a `DashMap::Ref` across an `.await` point will cause a **deadlock**. 
+
+**Why?** If your test holds a read lock on a shelf while you `await` the daemon tasks, and one of those services tries to call `shelve()` (which needs a write lock), the system will hang forever.
+
+**Always use `get_shelf()` and `get_status()`** instead of digging into `resources()`.
 
 ## 5. Summary of Powers
 
@@ -126,4 +145,4 @@ Because the simulator can be used with `run_for_duration`, you can effectively "
 
 ---
 
-[**← Previous Step: Waves of Orchestration**](orchestration-waves.md) | [**Next Step: Under the Hood →**](under-the-hood.md)
+[**-- Previous Step: Waves of Orchestration**](orchestration-waves.md) | [**Next Step: Under the Hood --**](under-the-hood.md)

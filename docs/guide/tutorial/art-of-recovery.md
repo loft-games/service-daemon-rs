@@ -34,7 +34,7 @@ pub async fn robust_service() -> anyhow::Result<()> {
             ServiceStatus::Healthy => {
                 tracing::info!("Working normally.");
                 if !sleep(Duration::from_secs(5)).await {
-                    continue; // Interrupted — re-check state
+                    continue; // Interrupted -- re-check state
                 }
             }
             ServiceStatus::NeedReload => {
@@ -51,6 +51,16 @@ pub async fn robust_service() -> anyhow::Result<()> {
     }
     Ok(())
 }
+```
+
+**Simulated Output:**
+```text
+INFO robust_service: First time starting up!
+INFO robust_service: Working normally.
+INFO robust_service: Working normally.
+...
+INFO robust_service: Performing cleanup before reload...
+INFO robust_service: Final cleanup before shutdown.
 ```
 
 ## 2. The "Shelf": Protecting your data
@@ -109,7 +119,18 @@ pub async fn counter_service() -> anyhow::Result<()> {
 }
 ```
 
-To the user, it looks like a seamless update. To the developer, it’s a clean state migration.
+**Simulated Output:**
+```text
+INFO counter_service: Starting fresh.
+INFO counter_service: Count is: 1
+INFO counter_service: Count is: 2
+... (User updates a dependency) ...
+INFO counter_service: Shelving count (2) before reload.
+INFO counter_service: Restored count: 2
+INFO counter_service: Count is: 3
+```
+
+To the user, it looks like a seamless update. To the developer, it's a clean state migration.
 
 ## 3. Why this matters? (The Provider Update)
 
@@ -119,7 +140,7 @@ Imagine `counter_service` depends on an `ApiKey`. If the `ApiKey` is updated in 
 3.  The framework instantly restarts the service with the **new** `ApiKey`.
 4.  The new instance **unshelves** the count and continues from where it left off.
 
-To the user, it looks like a seamless update. To the developer, it’s a clean state migration.
+To the user, it looks like a seamless update. To the developer, it's a clean state migration.
 
 ## 4. Shared Mutable State & Warm Restarts
 
@@ -174,4 +195,4 @@ This pattern enables **Reactive Architecture**: your services automatically adap
 
 ---
 
-[**← Previous Step: Reactive Triggers**](reactive-triggers.md) | [**Next Step: DIY Providers →**](diy-providers.md)
+[**<- Previous Step: Reactive Triggers**](reactive-triggers.md) | [**Next Step: DIY Providers ->**](diy-providers.md)

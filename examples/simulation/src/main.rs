@@ -1,4 +1,4 @@
-//! # Simulation Example — Interactive Debugging Sandbox
+//! # Simulation Example -- Interactive Debugging Sandbox
 //!
 //! This example demonstrates the `simulation` feature with **real `#[service]`** functions:
 //! - `MockContext::builder()` for creating isolated simulation environments
@@ -12,7 +12,7 @@
 
 use service_daemon::{service, shelve, state, unshelve};
 
-/// This file is intentionally minimal — the real demonstration is in the tests below.
+/// This file is intentionally minimal -- the real demonstration is in the tests below.
 fn main() {
     tracing_subscriber::fmt::init();
     tracing::info!("This example is designed to be run as tests:");
@@ -131,12 +131,9 @@ mod tests {
             .unwrap();
 
         // Verify: the service read the pre-filled value and wrote it to "read_result"
-        let resources = handle.resources();
-        let shelf = resources.shelf.get("shelf_reader_service").unwrap();
-        let result = shelf.get("read_result").unwrap();
         assert_eq!(
-            result.value().downcast_ref::<String>(),
-            Some(&"hello_from_mock".to_string()),
+            handle.get_shelf::<String>("shelf_reader_service", "read_result"),
+            Some("hello_from_mock".to_string()),
             "Real service should have read and persisted the pre-filled shelf value"
         );
     }
@@ -168,7 +165,7 @@ mod tests {
         // Wait for the service to start
         tokio::time::sleep(Duration::from_millis(300)).await;
 
-        // ── God Hand: inject shelf data mid-flight ──
+        // -- God Hand: inject shelf data mid-flight --
         handle.set_shelf::<String>(
             "shelf_reader_service",
             "dynamic_key",
@@ -179,12 +176,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Verify: the service saw the dynamically injected value
-        let resources = handle.resources();
-        let shelf = resources.shelf.get("shelf_reader_service").unwrap();
-        let result = shelf.get("dynamic_result").unwrap();
         assert_eq!(
-            result.value().downcast_ref::<String>(),
-            Some(&"injected_mid_flight".to_string()),
+            handle.get_shelf::<String>("shelf_reader_service", "dynamic_result"),
+            Some("injected_mid_flight".to_string()),
             "Real service should have observed the God Hand's dynamic shelf injection"
         );
 
@@ -192,7 +186,7 @@ mod tests {
         daemon_task.await.ok();
     }
 
-    /// E2E: Two-phase God Hand — pre-fill then mutate, observed by a real service.
+    /// E2E: Two-phase God Hand -- pre-fill then mutate, observed by a real service.
     ///
     /// This test proves the full lifecycle of simulation:
     /// 1. MockContext pre-fills shelf data (Phase 1)
@@ -222,34 +216,24 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Verify Phase 1: service read the pre-filled value
-        {
-            let resources = handle.resources();
-            let shelf = resources.shelf.get("shelf_reader_service").unwrap();
-            let result = shelf.get("read_result").unwrap();
-            assert_eq!(
-                result.value().downcast_ref::<String>(),
-                Some(&"phase1_value".to_string()),
-                "Phase 1: Service should have read the pre-filled 'phase1_value'"
-            );
-        }
+        assert_eq!(
+            handle.get_shelf::<String>("shelf_reader_service", "read_result"),
+            Some("phase1_value".to_string()),
+            "Phase 1: Service should have read the pre-filled 'phase1_value'"
+        );
 
-        // ── Phase 2: God Hand overwrites shelf data mid-flight ──
+        // -- Phase 2: God Hand overwrites shelf data mid-flight --
         handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "phase2_value".into());
 
         // Wait for service to observe Phase 2
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Verify Phase 2: service saw the dynamically injected value
-        {
-            let resources = handle.resources();
-            let shelf = resources.shelf.get("shelf_reader_service").unwrap();
-            let result = shelf.get("dynamic_result").unwrap();
-            assert_eq!(
-                result.value().downcast_ref::<String>(),
-                Some(&"phase2_value".to_string()),
-                "Phase 2: Service should have observed the God Hand's 'phase2_value'"
-            );
-        }
+        assert_eq!(
+            handle.get_shelf::<String>("shelf_reader_service", "dynamic_result"),
+            Some("phase2_value".to_string()),
+            "Phase 2: Service should have observed the God Hand's 'phase2_value'"
+        );
 
         cancel.cancel();
         daemon_task.await.ok();
@@ -265,15 +249,17 @@ mod tests {
 
         let (builder, handle) = MockContext::builder().build();
 
-        let daemon = builder
+        let mut daemon = builder
             .with_registry(Registry::builder().with_tag("sim_status").build())
             .build();
 
-        let _cancel = daemon.cancel_token();
+        let cancel = daemon.cancel_token();
 
-        // Use daemon.run() which correctly wires cancellation tokens
+        // Run the daemon in the background -- tests should not call wait()
+        // inline because it blocks the test thread waiting for OS signals.
         let daemon_task = tokio::spawn(async move {
-            daemon.run().await.ok();
+            daemon.run().await.unwrap();
+            daemon.wait().await.unwrap();
         });
 
         // Wait for the runner to spawn the service and write initial status
@@ -288,24 +274,21 @@ mod tests {
         );
         let svc_id = ids[0];
 
-        // ── God Hand: flip status to Healthy ──
+        // -- God Hand: flip status to Healthy --
         handle.set_status(svc_id, service_daemon::ServiceStatus::Healthy);
 
         // Wait for service to observe the new status via state()
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         // Verify: service persisted the observed status to shelf
-        let resources = handle.resources();
-        let shelf = resources.shelf.get("status_watcher_service").unwrap();
-        let status_str = shelf.get("observed_status").unwrap();
         assert_eq!(
-            status_str.value().downcast_ref::<String>(),
-            Some(&"Healthy".to_string()),
+            handle.get_shelf::<String>("status_watcher_service", "observed_status"),
+            Some("Healthy".to_string()),
             "Real service should have observed the God Hand's status flip to Healthy"
         );
 
-        // Cleanup: abort directly since graceful shutdown is not under test here
-        daemon_task.abort();
+        // Graceful shutdown
+        cancel.cancel();
         let _ = daemon_task.await;
     }
 }

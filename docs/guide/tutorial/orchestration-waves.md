@@ -55,4 +55,4 @@ When you stop the system (Ctrl+C), the process reverses. We want to stop the "ou
 
 ---
 
-[**← Previous Step: Resilience Kung-Fu**](resilience-kung-fu.md) | [**Next Step: Playing God: Simulator →**](playing-god.md)
+[**<- Previous Step: Resilience Kung-Fu**](resilience-kung-fu.md) | [**Next Step: Playing God: Simulator ->**](playing-god.md)

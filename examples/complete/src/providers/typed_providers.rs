@@ -31,7 +31,7 @@ pub struct AppConfig {
     pub db_url: Arc<DbUrl>,
 }
 
-/// Global statistics — demonstrates automatic RwLock promotion.
+/// Global statistics -- demonstrates automatic RwLock promotion.
 ///
 /// When a service requests `Arc<RwLock<GlobalStats>>`, the daemon
 /// automatically promotes this value into managed state. Multiple

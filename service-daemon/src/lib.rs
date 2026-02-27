@@ -15,7 +15,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     // Infallible build — always succeeds
+//!     // Infallible build -- always succeeds
 //!     ServiceDaemon::builder().build().run().await
 //! }
 //! ```

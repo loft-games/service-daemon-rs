@@ -1,6 +1,6 @@
 # Hello, Heartbeat!
 
-Every great journey starts with a single beat. In this first step, we’ll build a simple "Heartbeat" service that prints a message to the console every few seconds. 
+Every great journey starts with a single beat. In this first step, we'll build a simple "Heartbeat" service that prints a message to the console every few seconds. 
 
 This simple example introduces the three pillars of the framework: **Providers**, **Services**, and the **Daemon**.
 
@@ -38,7 +38,7 @@ pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Resu
     while !is_shutdown() {
         tracing::info!("Lub-dub...");
         
-        // Use the framework's sleep helper—it's interruptible!
+        // Use the framework's sleep helper--it's interruptible!
         sleep(Duration::from_secs(interval.0)).await;
     }
     
@@ -48,7 +48,7 @@ pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Resu
 ```
 
 ### Pro Tip: Why `tracing`?
-You’ll notice we use `tracing::info!` instead of `println!`. In `service-daemon-rs`, logs are handled by a dedicated, non-blocking **LogService**. This ensures that printing to the console never slows down your service's real work.
+You'll notice we use `tracing::info!` instead of `println!`. In `service-daemon-rs`, logs are handled by a dedicated, non-blocking **LogService**. This ensures that printing to the console never slows down your service's real work.
 
 ### Why `is_shutdown()` and `sleep()`?
 *   `is_shutdown()`: Returns `true` when the user presses Ctrl+C or the system is stopping. This is a non-blocking check, perfect for loop conditions.
@@ -79,4 +79,4 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-[**Next Step: Reactive Triggers →**](reactive-triggers.md)
+[**Next Step: Reactive Triggers ->**](reactive-triggers.md)

@@ -1,4 +1,4 @@
-//! # Complete Example — `state()` Lifecycle Management Pattern
+//! # Complete Example -- `state()` Lifecycle Management Pattern
 //!
 //! This example demonstrates the **advanced lifecycle management** approach:
 //! - Using `loop { match state() { ... } }` for explicit state handling
@@ -40,16 +40,19 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     // 3. Create daemon with all auto-registered services
-    let daemon = ServiceDaemon::builder().with_restart_policy(policy).build();
+    let mut daemon = ServiceDaemon::builder().with_restart_policy(policy).build();
 
-    // 4. Run daemon (blocks until Ctrl+C or SIGTERM)
+    // 4. Start daemon (non-blocking)
     daemon.run().await?;
+
+    // 5. Wait for shutdown signal (Ctrl+C / SIGTERM)
+    daemon.wait().await?;
 
     Ok(())
 }
 
 // =============================================================================
-// Integration Tests — Complete Lifecycle
+// Integration Tests -- Complete Lifecycle
 // =============================================================================
 #[cfg(test)]
 mod tests {
@@ -88,7 +91,7 @@ mod tests {
             .build()
     }
 
-    /// Verifies that services start in descending priority order (100 → 50 → 0).
+    /// Verifies that services start in descending priority order (100 -> 50 -> 0).
     #[tokio::test]
     async fn test_ordered_startup() -> anyhow::Result<()> {
         use std::sync::Mutex as StdMutex;
@@ -133,7 +136,7 @@ mod tests {
             })
         });
 
-        let daemon = build_daemon_with_services(
+        let mut daemon = build_daemon_with_services(
             RestartPolicy::for_testing(),
             vec![
                 (ServiceId::new(0), "priority_100", fn1, 100),
@@ -143,11 +146,12 @@ mod tests {
         );
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         let final_seq = start_sequence.lock().unwrap().clone();
         assert_eq!(
@@ -159,7 +163,7 @@ mod tests {
         Ok(())
     }
 
-    /// Verifies that services shut down in ascending priority order (0 → 50 → 100).
+    /// Verifies that services shut down in ascending priority order (0 -> 50 -> 100).
     #[tokio::test]
     async fn test_ordered_shutdown() -> anyhow::Result<()> {
         use std::sync::Mutex as StdMutex;
@@ -206,7 +210,7 @@ mod tests {
             })
         });
 
-        let daemon = build_daemon_with_services(
+        let mut daemon = build_daemon_with_services(
             RestartPolicy::for_testing(),
             vec![
                 (ServiceId::new(0), "priority_0", fn1, 0),
@@ -216,11 +220,12 @@ mod tests {
         );
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         let final_seq = exit_sequence.lock().unwrap().clone();
         assert_eq!(
@@ -267,17 +272,18 @@ mod tests {
             })
         });
 
-        let daemon = build_daemon_with_services(
+        let mut daemon = build_daemon_with_services(
             RestartPolicy::for_testing(),
             vec![(ServiceId::new(0), "crash_test_service", crash_fn, 50)],
         );
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         let value = recovered_value.lock().unwrap().take();
         assert_eq!(value, Some(42), "Shelf data did not survive the crash!");
@@ -323,7 +329,7 @@ mod tests {
             })
         });
 
-        let daemon = build_daemon_with_services(
+        let mut daemon = build_daemon_with_services(
             RestartPolicy::for_testing(),
             vec![
                 (ServiceId::new(0), "high_prio_100", fn1, 100),
@@ -332,11 +338,12 @@ mod tests {
         );
 
         let cancel = daemon.cancel_token();
-        let handle = tokio::spawn(async move { daemon.run().await.unwrap() });
+
+        daemon.run().await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         cancel.cancel();
-        let _ = handle.await;
+        daemon.wait().await.unwrap();
 
         let log = start_log.lock().unwrap();
         let high_done = log.iter().find(|(s, _)| *s == "high_done");
@@ -385,7 +392,7 @@ mod tests {
 
         assert!(
             elapsed < std::time::Duration::from_millis(50),
-            "resolve() blocked for {:?} — expected non-blocking",
+            "resolve() blocked for {:?} -- expected non-blocking",
             elapsed
         );
         // Snapshot should see the DEFAULT value, not the locked value

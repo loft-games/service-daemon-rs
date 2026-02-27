@@ -19,12 +19,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 // ---------------------------------------------------------------------------
-// RestartPolicy — stateless backoff configuration
+// RestartPolicy -- stateless backoff configuration
 // ---------------------------------------------------------------------------
 
 /// Configuration for retry / restart behavior with exponential backoff.
 ///
-/// This struct is **stateless** — it only describes *how* to compute delays.
+/// This struct is **stateless** -- it only describes *how* to compute delays.
 /// Pair it with [`BackoffController`] to get a stateful retry loop.
 #[derive(Debug, Clone, Copy)]
 pub struct RestartPolicy {
@@ -37,7 +37,7 @@ pub struct RestartPolicy {
     /// Delay resets to `initial_delay` after this duration of successful
     /// running (default: 60 seconds).
     pub reset_after: Duration,
-    /// Jitter factor (0.0–1.0) — randomises delay to prevent thundering
+    /// Jitter factor (0.0-1.0) -- randomises delay to prevent thundering
     /// herd (default: 0.1).
     pub jitter_factor: f64,
     /// Timeout for waiting for services to become healthy during wave
@@ -140,7 +140,7 @@ impl RestartPolicyBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// BackoffController — stateful retry engine
+// BackoffController -- stateful retry engine
 // ---------------------------------------------------------------------------
 
 /// A stateful controller that manages exponential-backoff retry loops.
@@ -261,7 +261,7 @@ impl BackoffController {
     }
 
     /// Convenience method: sleep for the current delay, advance the
-    /// backoff, and check cancellation — all in one call.
+    /// backoff, and check cancellation -- all in one call.
     ///
     /// Returns `true` if retry should proceed, `false` if cancelled.
     pub async fn backoff_or_cancel(&mut self, cancel_token: &CancellationToken) -> bool {

@@ -269,7 +269,7 @@ pub async fn sleep(duration: Duration) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Event Publishing API — "Throwing stones into the water"
+// Event Publishing API -- "Throwing stones into the water"
 // ---------------------------------------------------------------------------
 
 /// Generates a globally unique message ID for event tracing.
@@ -289,7 +289,7 @@ pub fn generate_message_id() -> String {
 
 /// Publishes an event from the current service context with full traceability.
 ///
-/// This is the canonical way for a service to "throw a stone" — it wraps
+/// This is the canonical way for a service to "throw a stone" -- it wraps
 /// a provider call (e.g. `push()` or `notify()`) with structured tracing
 /// metadata including the source `ServiceId` and a unique `message_id`.
 ///
