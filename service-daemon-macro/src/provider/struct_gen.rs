@@ -7,9 +7,7 @@ use quote::{format_ident, quote};
 use syn::{ItemStruct, Type};
 
 use super::parser::{ProviderAttrs, parse_provider_attrs};
-use super::templates::{
-    generate_broadcast_queue_template, generate_lb_queue_template, generate_notify_template,
-};
+use super::templates::{generate_broadcast_queue_template, generate_notify_template};
 
 /// Attempts to generate a template-based provider if the default value matches a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
@@ -29,18 +27,6 @@ fn try_generate_template(
             let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
             let capacity = provider_attrs.capacity.unwrap_or(100);
             Some(generate_broadcast_queue_template(
-                struct_name,
-                vis,
-                attrs,
-                item_type_str,
-                capacity,
-            ))
-        }
-        // Load-balancing queue templates (single consumer)
-        "LoadBalancingQueue" | "LBQueue" => {
-            let item_type_str = provider_attrs.item_type.as_deref().unwrap_or("String");
-            let capacity = provider_attrs.capacity.unwrap_or(100);
-            Some(generate_lb_queue_template(
                 struct_name,
                 vis,
                 attrs,

@@ -60,7 +60,7 @@ Magic providers (like `Notify` or `Queue`) provide specialized behavior automati
 The `TriggerInterceptor<P>` trait provides a composable, onion-model middleware layer for trigger dispatch. Each interceptor wraps the next layer and has full control over the dispatch lifecycle (unlike the previous observer-pattern `TriggerMiddleware`).
 
 1. Implement `TriggerInterceptor<P>` with an `intercept(ctx, next)` method.
-2. Register your interceptor via `TriggerRunner::with_interceptor()`.
+2. Register your interceptor via `TriggerRunner::with_interceptor()` (pass as `Arc<dyn TriggerInterceptor<P>>`).
 3. Interceptors execute in registration order (first registered = outermost layer).
 4. Each interceptor decides **if, when, and how many times** to call `next`.
 

@@ -22,7 +22,6 @@ Policies communicate with the engine using a transition enum:
 | :--- | :--- | :--- |
 | `Cron` | - | Time-based scheduling via `tokio-cron-scheduler` |
 | `Queue` | `BQueue`, `BroadcastQueue` | Receives every message sent to the target queue |
-| `LBQueue` | `LoadBalancingQueue` | Distributes messages to one available worker at a time |
 | `Watch` | `State` | Zero-lock reactive handlers for shared state changes |
 | `Notify` | `Event`, `Signal` | Simple signal-based triggers |
 
@@ -38,11 +37,9 @@ async fn hourly_cleanup() -> anyhow::Result<()> {
 ```
 
 ### Queue Triggers
-- **Broadcast (`Queue`)**: All handlers receive every message.
-- **Load Balancing (`LBQueue`)**: Messages are distributed to one available worker.
 
 ```rust
-#[trigger(LBQueue(WorkerQueue))]
+#[trigger(Queue(WorkerQueue))]
 async fn worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
@@ -126,7 +123,39 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 
 ---
 
-## 6. More Information
+## 6. Elastic Scaling (Async Dispatch)
+
+Trigger handlers are dispatched **asynchronously** -- the event loop does not block on handler completion. This is achieved through a `Semaphore`-gated `tokio::spawn` mechanism:
+
+1. **Semaphore Backpressure**: Each dispatch acquires a permit from a concurrency semaphore (initialized to `initial_concurrency` from `RestartPolicy`).
+2. **Async Spawn**: The interceptor chain + handler is spawned as an independent tokio task.
+3. **Scale Monitor**: A background task monitors semaphore pressure and dynamically adds permits when utilization exceeds the `scale_threshold` ratio.
+
+### Policy Configuration
+
+All elastic scaling parameters live in `RestartPolicy`:
+
+| Parameter | Default | Description |
+|:---|:---|:---|
+| `initial_concurrency` | 1 | Starting dispatch slots |
+| `max_concurrency` | 1024 | Hard upper limit |
+| `scale_factor` | 2 | Multiplier on each scale-up |
+| `scale_threshold` | 5 | Pressure ratio to trigger scaling |
+| `scale_cooldown` | 30s | Idle time before scaling down |
+
+### Scaling Algorithm
+
+```text
+pressure_limit = current_limit × threshold / (threshold + 1)
+if in_flight >= pressure_limit → scale up by scale_factor
+if idle > scale_cooldown       → shrink to initial_concurrency
+```
+
+Users do not need to configure anything -- the defaults provide sensible auto-scaling for most workloads.
+
+---
+
+## 7. More Information
 
 - [Provider Best Practices](provider-best-practices.md): Deep dive into defining custom providers.
 - [Concept Clarification (FAQ)](pitfalls-faq.md#2-lifecycle--paradigms): Understanding the difference between managed triggers and standard services.

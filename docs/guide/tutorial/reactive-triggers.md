@@ -25,7 +25,7 @@ async fn job_worker(job: Job) -> anyhow::Result<()> {
 ```
 
 > [!TIP]
-> You can have multiple workers for the same queue. Use `LBQueue` (Load Balancing) to distribute jobs to only one worker at a time, or `Queue` (Broadcast) to send the same job to everyone.
+> You can have multiple workers for the same queue. All handlers subscribed to a `Queue` will receive every message (broadcast/fanout).
 
 ## 2. Triggering the Trigger (Chain Reactions)
 
@@ -66,7 +66,7 @@ By default, the framework treats the first argument that is *not* an `Arc<T>` as
 However, if your payload is also wrapped in an `Arc` (common for zero-copy job processing) or if you want to be explicit, use the **`#[payload]`** attribute:
 
 ```rust
-#[trigger(LBQueue(JobQueue))]
+#[trigger(Queue(JobQueue))]
 async fn complex_worker(
     #[payload] job: Arc<ComplexJob>, // Explicitly marked as payload
     db: Arc<Database>               // This is a DI resource
@@ -82,6 +82,7 @@ async fn complex_worker(
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
 4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
+5.  **Elastic Scaling**: The framework dispatches handlers asynchronously and automatically scales concurrency based on pressure — zero configuration needed.
 
 > [!TIP]
 > **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../../triggers.md).

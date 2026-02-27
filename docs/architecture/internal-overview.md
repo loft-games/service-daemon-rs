@@ -63,7 +63,7 @@ The framework is organized into specialized submodules to ensure maintainability
 ### `service-daemon-macro`
 - **`trigger/`**: Handles attribute parsing and code generation for event-driven logic (Cron, Queues, Watchers).
 - **`service/`**: Core logic for wrapping functions as managed tasks and registering them with `linkme`.
-- **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `LBQueue`.
+- **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `Queue`.
 
 ### `service-daemon`
 - **`core/service_daemon/`**: The core orchestrator.
@@ -71,7 +71,7 @@ The framework is organized into specialized submodules to ensure maintainability
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
 - **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
 - **`core/triggers.rs`**: Built-in trigger host implementations. Each host implements the `TriggerHost` trait with `setup` (one-time initialization) and `handle_step` (per-event policy).
-- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerInterceptor` pipeline. Uses an onion-model interceptor chain where each layer (tracing, retry, user-defined) has full control over the dispatch lifecycle. Encapsulates the `select!`/shutdown logic, context construction, and chain invocation.
+- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerInterceptor` pipeline. Uses an onion-model interceptor chain (stored as `Arc<dyn>` for safe cross-task sharing) where each layer (tracing, retry, user-defined) has full control over the dispatch lifecycle. Dispatch is **asynchronous** -- each event is spawned into a `tokio::spawn` task gated by a `Semaphore`. A background `scale_monitor` dynamically adjusts the concurrency limit based on pressure ratio.
 - **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
 - **`core/managed_state.rs`**: The reactive state engine with change tracking.
 

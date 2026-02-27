@@ -144,7 +144,6 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// # Template Types
 /// - `Cron`: Uses cron expressions. Target should be a provider for `String` (the cron expression).
 /// - `Queue`/`BQueue`: Broadcast queue (fanout). Target should be a `#[provider(default = Queue)]`.
-/// - `LBQueue`: Load-balancing queue. Target should be a `#[provider(default = LBQueue)]`.
 /// - `Event`/`Notify`/`Custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
 /// - `Watch`/`State`: State change trigger. Fires when the target provider is modified.
 ///

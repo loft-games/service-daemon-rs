@@ -2,7 +2,7 @@
 //!
 //! This module is split into submodules for better organization:
 //! - `parser`: Attribute parsing and configuration.
-//! - `templates`: Template generators for Notify, Queue, LBQueue.
+//! - `templates`: Template generators for Notify, Queue.
 //! - `struct_gen`: Struct provider generation with field injection.
 
 mod parser;

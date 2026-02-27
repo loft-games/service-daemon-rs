@@ -178,7 +178,7 @@ pub type TriggerHandler<P> = Arc<
 pub enum TriggerTransition<P> {
     /// Deliver the payload and continue the event loop.
     ///
-    /// Used by streaming triggers (Signal, Queue, LBQueue) that process
+    /// Used by streaming triggers (Signal, Queue) that process
     /// a continuous flow of events within a single service lifetime.
     Next(P),
 
@@ -222,7 +222,6 @@ pub enum TriggerTransition<P> {
 /// |-----------------|-------------------------|---------|
 /// | `SignalHost`    | `tokio::sync::Notify`   | `()`    |
 /// | `TopicHost`     | `broadcast::Receiver`   | `T`     |
-/// | `LBTopicHost`   | `mpsc::Receiver` (Mutex)| `T`     |
 /// | `CronHost`      | `tokio-cron-scheduler`  | `()`    |
 /// | `WatchHost`     | State change detection  | `()`    |
 ///
@@ -303,7 +302,12 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
 
             let mut host = Self::setup(target.clone()).await?;
 
-            let runner = crate::core::trigger_runner::TriggerRunner::new(name, service_id, handler);
+            let runner = crate::core::trigger_runner::TriggerRunner::new(
+                name,
+                service_id,
+                handler,
+                crate::models::policy::RestartPolicy::default(),
+            );
 
             runner.run_with_host::<T, Self>(&mut host, target).await
         })
@@ -353,10 +357,6 @@ pub mod TT {
     pub use crate::core::triggers::TopicHost as BQueue;
     pub use crate::core::triggers::TopicHost as BroadcastQueue;
     pub use crate::core::triggers::TopicHost as Queue;
-
-    // Load-Balancing Queue (payload: T from the queue's item_type)
-    pub use crate::core::triggers::LBTopicHost as LBQueue;
-    pub use crate::core::triggers::LBTopicHost as LoadBalancingQueue;
 
     // Cron-based scheduled trigger (payload: ())
     #[cfg(feature = "cron")]

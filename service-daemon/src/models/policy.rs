@@ -22,9 +22,11 @@ use tracing::info;
 // RestartPolicy -- stateless backoff configuration
 // ---------------------------------------------------------------------------
 
-/// Configuration for retry / restart behavior with exponential backoff.
+/// Configuration for retry / restart behavior with exponential backoff,
+/// and elastic scaling parameters for trigger concurrency.
 ///
-/// This struct is **stateless** -- it only describes *how* to compute delays.
+/// This struct is **stateless** -- it only describes *how* to compute delays
+/// and *how* to scale trigger processing concurrency.
 /// Pair it with [`BackoffController`] to get a stateful retry loop.
 #[derive(Debug, Clone, Copy)]
 pub struct RestartPolicy {
@@ -46,6 +48,38 @@ pub struct RestartPolicy {
     /// Timeout for waiting for services to stop during wave shutdown
     /// (default: 30 seconds).
     pub wave_stop_timeout: Duration,
+
+    // -- Elastic scaling parameters for trigger concurrency --
+    /// Number of concurrent handler instances at cold-start (default: 1).
+    ///
+    /// The trigger runner starts with this many dispatch slots and scales
+    /// up only when the pressure ratio exceeds `scale_threshold`.
+    pub initial_concurrency: usize,
+    /// Hard upper limit on concurrent handler instances (default: 1024).
+    ///
+    /// The auto-scaler will never exceed this value, even under sustained
+    /// high pressure. This acts as a safety guard against unbounded
+    /// resource consumption.
+    pub max_concurrency: usize,
+    /// Multiplier applied to the current concurrency limit on each
+    /// scale-up event (default: 2).
+    ///
+    /// For example, with `scale_factor = 2`, limits grow as:
+    /// 1 → 2 → 4 → 8 → ... → `max_concurrency`.
+    pub scale_factor: usize,
+    /// Pressure ratio threshold that triggers a scale-up (default: 5).
+    ///
+    /// Pressure ratio is defined as `queue_depth / current_instances`.
+    /// A threshold of 5 means: "if the backlog would take 5 processing
+    /// cycles to drain at the current rate, scale up". Backlogs that
+    /// can be consumed within fewer cycles are not worth scaling for.
+    pub scale_threshold: usize,
+    /// Duration of queue idleness before the runner starts reclaiming
+    /// excess handler instances (default: 30 seconds).
+    ///
+    /// After the queue has been empty for this long, the runner
+    /// shrinks concurrency back towards `initial_concurrency`.
+    pub scale_cooldown: Duration,
 }
 
 impl Default for RestartPolicy {
@@ -58,6 +92,12 @@ impl Default for RestartPolicy {
             jitter_factor: 0.1, // 10% jitter by default
             wave_spawn_timeout: Duration::from_secs(5),
             wave_stop_timeout: Duration::from_secs(30),
+            // Elastic scaling defaults
+            initial_concurrency: 1,
+            max_concurrency: 1024,
+            scale_factor: 2,
+            scale_threshold: 5,
+            scale_cooldown: Duration::from_secs(30),
         }
     }
 }
@@ -78,6 +118,12 @@ impl RestartPolicy {
             jitter_factor: 0.0, // No jitter for predictable tests
             wave_spawn_timeout: Duration::from_millis(500),
             wave_stop_timeout: Duration::from_secs(2),
+            // Smaller limits for faster test cycles
+            initial_concurrency: 1,
+            max_concurrency: 4,
+            scale_factor: 2,
+            scale_threshold: 2,
+            scale_cooldown: Duration::from_secs(2),
         }
     }
 
@@ -130,6 +176,42 @@ impl RestartPolicyBuilder {
 
     pub fn wave_stop_timeout(mut self, timeout: Duration) -> Self {
         self.policy.wave_stop_timeout = timeout;
+        self
+    }
+
+    // -- Elastic scaling builder methods --
+
+    /// Set the initial number of concurrent handler instances.
+    pub fn initial_concurrency(mut self, count: usize) -> Self {
+        self.policy.initial_concurrency = count.max(1);
+        self
+    }
+
+    /// Set the hard upper limit on concurrent handler instances.
+    pub fn max_concurrency(mut self, count: usize) -> Self {
+        self.policy.max_concurrency = count.max(1);
+        self
+    }
+
+    /// Set the scale-up multiplier (e.g. 2 means double on each scale event).
+    pub fn scale_factor(mut self, factor: usize) -> Self {
+        self.policy.scale_factor = factor.max(2);
+        self
+    }
+
+    /// Set the pressure ratio threshold that triggers scale-up.
+    ///
+    /// Pressure ratio = `queue_depth / current_instances`.
+    /// A value of 5 means: "scale up when the backlog would take 5+
+    /// processing cycles to drain".
+    pub fn scale_threshold(mut self, threshold: usize) -> Self {
+        self.policy.scale_threshold = threshold.max(1);
+        self
+    }
+
+    /// Set the idle duration before the runner starts shrinking concurrency.
+    pub fn scale_cooldown(mut self, duration: Duration) -> Self {
+        self.policy.scale_cooldown = duration;
         self
     }
 
@@ -282,6 +364,41 @@ mod tests {
         let policy = RestartPolicy::default();
         assert_eq!(policy.initial_delay, Duration::from_secs(1));
         assert_eq!(policy.max_delay, Duration::from_secs(300));
+        // Elastic scaling defaults
+        assert_eq!(policy.initial_concurrency, 1);
+        assert_eq!(policy.max_concurrency, 1024);
+        assert_eq!(policy.scale_factor, 2);
+        assert_eq!(policy.scale_threshold, 5);
+        assert_eq!(policy.scale_cooldown, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_restart_policy_builder_scaling() {
+        let policy = RestartPolicy::builder()
+            .initial_concurrency(4)
+            .max_concurrency(2048)
+            .scale_factor(3)
+            .scale_threshold(10)
+            .scale_cooldown(Duration::from_secs(60))
+            .build();
+        assert_eq!(policy.initial_concurrency, 4);
+        assert_eq!(policy.max_concurrency, 2048);
+        assert_eq!(policy.scale_factor, 3);
+        assert_eq!(policy.scale_threshold, 10);
+        assert_eq!(policy.scale_cooldown, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_restart_policy_builder_scaling_clamping() {
+        // initial_concurrency minimum is 1
+        let policy = RestartPolicy::builder().initial_concurrency(0).build();
+        assert_eq!(policy.initial_concurrency, 1);
+        // scale_factor minimum is 2
+        let policy = RestartPolicy::builder().scale_factor(1).build();
+        assert_eq!(policy.scale_factor, 2);
+        // scale_threshold minimum is 1
+        let policy = RestartPolicy::builder().scale_threshold(0).build();
+        assert_eq!(policy.scale_threshold, 1);
     }
 
     #[test]

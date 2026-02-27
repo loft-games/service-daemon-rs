@@ -40,14 +40,13 @@ pub async fn broadcast_handler_b(payload: String) -> anyhow::Result<()> {
 }
 
 // =============================================================================
-// Load-Balancing Queue Trigger
+// Worker Queue Trigger
 // =============================================================================
 
-/// Receives messages from `WorkerQueue` in a round-robin fashion.
-/// Only ONE handler gets each message.
-#[trigger(LBQueue(WorkerQueue))]
+/// Receives messages from `WorkerQueue`.
+#[trigger(Queue(WorkerQueue))]
 pub async fn lb_worker_handler(payload: String) -> anyhow::Result<()> {
-    tracing::info!(">>> [LBQueue] received: '{}'", payload);
+    tracing::info!(">>> [Queue Worker] received: '{}'", payload);
     Ok(())
 }
 
@@ -56,11 +55,11 @@ pub async fn lb_worker_handler(payload: String) -> anyhow::Result<()> {
 // =============================================================================
 
 /// Receives a `ComplexJob` wrapped in `Arc` -- zero-copy payload delivery.
-#[trigger(LBQueue(crate::providers::JobQueue))]
+#[trigger(Queue(crate::providers::JobQueue))]
 pub async fn complex_job_handler(
     #[payload] job: Arc<crate::providers::ComplexJob>,
 ) -> anyhow::Result<()> {
-    tracing::info!(">>> [LBQueue Complex] id={}, data='{}'", job.id, job.data);
+    tracing::info!(">>> [Queue Complex] id={}, data='{}'", job.id, job.data);
     Ok(())
 }
 

@@ -21,7 +21,7 @@ and how many times** to call `next`, enabling patterns like retry, tracing, rate
 | Interceptor | Position | Responsibility |
 |:---|:---|:---|
 | `TracingInterceptor` | Outermost | Creates `info_span!("trigger", name, instance_id, message_id)` |
-| `RetryInterceptor` | Second | Exponential-backoff retry on handler failure |
+| `RetryInterceptor` | Second | Exponential-backoff retry using the runner's `RestartPolicy` |
 
 Both are automatically registered by `TriggerRunner::new()`.
 
@@ -153,10 +153,11 @@ next(ctx).instrument(span).await
 The type parameter `P` is bound at the **trait level** (`TriggerInterceptor<P>`), not at the method level.
 This makes the trait object-safe within a specific `TriggerRunner<P>`:
 
-- ✅ `Vec<Box<dyn TriggerInterceptor<P>>>` — dynamic composition
-- ✅ Full compile-time payload type safety — no `Any` or `downcast`
-- ✅ Generic interceptors via `impl<P> TriggerInterceptor<P> for T`
-- ✅ Payload-specific interceptors via `impl TriggerInterceptor<MyPayload> for T`
+- `Vec<Arc<dyn TriggerInterceptor<P>>>` — dynamic composition with safe cross-task sharing
+- Full compile-time payload type safety — no `Any` or `downcast`
+- Generic interceptors via `impl<P> TriggerInterceptor<P> for T`
+- Payload-specific interceptors via `impl TriggerInterceptor<MyPayload> for T`
+- Interceptors are `Arc`-wrapped, enabling safe `tokio::spawn` for async dispatch
 
 ---
 

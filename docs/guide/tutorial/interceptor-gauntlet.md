@@ -136,7 +136,7 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 ---
 
 > [!NOTE]
-> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Box<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically.
+> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically — and safe cross-task sharing for async dispatch.
 
 ---
 

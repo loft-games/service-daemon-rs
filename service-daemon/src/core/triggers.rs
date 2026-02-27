@@ -128,55 +128,6 @@ where
 }
 
 // ===========================================================================
-// LBTopicHost -- Load-Balancing Queue Trigger Host
-// ===========================================================================
-
-/// Load-balancing queue trigger host.
-///
-/// Consumes messages from a shared `tokio::sync::mpsc` channel behind a
-/// `Mutex`. Only one subscriber processes each message (competing consumers).
-///
-/// # Aliases
-/// `TT::LBQueue`, `TT::LoadBalancingQueue`.
-pub struct LBTopicHost;
-
-/// Trait for targets that expose a load-balanced receiver.
-///
-/// This is auto-implemented by LBQueue providers generated with the
-/// `#[provider(default = LBQueue)]` macro attribute.
-pub trait LBQueueTarget {
-    /// The payload type carried by the internal mpsc channel.
-    type Item: Send + Sync + 'static;
-
-    /// Returns a reference to the shared receiver mutex.
-    fn receiver(&self) -> &Arc<Mutex<tokio::sync::mpsc::Receiver<Self::Item>>>;
-}
-
-impl<T> TriggerHost<T> for LBTopicHost
-where
-    T: Provided + LBQueueTarget + Send + Sync + 'static,
-{
-    type Payload = T::Item;
-
-    fn setup(_target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
-        Box::pin(async { Ok(LBTopicHost) })
-    }
-
-    fn handle_step<'a>(
-        &'a mut self,
-        target: &'a Arc<T>,
-    ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
-        Box::pin(async move {
-            let mut rx = target.receiver().lock().await;
-            match rx.recv().await {
-                Some(value) => TriggerTransition::Next(value),
-                None => TriggerTransition::Stop,
-            }
-        })
-    }
-}
-
-// ===========================================================================
 // CronHost -- Cron Trigger Host
 // ===========================================================================
 

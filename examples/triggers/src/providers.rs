@@ -6,7 +6,6 @@
 //!
 //! ## Queue Types
 //! - `BroadcastQueue` (aliases: `Queue`, `BQueue`): All handlers receive every message (fanout).
-//! - `LoadBalancingQueue` (alias: `LBQueue`): Messages are distributed to one handler at a time.
 
 use service_daemon::provider;
 
@@ -39,11 +38,11 @@ pub struct CleanupSchedule(pub String);
 pub struct TaskQueue;
 
 // =============================================================================
-// Load-Balancing Queue Provider
+// Worker Queue Provider
 // =============================================================================
 
-/// A load-balancing queue: each message is delivered to exactly one handler.
-#[provider(default = LBQueue, item_type = "String")]
+/// A worker queue: messages are broadcast to all subscribed handlers.
+#[provider(default = Queue, item_type = "String")]
 pub struct WorkerQueue;
 
 // =============================================================================
@@ -57,8 +56,8 @@ pub struct ComplexJob {
     pub data: String,
 }
 
-/// A load-balancing queue that carries `ComplexJob` payloads.
-#[provider(default = LBQueue, item_type = "ComplexJob")]
+/// A broadcast queue that carries `ComplexJob` payloads.
+#[provider(default = Queue, item_type = "ComplexJob")]
 pub struct JobQueue;
 
 // =============================================================================

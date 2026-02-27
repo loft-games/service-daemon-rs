@@ -5,8 +5,7 @@
 //!
 //! ## Trigger types demonstrated
 //! - **Cron**: Fires on a cron schedule via `tokio-cron-scheduler`
-//! - **Broadcast Queue (BQueue)**: All subscribed handlers receive every message
-//! - **Load-Balancing Queue (LBQueue)**: Messages are distributed to one handler at a time
+//! - **Broadcast Queue (Queue)**: All subscribed handlers receive every message
 //! - **Signal (Event/Notify)**: Fire-and-forget notification
 //! - **Watch**: Fires when a shared state value changes
 //!
@@ -22,11 +21,11 @@
 //!  +----------------+      |          +-----------------+
 //!                          |          +-----------------+
 //!                          +--push()-->|  WorkerQueue    |--> lb_worker_handler
-//!                          |          |  (LBQueue)      |
+//!                          |          |  (Queue)        |
 //!                          |          +-----------------+
 //!                          |          +-----------------+
 //!                          +--push()-->|  JobQueue       |--> complex_job_handler
-//!                          |          |  (LBQueue)      |
+//!                          |          |  (Queue)        |
 //!                          |          +-----------------+
 //!                          |          +-----------------+
 //!                          +--------> |  UserNotifier   |--> on_user_notified
@@ -36,11 +35,11 @@
 //!
 //! **Run**: `RUST_LOG=info cargo run -p example-triggers`
 
-mod providers;
-mod services;
-mod trigger_handlers;
-
 use service_daemon::ServiceDaemon;
+
+// Import library modules so that `#[service]`, `#[trigger]`, and `#[provider]`
+// registrations are linked into this binary.
+use example_triggers as _;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -57,91 +56,4 @@ async fn main() -> anyhow::Result<()> {
     daemon.wait().await?;
 
     Ok(())
-}
-
-// =============================================================================
-// Integration Tests -- Triggers
-// =============================================================================
-#[cfg(test)]
-mod tests {
-    use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
-
-    /// Helper: Create an isolated registry that filters out all auto-registered services.
-    fn isolated_registry() -> Registry {
-        Registry::builder().with_tag("__test_isolation__").build()
-    }
-
-    /// Verifies that Cron, Queue, and Signal triggers are all registered
-    /// and the daemon can start/stop with them present.
-    #[tokio::test]
-    async fn test_trigger_registration() -> anyhow::Result<()> {
-        let mut daemon = ServiceDaemon::builder()
-            .with_registry(isolated_registry())
-            .with_restart_policy(RestartPolicy::for_testing())
-            .build();
-        let cancel = daemon.cancel_token();
-
-        daemon.run().await;
-
-        // Allow time for trigger initialization
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        cancel.cancel();
-        daemon.wait().await.unwrap();
-
-        Ok(())
-    }
-
-    /// Verifies that Signal triggers fire when notified.
-    #[tokio::test]
-    async fn test_signal_trigger_fires() -> anyhow::Result<()> {
-        let mut daemon = ServiceDaemon::builder()
-            .with_registry(isolated_registry())
-            .with_restart_policy(RestartPolicy::for_testing())
-            .build();
-        let cancel = daemon.cancel_token();
-
-        daemon.run().await;
-
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Fire the signal
-        crate::providers::UserNotifier::notify().await;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        cancel.cancel();
-        daemon.wait().await.unwrap();
-        Ok(())
-    }
-
-    /// Verifies that Watch triggers fire when the watched state changes.
-    #[tokio::test]
-    async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
-        use crate::providers::ExternalStatus;
-
-        let mut daemon = ServiceDaemon::builder()
-            .with_registry(isolated_registry())
-            .with_restart_policy(RestartPolicy::for_testing())
-            .build();
-        let cancel = daemon.cancel_token();
-
-        daemon.run().await;
-
-        // Wait for services to initialize
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-        // Modify ExternalStatus -- this should trigger the Watch handler
-        {
-            let lock = ExternalStatus::rwlock().await;
-            let mut guard = lock.write().await;
-            guard.message = "Watch test update".to_string();
-            guard.updated_count = 1;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        cancel.cancel();
-        daemon.wait().await.unwrap();
-        Ok(())
-    }
 }
