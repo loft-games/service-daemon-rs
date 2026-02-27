@@ -89,11 +89,17 @@ async fn compute_service() -> anyhow::Result<()> {
 }
 ```
 
-### The `#[allow_sync]` Escape Hatch
-If your function is synchronous but guaranteed to be fast and non-blocking (e.g., in-memory math), use `#[allow_sync]` to suppress runtime warnings.
+### The `#[allow(sync_handler)]` Escape Hatch
+If your function is synchronous but guaranteed to be fast and non-blocking (e.g., in-memory math), use `#[allow(sync_handler)]` to suppress runtime warnings.
+
+```rust
+#[service]
+#[allow(sync_handler)]
+pub fn fast_calc() -> anyhow::Result<()> { Ok(()) }
+```
 
 > [!WARNING]
-> **Never** use `#[allow_sync]` for network requests or disk I/O. This will cause severe performance degradation and may block shutdown.
+> **Never** use `#[allow(sync_handler)]` for network requests or disk I/O. This will cause severe performance degradation and may block shutdown.
 
 ## 3. Lifecycle Priorities
 

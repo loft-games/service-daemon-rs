@@ -14,7 +14,7 @@ use proc_macro_error2::abort;
 use quote::{format_ident, quote};
 use syn::ItemFn;
 
-use crate::common::has_allow_sync;
+use crate::common::extract_sync_handler_flag;
 use parser::parse_provider_attrs;
 use struct_gen::generate_struct_provider;
 
@@ -65,7 +65,7 @@ fn generate_async_fn_provider(
 
     let fn_name_str = fn_name.to_string();
     let return_type_str = quote!(#return_type).to_string().replace(" ", "");
-    let allow_sync_present = has_allow_sync(&item_fn.attrs);
+    let (allow_sync_present, _cleaned_attrs) = extract_sync_handler_flag(&item_fn.attrs);
     let call_expr = if fn_asyncness.is_some() {
         quote! { #fn_name().await }
     } else if allow_sync_present {

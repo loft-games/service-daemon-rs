@@ -10,7 +10,7 @@ use quote::{format_ident, quote};
 use syn::parse::Parse;
 use syn::{ItemFn, Token, parse_macro_input};
 
-use crate::common::{ExtractedParams, TagsList, has_allow_sync};
+use crate::common::{ExtractedParams, TagsList, extract_sync_handler_flag};
 use codegen::{generate_call_expr, generate_watcher};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,9 +82,11 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
     let vis = &input.vis;
-    let attrs = &input.attrs;
     let sig = &input.sig;
     let body = &input.block;
+
+    // Detect #[allow(sync_handler)] and strip it from the attribute list
+    let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
     // Extract parameters and categorize them
     let ExtractedParams {
@@ -102,7 +104,6 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
 
     let is_async = input.sig.asyncness.is_some();
-    let allow_sync_present = has_allow_sync(attrs);
     let call_expr = generate_call_expr(
         fn_name,
         &fn_name_str,
@@ -114,7 +115,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
     let expanded = quote! {
-        #(#attrs)*
+        #(#cleaned_attrs)*
         #vis #clean_sig {
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]

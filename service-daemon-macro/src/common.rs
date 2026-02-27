@@ -23,14 +23,87 @@ pub struct ExtractedParams {
     pub watcher_arms: Vec<proc_macro2::TokenStream>,
 }
 
-/// Helper to check if `#[allow_sync]` is present on the function's attributes.
-pub fn has_allow_sync(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        attr.path()
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident == "allow_sync")
-    })
+/// Extracts the `sync_handler` flag from function attributes and returns
+/// cleaned attributes with `sync_handler` stripped from any `#[allow(...)]`.
+///
+/// This function scans the attribute list for `#[allow(sync_handler)]`.
+/// When found, it:
+/// - Returns `true` to indicate sync is explicitly allowed.
+/// - Strips `sync_handler` from the `#[allow(...)]` list so the compiler
+///   never sees the unknown lint name.
+/// - If `#[allow(sync_handler)]` was the only item, the entire attribute
+///   is removed. If mixed (e.g., `#[allow(dead_code, sync_handler)]`),
+///   only `sync_handler` is removed and `#[allow(dead_code)]` is preserved.
+///
+/// # Returns
+/// `(is_sync_allowed, cleaned_attrs)`
+pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) {
+    let mut found = false;
+    let mut cleaned = Vec::with_capacity(attrs.len());
+
+    for attr in attrs {
+        // Only inspect `#[allow(...)]` attributes
+        if attr.path().is_ident("allow")
+            && let syn::Meta::List(meta_list) = &attr.meta
+        {
+            // Parse the token stream inside allow(...) to find sync_handler
+            let tokens = &meta_list.tokens;
+            let mut has_sync_handler = false;
+            let mut other_idents: Vec<proc_macro2::TokenStream> = Vec::new();
+
+            // Walk tokens: expect comma-separated identifiers
+            for token in tokens.clone().into_iter() {
+                match &token {
+                    proc_macro2::TokenTree::Ident(ident) if ident == "sync_handler" => {
+                        has_sync_handler = true;
+                    }
+                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
+                        // Skip commas — we rebuild them below
+                    }
+                    other => {
+                        other_idents.push(other.clone().into());
+                    }
+                }
+            }
+
+            if has_sync_handler {
+                found = true;
+                // If there are remaining lints, rebuild the #[allow(...)]
+                if !other_idents.is_empty() {
+                    let rebuilt: proc_macro2::TokenStream = other_idents
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .enumerate()
+                        .flat_map(|(i, ts)| {
+                            if i > 0 {
+                                vec![
+                                    proc_macro2::TokenTree::Punct(proc_macro2::Punct::new(
+                                        ',',
+                                        proc_macro2::Spacing::Alone,
+                                    ))
+                                    .into(),
+                                    ts,
+                                ]
+                            } else {
+                                vec![ts]
+                            }
+                        })
+                        .collect();
+
+                    let new_attr: Attribute = syn::parse_quote!(#[allow(#rebuilt)]);
+                    cleaned.push(new_attr);
+                }
+                // If sync_handler was the only item, drop the entire attribute
+                continue;
+            }
+        }
+
+        // Keep all other attributes unchanged
+        cleaned.push(attr.clone());
+    }
+
+    (found, cleaned)
 }
 
 /// Represents the detected intent of a function parameter.

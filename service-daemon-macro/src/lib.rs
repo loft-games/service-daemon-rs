@@ -4,12 +4,11 @@
 //! - `#[service]` - Mark functions as managed services
 //! - `#[trigger]` - Event-driven trigger functions
 //! - `#[provider]` - Dependency injection providers
-//! - `#[allow_sync]` - Suppress warnings for intentionally synchronous functions
+//! - `#[allow(sync_handler)]` - Suppress warnings for intentionally synchronous functions
 
 use proc_macro::TokenStream;
 use proc_macro_error2::proc_macro_error;
 
-mod allow_sync;
 mod common;
 mod provider;
 mod service;
@@ -19,34 +18,6 @@ mod trigger;
 // - trigger/: Macro logic for #[trigger]. Split into mod.rs (main), parser.rs (attributes), and codegen.rs (logic).
 // - service/: Macro logic for #[service]. Split into mod.rs (main) and codegen.rs (helpers).
 // - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, templates.rs (special types), and struct_gen.rs (DI).
-
-/// Marks a synchronous function as intentionally not needing `async`.
-///
-/// Use this attribute to suppress warnings about synchronous functions
-/// blocking the async executor. Only use this when you are certain that
-/// the synchronous function will not perform blocking I/O or long-running
-/// computations.
-///
-/// > [!CAUTION]
-/// > **Misuse Warning**: Using this on truly blocking code (e.g., `std::thread::sleep`,
-/// > network I/O) will stall the entire daemon and break graceful shutdown.
-/// > For blocking operations, use `tokio::task::spawn_blocking` instead.
-///
-/// # Example
-/// ```rust,ignore
-/// use service_daemon::{service, allow_sync};
-///
-/// #[allow_sync]
-/// #[service]
-/// pub fn my_fast_sync_service() -> anyhow::Result<()> {
-///     // This function is intentionally sync and won't block.
-///     Ok(())
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
-    allow_sync::allow_sync_impl(attr, item)
-}
 
 /// Marks a function as a service managed by ServiceDaemon.
 ///
@@ -59,7 +30,8 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// > [!IMPORTANT]
 /// > **Async Preferred**: Always prefer `async fn` for services. Synchronous
-/// > functions will trigger a runtime warning unless annotated with `#[allow_sync]`.
+/// > functions will trigger a runtime warning unless annotated with
+/// > `#[allow(sync_handler)]`.
 ///
 /// # Example
 /// ```rust,ignore
@@ -69,6 +41,13 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// #[service]
 /// pub async fn my_service(port: Arc<i32>, db: Arc<String>) -> anyhow::Result<()> {
 ///     // service implementation
+/// }
+///
+/// // Intentionally synchronous (fast, no I/O):
+/// #[service]
+/// #[allow(sync_handler)]
+/// pub fn my_sync_service() -> anyhow::Result<()> {
+///     Ok(())
 /// }
 /// ```
 ///

@@ -97,7 +97,7 @@ async fn test_service_recovery_flow() {
 | :--- | :--- |
 | **Provided trait error** | Ensure the type has a `#[provider]` annotation. |
 | **Trigger not firing** | Check if the module is included in `main.rs`. See [Registry Discovery](pitfalls-faq.md#1-registry--discovery). |
-| **Sync warning in logs** | Use `async fn` or `#[allow_sync]` on your service. |
+| **Sync warning in logs** | Use `async fn` or add `#[allow(sync_handler)]` on your service/trigger. |
 | **Simulation hang in CI** | Likely a deadlock caused by holding `resources()` locks across an `.await`. Use `get_shelf()`. |
 | **Registry interference** | All tests share the same `linkme` registry. Use `Registry::builder().with_tag("...")` to isolate. |
 

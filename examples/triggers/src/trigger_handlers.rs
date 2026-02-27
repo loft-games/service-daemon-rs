@@ -91,13 +91,13 @@ pub async fn on_external_status_changed(snapshot: Arc<ExternalStatus>) -> anyhow
 }
 
 // =============================================================================
-// Sync Trigger (via #[allow_sync] -- no async overhead)
+// Sync Trigger (via #[allow(sync_handler)] -- no async overhead)
 // =============================================================================
 
 /// Demonstrates that triggers can also be synchronous.
 /// Uses `Notify` template (alias for `Event`).
-#[service_daemon::allow_sync]
 #[trigger(Notify(UserNotifier))]
+#[allow(sync_handler)]
 pub fn sync_notify_trigger() -> anyhow::Result<()> {
     tracing::info!(">>> [Sync Event] Sync notify trigger fired");
     Ok(())

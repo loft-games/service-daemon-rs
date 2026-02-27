@@ -5,7 +5,7 @@
 //! - Crash recovery with `shelve()` / `unshelve()` (Shelf persistence)
 //! - Dependency-change-triggered restarts
 //! - Priority-based startup/shutdown ordering
-//! - Sync service support via `#[allow_sync]`
+//! - Sync service support via `#[allow(sync_handler)]`
 //!
 //! > [!WARNING]
 //! > Never mix `is_shutdown()` polling (from the minimal pattern) with
@@ -15,7 +15,7 @@
 
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::prelude::*;
-use service_daemon::{allow_sync, done, service, shelve, sleep, state, unshelve};
+use service_daemon::{done, service, shelve, sleep, state, unshelve};
 use tracing::{error, info, warn};
 
 // =============================================================================
@@ -372,19 +372,19 @@ pub async fn fatal_error_demo() -> anyhow::Result<()> {
 }
 
 // =============================================================================
-// 8. Sync Service (via #[allow_sync])
+// 8. Sync Service (via #[allow(sync_handler)])
 // =============================================================================
 
 /// Demonstrates that synchronous (blocking) functions can also be services.
 ///
-/// `#[allow_sync]` wraps this function in `spawn_blocking`, so it runs
-/// on a dedicated OS thread rather than the async executor.
+/// `#[allow(sync_handler)]` suppresses the runtime warning about synchronous
+/// handler functions. Only use this for truly non-blocking, fast computations.
 ///
 /// **Key point**: A sync service must still call `done()` to signal
 /// readiness, and must park/block to avoid immediate exit (which the
 /// daemon would treat as a crash and restart endlessly).
-#[allow_sync]
 #[service]
+#[allow(sync_handler)]
 pub fn sync_service(port: Arc<Port>) -> anyhow::Result<()> {
     info!("[Sync] Sync service started on port {}", port);
     done(); // Signal ready -- without this, the daemon won't proceed to the next wave.

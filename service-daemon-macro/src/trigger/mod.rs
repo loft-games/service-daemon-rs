@@ -11,7 +11,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::common::{ExtractedParams, has_allow_sync};
+use crate::common::{ExtractedParams, extract_sync_handler_flag};
 use codegen::{generate_call_expr, generate_event_loop_call, generate_watcher};
 use parser::TriggerArgs;
 
@@ -25,9 +25,11 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_name = &input.sig.ident;
     let fn_name_str = fn_name.to_string();
     let vis = &input.vis;
-    let attrs = &input.attrs;
     let sig = &input.sig;
     let body = &input.block;
+
+    // Detect #[allow(sync_handler)] and strip it from the attribute list
+    let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
     // Parse attributes using syn-based structured parsing.
     // The host path is now a real Rust path — no keyword validation needed.
@@ -47,7 +49,6 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     } = crate::common::extract_params(sig, true);
 
     let is_async = input.sig.asyncness.is_some();
-    let allow_sync_present = has_allow_sync(attrs);
     let call_expr = generate_call_expr(
         fn_name,
         &fn_name_str,
@@ -73,7 +74,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     clean_sig.inputs = clean_inputs;
 
     let expanded = quote! {
-        #(#attrs)*
+        #(#cleaned_attrs)*
         #vis #clean_sig {
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
