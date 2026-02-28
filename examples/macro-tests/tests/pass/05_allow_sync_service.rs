@@ -3,7 +3,7 @@
 use service_daemon::{provider, service};
 
 #[derive(Clone)]
-#[provider(default = 42)]
+#[provider(42)]
 pub struct MagicNumber(pub i32);
 
 #[service]

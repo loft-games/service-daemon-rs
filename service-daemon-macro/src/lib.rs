@@ -72,10 +72,10 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```rust,ignore
 /// use service_daemon::provider;
 ///
-/// #[provider(default = 8080)]
+/// #[provider(8080)]
 /// pub struct Port(pub i32);
 ///
-/// #[provider(default = "mysql://localhost")]  // Auto-expands to .to_owned()
+/// #[provider("mysql://localhost")]  // Auto-expands to .to_owned()
 /// pub struct DbUrl(pub String);
 /// ```
 ///
@@ -83,8 +83,19 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```rust,ignore
 /// use service_daemon::provider;
 ///
-/// #[provider(default = "localhost:5432", env_name = "DATABASE_HOST")]
+/// #[provider("localhost:5432", env = "DATABASE_HOST")]
 /// pub struct DatabaseHost(pub String);
+/// ```
+///
+/// # Example with template
+/// ```rust,ignore
+/// use service_daemon::provider;
+///
+/// #[provider(Queue(String))]
+/// pub struct TaskQueue;
+///
+/// #[provider(Notify)]
+/// pub struct MySignal;
 /// ```
 ///
 /// # Example with dependencies
@@ -122,8 +133,8 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Template Types
 /// - `Cron`: Uses cron expressions. Target should be a provider for `String` (the cron expression).
-/// - `Queue`/`BQueue`: Broadcast queue (fanout). Target should be a `#[provider(default = Queue)]`.
-/// - `Event`/`Notify`/`Custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
+/// - `Queue`/`BQueue`: Broadcast queue (fanout). Target should be a `#[provider(Queue(T))]`.
+/// - `Event`/`Notify`/`Custom`: Signal trigger. Target should be a `#[provider(Notify)]`.
 /// - `Watch`/`State`: State change trigger. Fires when the target provider is modified.
 ///
 /// # Example

@@ -75,12 +75,10 @@ pub fn generate_broadcast_queue_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    item_type_str: &str,
+    item_type: &syn::Type,
     capacity: usize,
 ) -> TokenStream {
     let singleton_name = format_ident!("__SINGLETON_{}", struct_name.to_string().to_uppercase());
-    let item_type: proc_macro2::TokenStream =
-        item_type_str.parse().unwrap_or_else(|_| quote!(String));
 
     let expanded = quote! {
         #(#attrs)*

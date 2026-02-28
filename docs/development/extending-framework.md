@@ -53,7 +53,7 @@ Magic providers (like `Notify` or `Queue`) provide specialized behavior automati
 > Only add a "Magic Provider" if you are introducing a **generic architectural primitive** that requires specialized code-generation (like automatically adding convenience methods via macro).
 
 1. Add a new template generator function in `service-daemon-macro/src/provider/templates.rs`.
-2. Update `generate_struct_provider` in `service-daemon-macro/src/provider/struct_gen.rs` to detect your new template name in the `#[provider(default = ...)]` attribute.
+2. Update `try_generate_template` in `service-daemon-macro/src/provider/struct_gen.rs` to detect your new template name. Also add it to the `TEMPLATE_NAMES` list in `parser.rs`.
 
 ## 3. Adding Custom Interceptors
 

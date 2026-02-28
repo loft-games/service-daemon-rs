@@ -3,7 +3,7 @@
 use service_daemon::{provider, service};
 
 #[derive(Clone)]
-#[provider(default = 8080)]
+#[provider(8080)]
 pub struct Port(pub i32);
 
 #[service]

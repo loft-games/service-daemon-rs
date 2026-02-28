@@ -48,7 +48,7 @@ fn reset_counters() {
 // ---------------------------------------------------------------------------
 
 /// A broadcast queue carrying `String` payloads for the pressure test.
-#[provider(default = Queue, item_type = "String")]
+#[provider(Queue(String))]
 pub struct PressureQueue;
 
 // ---------------------------------------------------------------------------

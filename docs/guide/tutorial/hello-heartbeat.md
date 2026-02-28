@@ -14,7 +14,7 @@ In `service-daemon-rs`, we don't pass configuration strings or raw integers arou
 use service_daemon::provider;
 
 /// A simple configuration for our heartbeat interval.
-#[provider(default = 5)]
+#[provider(5)]
 pub struct HeartbeatInterval(pub u64);
 ```
 

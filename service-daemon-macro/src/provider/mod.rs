@@ -12,24 +12,23 @@ mod templates;
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
 use quote::{format_ident, quote};
-use syn::ItemFn;
+use syn::{ItemFn, parse_macro_input};
 
 use crate::common::extract_sync_handler_flag;
-use parser::parse_provider_attrs;
+pub use parser::ProviderArgs;
 use struct_gen::generate_struct_provider;
 
 /// Implementation of the `#[provider]` attribute macro.
 pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let attr_str = attr.to_string();
-
     // Support struct items for type-based DI
     if let Ok(item_struct) = syn::parse::<syn::ItemStruct>(item.clone()) {
-        return generate_struct_provider(item_struct, &attr_str);
+        let args = parse_macro_input!(attr as ProviderArgs);
+        return generate_struct_provider(item_struct, args);
     }
 
     // Support async fn items for custom async initialization
     if let Ok(item_fn) = syn::parse::<ItemFn>(item.clone()) {
-        return generate_async_fn_provider(item_fn, parse_provider_attrs(&attr_str));
+        return generate_async_fn_provider(item_fn);
     }
 
     // Error for unsupported items - use abort! for enhanced error
@@ -37,15 +36,12 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         proc_macro2::TokenStream::from(item),
         "#[provider] can only be applied to struct or async fn items";
         help = "Use #[provider] on a struct definition or an async function";
-        note = "Example: #[provider(default = 8080)] pub struct Port(pub i32);"
+        note = "Example: #[provider(8080)] pub struct Port(pub i32);"
     )
 }
 
 /// Generates a provider from an async function.
-fn generate_async_fn_provider(
-    item_fn: ItemFn,
-    _provider_attrs: parser::ProviderAttrs,
-) -> TokenStream {
+fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
     let fn_name = &item_fn.sig.ident;
     let fn_vis = &item_fn.vis;
     let fn_block = &item_fn.block;

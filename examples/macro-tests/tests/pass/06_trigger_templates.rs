@@ -3,10 +3,10 @@
 use service_daemon::TT::*;
 use service_daemon::{provider, trigger};
 
-#[provider(default = Notify)]
+#[provider(Notify)]
 pub struct MySignal;
 
-#[provider(default = Queue, item_type = "String")]
+#[provider(Queue(String))]
 pub struct MyQueue;
 
 #[derive(Debug, Clone)]

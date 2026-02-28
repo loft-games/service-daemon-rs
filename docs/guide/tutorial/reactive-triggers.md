@@ -13,7 +13,7 @@ The most common trigger is the `Queue`. Imagine you have a background job queue,
 ```rust
 use service_daemon::prelude::*; // TT is here!
 
-#[provider(default = Queue, item_type = "Job")]
+#[provider(Queue(Job))]
 pub struct JobQueue;
 
 #[trigger(Queue(JobQueue))]
@@ -35,7 +35,7 @@ Let's say after processing a `Job`, we want to notify a cleanup service.
 
 ```rust
 // A simple signal provider
-#[provider(default = Notify)]
+#[provider(Notify)]
 pub struct CleanupSignal;
 
 #[trigger(Queue(JobQueue))]

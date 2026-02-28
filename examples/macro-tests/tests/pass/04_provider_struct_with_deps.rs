@@ -4,11 +4,11 @@ use service_daemon::provider;
 use std::sync::Arc;
 
 #[derive(Clone)]
-#[provider(default = 8080)]
+#[provider(8080)]
 pub struct Port(pub i32);
 
 #[derive(Clone)]
-#[provider(default = "localhost")]
+#[provider("localhost")]
 pub struct Host(pub String);
 
 /// A composite provider that depends on other providers via Arc fields.
