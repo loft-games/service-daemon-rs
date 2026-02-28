@@ -26,53 +26,41 @@ Integration tests verify the full lifecycle of the daemon:
 - Status transitions and shelving correctness.
 - Signal propagation and trigger execution.
 
-### Unit Testing with MockContext
+### Unit Testing with MockContext (God Mode)
 
-For isolated unit tests that don't spin up the full production registry, enable the `simulation` feature and use `MockContext`:
+Testing background services is difficult. How do you test a database failure at 2 AM? The `simulation` feature gives you total control ("God Mode") over the environment.
 
+Enable the feature in your `Cargo.toml`:
 ```toml
 [dev-dependencies]
 service-daemon = { path = "...", features = ["simulation"] }
 ```
 
-`MockContext` acts as a **simulation sandbox factory**. It prepares isolated resources (Shelf, Status Plane) and yields a `SimulationHandle` (the "God Hand") to safely inspect or mutate state while the daemon is running in the background.
+Use `MockContext` to create an isolated sandbox and `SimulationHandle` (The God's Hand) to reach into the running engine:
 
 ```rust
-use service_daemon::{MockContext, ServiceStatus, Registry, ServiceId};
-use std::time::Duration;
-
 #[tokio::test]
-async fn test_service_recovery_flow() {
-    // 1. Setup Phase: Pre-fill isolated resources
+async fn test_two_phase_simulation() {
+    // 1. Setup Sandbox: Pre-fill the Shelf
     let (builder, handle) = MockContext::builder()
-        .with_shelf::<String>("my_service", "last_job_id", "job-99".into())
-        .with_status(ServiceId::new(0), ServiceStatus::Recovering("Previous crash".into()))
+        .with_shelf::<String>("my_service", "config_key", "initial_val".into())
         .build();
 
-    // 2. Build the Sandbox Daemon
-    // Note: Simulation defaults to an isolated (empty) registry.
-    let daemon = builder
-        .with_service(my_service_description) // add the real service under test
-        .build();
-
+    let daemon = builder.with_service(my_service).build();
     let cancel = daemon.cancel_token();
-    let daemon_handle = tokio::spawn(async move {
-        let mut d = daemon;
-        d.run().await;
-        d.wait().await.unwrap();
-    });
-
-    // 3. Inspection & Mutation Phase (The God Hand)
-    // Snapshot accessors are cross-await friendly (lock-free)
-    let shelf_val: Option<String> = handle.get_shelf("my_service", "last_job_id");
-    assert_eq!(shelf_val, Some("job-99".into()));
-
-    // Mid-flight intervention: force a reload
-    handle.set_status(ServiceId::new(0), ServiceStatus::NeedReload);
     
-    // cleanup
+    // Start daemon in background
+    let daemon_task = tokio::spawn(async move { daemon.run().await; });
+
+    // 2. Mid-flight Intervention
+    // Reach in and change the world!
+    handle.set_shelf::<String>("my_service", "dynamic_key", "new_val".into());
+
+    // 3. Verify side-effects
+    let result = handle.get_shelf("my_service", "processed_result");
+    assert!(result.is_some());
+
     cancel.cancel();
-    let _ = daemon_handle.await;
 }
 ```
 

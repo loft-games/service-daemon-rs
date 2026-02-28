@@ -42,26 +42,27 @@ The `examples/` directory contains focused examples organized by use case:
 
 ---
 
-### Documentation Map
+## Documentation
 
-Explore our detailed documentation grouped by your needs:
+Our documentation is split by audience to ensure you find exactly what you need without the noise.
 
-- [Concept Clarification & Pitfalls](docs/guide/pitfalls-faq.md): Avoiding common architectural traps and misconceptions.
-- [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, priorities, and shutdown.
+### User Guides (Framework Users)
+*Everything you need to build and run your application.*
+
+- [State Management](docs/guide/state-management.md): Providers, Mutability, and zero-copy snapshots.
 - [Event Triggers](docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
-- [State Management](docs/guide/state-management.md): Mutability, snapshots, and persistence.
-- [Testing & Troubleshooting](docs/guide/testing-troubleshooting.md): Framework patterns and error resolution.
+- [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, jitter, and wave-based orchestration.
+- [Diagnostics & Logs](docs/guide/diagnostics.md): Using the `DaemonLayer` for real-time visibility.
+- [Testing & Troubleshooting](docs/guide/testing-troubleshooting.md): Framework patterns, Mocking, and FAQ.
 
-### Technical Reference
-Deep dives into the internal mechanics.
-- [Architecture Overview](docs/architecture/internal-overview.md): System flow and registry design.
-- [Macros Deep Dive](docs/architecture/macros-deep-dive.md): The magic behind `#[service]` and tracked state.
-- [Lifecycle & Status Plane](docs/architecture/lifecycle-management.md): Orchestration and state transitions.
+### Architecture & Internals (Core Developers)
+*Deep dives into the technical "Why" and "How" of the engine.*
 
-### Contributor Guide
-Help us improve the framework.
-- [Contributing](docs/CONTRIBUTING.md): Environment setup and PR process.
-- [Extending the Framework](docs/development/extending-framework.md): How to add new triggers or providers.
+- [Internal Overview](docs/architecture/internal-overview.md): Registry design, linkme segments, and DI resolution.
+- [The Ripple Model](docs/architecture/causal-tracing.md): Our unique philosophy for asynchronous causal tracing.
+- [Lifecycle Deep Dive](docs/architecture/lifecycle-management.md): Reactive signal paths and supervisor internals.
+- [Macros Mechanics](docs/architecture/macros-deep-dive.md): The magic behind attribute stripping and AST transformation.
+- [Extending the Framework](docs/development/extending-framework.md): Guide for adding new trigger types or providers.
 
 ---
 

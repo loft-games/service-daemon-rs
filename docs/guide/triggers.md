@@ -1,8 +1,37 @@
-# Event Triggers
+Triggers are specialized services with built-in event loops that execute your functions when specific events occur. They consume zero CPU while waiting.
 
-Triggers are specialized services with built-in event loops that execute your functions when specific events occur.
+## 0. Quick Start: Chain Reactions
 
-## 0. Architecture: Policy vs. Engine
+Triggers become powerful when they talk to each other. A trigger can "fire" another by publishing an event.
+
+```rust
+use service_daemon::prelude::*;
+
+// 1. Define a Signal Provider
+#[provider(Notify)]
+pub struct CleanupSignal;
+
+// 2. A trigger that performs work and notifies others
+#[trigger(Queue(JobQueue))]
+pub async fn worker(job: Job, signal: Arc<CleanupSignal>) -> anyhow::Result<()> {
+    tracing::info!("Processing job {}", job.id);
+    
+    // Explicitly publish/fire the signal
+    signal.notify().await;
+    Ok(())
+}
+
+// 3. A reactive handler listening for that signal
+#[trigger(Notify(CleanupSignal))]
+pub async fn cleanup_handler() -> anyhow::Result<()> {
+    tracing::info!("Cleaning up...");
+    Ok(())
+}
+```
+
+---
+
+## 1. Architecture: Policy vs. Engine
 
 Starting from v0.1.0, triggers follow a decoupled **Policy-Engine** architecture:
 
@@ -144,27 +173,12 @@ This design enables high-performance event processing by avoiding repeated setup
 
 ---
 
-## 8. Elastic Scaling & Backpressure Details
+### 8. Elastic Scaling & Backpressure Details
 
-The scaling mechanism is designed for "Set and Forget" reliability with maximum resource reuse. It is governed by the [`ScalingPolicy`] struct (separate from `RestartPolicy`).
+Elastic scaling is governed by the [`ScalingPolicy`]. The framework automatically adjusts concurrency based on pressure and ensures backpressure via a shared semaphore.
 
-### Configuration Source Priority
-
-1. **User Override**: `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`
-2. **Template Declaration**: `TriggerHost::scaling_policy()` (e.g. `TopicHost` returns `Some(ScalingPolicy::default())`)
-3. **No Scaling**: Templates returning `None` (e.g. `CronHost`, `SignalHost`, `WatchHost`) — serial dispatch, no scale monitor.
-
-### Backpressure Implementation
-Backpressure is enforced via a **shared semaphore**. If the number of in-flight handlers reaches the current concurrency limit, the `TriggerRunner` blocks on `dispatch`. This naturally slows down the `handle_step` loop, providing backpressure to the event source (e.g., pausing an MQ consumer).
-
-### Scaling Resource Reuse
-When the `scale_monitor` task decides to scale up:
-- It calls `semaphore.add_permits(n)` on the **existing** semaphore instance.
-- No new tasks or containers are allocated for the control plane.
-- The interceptor chain (`Arc<Vec<...>>`) is shared across all spawned tasks.
-
-### Scaling and "Phantom Permits"
-During scale-down (idle timeout), the logical limit is reduced, but permits aren't physically "revoked" from the semaphore (as Tokio doesn't support random revocation). Instead, the runner tracks a "logical limit" that effectively ignores excess permits until they are naturally exhausted or needed again.
+> [!NOTE]
+> **Scaling Internals**: For the mathematical pressure formula, 1-second monitoring logic, and the "Shadow Permits" implementation details, see [Internal Architecture: Trigger Scaling](../architecture/internal-overview.md#7-coretrigger_runner_rs).
 
 ---
 

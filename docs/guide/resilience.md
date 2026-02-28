@@ -24,19 +24,13 @@ daemon.run().await;
 daemon.wait().await?;
 ```
 
-### 1.1. The `BackoffController` Abstraction
+### 1.1. Backoff & Jitter Strategy
+The framework uses a unified `BackoffController` to manage retry delays, consecutive failure counts, and interruption-aware waiting. This ensures that both standard services and trigger handlers follow the same resilience policy.
 
-Internal to the framework, retry logic is managed by the **`BackoffController`**. This stateful component tracks:
-- Current retry delay.
-- Consecutive failure count.
-- Interruption-aware waiting (respecting shutdown/reload signals during the sleep period).
+> [!NOTE]
+> **Internal Architecture**: For a deep dive into the `BackoffController` state machine and the self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#14-backoffcontroller-internals).
 
-Because this controller is now a shared abstraction, **Trigger Handlers** also benefit from identical exponential backoff and jitter behavior when they encounter errors. The `TriggerRunner` uses `BackoffController` internally via its built-in `RetryInterceptor`, which receives the same `RestartPolicy` configured on the `ServiceDaemon`.
-
-### 1.2. Immediate Restart on Reload Signal
-Even if a service is in a restart delay period (e.g. after a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
-
-### 1.2. Fatal Errors
+### 1.3. Fatal Errors
 Sometimes a service encounters an error that it cannot recover from via a restart (e.g., a missing required environment variable or an invalid license). In such cases, the service can return `ServiceError::Fatal`.
 
 When a service returns a `Fatal` error, the `ServiceDaemon` will **permanently stop** that service and transition its status to `Terminated`, bypassing the restart policy entirely.
@@ -95,9 +89,11 @@ async fn compute_service() -> anyhow::Result<()> {
 ### The `#[allow(sync_handler)]` Escape Hatch
 If your function is synchronous but guaranteed to be fast and non-blocking (e.g., in-memory math), use `#[allow(sync_handler)]` to suppress runtime warnings.
 
+**How it works**: The macro system uses **AST-based attribute stripping**. It detects `#[allow(sync_handler)]`, sets a flag to bypass the async-wrapper requirement, and then **strips the attribute** before passing the code to the compiler. This prevents "unknown lint" errors while enabling synchronous execution.
+
 ```rust
 #[service]
-#[allow(sync_handler)]
+#[allow(sync_handler)] // Stripped by macro to avoid unknown lint errors
 pub fn fast_calc() -> anyhow::Result<()> { Ok(()) }
 ```
 

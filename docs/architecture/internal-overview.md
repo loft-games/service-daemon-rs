@@ -6,9 +6,13 @@
 
 Both standard services and event-driven triggers are collected into a single `SERVICE_REGISTRY` at link time using the `linkme` crate. 
 
-This enables "distributed registration":
-- **Zero Configuration**: No central list of services is needed.
-- **Automatic Discovery**: `ServiceDaemon::builder().build()` automatically finds all annotated functions across the entire workspace via the `Registry`.
+### How it works: Linker-Level Discovery
+1. **Metadata Segments**: The macros generate `#[distributed_slice]` entries. At compile time, the Rust compiler (and the linker) places these pointers into a specialized data segment of the final binary.
+2. **Zero-Scan Loading**: Unlike frameworks that scan the filesystem or use heavy reflection at runtime, `ServiceDaemon` simply reads this contiguous memory segment. This results in **O(1) service discovery** regardless of the project size.
+3. **Implicit Activation**: Any module included in the compilation tree via `mod` will have its services automatically registered. No manual list maintenance is required.
+
+### Registry Identity
+Each entry in the registry contains a `ServiceId`. This ID is used as the primary key in the **Status Plane** and for routing events in the **Ripple Model**.
 
 ## 2. Decentralized Dependency Injection
 
@@ -26,9 +30,9 @@ The daemon maintains a **Unified Status Plane** to track service health. To elim
 ```mermaid
 graph TD
     subgraph User_Code ["User Code"]
-        S["#[service] Function"]
-        P["#[provider] Struct/Fn"]
-        T["#[trigger] Function"]
+        S["service Function"]
+        P["provider Struct/Fn"]
+        T["trigger Function"]
     end
 
     subgraph Macro_Gen ["Macros"]
@@ -86,20 +90,20 @@ All testing/simulation code lives behind the `simulation` Cargo feature. It only
 
 ```mermaid
 graph LR
-    subgraph MockContext_Setup ["MockContext::builder().build()"]
+    subgraph MockContext_Setup ["MockContext Setup"]
         MC["MockContextBuilder"] -->|pre-fill| Shelf["Shelf Data"]
         MC -->|pre-fill| Status["Status Plane"]
         MC -->|produces| Builder["ServiceDaemonBuilder"]
         MC -->|produces| Handle["SimulationHandle"]
     end
 
-    subgraph Daemon_Execution ["ServiceDaemon (real engine)"]
+    subgraph Daemon_Execution ["ServiceDaemon Engine"]
         Builder -->|build + run| SD["ServiceDaemon"]
         SD -->|owns| Resources["Private DaemonResources"]
         SD -->|runs| RealSvc["Real Service Logic"]
     end
 
-    subgraph God_Hand ["God Hand (Hot Injection)"]
+    subgraph God_Hand ["Simulation Injection"]
         Handle -->|set_shelf| Resources
         Handle -->|set_status| Resources
         Handle -->|trigger_reload| Resources
@@ -107,7 +111,7 @@ graph LR
 ```
 
 - **`MockContext`**: A sandbox factory that produces a pre-configured `ServiceDaemonBuilder` and a `SimulationHandle`. No direct execution.
-- **`SimulationHandle`**: The "God Hand" -- allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
+- **`SimulationHandle`**: Allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
 - **Service Registration**: How `#[service]` works internal machinery.
 - **Strict Feature Gating**: All simulation types (`MockContext`, `SimulationHandle`, `with_resources()`, `resources()`) are `#[cfg(feature = "simulation")]` -- physically absent from production builds.
 

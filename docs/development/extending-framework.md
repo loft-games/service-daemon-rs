@@ -4,101 +4,105 @@ This guide is for developers looking to add new capabilities to the `service-dae
 
 ## 1. Adding a New Trigger Template
 
-Triggers are implemented as stateful hosts with a two-phase lifecycle: **setup** (one-time initialization) and **handle_step** (per-event waiting).
+Triggers are implemented as stateful hosts with a two-phase lifecycle managed by the **Policy-Engine separation** model.
 
-1. **Define the Host**: Add a struct in `service-daemon/src/core/triggers.rs`. It can be a unit struct (zero-sized) if no state is needed, or hold initialized resources as fields.
+1. **Define the Host**: Add a struct in `service-daemon/src/core/triggers.rs`. It can hold initialized resources as fields.
 2. **Implement `TriggerHost<T>`**:
    - **`setup(target: Arc<T>)`**: Called once when the trigger service starts. Use this to acquire resources (subscribers, scheduler jobs, etc.) and return an initialized `Self`.
-   - **`handle_step(&mut self, target: &Arc<T>)`**: Called in each event loop iteration. Define the waiting logic and return a `TriggerTransition`. Since `self` is mutable, you can access and modify state stored during `setup`.
+   - **`handle_step(&mut self, target: &Arc<T>)`**: Called in each event loop iteration. Define the waiting logic and return a `TriggerTransition`.
+   - **`scaling_policy()`** (Optional): Override to enable elastic scaling (e.g., for queues).
 3. **Register Aliases**: Add short aliases to the `TT` module in `service-daemon/src/models/trigger.rs`.
-4. **Update the Macro** (optional): Modify `service-daemon-macro/src/trigger/codegen.rs` to recognize the new template name if you want `#[trigger(MyTemplate(...))]` syntax. Update `trigger/parser.rs` if new attributes are needed.
-5. **Map Parameters**: Use the macro utilities in `trigger/mod.rs` to correctly distinguish between event payloads and DI resources.
+4. **Update the Macro** (Optional): Modify `service-daemon-macro/src/trigger/parser.rs` and `codegen.rs` if you want specialized attribute syntax like `#[trigger(MyTemplate(...))]`.
 
 > [!NOTE]
-> The `#[trigger]` macro calls `TriggerHost::run_as_service`, whose default implementation handles `setup` -> `TriggerRunner::run_with_host` automatically. Most custom hosts do **not** need to override `run_as_service`.
+> The `#[trigger]` macro calls `TriggerHost::run_as_service` by default. This default implementation automatically handles the `setup` -> `TriggerRunner` lifecycle. Most hosts do **not** need to override `run_as_service`.
 
-### Example: Minimal Custom Host
+### Example: Custom Host with Scaling
 
 ```rust
-pub struct MyHost;
+pub struct MyHost {
+    rx: tokio::sync::mpsc::Receiver<String>,
+}
 
 impl<T> TriggerHost<T> for MyHost
 where
     T: Provided + Send + Sync + 'static,
 {
-    type Payload = ();
+    type Payload = String;
 
     fn setup(_target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
-        Box::pin(async { Ok(MyHost) })
+        Box::pin(async {
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
+            // Initialize your event source here...
+            Ok(MyHost { rx })
+        })
     }
 
-    fn handle_step<'a>(&'a mut self, target: &'a Arc<T>)
+    fn handle_step<'a>(&'a mut self, _target: &'a Arc<T>)
         -> BoxFuture<'a, TriggerTransition<Self::Payload>>
     {
         Box::pin(async move {
-            // Your custom event-waiting logic here
-            TriggerTransition::Next(())
+            match self.rx.recv().await {
+                Some(msg) => TriggerTransition::Next(msg),
+                None => TriggerTransition::Stop,
+            }
         })
+    }
+
+    fn scaling_policy() -> Option<ScalingPolicy> {
+        Some(ScalingPolicy::default())
     }
 }
 ```
 
-## 2. Adding a "Magic Provider"
+## 2. Adding a "Provider Template"
 
-Magic providers (like `Notify` or `Queue`) provide specialized behavior automatically when used as a default.
+Provider templates (like `Notify` or `Queue`) generate specialized struct bodies and convenience methods automatically.
 
 > [!IMPORTANT]
-> **Stop!** Do not add a Magic Provider for business-specific components (e.g., MQTT, Database, Redis). Instead, use a regular `#[provider]` on an `async fn` in your application code. This is easier to maintain and provides full control over initialization.
+> **Stop!** Do not add a Template for business-specific components (e.g., MQTT, Database). Instead, use a regular `#[provider]` on an `async fn`.
 > 
-> Only add a "Magic Provider" if you are introducing a **generic architectural primitive** that requires specialized code-generation (like automatically adding convenience methods via macro).
+> Only add a Template if you are introducing a **generic architectural primitive** that requires specialized code-generation.
 
 1. Add a new template generator function in `service-daemon-macro/src/provider/templates.rs`.
-2. Update `try_generate_template` in `service-daemon-macro/src/provider/struct_gen.rs` to detect your new template name. Also add it to the `TEMPLATE_NAMES` list in `parser.rs`.
+2. Update the `TEMPLATE_NAMES` list in `service-daemon-macro/src/provider/parser.rs`.
+3. Update `try_generate_template` (or equivalent logic) in `service-daemon-macro/src/provider/struct_gen.rs` to wire up your new generator.
 
 ## 3. Adding Custom Interceptors
 
-The `TriggerInterceptor<P>` trait provides a composable, onion-model middleware layer for trigger dispatch. Each interceptor wraps the next layer and has full control over the dispatch lifecycle (unlike the previous observer-pattern `TriggerMiddleware`).
+The `TriggerInterceptor<P>` trait provides a composable, onion-model middleware layer.
 
-1. Implement `TriggerInterceptor<P>` with an `intercept(ctx, next)` method.
-2. Register your interceptor via `TriggerRunner::with_interceptor()` (pass as `Arc<dyn TriggerInterceptor<P>>`).
-3. Interceptors execute in registration order (first registered = outermost layer).
-4. Each interceptor decides **if, when, and how many times** to call `next`.
-
-For a generic interceptor (works with any payload type), use a blanket impl:
+1. **Implement `TriggerInterceptor<P>`**: Define `intercept(ctx, next)`.
+2. **Registration**: Registered via `TriggerRunner::with_interceptor()`.
+3. **Flow**: Interceptors execute in registration order. You decide when to call `next(ctx).await`.
 
 ```rust
-pub struct RateLimitInterceptor;
+pub struct MyInterceptor;
 
-impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RateLimitInterceptor {
+impl<P: Send + Sync + 'static> TriggerInterceptor<P> for MyInterceptor {
     fn intercept<'a>(
         &'a self,
         ctx: DispatchContext<P>,
         next: Next<'a, P>,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            // Pre-processing: check rate limit
-            // ... rate limit logic ...
-
-            // Call the next layer in the chain
+            let start = std::time::Instant::now();
             let result = next(ctx).await;
-
-            // Post-processing: record metrics
-            // ... metrics logic ...
-
+            tracing::info!("Dispatch took {:?}", start.elapsed());
             result
         })
     }
 }
 ```
 
-> [!TIP]
-> See [Interceptor Middleware Guide](../guide/interceptor-middleware.md) for detailed usage patterns and examples.
-
 ## 4. Modifying Registry Mechanics
 
-The framework uses `linkme` for distributed registration. If you need to change how services are registered:
-1. Update common types in `service-daemon/src/models/`.
-2. Ensure consistent updates in the macro generation logic in `service-daemon-macro/src/service/codegen.rs` and `trigger/codegen.rs`.
+The framework uses `linkme` for distributed registration and `ServiceId` for identity.
 
+1. **Identity**: `ServiceId` values are assigned at compile-time via `linkme`.
+2. **Context**: Use `current_service_id()` from `service-daemon/src/models/trigger.rs` to retrieve the ID of the running service.
+3. **Macro Generation**: Shared logic resides in `service-daemon-macro/src/common.rs`.
+    - **`decompose_type`**: This utility is key to the DI system. It recursively inspects AST types to identify wrappers like `Arc`, `RwLock`, and `Mutex`, stripping the outer layers to reach the inner `T`.
+    - **`ParamIntent`**: Parameters are categorized as either `Payload` or `Dependency`. This allows a single function to mix event data with DI-resolved resources seamlessly.
 
 [Back to README](../../README.md)
