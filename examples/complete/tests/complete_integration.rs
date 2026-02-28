@@ -351,3 +351,31 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Verifies that an `async fn` provider with `Arc<T>` parameter injection
+/// correctly resolves its dependencies and produces the expected output.
+///
+/// This test is a **regression guard** for P1 (async fn provider parameter injection).
+/// It exercises the full dependency chain at runtime:
+///
+///   `Port(8080)` + `DbUrl("mysql://localhost")` → `ConnectionString("mysql://localhost:8080")`
+///
+/// If the macro fails to generate DI resolution code for function parameters,
+/// this test will fail with a type error or incorrect output.
+#[tokio::test]
+async fn test_fn_provider_dependency_chain() {
+    use example_complete::providers::fn_providers::ConnectionString;
+    use service_daemon::Provided;
+
+    // Resolve the async fn provider — this triggers the full dependency chain.
+    let conn_str = ConnectionString::resolve().await;
+
+    // The connection string should be assembled from Port(8080) + DbUrl("mysql://localhost")
+    assert_eq!(
+        conn_str.0, "mysql://localhost:8080",
+        "Async fn provider did not correctly resolve its Arc<T> dependencies. \
+         Expected 'mysql://localhost:8080' from Port(8080) + DbUrl(\"mysql://localhost\"), \
+         got '{}'",
+        conn_str.0
+    );
+}

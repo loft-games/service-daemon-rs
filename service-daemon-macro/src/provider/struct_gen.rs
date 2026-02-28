@@ -3,8 +3,9 @@
 //! This module generates providers for structs with automatic field injection.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
-use syn::{ItemStruct, Type};
+use quote::{format_ident, quote, quote_spanned};
+use syn::ItemStruct;
+use syn::spanned::Spanned;
 
 use super::parser::ProviderArgs;
 use super::templates::{generate_broadcast_queue_template, generate_notify_template};
@@ -93,6 +94,85 @@ impl TupleStructInfo {
     }
 }
 
+/// Generates the standard `Provided` trait impl + convenience methods (`rwlock()`/`mutex()`)
+/// for a provider type.
+///
+/// This shared function eliminates the code duplication that previously existed
+/// across struct providers, fn providers, and template providers.
+///
+/// # Arguments
+/// * `type_tokens` — The type that implements `Provided` (as a token stream).
+/// * `singleton_name` — The unique static `StateManager` identifier.
+/// * `constructor` — The expression to create `Arc<Self>` on first resolution.
+/// * `changed_body` — Custom `changed()` body, or `None` for the standard
+///   `StateManager::changed()` implementation.
+/// * `user_span`  — The span of the user's type definition (struct name or fn
+///   return type). Used for `quote_spanned!` so that missing trait bound errors
+///   (e.g., `Clone`) point to the user's code, not the macro output.
+pub(super) fn generate_provided_impl(
+    type_tokens: &proc_macro2::TokenStream,
+    singleton_name: &syn::Ident,
+    constructor: &proc_macro2::TokenStream,
+    changed_body: Option<proc_macro2::TokenStream>,
+    user_span: proc_macro2::Span,
+) -> proc_macro2::TokenStream {
+    let changed_impl = changed_body.unwrap_or_else(|| {
+        quote! { #singleton_name.changed().await }
+    });
+
+    // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
+    // the compiler error points to the user's struct definition or fn return
+    // type rather than an opaque macro expansion site.
+    let bounds_assertion = quote_spanned! { user_span =>
+        const _: () = {
+            fn __assert_provider_bounds<T: Clone + Send + Sync + 'static>() {}
+            fn __check() { __assert_provider_bounds::<#type_tokens>(); }
+        };
+    };
+
+    quote! {
+        #bounds_assertion
+
+        static #singleton_name: service_daemon::core::managed_state::StateManager<#type_tokens> = service_daemon::core::managed_state::StateManager::new();
+
+        impl service_daemon::Provided for #type_tokens {
+            async fn resolve() -> std::sync::Arc<Self> {
+                #singleton_name.resolve_snapshot(|| async {
+                    #constructor
+                }).await
+            }
+
+            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+                #singleton_name.resolve_rwlock(|| async {
+                    #constructor
+                }).await
+            }
+
+            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+                #singleton_name.resolve_mutex(|| async {
+                    #constructor
+                }).await
+            }
+
+            async fn changed() {
+                #changed_impl
+            }
+        }
+
+        impl #type_tokens {
+            /// Resolves a tracked RwLock for this provider.
+            pub async fn rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+                <Self as service_daemon::Provided>::resolve_rwlock().await
+            }
+
+            /// Resolves a tracked Mutex for this provider.
+            pub async fn mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+                <Self as service_daemon::Provided>::resolve_mutex().await
+            }
+        }
+    }
+}
+
 /// Generates a provider for a struct with automatic field injection.
 pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenStream {
     let struct_name = &item.ident;
@@ -122,8 +202,26 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     // Generate constructor based on field type (async for named structs with Arc deps)
     let constructor = generate_constructor(fields);
 
-    // Generate unique static name for singleton
-    let singleton_name = format_ident!("__SINGLETON_{}", struct_name.to_string().to_uppercase());
+    // Generate unique static name for singleton.
+    //
+    // Safety: Rust's `static` items are scoped to the enclosing module, so
+    // two structs with the same name in different modules produce separate
+    // statics. Within a single module, Rust forbids duplicate type names,
+    // making name collisions impossible under normal usage.
+    let singleton_name = format_ident!(
+        "__PROVIDER_SINGLETON_{}",
+        struct_name.to_string().to_uppercase()
+    );
+
+    // Use the shared Provided impl generator (Fix #1)
+    let type_tokens = quote! { #struct_name };
+    let provided_impl = generate_provided_impl(
+        &type_tokens,
+        &singleton_name,
+        &constructor,
+        None,
+        struct_name.span(),
+    );
 
     let expanded = quote! {
         #struct_def
@@ -132,49 +230,10 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
 
         #default_impl
 
-        static #singleton_name: service_daemon::core::managed_state::StateManager<#struct_name> = service_daemon::core::managed_state::StateManager::new();
-
-        // Type-based DI: impl Provided for the struct with intelligent state management
-        impl service_daemon::Provided for #struct_name {
-            async fn resolve() -> std::sync::Arc<Self> {
-                #singleton_name.resolve_snapshot(|| async {
-                    #constructor
-                }).await
-            }
-
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
-                #singleton_name.resolve_rwlock(|| async {
-                    #constructor
-                }).await
-            }
-
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
-                #singleton_name.resolve_mutex(|| async {
-                    #constructor
-                }).await
-            }
-
-            async fn changed() {
-                #singleton_name.changed().await
-            }
-        }
-
-        impl #struct_name {
-            /// Resolves a tracked RwLock for this provider.
-            pub async fn rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
-                <Self as service_daemon::Provided>::resolve_rwlock().await
-            }
-
-            /// Resolves a tracked Mutex for this provider.
-            pub async fn mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
-                <Self as service_daemon::Provided>::resolve_mutex().await
-            }
-        }
+        #provided_impl
     };
 
-    TokenStream::from(quote! {
-        #expanded
-    })
+    TokenStream::from(expanded)
 }
 
 /// Generates the struct definition with proper syntax for different struct kinds.
@@ -208,6 +267,18 @@ fn generate_extra_traits(
 ) -> proc_macro2::TokenStream {
     if let Some(info) = tuple_info {
         let inner = &info.inner_type;
+
+        // Build Display impl with quote_spanned! so that if the inner type
+        // doesn't implement Display, the error points to the user's type (R2).
+        let inner_span = inner.span();
+        let display_impl = quote_spanned! { inner_span =>
+            impl std::fmt::Display for #struct_name {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+        };
+
         quote! {
             impl std::ops::Deref for #struct_name {
                 type Target = #inner;
@@ -216,11 +287,7 @@ fn generate_extra_traits(
                 }
             }
 
-            impl std::fmt::Display for #struct_name {
-                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                    write!(f, "{}", self.0)
-                }
-            }
+            #display_impl
         }
     } else {
         quote! {}
@@ -237,29 +304,12 @@ fn generate_default_impl(
         return quote! {};
     };
 
-    // Extract default value expression and optional env from args
+    // Extract default value expression and optional env from args.
+    // No sentinel detection needed — `default_value` is `Option<syn::Expr>`.
     let (default_expr_opt, env_opt) = match provider_args {
         ProviderArgs::Value {
             default_value, env, ..
-        } => {
-            // Detect the empty-string sentinel from env-only parsing:
-            // `#[provider(env = "KEY")]` produces default_value = `""` as a placeholder.
-            // We treat this as "no default value" so the env-required panic path fires.
-            let is_env_only_sentinel = matches!(
-                default_value,
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(s),
-                    ..
-                }) if s.value().is_empty()
-            ) && env.is_some();
-
-            let effective_default = if is_env_only_sentinel {
-                None
-            } else {
-                Some(default_value)
-            };
-            (effective_default, env.as_ref())
-        }
+        } => (default_value.as_ref(), env.as_ref()),
         _ => (None, None),
     };
 
@@ -283,21 +333,57 @@ fn generate_default_impl(
     let default_body = if let Some(env_lit) = env_opt {
         // Use env var with fallback to default
         let env_str = env_lit.value();
-        if let Some(default_val) = default_expr_opt {
-            let default_tokens = expand_value(default_val);
-            quote! {
-                std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
+
+        if info.is_string {
+            // String type: use env var directly without parsing
+            if let Some(default_val) = default_expr_opt {
+                let default_tokens = expand_value(default_val);
+                quote! {
+                    std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
+                }
+            } else {
+                // No fallback: env var is REQUIRED. Panic with a descriptive message.
+                quote! {
+                    std::env::var(#env_str).unwrap_or_else(|_| {
+                        panic!(
+                            "Required environment variable '{}' is not set (needed by provider '{}'). \
+                             Set it or add a default: #[provider(\"...\", env = \"{}\")]",
+                            #env_str, #struct_name_str, #env_str
+                        )
+                    })
+                }
             }
         } else {
-            // No fallback: env var is REQUIRED. Panic with a descriptive message.
-            quote! {
-                std::env::var(#env_str).unwrap_or_else(|_| {
-                    panic!(
-                        "Required environment variable '{}' is not set (needed by provider '{}'). \
-                         Set it or add a default: #[provider(\"...\", env = \"{}\")]",
-                        #env_str, #struct_name_str, #env_str
-                    )
-                })
+            // Non-String type: parse the env var string into the target type.
+            // This enables `#[provider(8080, env = "PORT")] struct Port(pub i32)`.
+            let inner_ty = &info.inner_type;
+            if let Some(default_val) = default_expr_opt {
+                let default_tokens = expand_value(default_val);
+                quote! {
+                    std::env::var(#env_str)
+                        .ok()
+                        .and_then(|v| v.parse::<#inner_ty>().ok())
+                        .unwrap_or_else(|| #default_tokens)
+                }
+            } else {
+                // No fallback: env var is REQUIRED and must be parseable.
+                quote! {
+                    std::env::var(#env_str)
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "Required environment variable '{}' is not set (needed by provider '{}'). \
+                                 Set it or add a default: #[provider(value, env = \"{}\")]",
+                                #env_str, #struct_name_str, #env_str
+                            )
+                        })
+                        .parse::<#inner_ty>()
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "Environment variable '{}' for provider '{}' cannot be parsed: {}",
+                                #env_str, #struct_name_str, e
+                            )
+                        })
+                }
             }
         }
     } else if let Some(default_val) = default_expr_opt {
@@ -317,60 +403,15 @@ fn generate_default_impl(
     }
 }
 
-/// Extracts the inner type `U` from a nested `Arc<Wrapper<U>>` pattern,
-/// where `Wrapper` matches the given identifier (e.g., "RwLock" or "Mutex").
-fn extract_arc_inner_wrapper<'a>(
-    field_type: &'a Type,
-    wrapper_name: &str,
-) -> Option<&'a syn::Type> {
-    // Match Arc<...>
-    let syn::Type::Path(syn::TypePath { path, .. }) = field_type else {
-        return None;
-    };
-    let (Some(arc_seg), true) = (path.segments.last(), path.segments.len() == 1) else {
-        return None;
-    };
-    if arc_seg.ident != "Arc" {
-        return None;
-    }
-    let syn::PathArguments::AngleBracketed(arc_args) = &arc_seg.arguments else {
-        return None;
-    };
-    let Some(syn::GenericArgument::Type(inner)) = arc_args.args.first() else {
-        return None;
-    };
-
-    // Match Wrapper<U> inside the Arc
-    let syn::Type::Path(syn::TypePath {
-        path: inner_path, ..
-    }) = inner
-    else {
-        return None;
-    };
-    let (Some(wrapper_seg), true) = (inner_path.segments.last(), inner_path.segments.len() == 1)
-    else {
-        return None;
-    };
-    if wrapper_seg.ident != wrapper_name {
-        return None;
-    }
-    let syn::PathArguments::AngleBracketed(wrapper_args) = &wrapper_seg.arguments else {
-        return None;
-    };
-    let Some(syn::GenericArgument::Type(innermost)) = wrapper_args.args.first() else {
-        return None;
-    };
-
-    Some(innermost)
-}
-
 /// Generates the constructor for the struct provider.
 ///
 /// Supports automatic injection for:
-/// - `Arc<T>` fields → `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` fields → `<T as Provided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` fields → `<T as Provided>::resolve_mutex().await`
-/// - Other fields → `Default::default()`
+/// - `Arc<T>` fields -> `<T as Provided>::resolve().await`
+/// - `Arc<RwLock<T>>` fields -> `<T as Provided>::resolve_rwlock().await`
+/// - `Arc<Mutex<T>>` fields -> `<T as Provided>::resolve_mutex().await`
+/// - Other fields -> `Default::default()`
+///
+/// Uses `decompose_type` from `common` to avoid duplicating Arc pattern matching (Fix #8).
 fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
     match fields {
         syn::Fields::Named(named_fields) => {
@@ -381,37 +422,39 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                     let field_name = field.ident.as_ref().expect("Named fields must have idents");
                     let field_type = &field.ty;
 
-                    // Check for Arc<RwLock<T>> → resolve_rwlock()
-                    if let Some(inner_type) = extract_arc_inner_wrapper(field_type, "RwLock") {
-                        return quote! {
-                            #field_name: <#inner_type as service_daemon::Provided>::resolve_rwlock().await
-                        };
-                    }
+                    // Use the shared type decomposition from common.rs
+                    let (inner_type, wrapper) = crate::common::decompose_type(field_type);
 
-                    // Check for Arc<Mutex<T>> → resolve_mutex()
-                    if let Some(inner_type) = extract_arc_inner_wrapper(field_type, "Mutex") {
-                        return quote! {
-                            #field_name: <#inner_type as service_daemon::Provided>::resolve_mutex().await
-                        };
-                    }
-
-                    // Check if it's Arc<T> → resolve()
-                    if let Type::Path(syn::TypePath { path, .. }) = field_type
-                        && let (Some(segment), true) =
-                            (path.segments.last(), path.segments.len() == 1)
-                        && segment.ident == "Arc"
-                        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-                        && let Some(syn::GenericArgument::Type(inner_type)) = args.args.first()
-                    {
-                        // Async resolution with .await
-                        return quote! {
-                            #field_name: <#inner_type as service_daemon::Provided>::resolve().await
-                        };
-                    }
-
-                    // For non-Arc fields, use Default
-                    quote! {
-                        #field_name: Default::default()
+                    match wrapper {
+                        Some(crate::common::WrapperKind::ArcRwLock(_, _)) => {
+                            quote! {
+                                #field_name: <#inner_type as service_daemon::Provided>::resolve_rwlock().await
+                            }
+                        }
+                        Some(crate::common::WrapperKind::ArcMutex(_, _)) => {
+                            quote! {
+                                #field_name: <#inner_type as service_daemon::Provided>::resolve_mutex().await
+                            }
+                        }
+                        Some(crate::common::WrapperKind::Arc(_)) => {
+                            quote! {
+                                #field_name: <#inner_type as service_daemon::Provided>::resolve().await
+                            }
+                        }
+                        None => {
+                            // For non-Arc fields, use Default.
+                            // Use quote_spanned! to direct compile errors to the
+                            // field declaration rather than obscure macro output.
+                            //
+                            // The explicit trait-call style `<Type as Default>::default()`
+                            // combined with quote_spanned! produces clear diagnostics
+                            // that point directly to the user's field type when Default
+                            // is not implemented.
+                            let field_span = field_type.span();
+                            quote_spanned! { field_span =>
+                                #field_name: <#field_type as Default>::default()
+                            }
+                        }
                     }
                 })
                 .collect();

@@ -13,9 +13,9 @@ use syn::{ItemFn, Token, parse_macro_input};
 use crate::common::{ExtractedParams, TagsList, extract_sync_handler_flag};
 use codegen::{generate_call_expr, generate_watcher};
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Structured attribute parser (replaces the old string-based parse_service_attr)
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// Parsed result of `#[service(...)]` attributes.
 ///

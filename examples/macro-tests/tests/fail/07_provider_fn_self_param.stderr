@@ -1,0 +1,8 @@
+error: #[provider] fn must be a free function, not a method
+
+         = help: Remove the `self` parameter
+
+  --> tests/fail/07_provider_fn_self_param.rs:12:29
+   |
+12 |     pub async fn bad_method(&self) -> String {
+   |                             ^^^^^

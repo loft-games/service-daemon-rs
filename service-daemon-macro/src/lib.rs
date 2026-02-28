@@ -83,8 +83,17 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```rust,ignore
 /// use service_daemon::provider;
 ///
+/// // String field: env var used directly
 /// #[provider("localhost:5432", env = "DATABASE_HOST")]
 /// pub struct DatabaseHost(pub String);
+///
+/// // Non-String field: env var auto-parsed via `.parse()`
+/// #[provider(8080, env = "PORT")]
+/// pub struct Port(pub i32);
+///
+/// // Env-only (no default — panics if env var is missing)
+/// #[provider(env = "API_KEY")]
+/// pub struct ApiKey(pub String);
 /// ```
 ///
 /// # Example with template
@@ -103,10 +112,22 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// use service_daemon::provider;
 /// use std::sync::Arc;
 ///
+/// // Non-Arc fields must implement `Default`.
 /// #[provider]
 /// pub struct AppConfig {
 ///     pub port: Arc<Port>,
 ///     pub db_url: Arc<DbUrl>,
+/// }
+/// ```
+///
+/// # Example with async function (dependency injection)
+/// ```rust,ignore
+/// use service_daemon::provider;
+/// use std::sync::Arc;
+///
+/// #[provider]
+/// pub async fn db_pool(url: Arc<DbUrl>) -> DatabasePool {
+///     DatabasePool::connect(&url.0).await.expect("DB connection failed")
 /// }
 /// ```
 #[proc_macro_attribute]

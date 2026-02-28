@@ -1,4 +1,4 @@
-error: #[provider] async fn must have a return type
+error: #[provider] fn must have a return type
 
          = help: Add a return type, e.g., `async fn config() -> MyConfig { ... }`
 

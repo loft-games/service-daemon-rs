@@ -9,9 +9,9 @@
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
 //!
 //! The first token determines the parsing branch:
-//! - `Ident` → check for known template name (with optional parenthesized type)
-//! - `LitInt` / `LitStr` → default value
-//! - Empty → no-arg provider
+//! - `Ident` -> check for known template name (with optional parenthesized type)
+//! - `LitInt` / `LitStr` -> default value
+//! - Empty -> no-arg provider
 
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, Token};
@@ -27,9 +27,9 @@ fn is_template_name(ident: &Ident) -> bool {
 /// Parsed result of `#[provider(...)]` attributes.
 ///
 /// The first positional argument determines the variant:
-/// - Known template identifier → `Template`
-/// - Literal value → `Value`
-/// - Nothing → `Empty`
+/// - Known template identifier -> `Template`
+/// - Literal value -> `Value`
+/// - Nothing -> `Empty`
 #[derive(Debug)]
 pub enum ProviderArgs {
     /// No attributes: `#[provider]`
@@ -51,8 +51,8 @@ pub enum ProviderArgs {
     ///
     /// The macro generates a `Default` impl using this value.
     Value {
-        /// The default value expression (numeric literal, string literal, or complex expr).
-        default_value: syn::Expr,
+        /// The default value expression, or `None` for env-only providers.
+        default_value: Option<syn::Expr>,
         /// Optional environment variable name that overrides the default at runtime.
         env: Option<syn::LitStr>,
     },
@@ -140,7 +140,7 @@ impl Parse for ProviderArgs {
                     let env_lit = input.parse::<syn::LitStr>()?;
                     // env-only provider: no default value, env var is required at runtime
                     return Ok(ProviderArgs::Value {
-                        default_value: syn::parse_quote!(""),
+                        default_value: None,
                         env: Some(env_lit),
                     });
                 }
@@ -155,6 +155,7 @@ impl Parse for ProviderArgs {
 
         // Branch 3: Literal or expression — default value
         let default_value: syn::Expr = input.parse()?;
+        let default_value = Some(default_value);
 
         // Parse optional trailing named arguments (env)
         let mut env = None;
@@ -200,7 +201,7 @@ mod tests {
         assert!(matches!(args, ProviderArgs::Empty));
     }
 
-    // ── Template branch ─────────────────────────────────────────────────
+    // -- Template branch ----------------------------------------------------------
 
     #[test]
     fn notify_template_without_inner_type() {
@@ -259,13 +260,19 @@ mod tests {
         assert!(matches!(args, ProviderArgs::Template { name, .. } if name == "BQueue"));
     }
 
-    // ── Value branch ────────────────────────────────────────────────────
+    // -- Value branch -------------------------------------------------------------
 
     #[test]
     fn integer_literal_default() {
         let args = parse_args(quote! { 8080 }).unwrap();
         match args {
-            ProviderArgs::Value { env, .. } => {
+            ProviderArgs::Value {
+                default_value, env, ..
+            } => {
+                assert!(
+                    default_value.is_some(),
+                    "default_value should be Some for literal"
+                );
                 assert!(env.is_none());
             }
             _ => panic!("Expected Value variant"),
@@ -291,22 +298,27 @@ mod tests {
         }
     }
 
-    // ── Named-arg-only branch ───────────────────────────────────────────
+    // -- Named-arg-only branch ----------------------------------------------------
 
     #[test]
     fn env_only_without_default() {
         let args = parse_args(quote! { env = "API_KEY" }).unwrap();
         match args {
             ProviderArgs::Value {
-                env: Some(env_lit), ..
+                default_value,
+                env: Some(env_lit),
             } => {
+                assert!(
+                    default_value.is_none(),
+                    "env-only should have None default_value"
+                );
                 assert_eq!(env_lit.value(), "API_KEY");
             }
             _ => panic!("Expected Value variant with env-only"),
         }
     }
 
-    // ── Unknown ident falls through to expression ───────────────────────
+    // -- Unknown ident falls through to expression --------------------------------
 
     #[test]
     fn unknown_ident_treated_as_expression() {
@@ -315,7 +327,7 @@ mod tests {
         assert!(matches!(args, ProviderArgs::Value { .. }));
     }
 
-    // ── Error cases ─────────────────────────────────────────────────────
+    // -- Error cases ---------------------------------------------------------------
 
     #[test]
     fn unknown_template_attribute_is_error() {

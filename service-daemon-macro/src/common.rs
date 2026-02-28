@@ -186,7 +186,7 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
 /// Decomposes a type to find the inner type and the wrapper kind.
 /// Supports Arc<T>, Arc<RwLock<T>>, Arc<Mutex<T>>.
 /// Now supports qualified paths (e.g., std::sync::Arc) and captures spans.
-fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
+pub(crate) fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
     if let Type::Path(syn::TypePath { path, .. }) = ty
         && let Some(segment) = path.segments.last()
         && segment.ident == "Arc"
@@ -418,9 +418,9 @@ pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedPar
     processor.finish()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Tags parsing (shared by #[service] and #[trigger])
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A parsed list of static tag strings from `tags = ["a", "b"]` syntax.
 ///
