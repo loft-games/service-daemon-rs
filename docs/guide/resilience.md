@@ -68,6 +68,9 @@ let policy = RestartPolicy::builder()
 - **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`. If the timeout is reached, the daemon logs a warning and proceeds to the next wave to avoid blocking the entire system.
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
+### 2.1. Concurrency & Elastic Scaling
+Resilience also extends to **throughput management**. For streaming triggers (e.g. `Queue`), elastic scaling is governed by a dedicated [`ScalingPolicy`] struct &mdash; separate from `RestartPolicy`. Each trigger template self-declares its scaling requirements via `TriggerHost::scaling_policy()`. Templates that do not need scaling (e.g. `Cron`, `Watch`, `Notify`) return `None` and incur zero scaling overhead. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+
 ## 3. Managing CPU-Intensive & Blocking Tasks
 
 The asynchronous executor (Tokio) relies on cooperative multitasking. If a service performs a long-running CPU computation or a blocking I/O operation without yielding, it will **stall the entire daemon**.

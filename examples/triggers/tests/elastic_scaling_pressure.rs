@@ -91,8 +91,9 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     reset_counters();
 
     // -- Build and start the daemon --
-    // Default RestartPolicy has initial_concurrency=1, max_concurrency=1024,
-    // scale_factor=2, scale_threshold=5 (~83% utilization triggers scale-up).
+    // TopicHost (Queue template) declares ScalingPolicy::default() via
+    // TriggerHost::scaling_policy(), which gives initial_concurrency=1,
+    // max_concurrency=64, scale_factor=2, scale_threshold=5 (~83% utilization).
     let mut daemon = ServiceDaemon::builder().build();
     let token = daemon.cancel_token();
     daemon.run().await;

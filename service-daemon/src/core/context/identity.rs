@@ -7,7 +7,7 @@
 //! - Task-local bindings (`CURRENT_SERVICE`, `CURRENT_RESOURCES`)
 
 use dashmap::DashMap;
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::task_local;
@@ -39,6 +39,10 @@ pub struct DaemonResources {
     pub reload_signals: Arc<DashMap<ServiceId, Arc<tokio::sync::Notify>>>,
     /// Global notification for any status change in the STATUS_PLANE.
     pub status_changed: Arc<tokio::sync::Notify>,
+    /// Type-erased registry for trigger-specific configurations.
+    /// Users register configs via `ServiceDaemonBuilder::with_trigger_config<C>`.
+    /// Templates read them via `context::trigger_config::<C>()`.
+    pub trigger_configs: Arc<DashMap<TypeId, Box<dyn Any + Send + Sync>>>,
 }
 
 impl DaemonResources {
@@ -49,6 +53,7 @@ impl DaemonResources {
             shelf: Arc::new(DashMap::new()),
             reload_signals: Arc::new(DashMap::new()),
             status_changed: Arc::new(tokio::sync::Notify::new()),
+            trigger_configs: Arc::new(DashMap::new()),
         }
     }
 }

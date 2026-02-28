@@ -1,17 +1,18 @@
-//! Shared retry and backoff policies used across services and triggers.
+//! Shared retry, backoff, and scaling policies.
 //!
-//! This module provides two complementary types:
+//! This module provides three complementary types:
 //!
-//! - [`RestartPolicy`]: A configuration object describing backoff parameters
-//!   (initial delay, max delay, jitter, etc.). It is **stateless** and can be
-//!   shared across many supervisors.
+//! - [`RestartPolicy`]: Stateless backoff configuration (initial delay, max
+//!   delay, jitter, wave timeouts). Shared across service supervisors and
+//!   trigger retry interceptors.
+//! - [`ScalingPolicy`]: Stateless elastic-scaling configuration (concurrency
+//!   limits, pressure threshold, cooldown). Only relevant for streaming
+//!   trigger templates (e.g. `Queue`). Declared via
+//!   [`TriggerHost::scaling_policy()`] and optionally overridden by the user
+//!   via [`ServiceDaemonBuilder::with_trigger_config`].
 //! - [`BackoffController`]: A **stateful** controller that tracks the current
 //!   backoff delay and attempt count. It wraps a `RestartPolicy` and provides
 //!   interruption-aware waiting via `tokio::select!`.
-//!
-//! Both `ServiceSupervisor` (for long-running services) and `TriggerInvocation`
-//! (for individual trigger event retries) compose `BackoffController` to share
-//! identical retry semantics.
 
 use rand::Rng;
 use std::time::Duration;
@@ -22,12 +23,14 @@ use tracing::info;
 // RestartPolicy -- stateless backoff configuration
 // ---------------------------------------------------------------------------
 
-/// Configuration for retry / restart behavior with exponential backoff,
-/// and elastic scaling parameters for trigger concurrency.
+/// Configuration for retry / restart behavior with exponential backoff.
 ///
 /// This struct is **stateless** -- it only describes *how* to compute delays
-/// and *how* to scale trigger processing concurrency.
+/// for service restarts and trigger handler retries.
 /// Pair it with [`BackoffController`] to get a stateful retry loop.
+///
+/// For elastic-scaling configuration (concurrency, pressure threshold),
+/// see [`ScalingPolicy`].
 #[derive(Debug, Clone, Copy)]
 pub struct RestartPolicy {
     /// Initial delay before the first retry (default: 1 second).
@@ -48,38 +51,6 @@ pub struct RestartPolicy {
     /// Timeout for waiting for services to stop during wave shutdown
     /// (default: 30 seconds).
     pub wave_stop_timeout: Duration,
-
-    // -- Elastic scaling parameters for trigger concurrency --
-    /// Number of concurrent handler instances at cold-start (default: 1).
-    ///
-    /// The trigger runner starts with this many dispatch slots and scales
-    /// up only when the pressure ratio exceeds `scale_threshold`.
-    pub initial_concurrency: usize,
-    /// Hard upper limit on concurrent handler instances (default: 1024).
-    ///
-    /// The auto-scaler will never exceed this value, even under sustained
-    /// high pressure. This acts as a safety guard against unbounded
-    /// resource consumption.
-    pub max_concurrency: usize,
-    /// Multiplier applied to the current concurrency limit on each
-    /// scale-up event (default: 2).
-    ///
-    /// For example, with `scale_factor = 2`, limits grow as:
-    /// 1 → 2 → 4 → 8 → ... → `max_concurrency`.
-    pub scale_factor: usize,
-    /// Pressure ratio threshold that triggers a scale-up (default: 5).
-    ///
-    /// Pressure ratio is defined as `queue_depth / current_instances`.
-    /// A threshold of 5 means: "if the backlog would take 5 processing
-    /// cycles to drain at the current rate, scale up". Backlogs that
-    /// can be consumed within fewer cycles are not worth scaling for.
-    pub scale_threshold: usize,
-    /// Duration of queue idleness before the runner starts reclaiming
-    /// excess handler instances (default: 30 seconds).
-    ///
-    /// After the queue has been empty for this long, the runner
-    /// shrinks concurrency back towards `initial_concurrency`.
-    pub scale_cooldown: Duration,
 }
 
 impl Default for RestartPolicy {
@@ -92,12 +63,6 @@ impl Default for RestartPolicy {
             jitter_factor: 0.1, // 10% jitter by default
             wave_spawn_timeout: Duration::from_secs(5),
             wave_stop_timeout: Duration::from_secs(30),
-            // Elastic scaling defaults
-            initial_concurrency: 1,
-            max_concurrency: 1024,
-            scale_factor: 2,
-            scale_threshold: 5,
-            scale_cooldown: Duration::from_secs(30),
         }
     }
 }
@@ -118,12 +83,6 @@ impl RestartPolicy {
             jitter_factor: 0.0, // No jitter for predictable tests
             wave_spawn_timeout: Duration::from_millis(500),
             wave_stop_timeout: Duration::from_secs(2),
-            // Smaller limits for faster test cycles
-            initial_concurrency: 1,
-            max_concurrency: 4,
-            scale_factor: 2,
-            scale_threshold: 2,
-            scale_cooldown: Duration::from_secs(2),
         }
     }
 
@@ -179,8 +138,100 @@ impl RestartPolicyBuilder {
         self
     }
 
-    // -- Elastic scaling builder methods --
+    #[must_use]
+    pub fn build(self) -> RestartPolicy {
+        self.policy
+    }
+}
 
+// ---------------------------------------------------------------------------
+// ScalingPolicy -- elastic scaling configuration for trigger concurrency
+// ---------------------------------------------------------------------------
+
+/// Configuration for elastic-scaling of trigger handler concurrency.
+///
+/// This struct is **stateless** and describes *how* the `TriggerRunner`
+/// should manage concurrent handler dispatch for streaming event sources.
+///
+/// Trigger templates declare whether they need scaling via
+/// [`TriggerHost::scaling_policy()`]. Only streaming templates (e.g.
+/// `TopicHost` for `Queue`) return `Some(ScalingPolicy)`. Discrete
+/// templates (`SignalHost`, `CronHost`, `WatchHost`) return `None`,
+/// which disables the scale monitor and runs handlers serially.
+///
+/// Users can override the template default via
+/// [`ServiceDaemonBuilder::with_trigger_config`].
+#[derive(Debug, Clone, Copy)]
+pub struct ScalingPolicy {
+    /// Number of concurrent handler instances at cold-start (default: 1).
+    ///
+    /// The trigger runner starts with this many dispatch slots and scales
+    /// up only when the pressure ratio exceeds `scale_threshold`.
+    pub initial_concurrency: usize,
+    /// Hard upper limit on concurrent handler instances (default: 64).
+    ///
+    /// The auto-scaler will never exceed this value, even under sustained
+    /// high pressure. This acts as a safety guard against unbounded
+    /// resource consumption.
+    pub max_concurrency: usize,
+    /// Multiplier applied to the current concurrency limit on each
+    /// scale-up event (default: 2).
+    ///
+    /// For example, with `scale_factor = 2`, limits grow as:
+    /// 1 → 2 → 4 → 8 → ... → `max_concurrency`.
+    pub scale_factor: usize,
+    /// Pressure ratio threshold that triggers a scale-up (default: 5).
+    ///
+    /// Pressure ratio is defined as `queue_depth / current_instances`.
+    /// A threshold of 5 means: "if the backlog would take 5 processing
+    /// cycles to drain at the current rate, scale up". Backlogs that
+    /// can be consumed within fewer cycles are not worth scaling for.
+    pub scale_threshold: usize,
+    /// Duration of queue idleness before the runner starts reclaiming
+    /// excess handler instances (default: 30 seconds).
+    ///
+    /// After the queue has been empty for this long, the runner
+    /// shrinks concurrency back towards `initial_concurrency`.
+    pub scale_cooldown: Duration,
+}
+
+impl Default for ScalingPolicy {
+    fn default() -> Self {
+        Self {
+            initial_concurrency: 1,
+            max_concurrency: 64,
+            scale_factor: 2,
+            scale_threshold: 5,
+            scale_cooldown: Duration::from_secs(30),
+        }
+    }
+}
+
+impl ScalingPolicy {
+    /// Create a scaling policy builder.
+    pub fn builder() -> ScalingPolicyBuilder {
+        ScalingPolicyBuilder::default()
+    }
+
+    /// Create a scaling policy for testing with smaller limits.
+    pub fn for_testing() -> Self {
+        Self {
+            initial_concurrency: 1,
+            max_concurrency: 4,
+            scale_factor: 2,
+            scale_threshold: 2,
+            scale_cooldown: Duration::from_secs(2),
+        }
+    }
+}
+
+/// Builder for [`ScalingPolicy`].
+#[derive(Default)]
+pub struct ScalingPolicyBuilder {
+    policy: ScalingPolicy,
+}
+
+impl ScalingPolicyBuilder {
     /// Set the initial number of concurrent handler instances.
     pub fn initial_concurrency(mut self, count: usize) -> Self {
         self.policy.initial_concurrency = count.max(1);
@@ -216,7 +267,7 @@ impl RestartPolicyBuilder {
     }
 
     #[must_use]
-    pub fn build(self) -> RestartPolicy {
+    pub fn build(self) -> ScalingPolicy {
         self.policy
     }
 }
@@ -364,17 +415,21 @@ mod tests {
         let policy = RestartPolicy::default();
         assert_eq!(policy.initial_delay, Duration::from_secs(1));
         assert_eq!(policy.max_delay, Duration::from_secs(300));
-        // Elastic scaling defaults
+    }
+
+    #[test]
+    fn test_scaling_policy_default() {
+        let policy = ScalingPolicy::default();
         assert_eq!(policy.initial_concurrency, 1);
-        assert_eq!(policy.max_concurrency, 1024);
+        assert_eq!(policy.max_concurrency, 64);
         assert_eq!(policy.scale_factor, 2);
         assert_eq!(policy.scale_threshold, 5);
         assert_eq!(policy.scale_cooldown, Duration::from_secs(30));
     }
 
     #[test]
-    fn test_restart_policy_builder_scaling() {
-        let policy = RestartPolicy::builder()
+    fn test_scaling_policy_builder() {
+        let policy = ScalingPolicy::builder()
             .initial_concurrency(4)
             .max_concurrency(2048)
             .scale_factor(3)
@@ -389,15 +444,15 @@ mod tests {
     }
 
     #[test]
-    fn test_restart_policy_builder_scaling_clamping() {
+    fn test_scaling_policy_builder_clamping() {
         // initial_concurrency minimum is 1
-        let policy = RestartPolicy::builder().initial_concurrency(0).build();
+        let policy = ScalingPolicy::builder().initial_concurrency(0).build();
         assert_eq!(policy.initial_concurrency, 1);
         // scale_factor minimum is 2
-        let policy = RestartPolicy::builder().scale_factor(1).build();
+        let policy = ScalingPolicy::builder().scale_factor(1).build();
         assert_eq!(policy.scale_factor, 2);
         // scale_threshold minimum is 1
-        let policy = RestartPolicy::builder().scale_threshold(0).build();
+        let policy = ScalingPolicy::builder().scale_threshold(0).build();
         assert_eq!(policy.scale_threshold, 1);
     }
 

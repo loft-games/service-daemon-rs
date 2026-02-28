@@ -269,6 +269,35 @@ pub async fn sleep(duration: Duration) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Trigger Configuration API
+// ---------------------------------------------------------------------------
+
+/// Retrieves a user-registered trigger configuration of type `T`.
+///
+/// Returns `Some(T)` if the user registered this config type via
+/// [`ServiceDaemonBuilder::with_trigger_config`], otherwise `None`.
+///
+/// This function is typically called from the default `run_as_service`
+/// implementation in [`TriggerHost`] to check for user overrides before
+/// falling back to the template's self-declared [`ScalingPolicy`].
+///
+/// # Panics
+///
+/// Returns `None` if called outside a service scope (no task-local context).
+pub fn trigger_config<T: Any + Clone + Send + Sync>() -> Option<T> {
+    use std::any::TypeId;
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources
+                .trigger_configs
+                .get(&TypeId::of::<T>())
+                .and_then(|entry| entry.value().downcast_ref::<T>().cloned())
+        })
+        .ok()
+        .flatten()
+}
+
+// ---------------------------------------------------------------------------
 // Event Publishing API -- "Throwing stones into the water"
 // ---------------------------------------------------------------------------
 

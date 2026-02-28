@@ -279,6 +279,21 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
         target: &'a Arc<T>,
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>>;
 
+    /// **Scaling**: Declare whether this trigger type needs elastic scaling.
+    ///
+    /// Returns `None` by default, which means the trigger runner will
+    /// dispatch events serially (single permit, no scale monitor).
+    ///
+    /// Streaming trigger templates (e.g. `TopicHost` for `Queue`) should
+    /// override this to return `Some(ScalingPolicy::default())`, which
+    /// enables the pressure-based auto-scaler.
+    ///
+    /// Users can override the template's default via
+    /// [`ServiceDaemonBuilder::with_trigger_config`].
+    fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
+        None
+    }
+
     /// **Engine**: Start the trigger's event loop as a long-running service.
     ///
     /// The default implementation provides a complete event loop that:
@@ -302,11 +317,17 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
 
             let mut host = Self::setup(target.clone()).await?;
 
+            // Priority chain: user override > template declaration > None
+            let scaling =
+                crate::core::context::trigger_config::<crate::models::policy::ScalingPolicy>()
+                    .or_else(|| Self::scaling_policy());
+
             let runner = crate::core::trigger_runner::TriggerRunner::new(
                 name,
                 service_id,
                 handler,
                 crate::models::policy::RestartPolicy::default(),
+                scaling,
             );
 
             runner.run_with_host::<T, Self>(&mut host, target).await

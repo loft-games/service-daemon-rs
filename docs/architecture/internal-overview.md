@@ -71,7 +71,10 @@ The framework is organized into specialized submodules to ensure maintainability
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
 - **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
 - **`core/triggers.rs`**: Built-in trigger host implementations. Each host implements the `TriggerHost` trait with `setup` (one-time initialization) and `handle_step` (per-event policy).
-- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerInterceptor` pipeline. Uses an onion-model interceptor chain (stored as `Arc<dyn>` for safe cross-task sharing) where each layer (tracing, retry, user-defined) has full control over the dispatch lifecycle. Dispatch is **asynchronous** -- each event is spawned into a `tokio::spawn` task gated by a `Semaphore`. A background `scale_monitor` dynamically adjusts the concurrency limit based on pressure ratio.
+- **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerInterceptor` pipeline.
+  - **Instance Reuse**: Reuses a single `TriggerHost` instance via `&mut self` across all iterations in a service lifecycle, allowing hosts to maintain internal state (counters, buffers) without global shelving. A fresh instance is only created via `setup` during service reloads or restarts.
+  - **Onion Interceptors**: Uses an onion-model interceptor chain (stored as `Arc<dyn>` for safe cross-task sharing) where each layer (tracing, retry, user-defined) has full control over the dispatch lifecycle.
+  - **Elastic Scaling & Backpressure**: Dispatch is **asynchronous** -- each event is spawned into a `tokio::spawn` task. Scaling is **conditionally enabled**: only trigger templates that declare a `ScalingPolicy` (via `TriggerHost::scaling_policy()`) activate the semaphore-based flow control and background `scale_monitor` task. Templates without scaling declarations dispatch serially with zero overhead.
 - **`core/context/`**: Task-local storage, status plane interactions, and **simulation overlay** (`MockContext`).
 - **`core/managed_state.rs`**: The reactive state engine with change tracking.
 

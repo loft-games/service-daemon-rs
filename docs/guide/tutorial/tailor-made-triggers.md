@@ -9,7 +9,7 @@ To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 ## 1. The Policy vs. Engine Model
 
 Starting from v0.1.0, triggers are split into two parts:
-1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **elastic scaling** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency.
+1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **conditional elastic scaling** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency, enabled only when the template declares a `ScalingPolicy` via `TriggerHost::scaling_policy()`.
 2.  **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
 
 ### Why `Clone` for Payloads?
@@ -103,6 +103,18 @@ Your `handle_step` method returns an instruction to the engine:
 *   `TriggerTransition::Next(payload)`: Dispatch event and loop immediately.
 *   `TriggerTransition::Reload(payload)`: Dispatch event, then wait for a framework restart (ideal for state-watchers).
 *   `TriggerTransition::Stop`: Cleanly exit the loop.
+
+### Declaring Elastic Scaling
+
+By default, custom triggers dispatch events **serially** (no scaling overhead). If your trigger is a streaming event source that benefits from concurrent handler execution, override `scaling_policy()`:
+
+```rust
+fn scaling_policy() -> Option<ScalingPolicy> {
+    Some(ScalingPolicy::default())
+}
+```
+
+This enables the framework's pressure-based auto-scaler (`scale_monitor`). Users can further override your defaults via `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
 
 ## 3. The Ultimate Escape Hatch: `run_as_service`
 

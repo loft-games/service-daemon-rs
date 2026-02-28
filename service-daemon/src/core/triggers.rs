@@ -125,6 +125,11 @@ where
             }
         })
     }
+
+    /// TopicHost is a streaming event source -- declare elastic scaling.
+    fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
+        Some(crate::models::policy::ScalingPolicy::default())
+    }
 }
 
 // ===========================================================================

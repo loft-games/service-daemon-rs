@@ -125,33 +125,46 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 
 ## 6. Elastic Scaling (Async Dispatch)
 
-Trigger handlers are dispatched **asynchronously** -- the event loop does not block on handler completion. This is achieved through a `Semaphore`-gated `tokio::spawn` mechanism:
+Elastic scaling is **automatically enabled** only for streaming trigger templates that declare scaling support (e.g. `Queue` / `TopicHost`). Other templates (`Cron`, `Watch`, `Notify`) dispatch handlers serially with zero scaling overhead.
 
-1. **Semaphore Backpressure**: Each dispatch acquires a permit from a concurrency semaphore (initialized to `initial_concurrency` from `RestartPolicy`).
-2. **Async Spawn**: The interceptor chain + handler is spawned as an independent tokio task.
-3. **Scale Monitor**: A background task monitors semaphore pressure and dynamically adds permits when utilization exceeds the `scale_threshold` ratio.
+Each trigger template declares its scaling needs via `TriggerHost::scaling_policy()`. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
 
-### Policy Configuration
+---
 
-All elastic scaling parameters live in `RestartPolicy`:
+## 7. Instance Lifecycle & State Reuse
 
-| Parameter | Default | Description |
-|:---|:---|:---|
-| `initial_concurrency` | 1 | Starting dispatch slots |
-| `max_concurrency` | 1024 | Hard upper limit |
-| `scale_factor` | 2 | Multiplier on each scale-up |
-| `scale_threshold` | 5 | Pressure ratio to trigger scaling |
-| `scale_cooldown` | 30s | Idle time before scaling down |
+Unlike standard services where the macro-wrapped function is re-executed on every iteration, triggers leverage a **Stateful Host** model:
 
-### Scaling Algorithm
+1.  **Instantiation**: The `TriggerHost` is created **once** via `setup()` when the service starts.
+2.  **State Persistence**: The `TriggerRunner` maintains a reference to this instance and calls `handle_step(&mut self, ...)` in a loop.
+3.  **State Reuse**: You can store resources (e.g., a `tokio::sync::mpsc::Receiver` or a local cache) as struct fields in your `TriggerHost`. These fields are preserved across all event iterations.
+4.  **Reload Boundary**: When a reload signal is received (e.g., configuration change), the current `TriggerRunner` and its `TriggerHost` are dropped, and a **new** instance is created.
 
-```text
-pressure_limit = current_limit × threshold / (threshold + 1)
-if in_flight >= pressure_limit → scale up by scale_factor
-if idle > scale_cooldown       → shrink to initial_concurrency
-```
+This design enables high-performance event processing by avoiding repeated setup overhead while ensuring clean resource isolation during reloads.
 
-Users do not need to configure anything -- the defaults provide sensible auto-scaling for most workloads.
+---
+
+## 8. Elastic Scaling & Backpressure Details
+
+The scaling mechanism is designed for "Set and Forget" reliability with maximum resource reuse. It is governed by the [`ScalingPolicy`] struct (separate from `RestartPolicy`).
+
+### Configuration Source Priority
+
+1. **User Override**: `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`
+2. **Template Declaration**: `TriggerHost::scaling_policy()` (e.g. `TopicHost` returns `Some(ScalingPolicy::default())`)
+3. **No Scaling**: Templates returning `None` (e.g. `CronHost`, `SignalHost`, `WatchHost`) — serial dispatch, no scale monitor.
+
+### Backpressure Implementation
+Backpressure is enforced via a **shared semaphore**. If the number of in-flight handlers reaches the current concurrency limit, the `TriggerRunner` blocks on `dispatch`. This naturally slows down the `handle_step` loop, providing backpressure to the event source (e.g., pausing an MQ consumer).
+
+### Scaling Resource Reuse
+When the `scale_monitor` task decides to scale up:
+- It calls `semaphore.add_permits(n)` on the **existing** semaphore instance.
+- No new tasks or containers are allocated for the control plane.
+- The interceptor chain (`Arc<Vec<...>>`) is shared across all spawned tasks.
+
+### Scaling and "Phantom Permits"
+During scale-down (idle timeout), the logical limit is reduced, but permits aren't physically "revoked" from the semaphore (as Tokio doesn't support random revocation). Instead, the runner tracks a "logical limit" that effectively ignores excess permits until they are naturally exhausted or needed again.
 
 ---
 

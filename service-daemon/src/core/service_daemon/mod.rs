@@ -305,6 +305,8 @@ pub struct ServiceDaemonBuilder {
     extra_services: Vec<ServiceDescription>,
     /// External cancellation token for hierarchical lifecycle management.
     external_cancel_token: Option<CancellationToken>,
+    /// Type-erased trigger configuration overrides.
+    trigger_configs: dashmap::DashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
     /// Pre-filled resources for simulation (only available with `simulation` feature).
     #[cfg(feature = "simulation")]
     resources: Option<DaemonResources>,
@@ -317,6 +319,7 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             extra_services: Vec::new(),
             external_cancel_token: None,
+            trigger_configs: dashmap::DashMap::new(),
             #[cfg(feature = "simulation")]
             resources: None,
         }
@@ -337,6 +340,7 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             extra_services: Vec::new(),
             external_cancel_token: None,
+            trigger_configs: dashmap::DashMap::new(),
             resources: None,
         }
     }
@@ -407,6 +411,32 @@ impl ServiceDaemonBuilder {
         self
     }
 
+    /// Register a trigger-specific configuration override.
+    ///
+    /// The registered config can be retrieved at runtime via
+    /// [`context::trigger_config::<C>()`](crate::core::context::trigger_config).
+    /// This is how users override the defaults declared by trigger templates
+    /// (e.g. [`ScalingPolicy`](crate::models::ScalingPolicy)).
+    ///
+    /// This method can be called multiple times with different config types.
+    /// Each call replaces the previous registration for that type.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut daemon = ServiceDaemon::builder()
+    ///     .with_trigger_config(ScalingPolicy::builder()
+    ///         .initial_concurrency(4)
+    ///         .build())
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn with_trigger_config<C: 'static + Clone + Send + Sync>(self, config: C) -> Self {
+        self.trigger_configs
+            .insert(std::any::TypeId::of::<C>(), Box::new(config));
+        self
+    }
+
     /// Build the `ServiceDaemon`.
     ///
     /// This method is **infallible** -- it always returns a valid daemon.
@@ -423,6 +453,11 @@ impl ServiceDaemonBuilder {
         let resources = self.resources.unwrap_or_default();
         #[cfg(not(feature = "simulation"))]
         let resources = DaemonResources::new();
+
+        // Inject user-registered trigger configs into the shared resources.
+        for entry in self.trigger_configs {
+            resources.trigger_configs.insert(entry.0, entry.1);
+        }
 
         ServiceDaemon {
             services,
