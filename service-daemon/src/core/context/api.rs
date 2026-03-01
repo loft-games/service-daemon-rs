@@ -6,6 +6,7 @@
 //! the `#[service]` and `#[trigger]` macros.
 
 use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, ServiceIdentity};
+use std::sync::Arc;
 
 use std::any::Any;
 use std::future::Future;
@@ -21,7 +22,7 @@ use crate::models::ServiceStatus;
 #[doc(hidden)]
 pub async fn __run_service_scope<F, Fut>(
     identity: ServiceIdentity,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     f: F,
 ) -> Fut::Output
 where

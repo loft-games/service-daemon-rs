@@ -125,7 +125,7 @@ pub struct ServiceDescription {
     pub priority: u8,
     pub cancellation_token: CancellationToken,
     /// Tags inherited from the static `ServiceEntry`.
-    pub tags: Vec<String>,
+    pub tags: &'static [&'static str],
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +313,7 @@ impl RegistryBuilder {
                 watcher: entry.watcher.map(|w| Arc::new(w) as _),
                 priority: entry.priority,
                 cancellation_token: CancellationToken::new(),
-                tags: entry.tags.iter().map(|t| t.to_string()).collect(),
+                tags: entry.tags,
             });
         }
 

@@ -58,7 +58,7 @@ struct ServiceSupervisor {
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     backoff: BackoffController,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
 
     // -- Per-generation mutable context (set during `on_starting`) --
@@ -75,7 +75,7 @@ impl ServiceSupervisor {
         run: ServiceFn,
         watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
         policy: RestartPolicy,
-        resources: DaemonResources,
+        resources: Arc<DaemonResources>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
@@ -433,7 +433,7 @@ impl<'a> ServiceWave<'a> {
     /// to skip waiting during shutdown.
     async fn wait_for_healthy(
         &self,
-        resources: &DaemonResources,
+        resources: &Arc<DaemonResources>,
         timeout: Duration,
         daemon_token: &CancellationToken,
     ) {
@@ -493,7 +493,7 @@ pub async fn spawn_service(
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
 ) {
     let supervisor = ServiceSupervisor::new(
@@ -522,7 +522,7 @@ pub async fn spawn_all_services(
     services: &[ServiceDescription],
     restart_policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     daemon_token: &CancellationToken,
 ) {
     info!("Beginning wave-based startup sequence...");
@@ -572,7 +572,7 @@ pub async fn spawn_all_services(
 pub async fn stop_all_services(
     services: &[ServiceDescription],
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     daemon_token: CancellationToken,
     grace_period: Duration,
 ) {

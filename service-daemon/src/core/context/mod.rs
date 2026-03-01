@@ -38,9 +38,10 @@ mod tests {
     use super::*;
     use crate::models::{ServiceId, ServiceStatus};
     use std::future::Future;
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
-    fn create_test_resources() -> DaemonResources {
+    fn create_test_resources() -> Arc<DaemonResources> {
         DaemonResources::new()
     }
 
@@ -54,7 +55,11 @@ mod tests {
     }
 
     /// Helper to run a future in a service scope (for tests).
-    async fn in_scope<F, Fut, T>(identity: ServiceIdentity, resources: DaemonResources, f: F) -> T
+    async fn in_scope<F, Fut, T>(
+        identity: ServiceIdentity,
+        resources: Arc<DaemonResources>,
+        f: F,
+    ) -> T
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,

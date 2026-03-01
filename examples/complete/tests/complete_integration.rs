@@ -25,7 +25,7 @@ fn build_daemon_with_services(
             watcher: None,
             priority,
             cancellation_token: CancellationToken::new(),
-            tags: vec![],
+            tags: &[],
         })
         .collect();
 

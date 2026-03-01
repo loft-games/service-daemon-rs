@@ -29,7 +29,7 @@ pub use policy::{RestartPolicy, RestartPolicyBuilder};
 /// A handle to the ServiceDaemon that can be used to query status and interact with services.
 #[derive(Clone)]
 pub struct ServiceDaemonHandle {
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl ServiceDaemonHandle {
@@ -80,7 +80,7 @@ pub struct ServiceDaemon {
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl ServiceDaemon {
@@ -112,7 +112,7 @@ impl ServiceDaemon {
     /// This method is gated behind the `simulation` feature to prevent misuse
     /// in production environments.
     #[cfg(feature = "simulation")]
-    pub fn resources(&self) -> DaemonResources {
+    pub fn resources(&self) -> Arc<DaemonResources> {
         self.resources.clone()
     }
 
@@ -309,7 +309,7 @@ pub struct ServiceDaemonBuilder {
     trigger_configs: dashmap::DashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
     /// Pre-filled resources for simulation (only available with `simulation` feature).
     #[cfg(feature = "simulation")]
-    resources: Option<DaemonResources>,
+    resources: Option<Arc<DaemonResources>>,
 }
 
 impl ServiceDaemonBuilder {
@@ -392,7 +392,7 @@ impl ServiceDaemonBuilder {
     /// in production environments.
     #[cfg(feature = "simulation")]
     #[must_use]
-    pub fn with_resources(mut self, resources: DaemonResources) -> Self {
+    pub fn with_resources(mut self, resources: Arc<DaemonResources>) -> Self {
         self.resources = Some(resources);
         self
     }
@@ -448,9 +448,8 @@ impl ServiceDaemonBuilder {
         let mut services = registry.into_services();
         services.extend(self.extra_services);
 
-        // Use injected resources if provided (simulation), otherwise create fresh ones.
         #[cfg(feature = "simulation")]
-        let resources = self.resources.unwrap_or_default();
+        let resources = self.resources.unwrap_or_else(DaemonResources::new);
         #[cfg(not(feature = "simulation"))]
         let resources = DaemonResources::new();
 
@@ -570,7 +569,7 @@ mod tests {
                 watcher: None,
                 priority: 50,
                 cancellation_token: CancellationToken::new(),
-                tags: vec![],
+                tags: &[],
             }],
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: RestartPolicy::for_testing(),

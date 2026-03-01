@@ -57,7 +57,7 @@ async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
             watcher: None,
             priority: 50,
             cancellation_token: CancellationToken::new(),
-            tags: vec![],
+            tags: &[],
         })
         .build();
 

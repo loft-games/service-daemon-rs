@@ -20,6 +20,7 @@ use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
 use crate::models::{ServiceId, ServiceStatus};
 
 use std::any::Any;
+use std::sync::Arc;
 
 // =============================================================================
 // SimulationHandle -- The "God Hand" for dynamic intervention
@@ -41,12 +42,12 @@ use std::any::Any;
 #[derive(Clone)]
 pub struct SimulationHandle {
     /// Reference to the daemon's shared resources.
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl SimulationHandle {
     /// Creates a new `SimulationHandle` wrapping the given resources.
-    pub(crate) fn new(resources: DaemonResources) -> Self {
+    pub(crate) fn new(resources: Arc<DaemonResources>) -> Self {
         Self { resources }
     }
 
@@ -246,7 +247,7 @@ impl SimulationHandle {
     /// daemon_task.await;  // safe
     /// ```
     #[doc(hidden)]
-    pub fn resources(&self) -> DaemonResources {
+    pub fn resources(&self) -> Arc<DaemonResources> {
         self.resources.clone()
     }
 }
@@ -263,7 +264,7 @@ pub struct MockContext;
 
 /// Builder for `MockContext`.
 pub struct MockContextBuilder {
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl MockContext {
