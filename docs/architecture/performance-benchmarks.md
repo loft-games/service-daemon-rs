@@ -92,9 +92,9 @@ xychart-beta
 Selecting between these two frameworks depends on the specific requirements of the target system and project scale.
 
 ### Choose [task-supervisor](https://github.com/akhercha/task-supervisor) if:
-- **Extreme Constraints**: Running on systems with less than 16MB of available RAM.
-- **Minimalist Task Model**: Managing massive numbers of simple, completely decoupled background tasks where Dependency Injection and complex lifecycle state are not required.
+- **Minimalist Task Model**: Managing simple, fully decoupled background tasks where Dependency Injection, lifecycle orchestration, and event-driven triggers are not needed.
 - **Zero-Dependency Policy**: Developing a library where minimal transitive dependencies are required.
+- **Maximum Simplicity**: Preferring a thin wrapper around raw `tokio::spawn` with no additional abstractions.
 
 ### Choose service-daemon-rs if:
 - **High-Scale Orchestration**: Managing hundreds or thousands of services that require reliable dependency resolution, wave-based synchronization, and causal tracing.

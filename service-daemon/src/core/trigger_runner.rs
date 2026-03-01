@@ -43,13 +43,18 @@ use crate::models::trigger::{
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Generates a globally unique message ID for each trigger event.
+/// Generates a globally unique, time-ordered message ID for each trigger event.
+///
+/// When the `uuid-trigger-ids` feature is enabled, this produces a UUID v7
+/// string whose high bits encode a millisecond-precision timestamp, guaranteeing
+/// lexicographic (dictionary) ordering that mirrors chronological ordering.
+/// This is beneficial for database indexing and ordered event replay.
 ///
 /// This is also called by the public `context::generate_message_id()` API.
 pub(crate) fn generate_message_id() -> String {
     #[cfg(feature = "uuid-trigger-ids")]
     {
-        uuid::Uuid::new_v4().to_string()
+        uuid::Uuid::now_v7().to_string()
     }
     #[cfg(not(feature = "uuid-trigger-ids"))]
     {
@@ -1019,5 +1024,31 @@ mod tests {
         assert_eq!(stored.scale_factor, 4);
         assert_eq!(stored.scale_threshold, 3);
         assert_eq!(stored.scale_cooldown, Duration::from_secs(10));
+    }
+
+    // -----------------------------------------------------------------------
+    // UUID v7 monotonic ordering test
+    // -----------------------------------------------------------------------
+
+    /// Verifies that `generate_message_id` produces lexicographically ordered
+    /// IDs when the `uuid-trigger-ids` feature is enabled (UUID v7).
+    ///
+    /// UUID v7 encodes a millisecond-precision timestamp in its high bits,
+    /// so consecutive calls should yield IDs that sort in chronological order.
+    /// This property is critical for database index locality and ordered
+    /// event replay.
+    #[cfg(feature = "uuid-trigger-ids")]
+    #[test]
+    fn test_message_id_monotonic_ordering() {
+        let mut previous = generate_message_id();
+        for _ in 0..100 {
+            let current = generate_message_id();
+            assert!(
+                current >= previous,
+                "UUID v7 IDs must be monotonically non-decreasing: \
+                 previous={previous}, current={current}"
+            );
+            previous = current;
+        }
     }
 }
