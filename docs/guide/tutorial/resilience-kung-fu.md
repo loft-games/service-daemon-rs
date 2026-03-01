@@ -105,7 +105,7 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 *   `wave_stop_timeout`: Maximum time to wait for a service to exit before forcefully killing it.
 
 > [!NOTE]
-> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](../../resilience.md) design document.
+> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](../resilience.md) design document.
 
 ---
 

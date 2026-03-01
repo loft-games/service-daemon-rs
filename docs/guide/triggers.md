@@ -2,7 +2,7 @@ Triggers are specialized services with built-in event loops that execute your fu
 
 ## 0. Quick Start: Chain Reactions
 
-Triggers become powerful when they talk to each other. A trigger can "fire" another by publishing an event.
+Triggers become powerful when they talk to each other. A trigger can "fire" another by calling a provider's method directly.
 
 ```rust
 use service_daemon::prelude::*;
@@ -16,8 +16,8 @@ pub struct CleanupSignal;
 pub async fn worker(job: Job, signal: Arc<CleanupSignal>) -> anyhow::Result<()> {
     tracing::info!("Processing job {}", job.id);
     
-    // Explicitly publish/fire the signal
-    signal.notify().await;
+    // Fire the signal directly via the DI-injected instance
+    signal.notify();
     Ok(())
 }
 
@@ -96,34 +96,13 @@ pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()
 2. **Explicit Payload**: Any parameter marked with `#[payload]` is the payload (allows `Arc<Payload>`).
 3. **DI Resources**: All other `Arc<T>` parameters are resolved via the DI system.
 
-## 4. Event Traceability (Publishing)
+## 4. Event Flow
 
-Starting from v0.1.0, any event published within a service can be traced throughout the entire system.
-
-### Using `publish()`
-Wrap your event production logic in `service_daemon::publish()` to capture the current `InstanceId` and generate a unique `MessageId`.
-
-```rust
-use service_daemon::publish;
-
-#[service]
-async fn my_service() -> anyhow::Result<()> {
-    while !service_daemon::is_shutdown() {
-        // Traceable event publishing
-        publish("my_event", || async {
-            MyProvider::notify().await;
-        }).await;
-
-        service_daemon::sleep(Duration::from_secs(10)).await;
-    }
-    Ok(())
-}
-```
-
-### Traceability Benefits
-- **Source Attribution**: See exactly which service instance fired a signal.
-- **Message IDs**: Correlation of logs across multiple trigger handlers.
-- **Debug Visibility**: High-priority diagnostics via `DaemonLayer`.
+Services and triggers emit events by calling provider instance methods directly (e.g.
+`notifier.notify()`, `queue.push(...)`) after resolving the provider via DI.
+The framework's `TriggerRunner` automatically
+assigns a unique `message_id` and `source_id` to each dispatched event,
+enabling structured log correlation without manual intervention.
 
 ## 5. Resilience: Automatic Handler Retries
 
@@ -145,7 +124,7 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 | Handler Signature | What Happens | `Clone` Required? |
 |:---|:---|:---|
 | `async fn handler(data: T)` | Macro auto-clones from `Arc` | **Yes** |
-| `async fn handler(data: Arc<T>)` | Zero-copy pointer pass | **No** |
+| `async fn handler(#[payload] data: Arc<T>)` | Zero-copy pointer pass | **No** |
 
 > [!TIP]
 > For large payloads or types that cannot implement `Clone`, declare your handler parameter as `Arc<T>`. This gives you true zero-copy access and works with any type.

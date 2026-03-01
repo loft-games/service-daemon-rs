@@ -313,7 +313,7 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
     use service_daemon::Provided;
 
     // Acquire the RwLock (promotes to managed state)
-    let lock = GlobalStats::rwlock().await;
+    let lock = GlobalStats::resolve().await.rwlock().await;
     let lock_clone = lock.clone();
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));

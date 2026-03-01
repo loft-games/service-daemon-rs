@@ -10,7 +10,7 @@ pub struct MagicNumber(pub i32);
 #[allow(sync_handler)]
 pub fn sync_service(num: Arc<MagicNumber>) -> anyhow::Result<()> {
     // This is intentionally sync -- fast, no I/O.
-    println!("Magic: {}", num.0);
+    println!("Magic: {}", num);
     Ok(())
 }
 

@@ -27,7 +27,7 @@ pub struct CompositeConfig {
 #[provider]
 pub async fn composite_config_provider(port: Arc<Port>, host: Arc<Host>) -> CompositeConfig {
     CompositeConfig {
-        address: format!("{}:{}", host.0, port.0),
+        address: format!("{}:{}", host, port),
     }
 }
 

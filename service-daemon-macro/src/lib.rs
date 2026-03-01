@@ -127,7 +127,7 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// #[provider]
 /// pub async fn db_pool(url: Arc<DbUrl>) -> DatabasePool {
-///     DatabasePool::connect(&url.0).await.expect("DB connection failed")
+///     DatabasePool::connect(&url).await.expect("DB connection failed")
 /// }
 /// ```
 #[proc_macro_attribute]

@@ -55,7 +55,7 @@ pub async fn mqtt_provider() -> MqttBus {
 
 **Avoid creating new Magic Providers unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
-* The provider requires **special code generation** (like automatically creating `push()` or `subscribe()` methods via macro).
+* The provider requires **special code generation** (like automatically creating `push()` or `subscribe()` instance methods via macro).
 
 > [!IMPORTANT]
 > Business-specific components (MQTT, Database, API Clients) are **NOT** Magic Providers. They should be implemented as regular `async fn` providers.

@@ -8,7 +8,7 @@ pub struct Port(pub i32);
 
 #[service]
 pub async fn basic_service(port: Arc<Port>) -> anyhow::Result<()> {
-    tracing::info!("Running on port {}", port.0);
+    tracing::info!("Running on port {}", port);
     Ok(())
 }
 

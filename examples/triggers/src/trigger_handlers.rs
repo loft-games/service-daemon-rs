@@ -6,7 +6,7 @@
 
 use crate::providers::{CleanupSchedule, ExternalStatus, TaskQueue, UserNotifier, WorkerQueue};
 use service_daemon::TT::*;
-use service_daemon::{publish, trigger};
+use service_daemon::trigger;
 use std::sync::Arc;
 
 // =============================================================================
@@ -67,7 +67,7 @@ pub async fn complex_job_handler(
 // Signal (Event) Trigger
 // =============================================================================
 
-/// Fires whenever `UserNotifier::notify()` is called.
+/// Fires whenever the `UserNotifier` signal is triggered via `notifier.notify()`.
 #[trigger(Event(UserNotifier))]
 pub async fn on_user_notified() -> anyhow::Result<()> {
     tracing::info!(">>> [Event] User notification received");
@@ -113,17 +113,14 @@ pub fn sync_notify_trigger() -> anyhow::Result<()> {
 /// Together with `on_user_notified` and `sync_notify_trigger`, this demonstrates
 /// one signal triggering multiple handlers simultaneously.
 #[trigger(Signal(UserNotifier))]
-pub async fn on_tick() -> anyhow::Result<()> {
+pub async fn on_tick(tasks: Arc<TaskQueue>) -> anyhow::Result<()> {
     tracing::info!("Tick signal captured! Processing...");
 
     // Simulate some work
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    // Publish the result to the shared broadcast queue
-    publish("tick_processed", || async {
-        let _ = TaskQueue::push("Tick processed successfully".to_string()).await;
-    })
-    .await;
+    // Push the result to the shared broadcast queue via instance method
+    let _ = tasks.push("Tick processed successfully".to_string());
 
     tracing::info!("Processing complete, result published to TaskQueue");
     Ok(())

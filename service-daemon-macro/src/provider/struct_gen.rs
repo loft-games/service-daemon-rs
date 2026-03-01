@@ -161,12 +161,12 @@ pub(super) fn generate_provided_impl(
 
         impl #type_tokens {
             /// Resolves a tracked RwLock for this provider.
-            pub async fn rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+            pub async fn rwlock(&self) -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 <Self as service_daemon::Provided>::resolve_rwlock().await
             }
 
             /// Resolves a tracked Mutex for this provider.
-            pub async fn mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+            pub async fn mutex(&self) -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 <Self as service_daemon::Provided>::resolve_mutex().await
             }
         }

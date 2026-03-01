@@ -13,8 +13,8 @@ use service_daemon::provider;
 // Signal Provider
 // =============================================================================
 
-/// A `Notify`-based signal. Calling `UserNotifier::notify()` wakes all
-/// subscribed `Event`/`Notify`/`Signal` triggers, demonstrating one-to-many fanout.
+/// A `Notify`-based signal. Calling `notifier.notify()` on a resolved instance
+/// wakes all subscribed `Event`/`Notify`/`Signal` triggers, demonstrating one-to-many fanout.
 #[provider(Notify)]
 pub struct UserNotifier;
 
@@ -66,7 +66,7 @@ pub struct JobQueue;
 
 /// A state value that can be watched for changes.
 ///
-/// When any code acquires `ExternalStatus::rwlock()` and modifies the value,
+/// When any code acquires a `RwLock` via the resolved instance and modifies the value,
 /// all `Watch` triggers targeting `ExternalStatus` will fire automatically.
 #[derive(Debug, Clone)]
 #[provider]

@@ -129,7 +129,7 @@ Because of the automatic service discovery, testing a subsystem in a large proje
 The system uses a unified messaging layer for all cross-service events:
 
 - **TriggerMessage**: Encapsulates the payload with a `TriggerContext` (Source ID, Instance ID, Message ID).
-- **Publish API**: Services use `publish()` to inject these messages into providers.
+- **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI injection.
 - **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context.
 - **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). User-defined interceptors can be added for rate limiting, authentication, metrics, etc.
 

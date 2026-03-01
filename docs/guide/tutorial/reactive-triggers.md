@@ -47,7 +47,7 @@ async fn process_and_notify(
     
     // Fire the signal directly. 
     // The framework handles the back-end orchestration.
-    signal.notify().await;
+    signal.notify();
     
     Ok(())
 }

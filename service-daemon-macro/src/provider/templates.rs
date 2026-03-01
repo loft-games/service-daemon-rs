@@ -131,14 +131,14 @@ pub fn generate_notify_template(
         #provided_impl
 
         impl #struct_name {
-            /// Trigger this signal from anywhere in the application.
-            pub async fn notify() {
-                <Self as service_daemon::Provided>::resolve().await.notify_one();
+            /// Trigger this signal, waking all subscribed triggers.
+            pub fn notify(&self) {
+                self.0.notify_waiters();
             }
 
             /// Wait for a notification on this signal.
-            pub async fn wait() {
-                <Self as service_daemon::Provided>::resolve().await.notified().await;
+            pub async fn wait(&self) {
+                self.0.notified().await;
             }
         }
     };
@@ -188,14 +188,14 @@ pub fn generate_broadcast_queue_template(
         #provided_impl
 
         impl #struct_name {
-            /// Push an item to this queue from anywhere in the application.
-            pub async fn push(item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
-                <Self as service_daemon::Provided>::resolve().await.tx.send(item)
+            /// Push an item to this queue.
+            pub fn push(&self, item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
+                self.tx.send(item)
             }
 
             /// Subscribe to this queue to receive broadcast messages.
-            pub async fn subscribe() -> tokio::sync::broadcast::Receiver<#item_type> {
-                <Self as service_daemon::Provided>::resolve().await.tx.subscribe()
+            pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<#item_type> {
+                self.tx.subscribe()
             }
         }
     };

@@ -22,5 +22,5 @@ pub struct ConnectionString(pub String);
 /// depend on other providers and require custom initialization logic.
 #[provider]
 pub async fn connection_string_provider(port: Arc<Port>, db_url: Arc<DbUrl>) -> ConnectionString {
-    ConnectionString(format!("{}:{}", db_url.0, port.0))
+    ConnectionString(format!("{}:{}", db_url, port))
 }
