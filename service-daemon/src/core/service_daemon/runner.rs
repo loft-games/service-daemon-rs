@@ -54,7 +54,7 @@ enum SupervisorState {
 struct ServiceSupervisor {
     // -- Immutable service identity --
     service_id: ServiceId,
-    name: Arc<str>,
+    name: &'static str,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     backoff: BackoffController,
@@ -71,7 +71,7 @@ struct ServiceSupervisor {
 impl ServiceSupervisor {
     fn new(
         service_id: ServiceId,
-        name: Arc<str>,
+        name: &'static str,
         run: ServiceFn,
         watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
         policy: RestartPolicy,
@@ -94,7 +94,7 @@ impl ServiceSupervisor {
     /// Spawns the dependency watcher if present.
     fn spawn_watcher(&self) {
         if let Some(watcher) = &self.watcher {
-            let n = self.name.clone();
+            let n = self.name;
             let sid = self.service_id;
             let ct = self.cancellation_token.clone();
             let res = self.resources.clone();
@@ -281,7 +281,7 @@ impl ServiceSupervisor {
 
         let identity = ServiceIdentity::new(
             self.service_id,
-            self.name.clone(),
+            self.name,
             self.cancellation_token.clone(),
             reload_token.clone(),
         );
@@ -411,7 +411,7 @@ impl<'a> ServiceWave<'a> {
     fn from_services(services: &'a [ServiceDescription]) -> BTreeMap<u8, ServiceWave<'a>> {
         let mut waves: BTreeMap<u8, Vec<&'a ServiceDescription>> = BTreeMap::new();
         for service in services {
-            waves.entry(service.priority).or_default().push(service);
+            waves.entry(service.priority()).or_default().push(service);
         }
         waves
             .into_iter()
@@ -488,7 +488,7 @@ impl<'a> ServiceWave<'a> {
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_service(
     service_id: ServiceId,
-    name: Arc<str>,
+    name: &'static str,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     policy: RestartPolicy,
@@ -546,7 +546,7 @@ pub async fn spawn_all_services(
         for service in &wave.services {
             spawn_service(
                 service.id,
-                service.name.clone(),
+                service.name(),
                 service.run.clone(),
                 service.watcher.clone(),
                 restart_policy,
@@ -601,7 +601,7 @@ pub async fn stop_all_services(
         let mut join_handles = Vec::new();
         for service in wave.services {
             let sid = service.id;
-            let name = service.name.clone();
+            let name = service.name();
             let handle_opt = {
                 let mut guard = running_tasks.lock().await;
                 guard.remove(&sid)
@@ -626,8 +626,8 @@ pub async fn stop_all_services(
                     }
                     _ = tokio::time::sleep(grace_period) => {
                         warn!(
-                            "Service '{}' did not stop within grace period, forcing abort",
-                            name
+                    "Service '{}' did not stop within grace period, forcing abort",
+                    name
                         );
                         handle.abort();
                         let _ = handle.await;

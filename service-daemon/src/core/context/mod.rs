@@ -45,10 +45,10 @@ mod tests {
         DaemonResources::new()
     }
 
-    fn create_test_identity(name: &str) -> ServiceIdentity {
+    fn create_test_identity(name: &'static str) -> ServiceIdentity {
         ServiceIdentity::new(
             ServiceId::new(0),
-            Arc::from(name),
+            name,
             CancellationToken::new(),
             CancellationToken::new(),
         )

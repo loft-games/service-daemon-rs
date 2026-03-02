@@ -18,7 +18,7 @@ use crate::models::{ServiceId, ServiceStatus};
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
-pub(crate) type GlobalShelfMapping = DashMap<Arc<str>, ServiceShelf>;
+pub(crate) type GlobalShelfMapping = DashMap<&'static str, ServiceShelf>;
 
 /// Shared daemon resources that are owned by `ServiceDaemon` and plumbed to services.
 ///
@@ -69,8 +69,8 @@ pub struct ServiceIdentity {
     pub service_id: ServiceId,
     /// Human-readable name -- the weak identity for logging only.
     ///
-    /// Uses `Arc<str>` for O(1) cloning on every service restart.
-    pub name: Arc<str>,
+    /// Points to the static name in `ServiceEntry`, zero-cost to clone.
+    pub name: &'static str,
     pub cancellation_token: CancellationToken,
     pub reload_token: CancellationToken,
     /// Shared flag: true means the auto-handshake (Initializing->Healthy) has been performed.
@@ -82,7 +82,7 @@ impl ServiceIdentity {
     /// Creates a new ServiceIdentity with the handshake flag set to false.
     pub fn new(
         service_id: ServiceId,
-        name: Arc<str>,
+        name: &'static str,
         cancellation_token: CancellationToken,
         reload_token: CancellationToken,
     ) -> Self {

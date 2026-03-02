@@ -95,7 +95,8 @@ impl TupleStructInfo {
 }
 
 /// Generates the standard `Provided` trait impl + convenience methods (`rwlock()`/`mutex()`)
-/// for a provider type.
+/// for a provider type, and registers a `ProviderEntry` in the `PROVIDER_REGISTRY`
+/// for dependency graph analysis.
 ///
 /// This shared function eliminates the code duplication that previously existed
 /// across struct providers, fn providers, and template providers.
@@ -109,12 +110,14 @@ impl TupleStructInfo {
 /// * `user_span`  — The span of the user's type definition (struct name or fn
 ///   return type). Used for `quote_spanned!` so that missing trait bound errors
 ///   (e.g., `Clone`) point to the user's code, not the macro output.
+/// * `param_entries` — Dependency metadata tokens for `PROVIDER_REGISTRY` registration.
 pub(super) fn generate_provided_impl(
     type_tokens: &proc_macro2::TokenStream,
     singleton_name: &syn::Ident,
     constructor: &proc_macro2::TokenStream,
     changed_body: Option<proc_macro2::TokenStream>,
     user_span: proc_macro2::Span,
+    param_entries: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
     let changed_impl = changed_body.unwrap_or_else(|| {
         quote! { #singleton_name.changed().await }
@@ -129,6 +132,15 @@ pub(super) fn generate_provided_impl(
             fn __check() { __assert_provider_bounds::<#type_tokens>(); }
         };
     };
+
+    // Generate a unique entry name for the PROVIDER_REGISTRY slice.
+    let type_name_str = quote!(#type_tokens).to_string().replace(' ', "");
+    let entry_name = format_ident!(
+        "__PROVIDER_ENTRY_{}",
+        type_name_str
+            .to_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
 
     quote! {
         #bounds_assertion
@@ -170,6 +182,16 @@ pub(super) fn generate_provided_impl(
                 <Self as service_daemon::Provided>::resolve_mutex().await
             }
         }
+
+        /// Auto-generated provider registry entry for dependency graph analysis.
+        #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
+        #[linkme(crate = service_daemon::linkme)]
+        static #entry_name: service_daemon::ProviderEntry = service_daemon::ProviderEntry {
+            name: #type_name_str,
+            module: module_path!(),
+            type_id: std::any::TypeId::of::<#type_tokens>(),
+            params: &[#(#param_entries),*],
+        };
     }
 }
 
@@ -202,6 +224,32 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     // Generate constructor based on field type (async for named structs with Arc deps)
     let constructor = generate_constructor(fields);
 
+    // Collect dependency metadata from struct fields for PROVIDER_REGISTRY.
+    // Only named fields with Arc-wrapped types are injectable dependencies.
+    let param_entries: Vec<proc_macro2::TokenStream> = match fields {
+        syn::Fields::Named(named_fields) => named_fields
+            .named
+            .iter()
+            .filter_map(|field| {
+                let field_name = field.ident.as_ref()?;
+                let (inner_type, wrapper) = crate::common::decompose_type(&field.ty);
+                // Only Arc-wrapped fields are DI dependencies
+                wrapper.map(|_| {
+                    let field_name_str = field_name.to_string();
+                    let type_str = quote!(#inner_type).to_string().replace(' ', "");
+                    quote! {
+                        service_daemon::ServiceParam {
+                            name: #field_name_str,
+                            type_name: #type_str,
+                            type_id: std::any::TypeId::of::<#inner_type>(),
+                        }
+                    }
+                })
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+
     // Generate unique static name for singleton.
     //
     // Safety: Rust's `static` items are scoped to the enclosing module, so
@@ -221,6 +269,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         &constructor,
         None,
         struct_name.span(),
+        &param_entries,
     );
 
     let expanded = quote! {

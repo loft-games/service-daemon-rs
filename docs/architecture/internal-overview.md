@@ -4,12 +4,12 @@
 
 ## 1. Unified Registry (Linkme)
 
-Both standard services and event-driven triggers are collected into a single `SERVICE_REGISTRY` at link time using the `linkme` crate. 
+Both standard services and event-driven triggers are collected into a `SERVICE_REGISTRY`, while dependency providers are collected into a `PROVIDER_REGISTRY`. Both are managed at link time using the `linkme` crate. 
 
 ### How it works: Linker-Level Discovery
-1. **Metadata Segments**: The macros generate `#[distributed_slice]` entries. At compile time, the Rust compiler (and the linker) places these pointers into a specialized data segment of the final binary.
-2. **Zero-Scan Loading**: Unlike frameworks that scan the filesystem or use heavy reflection at runtime, `ServiceDaemon` simply reads this contiguous memory segment. This results in **O(1) service discovery** regardless of the project size.
-3. **Implicit Activation**: Any module included in the compilation tree via `mod` will have its services automatically registered. No manual list maintenance is required.
+1. **Metadata Segments**: The framework macros generate `#[distributed_slice]` entries. At compile time, the Rust compiler (and the linker) places these pointers into specialized data segments (`SERVICE_REGISTRY` and `PROVIDER_REGISTRY`).
+2. **Zero-Scan Loading**: Unlike frameworks that scan the filesystem or use heavy reflection at runtime, `ServiceDaemon` simply reads these contiguous memory segments. This results in **O(1) discovery** regardless of the project size.
+3. **Implicit Activation**: Any module included in the compilation tree via `mod` will have its services and providers automatically registered. No manual list maintenance is required.
 
 ### Registry Identity
 Each entry in the registry contains a `ServiceId`. This ID is used as the primary key in the **Status Plane** and for routing events in the **Ripple Model**.
@@ -37,12 +37,13 @@ graph TD
 
     subgraph Macro_Gen ["Macros"]
         M_S[Service Wrapper]
-        M_P[Provided Trait Impl]
+        M_P[Provider Metadata & Trait]
         M_T[Trigger Wrapper]
     end
 
     subgraph Static_Registry ["Static Registry"]
         SR[("SERVICE_REGISTRY")]
+        PR[("PROVIDER_REGISTRY")]
     end
 
     subgraph Core_Daemon ["Core Daemon"]
@@ -51,10 +52,10 @@ graph TD
     end
 
     S --> M_S --> SR
-    P --> M_P
+    P --> M_P --> PR
     T --> M_T --> SR
 
-    SD -->|load| SR
+    SD -->|load| SR & PR
     SD -->|orchestrate| SCP
     SCP -->|spawn| S
     SCP -->|spawn| T
@@ -65,9 +66,10 @@ graph TD
 The framework is organized into specialized submodules to ensure maintainability as the codebase grows:
 
 ### `service-daemon-macro`
-- **`trigger/`**: Handles attribute parsing and code generation for event-driven logic (Cron, Queues, Watchers).
-- **`service/`**: Core logic for wrapping functions as managed tasks and registering them with `linkme`.
-- **`provider/`**: Managed state and dependency injection logic, including special templates like `Notify` and `Queue`.
+- **`common.rs`**: Shared infrastructure for parameter extraction (`ExtractedParams`) and unified code generation for function wrappers and watchers.
+- **`trigger/`**: Handles specialized attribute parsing and host-specific event loop generation for triggers (Cron, Queues, Watchers).
+- **`service/`**: Core logic for wrapping standard functions and creating registry entries.
+- **`provider/`**: Managed state and dependency injection logic.
 
 ### `service-daemon`
 - **`core/service_daemon/`**: The core orchestrator.
@@ -121,7 +123,7 @@ Because of the automatic service discovery, testing a subsystem in a large proje
 
 **Best Practices:**
 1. **Use Tags**: Group services logically using `#[service(tags = ["core", "api"])]`.
-2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment, then inject only the services under test via `.with_services()`.
+2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment. Register test services with unique tags via `#[service(tags = ["__my_test__"])]` and select them with `Registry::builder().with_tag("__my_test__").build()`.
 3. **ServiceId Safety**: The `ServiceDaemonBuilder` automatically detects `ServiceId` collisions at startup, preventing two services from competing for the same status plane slot.
 
 ## 7. Event Traceability Architecture

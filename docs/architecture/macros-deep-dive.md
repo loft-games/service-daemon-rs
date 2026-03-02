@@ -15,9 +15,10 @@ When you annotate a function, the macro generates:
 ## 2. The `#[trigger]` Transformation
 
 Triggers are specialized services. The macro generates a **Host Wrapper** that:
-- Spawns the appropriate "Host" logic (e.g., `cron_trigger_host`).
-- **Service-Level Integration (`Watch`)**: For `Watch` templates, the macro generates a service watcher that leverages the `ServiceDaemon`'s reload mechanism, allowing triggers to be reactive with minimal internal logic.
-- Manages the inversion of control: the host executes the user handler when events occur.
+- Spawns the appropriate "Host" logic (e.g., `Notify_trigger_host`).
+- **DI Resolution**: Dependency providers are resolved **once** at trigger startup (outside the event loop), matching standard service behavior. This ensures consistent lifecycle management and prevents redundant resolutions on every event.
+- **Service-Level Integration (`Watch`)**: For `Watch` templates, the macro generates a service watcher that leverages the `ServiceDaemon`'s reload mechanism.
+- **Event Dispatch**: The host executes the user handler when events occur, managing the inversion of control.
 
 ## 3. The "Macro Illusion"
 
@@ -39,7 +40,14 @@ The macros are robust enough to handle various import styles:
 - **Fast Path**: If only `Arc<T>` is used, it stays an immutable singleton with zero locking overhead.
 - **Managed Path**: If *any* service in the entire registry requests a lock (`RwLock`/`Mutex`), the provider is automatically promoted at link-time to support atomic CoW (Copy-on-Write) publishing.
 
-## 5. The `#[allow(sync_handler)]` Pseudo-Lint
+## 5. Shared Macro Infrastructure (`common.rs`)
+
+To ensure consistency between `#[service]` and `#[trigger]`, shared code is consolidated in `common.rs`:
+- **`ParamProcessor`**: A unified state machine for parsing function inputs and identifying DI dependencies (`Arc<T>`, `Arc<RwLock<T>>`).
+- **`generate_call_expr`**: A shared generator for calling user functions, handling async/sync differences and warning injection.
+- **`generate_watcher`**: A unified generator for the service/trigger reload watcher.
+
+## 6. The `#[allow(sync_handler)]` Pseudo-Lint
 
 ### Background
 

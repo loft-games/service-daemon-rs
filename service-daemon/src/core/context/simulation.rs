@@ -56,12 +56,8 @@ impl SimulationHandle {
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
-    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &str, key: &str, value: T) {
-        let entry = self
-            .resources
-            .shelf
-            .entry(Arc::from(service_name))
-            .or_default();
+    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &'static str, key: &str, value: T) {
+        let entry = self.resources.shelf.entry(service_name).or_default();
         entry.insert(key.to_string(), Box::new(value));
     }
 
@@ -284,13 +280,14 @@ impl MockContextBuilder {
     ///
     /// This simulates previously shelved data, useful for testing crash recovery
     /// and state persistence logic.
-    pub fn with_shelf<T: Any + Send + Sync>(self, service_name: &str, key: &str, data: T) -> Self {
+    pub fn with_shelf<T: Any + Send + Sync>(
+        self,
+        service_name: &'static str,
+        key: &str,
+        data: T,
+    ) -> Self {
         {
-            let entry = self
-                .resources
-                .shelf
-                .entry(Arc::from(service_name))
-                .or_default();
+            let entry = self.resources.shelf.entry(service_name).or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self
@@ -313,8 +310,8 @@ impl MockContextBuilder {
     /// - Uses a testing-friendly restart policy.
     /// - Has the pre-filled `DaemonResources` injected.
     ///
-    /// You can further customize it by calling `.with_service()` to add the
-    /// real service(s) you want to debug.
+    /// You can further customize it by calling `.with_registry()` to select
+    /// the real service(s) you want to debug via tag filtering.
     pub fn build(self) -> (ServiceDaemonBuilder, SimulationHandle) {
         let handle = SimulationHandle::new(self.resources.clone());
 

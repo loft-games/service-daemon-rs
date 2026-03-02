@@ -110,6 +110,7 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
     // Process function parameters for DI resolution
     let mut resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
+    let mut param_entries = Vec::new();
 
     for arg in fn_inputs {
         // Reject `self` / `&self` / `&mut self` — providers must be free functions.
@@ -152,6 +153,17 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
                 }
             }
 
+            // Collect dependency metadata for PROVIDER_REGISTRY
+            let arg_name_str = arg_name.to_string();
+            let type_str = quote!(#inner_type).to_string().replace(' ', "");
+            param_entries.push(quote! {
+                service_daemon::ServiceParam {
+                    name: #arg_name_str,
+                    type_name: #type_str,
+                    type_id: std::any::TypeId::of::<#inner_type>(),
+                }
+            });
+
             call_args.push(quote! { #arg_name });
         }
     }
@@ -191,6 +203,7 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         &constructor,
         None,
         return_type.span(),
+        &param_entries,
     );
 
     let expanded = quote! {

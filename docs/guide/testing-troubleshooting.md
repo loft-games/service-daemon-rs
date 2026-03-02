@@ -39,6 +39,12 @@ service-daemon = { path = "...", features = ["simulation"] }
 Use `MockContext` to create an isolated sandbox and `SimulationHandle` (The God's Hand) to reach into the running engine:
 
 ```rust
+#[service(tags = ["__test_sim__"])]
+async fn my_service() -> anyhow::Result<()> {
+    // service implementation ...
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_two_phase_simulation() {
     // 1. Setup Sandbox: Pre-fill the Shelf
@@ -46,7 +52,9 @@ async fn test_two_phase_simulation() {
         .with_shelf::<String>("my_service", "config_key", "initial_val".into())
         .build();
 
-    let daemon = builder.with_service(my_service).build();
+    let daemon = builder
+        .with_registry(Registry::builder().with_tag("__test_sim__").build())
+        .build();
     let cancel = daemon.cancel_token();
     
     // Start daemon in background

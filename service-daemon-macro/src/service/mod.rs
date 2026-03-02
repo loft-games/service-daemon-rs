@@ -1,9 +1,4 @@
 //! `#[service]` macro implementation.
-//!
-//! This module is split into submodules for better organization:
-//! - `codegen`: Code generation for watchers and call expressions.
-
-mod codegen;
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -11,7 +6,7 @@ use syn::parse::Parse;
 use syn::{ItemFn, Token, parse_macro_input};
 
 use crate::common::{ExtractedParams, TagsList, extract_sync_handler_flag};
-use codegen::{generate_call_expr, generate_watcher};
+use crate::common::{generate_call_expr, generate_watcher};
 
 // -----------------------------------------------------------------------------
 // Structured attribute parser (replaces the old string-based parse_service_attr)
@@ -95,6 +90,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         call_args,
         param_entries,
         watcher_arms,
+        ..
     } = crate::common::extract_params(sig, false);
 
     let mut clean_sig = sig.clone();
@@ -110,6 +106,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         &call_args,
         is_async,
         allow_sync_present,
+        "Service",
     );
 
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);

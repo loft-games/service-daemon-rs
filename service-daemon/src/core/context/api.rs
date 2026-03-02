@@ -113,7 +113,7 @@ pub fn done() {
 /// Shelves a managed value to the daemon. This value will survive service reloads and crashes.
 /// The value is stored in a service-isolated bucket based on the calling service's identity.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
         Err(_) => return,
     };
@@ -128,13 +128,13 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 ///
 /// For a non-destructive read, use [`shelve_clone`] instead.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(name.as_ref()).and_then(|entry| {
+            r.shelf.get(name).and_then(|entry| {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
@@ -154,13 +154,13 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// The stored type `T` must implement `Clone`. This is naturally satisfied
 /// by `Arc<T>` values, which are the primary use case.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(name.as_ref()).and_then(|entry| {
+            r.shelf.get(name).and_then(|entry| {
                 entry
                     .get(key)
                     .and_then(|val| val.downcast_ref::<T>().cloned())

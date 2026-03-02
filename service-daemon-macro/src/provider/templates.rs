@@ -82,6 +82,7 @@ impl<'a> TemplateContext<'a> {
             &constructor,
             changed_body,
             struct_name.span(),
+            &[],
         );
 
         Self {

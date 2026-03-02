@@ -24,41 +24,35 @@ async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Test service for is_shutdown() responsiveness
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag: set to `true` when the test service exits after `is_shutdown()`.
+static SHUTDOWN_EXITED: AtomicBool = AtomicBool::new(false);
+
+/// Test service that polls `is_shutdown()` and sets a global flag on exit.
+#[service_daemon::service(tags = ["__test_shutdown__"], priority = 50)]
+async fn shutdown_responsive_service() -> anyhow::Result<()> {
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    SHUTDOWN_EXITED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 /// Verifies that `is_shutdown()` becomes true after cancellation,
 /// allowing services to exit their polling loops.
 #[tokio::test]
 async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
-    use service_daemon::tokio_util::sync::CancellationToken;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let exited = Arc::new(AtomicBool::new(false));
-    let exited_clone = exited.clone();
-
-    let shutdown_fn: service_daemon::ServiceFn = Arc::new(move |_| {
-        let flag = exited_clone.clone();
-        Box::pin(async move {
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            flag.store(true, Ordering::SeqCst);
-            Ok(())
-        })
-    });
+    SHUTDOWN_EXITED.store(false, Ordering::SeqCst);
 
     let mut daemon = ServiceDaemon::builder()
-        .with_registry(Registry::builder().with_tag("__test_isolation__").build())
+        .with_registry(Registry::builder().with_tag("__test_shutdown__").build())
         .with_restart_policy(RestartPolicy::for_testing())
-        .with_service(service_daemon::ServiceDescription {
-            id: service_daemon::ServiceId::new(0),
-            name: std::sync::Arc::from("shutdown_test"),
-            run: shutdown_fn,
-            watcher: None,
-            priority: 50,
-            cancellation_token: CancellationToken::new(),
-            tags: &[],
-        })
         .build();
 
     let cancel = daemon.cancel_token();
@@ -67,13 +61,16 @@ async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
 
     // Wait for service to reach Healthy
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(!exited.load(Ordering::SeqCst), "Service exited prematurely");
+    assert!(
+        !SHUTDOWN_EXITED.load(Ordering::SeqCst),
+        "Service exited prematurely"
+    );
 
     cancel.cancel();
     daemon.wait().await.unwrap();
 
     assert!(
-        exited.load(Ordering::SeqCst),
+        SHUTDOWN_EXITED.load(Ordering::SeqCst),
         "Service did not exit after shutdown signal"
     );
     Ok(())

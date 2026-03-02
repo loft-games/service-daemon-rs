@@ -1,5 +1,5 @@
 use proc_macro_error2::abort;
-use quote::{quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type};
 
 /// Result of extracting and categorizing function parameters.
@@ -21,6 +21,11 @@ pub struct ExtractedParams {
     pub param_entries: Vec<proc_macro2::TokenStream>,
     /// Select arms for the watcher function (reactive updates).
     pub watcher_arms: Vec<proc_macro2::TokenStream>,
+    /// Variable identifiers for DI-resolved dependencies.
+    ///
+    /// Used by trigger codegen to generate `let x = x.clone();` shadow
+    /// bindings inside the per-event `Fn` closure.
+    pub di_idents: Vec<syn::Ident>,
 }
 
 /// Extracts the `sync_handler` flag from function attributes and returns
@@ -129,17 +134,6 @@ pub enum WrapperKind {
     ArcMutex(proc_macro2::Span, proc_macro2::Span),
 }
 
-impl WrapperKind {
-    /// Returns a formatted string representation of the wrapper type.
-    fn format_with_inner(&self, inner_type_str: &str) -> String {
-        match self {
-            WrapperKind::Arc(_) => format!("Arc<{}>", inner_type_str),
-            WrapperKind::ArcRwLock(_, _) => format!("Arc<RwLock<{}>>", inner_type_str),
-            WrapperKind::ArcMutex(_, _) => format!("Arc<Mutex<{}>>", inner_type_str),
-        }
-    }
-}
-
 /// Analyzes a function argument to determine its DI intent.
 pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
     if let FnArg::Typed(syn::PatType {
@@ -233,6 +227,7 @@ struct ParamProcessor {
     call_args: Vec<proc_macro2::TokenStream>,
     param_entries: Vec<proc_macro2::TokenStream>,
     watcher_arms: Vec<proc_macro2::TokenStream>,
+    di_idents: Vec<syn::Ident>,
     payload_arg_name: Option<syn::Ident>,
 }
 
@@ -245,6 +240,7 @@ impl ParamProcessor {
             call_args: Vec::new(),
             param_entries: Vec::new(),
             watcher_arms: Vec::new(),
+            di_idents: Vec::new(),
             payload_arg_name: None,
         }
     }
@@ -306,7 +302,6 @@ impl ParamProcessor {
     ) {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
-        let arg_type_wrapper_str = wrapper.format_with_inner(&type_str);
 
         match wrapper {
             WrapperKind::Arc(arc_span) => {
@@ -362,9 +357,13 @@ impl ParamProcessor {
         }
 
         self.call_args.push(quote! { #arg_name });
-        let key_str = format!("{}_{}", arg_name_str, arg_type_wrapper_str);
+        self.di_idents.push(arg_name.clone());
         self.param_entries.push(quote! {
-            service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
+            service_daemon::ServiceParam {
+                name: #arg_name_str,
+                type_name: #type_str,
+                type_id: std::any::TypeId::of::<#inner_type>(),
+            }
         });
 
         self.watcher_arms.push(quote! {
@@ -404,6 +403,7 @@ impl ParamProcessor {
             call_args: self.call_args,
             param_entries: self.param_entries,
             watcher_arms: self.watcher_arms,
+            di_idents: self.di_idents,
         }
     }
 }
@@ -416,6 +416,74 @@ pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedPar
         processor.process_param(arg);
     }
     processor.finish()
+}
+
+// -----------------------------------------------------------------------------
+// Shared codegen helpers (used by both #[service] and #[trigger])
+// -----------------------------------------------------------------------------
+
+/// Generates the call expression for the user's function.
+///
+/// Shared by `#[service]` and `#[trigger]`. The `kind` parameter controls
+/// the sync warning message (e.g., `"Service"` or `"Trigger"`).
+pub fn generate_call_expr(
+    fn_name: &syn::Ident,
+    fn_name_str: &str,
+    call_args: &[proc_macro2::TokenStream],
+    is_async: bool,
+    allow_sync_present: bool,
+    kind: &str,
+) -> proc_macro2::TokenStream {
+    if is_async {
+        quote! { #fn_name(#(#call_args),*).await }
+    } else if allow_sync_present {
+        // User explicitly allowed sync, no warning
+        quote! { #fn_name(#(#call_args),*) }
+    } else {
+        let msg = format!(
+            "{} '{{}}' is synchronous. Consider switching to 'async fn'.",
+            kind
+        );
+        quote! {
+            {
+                tracing::warn!(#msg, #fn_name_str);
+                #fn_name(#(#call_args),*)
+            }
+        }
+    }
+}
+
+/// Generates the watcher function and pointer for dependency change monitoring.
+///
+/// Shared by `#[service]` and `#[trigger]`. Both pass their watcher arms
+/// (collected by `extract_params`); triggers should push the target's
+/// `changed()` arm to the list before calling this function.
+///
+/// # Returns
+/// A tuple of `(watcher_fn_tokens, watcher_ptr_tokens)`.
+pub fn generate_watcher(
+    fn_name: &syn::Ident,
+    watcher_select_arms: &[proc_macro2::TokenStream],
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let watcher_name = format_ident!("{}_watcher", fn_name);
+
+    if !watcher_select_arms.is_empty() {
+        (
+            quote! {
+                /// Auto-generated watcher -- notifies when dependencies change
+                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
+                    Box::pin(async move {
+                        service_daemon::tokio::select! {
+                            #(#watcher_select_arms),*
+                        }
+                    })
+                }
+            },
+            quote! { Some(#watcher_name) },
+        )
+    } else {
+        (quote! {}, quote! { None })
+    }
 }
 
 // -----------------------------------------------------------------------------

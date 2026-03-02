@@ -4,7 +4,7 @@ The `ServiceDaemon` uses a sophisticated orchestration system to manage service 
 
 ## 1. Unified Status Plane
 
-All services share a central **Status Plane** (`DashMap<String, ServiceStatus>`) managed by `DaemonResources`.
+All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus>`) managed by `DaemonResources`.
 
 | Level | Transitions to | Triggered by |
 |--------|----------------|--------------|
@@ -82,7 +82,7 @@ For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdo
 ## 4. State Persistence (The Shelf)
 
 The "Shelf" is a global store where services can deposit data before a reload or after a crash.
-- **Isolation**: Buckets are isolated by service name.
+- **Isolation**: Buckets are isolated by `ServiceId`.
 - **Survival**: Unlike standard singletons, Shelf data survives the task termination and is inherited by the next "generation" of the same service.
 
 [Back to README](../../README.md)

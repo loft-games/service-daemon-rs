@@ -1,5 +1,6 @@
 use futures::future::BoxFuture;
-use std::borrow::Cow;
+use linkme::distributed_slice;
+use std::any::TypeId;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -46,29 +47,22 @@ impl std::fmt::Display for ServiceId {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceParam / ServicePriority (unchanged)
+// ServiceParam / ServicePriority
 // ---------------------------------------------------------------------------
 
-/// Describes a service parameter for the registry.
+/// Describes a dependency parameter for the service registry.
 ///
-/// The `key` field is pre-computed at compile time by the macro to avoid
-/// runtime string allocations.
+/// Each parameter records the argument name, type name (for diagnostics),
+/// and a `TypeId` that enables compile-time-safe dependency graph
+/// construction at startup.
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceParam {
+    /// The parameter name as declared in the function signature.
     pub name: &'static str,
+    /// The inner type name (e.g. "Config"), used for diagnostic output.
     pub type_name: &'static str,
-    /// Pre-computed container key in "name_typename" format.
-    pub key: &'static str,
-}
-
-impl ServiceParam {
-    /// Get the container key for this parameter.
-    ///
-    /// This returns a pre-computed static string, avoiding allocation.
-    #[inline]
-    pub fn container_key(&self) -> Cow<'static, str> {
-        Cow::Borrowed(self.key)
-    }
+    /// Compiler-assigned type identity for dependency graph edges.
+    pub type_id: TypeId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -113,22 +107,55 @@ pub struct ServiceEntry {
 
 /// Runtime description of a managed service instance.
 ///
-/// `id` is the **strong identity** used by the StatusPlane and signal system.
-/// `name` is the **weak identity** used only for logging.
+/// Holds a reference to the underlying static `ServiceEntry` from the
+/// `SERVICE_REGISTRY`, plus runtime-only state (`id`, `cancellation_token`)
+/// and Arc-wrapped variants of the entry's function pointers.
+///
+/// Use accessor methods (`name()`, `priority()`, etc.) to read static
+/// metadata without field duplication.
 pub struct ServiceDescription {
     /// Unique ID assigned by `Registry::build()` -- the strong identity.
     pub id: ServiceId,
-    /// Human-readable name for logging -- the weak identity.
-    ///
-    /// Uses `Arc<str>` so that cloning (which happens on every service restart)
-    /// is a cheap atomic reference-count increment instead of a heap allocation.
-    pub name: Arc<str>,
+    /// Reference to the static entry that registered this service.
+    pub entry: &'static ServiceEntry,
+    /// Arc-wrapped version of `entry.wrapper` for shared ownership.
     pub run: ServiceFn,
+    /// Arc-wrapped version of `entry.watcher` for shared ownership.
     pub watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
-    pub priority: u8,
+    /// Per-instance cancellation token for lifecycle management.
     pub cancellation_token: CancellationToken,
-    /// Tags inherited from the static `ServiceEntry`.
-    pub tags: &'static [&'static str],
+}
+
+impl ServiceDescription {
+    /// Human-readable name for logging.
+    #[inline]
+    pub fn name(&self) -> &'static str {
+        self.entry.name
+    }
+
+    /// Priority level (higher = started earlier).
+    #[inline]
+    pub fn priority(&self) -> u8 {
+        self.entry.priority
+    }
+
+    /// Compile-time tags for filtering.
+    #[inline]
+    pub fn tags(&self) -> &'static [&'static str] {
+        self.entry.tags
+    }
+
+    /// Dependency parameters with `TypeId` for graph analysis.
+    #[inline]
+    pub fn params(&self) -> &'static [ServiceParam] {
+        self.entry.params
+    }
+
+    /// Module path where the service is defined.
+    #[inline]
+    pub fn module(&self) -> &'static str {
+        self.entry.module
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -159,15 +186,36 @@ pub enum ServiceStatus {
     Terminated,
 }
 
-// ---------------------------------------------------------------------------
-// Global static registry (linkme)
-// ---------------------------------------------------------------------------
-
-use linkme::distributed_slice;
-
 /// The global service registry -- services register themselves here via `#[service]` macro.
 #[distributed_slice]
 pub static SERVICE_REGISTRY: [ServiceEntry];
+
+/// The global provider registry -- providers register themselves here via `#[provider]` macro.
+///
+/// Each entry records the provider's type identity and its dependency parameters,
+/// enabling full dependency graph construction (including Provider→Provider edges)
+/// at startup for cycle detection.
+#[distributed_slice]
+pub static PROVIDER_REGISTRY: [ProviderEntry];
+
+// ---------------------------------------------------------------------------
+// ProviderEntry (static, compile-time) -- provider dependency metadata
+// ---------------------------------------------------------------------------
+
+/// A static entry in the provider registry (generated by `#[provider]` macro).
+///
+/// Unlike `ServiceEntry`, providers do not carry a wrapper function or priority.
+/// Their sole purpose is to expose dependency metadata for graph analysis.
+pub struct ProviderEntry {
+    /// Provider type name (e.g. "ConnectionString").
+    pub name: &'static str,
+    /// Module path where the provider is defined.
+    pub module: &'static str,
+    /// `TypeId` of the provided type itself (used as graph node identity).
+    pub type_id: TypeId,
+    /// Dependencies this provider requires (other provider types).
+    pub params: &'static [ServiceParam],
+}
 
 // ---------------------------------------------------------------------------
 // Registry: Tag-filtered, ID-allocating service container.
@@ -308,15 +356,12 @@ impl RegistryBuilder {
                 continue;
             }
 
-            let wrapper = entry.wrapper;
             services.push(ServiceDescription {
                 id: ServiceId(idx),
-                name: Arc::from(entry.name),
-                run: Arc::new(wrapper),
+                entry,
+                run: Arc::new(entry.wrapper),
                 watcher: entry.watcher.map(|w| Arc::new(w) as _),
-                priority: entry.priority,
                 cancellation_token: CancellationToken::new(),
-                tags: entry.tags,
             });
         }
 

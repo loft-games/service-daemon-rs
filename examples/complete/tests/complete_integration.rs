@@ -2,103 +2,80 @@
 //!
 //! These tests verify ordered startup/shutdown, crash recovery,
 //! handshake synchronization, and zero-lockdown reads.
+//!
+//! All test services use `#[service(tags = [...])]` with isolated tags
+//! to prevent cross-test interference. Global atomics and `std::sync::Mutex`
+//! are used for state observation since test assertions run outside the
+//! service context.
 
-use service_daemon::{
-    Registry, RestartPolicy, ServiceDaemon, ServiceDescription, ServiceId, ServiceStatus,
-};
-use std::sync::Arc;
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Helper: Build a ServiceDaemon with manually constructed service descriptions.
-fn build_daemon_with_services(
-    policy: RestartPolicy,
-    services: Vec<(ServiceId, &str, service_daemon::ServiceFn, u8)>,
-) -> ServiceDaemon {
-    use service_daemon::tokio_util::sync::CancellationToken;
+// ===========================================================================
+// Test services for: test_ordered_startup
+// ===========================================================================
 
-    let descriptions: Vec<ServiceDescription> = services
-        .into_iter()
-        .map(|(id, name, run, priority)| ServiceDescription {
-            id,
-            name: std::sync::Arc::from(name),
-            run,
-            watcher: None,
-            priority,
-            cancellation_token: CancellationToken::new(),
-            tags: &[],
-        })
-        .collect();
+use std::sync::Mutex as StdMutex;
 
-    ServiceDaemon::builder()
-        .with_registry(Registry::builder().with_tag("__test_isolation__").build())
-        .with_restart_policy(policy)
-        .with_services(descriptions)
-        .build()
+/// Shared start sequence for ordered startup tests.
+static STARTUP_SEQ: std::sync::LazyLock<StdMutex<Vec<u8>>> =
+    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+
+/// High-priority test service (priority 100) for ordered startup.
+#[service_daemon::service(tags = ["__test_ordered_startup__"], priority = 100)]
+async fn startup_service_100() -> anyhow::Result<()> {
+    STARTUP_SEQ.lock().unwrap().push(100);
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
+/// Mid-priority test service (priority 50) for ordered startup.
+#[service_daemon::service(tags = ["__test_ordered_startup__"], priority = 50)]
+async fn startup_service_50() -> anyhow::Result<()> {
+    STARTUP_SEQ.lock().unwrap().push(50);
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
+/// Low-priority test service (priority 0) for ordered startup.
+#[service_daemon::service(tags = ["__test_ordered_startup__"], priority = 0)]
+async fn startup_service_0() -> anyhow::Result<()> {
+    STARTUP_SEQ.lock().unwrap().push(0);
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
 }
 
 /// Verifies that services start in descending priority order (100 -> 50 -> 0).
 #[tokio::test]
 async fn test_ordered_startup() -> anyhow::Result<()> {
-    use std::sync::Mutex as StdMutex;
-    let start_sequence = Arc::new(StdMutex::new(Vec::new()));
+    STARTUP_SEQ.lock().unwrap().clear();
 
-    let seq1 = start_sequence.clone();
-    let fn1: service_daemon::ServiceFn = Arc::new(move |_| {
-        let s = seq1.clone();
-        Box::pin(async move {
-            s.lock().unwrap().push(100);
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Ok(())
-        })
-    });
-
-    let seq2 = start_sequence.clone();
-    let fn2: service_daemon::ServiceFn = Arc::new(move |_| {
-        let s = seq2.clone();
-        Box::pin(async move {
-            s.lock().unwrap().push(50);
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Ok(())
-        })
-    });
-
-    let seq3 = start_sequence.clone();
-    let fn3: service_daemon::ServiceFn = Arc::new(move |_| {
-        let s = seq3.clone();
-        Box::pin(async move {
-            s.lock().unwrap().push(0);
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Ok(())
-        })
-    });
-
-    let mut daemon = build_daemon_with_services(
-        RestartPolicy::for_testing(),
-        vec![
-            (ServiceId::new(0), "priority_100", fn1, 100),
-            (ServiceId::new(1), "priority_50", fn2, 50),
-            (ServiceId::new(2), "priority_0", fn3, 0),
-        ],
-    );
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__test_ordered_startup__")
+                .build(),
+        )
+        .with_restart_policy(RestartPolicy::for_testing())
+        .build();
 
     let cancel = daemon.cancel_token();
-
     daemon.run().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     cancel.cancel();
     daemon.wait().await.unwrap();
 
-    let final_seq = start_sequence.lock().unwrap().clone();
+    let final_seq = STARTUP_SEQ.lock().unwrap().clone();
     assert_eq!(
         final_seq,
         vec![100, 50, 0],
@@ -108,71 +85,72 @@ async fn test_ordered_startup() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ===========================================================================
+// Test services for: test_ordered_shutdown
+// ===========================================================================
+
+/// Shared exit sequence for ordered shutdown tests.
+static SHUTDOWN_SEQ: std::sync::LazyLock<StdMutex<Vec<u8>>> =
+    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+
+/// Low-priority test service (priority 0) for ordered shutdown.
+/// Exits last (highest priority shuts down last -> lowest first).
+#[service_daemon::service(tags = ["__test_ordered_shutdown__"], priority = 0)]
+async fn shutdown_service_0() -> anyhow::Result<()> {
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    SHUTDOWN_SEQ.lock().unwrap().push(0);
+    Ok(())
+}
+
+/// Mid-priority test service (priority 50) for ordered shutdown.
+#[service_daemon::service(tags = ["__test_ordered_shutdown__"], priority = 50)]
+async fn shutdown_service_50() -> anyhow::Result<()> {
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    SHUTDOWN_SEQ.lock().unwrap().push(50);
+    Ok(())
+}
+
+/// High-priority test service (priority 100) for ordered shutdown.
+#[service_daemon::service(tags = ["__test_ordered_shutdown__"], priority = 100)]
+async fn shutdown_service_100() -> anyhow::Result<()> {
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    SHUTDOWN_SEQ.lock().unwrap().push(100);
+    Ok(())
+}
+
 /// Verifies that services shut down in ascending priority order (0 -> 50 -> 100).
 #[tokio::test]
 async fn test_ordered_shutdown() -> anyhow::Result<()> {
-    use std::sync::Mutex as StdMutex;
-    let exit_sequence = Arc::new(StdMutex::new(Vec::new()));
+    SHUTDOWN_SEQ.lock().unwrap().clear();
 
-    let seq1 = exit_sequence.clone();
-    let fn1: service_daemon::ServiceFn = Arc::new(move |_| {
-        let s = seq1.clone();
-        Box::pin(async move {
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            s.lock().unwrap().push(0);
-            Ok(())
-        })
-    });
-
-    let seq2 = exit_sequence.clone();
-    let fn2: service_daemon::ServiceFn = Arc::new(move |_| {
-        let s = seq2.clone();
-        Box::pin(async move {
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            s.lock().unwrap().push(50);
-            Ok(())
-        })
-    });
-
-    let seq3 = exit_sequence.clone();
-    let fn3: service_daemon::ServiceFn = Arc::new(move |_| {
-        let s = seq3.clone();
-        Box::pin(async move {
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            s.lock().unwrap().push(100);
-            Ok(())
-        })
-    });
-
-    let mut daemon = build_daemon_with_services(
-        RestartPolicy::for_testing(),
-        vec![
-            (ServiceId::new(0), "priority_0", fn1, 0),
-            (ServiceId::new(1), "priority_50", fn2, 50),
-            (ServiceId::new(2), "priority_100", fn3, 100),
-        ],
-    );
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__test_ordered_shutdown__")
+                .build(),
+        )
+        .with_restart_policy(RestartPolicy::for_testing())
+        .build();
 
     let cancel = daemon.cancel_token();
-
     daemon.run().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     cancel.cancel();
     daemon.wait().await.unwrap();
 
-    let final_seq = exit_sequence.lock().unwrap().clone();
+    let final_seq = SHUTDOWN_SEQ.lock().unwrap().clone();
     assert_eq!(
         final_seq,
         vec![0, 50, 100],
@@ -182,57 +160,101 @@ async fn test_ordered_shutdown() -> anyhow::Result<()> {
     Ok(())
 }
 
+// ===========================================================================
+// Test services for: test_shelf_persistence_on_crash
+// ===========================================================================
+
+/// Generation counter for the crash test service.
+static CRASH_GENERATION: AtomicU32 = AtomicU32::new(0);
+
+/// Recovered value from shelf after crash.
+static RECOVERED_VALUE: std::sync::LazyLock<StdMutex<Option<u32>>> =
+    std::sync::LazyLock::new(|| StdMutex::new(None));
+
+/// Test service that crashes on first generation, then recovers shelf data.
+#[service_daemon::service(tags = ["__test_crash_shelf__"], priority = 50)]
+async fn crash_test_service() -> anyhow::Result<()> {
+    let generation = CRASH_GENERATION.fetch_add(1, Ordering::SeqCst);
+    match service_daemon::state() {
+        ServiceStatus::Recovering(_) => {
+            if let Some(v) = service_daemon::unshelve::<u32>("crash_data").await {
+                *RECOVERED_VALUE.lock().unwrap() = Some(v);
+            }
+            service_daemon::done();
+        }
+        _ => {
+            service_daemon::shelve("crash_data", 42u32).await;
+            if generation == 0 {
+                panic!("Simulated crash on first generation!");
+            }
+            service_daemon::done();
+        }
+    }
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
 /// Verifies that shelved data survives a service crash and is available
 /// in the recovery generation via `unshelve()`.
 #[tokio::test]
 async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
-    use std::sync::Mutex as StdMutex;
-    static GENERATION_COUNTER: AtomicU32 = AtomicU32::new(0);
-    let recovered_value = Arc::new(StdMutex::new(None::<u32>));
+    CRASH_GENERATION.store(0, Ordering::SeqCst);
+    *RECOVERED_VALUE.lock().unwrap() = None;
 
-    let rv = recovered_value.clone();
-    let crash_fn: service_daemon::ServiceFn = Arc::new(move |_| {
-        let rv_clone = rv.clone();
-        Box::pin(async move {
-            let generation = GENERATION_COUNTER.fetch_add(1, Ordering::SeqCst);
-            match service_daemon::state() {
-                ServiceStatus::Recovering(_) => {
-                    if let Some(v) = service_daemon::unshelve::<u32>("crash_data").await {
-                        *rv_clone.lock().unwrap() = Some(v);
-                    }
-                    service_daemon::done();
-                }
-                _ => {
-                    service_daemon::shelve("crash_data", 42u32).await;
-                    if generation == 0 {
-                        panic!("Simulated crash on first generation!");
-                    }
-                    service_daemon::done();
-                }
-            }
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Ok(())
-        })
-    });
-
-    let mut daemon = build_daemon_with_services(
-        RestartPolicy::for_testing(),
-        vec![(ServiceId::new(0), "crash_test_service", crash_fn, 50)],
-    );
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(Registry::builder().with_tag("__test_crash_shelf__").build())
+        .with_restart_policy(RestartPolicy::for_testing())
+        .build();
 
     let cancel = daemon.cancel_token();
-
     daemon.run().await;
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     cancel.cancel();
     daemon.wait().await.unwrap();
 
-    let value = recovered_value.lock().unwrap().take();
+    let value = RECOVERED_VALUE.lock().unwrap().take();
     assert_eq!(value, Some(42), "Shelf data did not survive the crash!");
 
+    Ok(())
+}
+
+// ===========================================================================
+// Test services for: test_handshake_sync_behavior
+// ===========================================================================
+
+/// Shared log for handshake timing assertions.
+static HANDSHAKE_LOG: std::sync::LazyLock<StdMutex<Vec<(&'static str, std::time::Instant)>>> =
+    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+
+/// High-priority service that delays `done()` by 200ms.
+#[service_daemon::service(tags = ["__test_handshake__"], priority = 100)]
+async fn handshake_high_prio() -> anyhow::Result<()> {
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    HANDSHAKE_LOG
+        .lock()
+        .unwrap()
+        .push(("high_done", std::time::Instant::now()));
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    Ok(())
+}
+
+/// Low-priority service that starts after high-priority handshake.
+#[service_daemon::service(tags = ["__test_handshake__"], priority = 50)]
+async fn handshake_low_prio() -> anyhow::Result<()> {
+    HANDSHAKE_LOG
+        .lock()
+        .unwrap()
+        .push(("low_start", std::time::Instant::now()));
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     Ok(())
 }
 
@@ -240,57 +262,21 @@ async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
 /// for higher-priority services to signal `done()` before starting.
 #[tokio::test]
 async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
-    use std::sync::Mutex as StdMutex;
-    let start_log = Arc::new(StdMutex::new(Vec::new()));
+    HANDSHAKE_LOG.lock().unwrap().clear();
 
-    let log1 = start_log.clone();
-    let fn1: service_daemon::ServiceFn = Arc::new(move |_| {
-        let l = log1.clone();
-        Box::pin(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            l.lock()
-                .unwrap()
-                .push(("high_done", std::time::Instant::now()));
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Ok(())
-        })
-    });
-
-    let log2 = start_log.clone();
-    let fn2: service_daemon::ServiceFn = Arc::new(move |_| {
-        let l = log2.clone();
-        Box::pin(async move {
-            l.lock()
-                .unwrap()
-                .push(("low_start", std::time::Instant::now()));
-            service_daemon::done();
-            while !service_daemon::is_shutdown() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-            Ok(())
-        })
-    });
-
-    let mut daemon = build_daemon_with_services(
-        RestartPolicy::for_testing(),
-        vec![
-            (ServiceId::new(0), "high_prio_100", fn1, 100),
-            (ServiceId::new(1), "low_prio_50", fn2, 50),
-        ],
-    );
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(Registry::builder().with_tag("__test_handshake__").build())
+        .with_restart_policy(RestartPolicy::for_testing())
+        .build();
 
     let cancel = daemon.cancel_token();
-
     daemon.run().await;
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     cancel.cancel();
     daemon.wait().await.unwrap();
 
-    let log = start_log.lock().unwrap();
+    let log = HANDSHAKE_LOG.lock().unwrap();
     let high_done = log.iter().find(|(s, _)| *s == "high_done");
     let low_start = log.iter().find(|(s, _)| *s == "low_start");
 
@@ -303,6 +289,10 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ===========================================================================
+// Tests that do NOT require manually constructed services
+// ===========================================================================
 
 /// Verifies that `resolve()` returns a non-blocking snapshot even while
 /// a writer holds the RwLock. This guarantees zero-lockdown reads for
