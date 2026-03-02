@@ -56,7 +56,7 @@ struct ServiceSupervisor {
     service_id: ServiceId,
     name: &'static str,
     run: ServiceFn,
-    watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+    watcher: Option<fn() -> BoxFuture<'static, ()>>,
     backoff: BackoffController,
     resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
@@ -73,7 +73,7 @@ impl ServiceSupervisor {
         service_id: ServiceId,
         name: &'static str,
         run: ServiceFn,
-        watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+        watcher: Option<fn() -> BoxFuture<'static, ()>>,
         policy: RestartPolicy,
         resources: Arc<DaemonResources>,
         cancellation_token: CancellationToken,
@@ -98,7 +98,7 @@ impl ServiceSupervisor {
             let sid = self.service_id;
             let ct = self.cancellation_token.clone();
             let res = self.resources.clone();
-            let watcher = watcher.clone();
+            let watcher = *watcher;
             tokio::spawn(async move {
                 while !ct.is_cancelled() {
                     let reload_signal = res
@@ -286,15 +286,14 @@ impl ServiceSupervisor {
             reload_token.clone(),
         );
 
-        let run_clone = self.run.clone();
+        let run_fn = self.run;
         let token_for_run = self.cancellation_token.clone();
         let resources_clone = self.resources.clone();
         let reload_token_clone = reload_token;
 
         let result = __run_service_scope(identity, resources_clone, || async move {
             let service_future =
-                std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
-                    .catch_unwind();
+                std::panic::AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
 
             // Integrated signal handling -- replaces the bridge_task
             tokio::select! {
@@ -490,7 +489,7 @@ pub async fn spawn_service(
     service_id: ServiceId,
     name: &'static str,
     run: ServiceFn,
-    watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+    watcher: Option<fn() -> BoxFuture<'static, ()>>,
     policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
@@ -547,8 +546,8 @@ pub async fn spawn_all_services(
             spawn_service(
                 service.id,
                 service.name(),
-                service.run.clone(),
-                service.watcher.clone(),
+                service.entry.wrapper,
+                service.entry.watcher,
                 restart_policy,
                 running_tasks.clone(),
                 resources.clone(),

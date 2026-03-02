@@ -1,12 +1,10 @@
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-pub type ServiceFn =
-    Arc<dyn Fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> + Send + Sync>;
+pub type ServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
 
 // ---------------------------------------------------------------------------
 // ServiceId: Unique, ID-based identity for runtime indexing.
@@ -118,10 +116,6 @@ pub struct ServiceDescription {
     pub id: ServiceId,
     /// Reference to the static entry that registered this service.
     pub entry: &'static ServiceEntry,
-    /// Arc-wrapped version of `entry.wrapper` for shared ownership.
-    pub run: ServiceFn,
-    /// Arc-wrapped version of `entry.watcher` for shared ownership.
-    pub watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     /// Per-instance cancellation token for lifecycle management.
     pub cancellation_token: CancellationToken,
 }
@@ -359,8 +353,6 @@ impl RegistryBuilder {
             services.push(ServiceDescription {
                 id: ServiceId(idx),
                 entry,
-                run: Arc::new(entry.wrapper),
-                watcher: entry.watcher.map(|w| Arc::new(w) as _),
                 cancellation_token: CancellationToken::new(),
             });
         }

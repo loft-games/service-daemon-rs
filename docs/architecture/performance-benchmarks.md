@@ -91,8 +91,8 @@ and validated against RSS deltas from
 | Component | Stack Size | Description |
 | :--- | ---: | :--- |
 | `BackoffController` | 120 B | Retry state: policy (96 B) + current delay + attempt counter |
-| `ServiceDescription` | 96 B | Registry entry: name, run fn, watcher, priority, token, tags |
-| `ServiceIdentity` | 56 B | Task-local handle: ID, name, 2× cancel token, handshake flag |
+| `ServiceDescription` | 24 B | Registry entry: ServiceId + &ServiceEntry ref + CancellationToken |
+| `ServiceIdentity` | 48 B | Task-local handle: ID, name, 2× cancel token, handshake flag |
 | `ServiceStatus` | 24 B | Lifecycle enum (Initializing, Healthy, Recovering, etc.) |
 | `CancellationToken` | 8 B | Lightweight pointer to shared cancellation state |
 

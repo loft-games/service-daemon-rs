@@ -271,8 +271,8 @@ impl ServiceDaemon {
             runner::spawn_service(
                 service.id,
                 service.name(),
-                service.run.clone(),
-                service.watcher.clone(),
+                service.entry.wrapper,
+                service.entry.watcher,
                 test_policy,
                 self.running_tasks.clone(),
                 self.resources.clone(),
