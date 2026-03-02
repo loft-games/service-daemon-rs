@@ -20,7 +20,7 @@ fn build_daemon_with_services(
         .into_iter()
         .map(|(id, name, run, priority)| ServiceDescription {
             id,
-            name: name.to_string(),
+            name: std::sync::Arc::from(name),
             run,
             watcher: None,
             priority,

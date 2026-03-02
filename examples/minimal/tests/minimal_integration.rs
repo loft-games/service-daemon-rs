@@ -52,7 +52,7 @@ async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
         .with_restart_policy(RestartPolicy::for_testing())
         .with_service(service_daemon::ServiceDescription {
             id: service_daemon::ServiceId::new(0),
-            name: "shutdown_test".to_string(),
+            name: std::sync::Arc::from("shutdown_test"),
             run: shutdown_fn,
             watcher: None,
             priority: 50,

@@ -134,7 +134,7 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(&name).and_then(|entry| {
+            r.shelf.get(name.as_ref()).and_then(|entry| {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
@@ -160,7 +160,7 @@ pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> 
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(&name).and_then(|entry| {
+            r.shelf.get(name.as_ref()).and_then(|entry| {
                 entry
                     .get(key)
                     .and_then(|val| val.downcast_ref::<T>().cloned())

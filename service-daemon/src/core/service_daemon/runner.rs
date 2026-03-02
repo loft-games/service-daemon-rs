@@ -54,7 +54,7 @@ enum SupervisorState {
 struct ServiceSupervisor {
     // -- Immutable service identity --
     service_id: ServiceId,
-    name: String,
+    name: Arc<str>,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     backoff: BackoffController,
@@ -71,7 +71,7 @@ struct ServiceSupervisor {
 impl ServiceSupervisor {
     fn new(
         service_id: ServiceId,
-        name: String,
+        name: Arc<str>,
         run: ServiceFn,
         watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
         policy: RestartPolicy,
@@ -488,7 +488,7 @@ impl<'a> ServiceWave<'a> {
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_service(
     service_id: ServiceId,
-    name: String,
+    name: Arc<str>,
     run: ServiceFn,
     watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     policy: RestartPolicy,

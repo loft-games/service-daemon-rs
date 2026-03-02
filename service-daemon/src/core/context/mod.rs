@@ -48,7 +48,7 @@ mod tests {
     fn create_test_identity(name: &str) -> ServiceIdentity {
         ServiceIdentity::new(
             ServiceId::new(0),
-            name.to_string(),
+            Arc::from(name),
             CancellationToken::new(),
             CancellationToken::new(),
         )

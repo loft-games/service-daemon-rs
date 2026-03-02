@@ -60,7 +60,7 @@ impl SimulationHandle {
         let entry = self
             .resources
             .shelf
-            .entry(service_name.to_string())
+            .entry(Arc::from(service_name))
             .or_default();
         entry.insert(key.to_string(), Box::new(value));
     }
@@ -121,11 +121,14 @@ impl SimulationHandle {
         service_name: &str,
         key: &str,
     ) -> Option<T> {
-        self.resources.shelf.get(service_name).and_then(|entry| {
-            entry
-                .get(key)
-                .and_then(|val| val.downcast_ref::<T>().cloned())
-        })
+        self.resources
+            .shelf
+            .get(service_name as &str)
+            .and_then(|entry| {
+                entry
+                    .get(key)
+                    .and_then(|val| val.downcast_ref::<T>().cloned())
+            })
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -146,7 +149,7 @@ impl SimulationHandle {
     pub fn has_shelf(&self, service_name: &str, key: &str) -> bool {
         self.resources
             .shelf
-            .get(service_name)
+            .get(service_name as &str)
             .is_some_and(|entry| entry.contains_key(key))
     }
 
@@ -156,7 +159,7 @@ impl SimulationHandle {
     pub fn shelf_keys(&self, service_name: &str) -> Vec<String> {
         self.resources
             .shelf
-            .get(service_name)
+            .get(service_name as &str)
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
     }
@@ -286,7 +289,7 @@ impl MockContextBuilder {
             let entry = self
                 .resources
                 .shelf
-                .entry(service_name.to_string())
+                .entry(Arc::from(service_name))
                 .or_default();
             entry.insert(key.to_string(), Box::new(data));
         }

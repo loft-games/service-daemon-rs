@@ -118,6 +118,22 @@ any spawned task would pay), **30%** goes to the framework's core value-adds
 (lifecycle tracking, backoff, reload signals), and the remaining **50%** is
 shared infrastructure (heap allocations, DashMap amortization).
 
+#### Deep Dive: Why is Shared Infrastructure so high?
+
+Users often ask why "Shared Infrastructure" / "Heap Overhead" accounts for
+~1 KB of the delta. This is due to three factors inherent in high-performance
+Rust systems:
+
+1.  **String "Double-dipping"**: While a `String` is 24 bytes on the stack, it
+    requires a separate heap allocation for the actual characters. Since every
+    service has a unique name, this adds **40-64 B** per service.
+2.  **DashMap Concurrency Tax**: To enable lock-free reads across 1,000+ services,
+    `StatusPlane` uses `DashMap`. Each entry pays for hash bucket metadata,
+    control bits, and amortized empty slots.
+3.  **Arc Control Blocks**: We use `Arc` for shared signals and state. Each
+    unique `Arc` allocation carries a **24-32 B** control block (Strong/Weak
+    counters) on the heap, which adds up across multiple shared resources.
+
 ---
 
 ## 4. Selection Guide

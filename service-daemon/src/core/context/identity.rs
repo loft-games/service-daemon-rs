@@ -18,7 +18,7 @@ use crate::models::{ServiceId, ServiceStatus};
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
-pub(crate) type GlobalShelfMapping = DashMap<String, ServiceShelf>;
+pub(crate) type GlobalShelfMapping = DashMap<Arc<str>, ServiceShelf>;
 
 /// Shared daemon resources that are owned by `ServiceDaemon` and plumbed to services.
 ///
@@ -32,8 +32,8 @@ pub struct DaemonResources {
     /// Indexed by `ServiceId` (strong identity) instead of String for safety and performance.
     pub status_plane: DashMap<ServiceId, ServiceStatus>,
     /// Shelf for cross-generational state persistence (managed values).
-    /// Structure: DashMap<ServiceName, DashMap<Key, Value>>
-    /// Kept as String-keyed because shelf data is user-facing and persists across restarts.
+    /// Structure: DashMap<ServiceName (Arc<str>), DashMap<Key, Value>>
+    /// Kept as name-keyed because shelf data is user-facing and persists across restarts.
     pub shelf: GlobalShelfMapping,
     /// Signals for services to reload, indexed by `ServiceId`.
     pub reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
@@ -68,7 +68,9 @@ pub struct ServiceIdentity {
     /// Unique runtime ID -- the strong identity for resource lookups.
     pub service_id: ServiceId,
     /// Human-readable name -- the weak identity for logging only.
-    pub name: String,
+    ///
+    /// Uses `Arc<str>` for O(1) cloning on every service restart.
+    pub name: Arc<str>,
     pub cancellation_token: CancellationToken,
     pub reload_token: CancellationToken,
     /// Shared flag: true means the auto-handshake (Initializing->Healthy) has been performed.
@@ -80,7 +82,7 @@ impl ServiceIdentity {
     /// Creates a new ServiceIdentity with the handshake flag set to false.
     pub fn new(
         service_id: ServiceId,
-        name: String,
+        name: Arc<str>,
         cancellation_token: CancellationToken,
         reload_token: CancellationToken,
     ) -> Self {

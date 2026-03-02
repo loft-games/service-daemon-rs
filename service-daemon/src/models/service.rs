@@ -119,7 +119,10 @@ pub struct ServiceDescription {
     /// Unique ID assigned by `Registry::build()` -- the strong identity.
     pub id: ServiceId,
     /// Human-readable name for logging -- the weak identity.
-    pub name: String,
+    ///
+    /// Uses `Arc<str>` so that cloning (which happens on every service restart)
+    /// is a cheap atomic reference-count increment instead of a heap allocation.
+    pub name: Arc<str>,
     pub run: ServiceFn,
     pub watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
     pub priority: u8,
@@ -308,7 +311,7 @@ impl RegistryBuilder {
             let wrapper = entry.wrapper;
             services.push(ServiceDescription {
                 id: ServiceId(idx),
-                name: entry.name.to_string(),
+                name: Arc::from(entry.name),
                 run: Arc::new(wrapper),
                 watcher: entry.watcher.map(|w| Arc::new(w) as _),
                 priority: entry.priority,

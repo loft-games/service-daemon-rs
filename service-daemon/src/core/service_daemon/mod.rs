@@ -564,7 +564,7 @@ mod tests {
         let daemon = ServiceDaemon {
             services: vec![ServiceDescription {
                 id: ServiceId(0),
-                name: "counting_service".to_string(),
+                name: Arc::from("counting_service"),
                 run: service_fn,
                 watcher: None,
                 priority: 50,
