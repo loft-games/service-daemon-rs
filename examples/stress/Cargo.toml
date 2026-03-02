@@ -7,7 +7,8 @@ description = "Stress test: bulk service registration via macro expansion."
 
 [features]
 default = []
-s50 = []
+s0 = []
+s50 = ["s0"]
 s100 = ["s50"]
 s150 = ["s100"]
 s200 = ["s150"]

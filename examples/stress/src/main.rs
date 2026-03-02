@@ -9,24 +9,26 @@
 //! - Reload signal pre-allocation
 //!
 //! **Run**: `cargo run -p example-stress --release --features s100`
+//!
+//! Use `--features s0` to measure the framework baseline (zero business services).
 
 use example_stress as _;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    #[cfg(not(feature = "s50"))]
+    #[cfg(not(feature = "s0"))]
     {
-        println!("No stress features enabled (s50..s1000). Skipping real framework pipeline.");
+        println!("No stress features enabled (s0..s1000). Skipping real framework pipeline.");
         Ok(())
     }
 
-    #[cfg(feature = "s50")]
+    #[cfg(feature = "s0")]
     {
         run_stress_test().await
     }
 }
 
-#[cfg(feature = "s50")]
+#[cfg(feature = "s0")]
 async fn run_stress_test() -> anyhow::Result<()> {
     use service_daemon::ServiceDaemon;
     // Minimal tracing setup (suppress noisy output for benchmarking)

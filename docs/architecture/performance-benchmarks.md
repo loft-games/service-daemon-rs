@@ -7,7 +7,7 @@ controlled environment to ensure reproducibility.
 ## Executive Summary
 
 - **Predictable Scalability**: Uses a fixed-cost model with near-perfect linear memory growth, ensuring the system remains stable even when managing over 1,000 active services.
-- **Resource Efficiency**: Each service adds only ~3.2 KB of memory overhead—a negligible cost even for memory-constrained edge devices.
+- **Resource Efficiency**: Each service adds only ~3.4 KB of memory overhead—a negligible cost even for memory-constrained edge devices.
 - **Ready-to-Use Features**: This tiny memory cost gives you a professional-grade toolkit out of the box: automatic dependency injection, unified logging, and reliable graceful shutdown.
 - **Grows with You**: Start with a simple **`is_shutdown()` polling loop** (just like a standard thread), and seamlessly migrate to **event-driven triggers and causal tracing** as your requirements grow—all within the same unified architecture.
 
@@ -15,9 +15,10 @@ controlled environment to ensure reproducibility.
 
 - **Operating System**: Linux x64
 - **CPU**: (Test host physical CPU)
-- **Rust Version**: 1.75+ (Stable)
+- **Rust Version**: 1.93+ (Stable)
 - **Profile**: Release
 - **Measurement Metric**: RSS (Resident Set Size) sampled at 3 seconds post-initialization.
+- **Statistical Method**: Each data point is the arithmetic mean of 6 independent runs.
 
 ---
 
@@ -26,7 +27,7 @@ controlled environment to ensure reproducibility.
 The framework overhead consists of the static binary size and the runtime baseline (RSS) with zero business services active.
 
 - **Binary Size**: ~2.0 MB (Release profile, stripped)
-- **Baseline RSS**: 3,680 KB (~3.6 MB)
+- **Baseline RSS**: 3,608 KB (~3.5 MB)
 
 ---
 
@@ -51,38 +52,38 @@ xychart-beta
     title "RSS Memory Growth (KB)"
     x-axis ["0", "50", "100", "150", "200", "300", "400", "500", "600", "700", "800", "900", "1000"]
     y-axis "RSS (KB)" 2500 --> 8000
-    line [3680, 3816, 4052, 4300, 4320, 4656, 5052, 5348, 5704, 6020, 6352, 6668, 6968]
-    line [3112, 3212, 3192, 3256, 3340, 3508, 3544, 3680, 3780, 3912, 3916, 4140, 4328]
+    line [3608, 3815, 4149, 4256, 4611, 4878, 5185, 5493, 5769, 6064, 6373, 6666, 7025]
+    line [3077, 3162, 3218, 3299, 3335, 3438, 3537, 3737, 3771, 3876, 3931, 4181, 4252]
 ```
 
 | Services | service-daemon-rs | [task-supervisor](https://github.com/akhercha/task-supervisor) | Delta |
 | :--- | ---: | ---: | ---: |
-| 0 | 3,680 KB (3.6 MB) | 3,112 KB (3.0 MB) | 568 KB (0.6 MB) |
-| 50 | 3,816 KB (3.7 MB) | 3,212 KB (3.1 MB) | 604 KB (0.6 MB) |
-| 100 | 4,052 KB (4.0 MB) | 3,192 KB (3.1 MB) | 860 KB (0.8 MB) |
-| 150 | 4,300 KB (4.2 MB) | 3,256 KB (3.2 MB) | 1,044 KB (1.0 MB) |
-| 200 | 4,320 KB (4.2 MB) | 3,340 KB (3.3 MB) | 980 KB (1.0 MB) |
-| 300 | 4,656 KB (4.5 MB) | 3,508 KB (3.4 MB) | 1,148 KB (1.1 MB) |
-| 400 | 5,052 KB (4.9 MB) | 3,544 KB (3.5 MB) | 1,508 KB (1.5 MB) |
-| 500 | 5,348 KB (5.2 MB) | 3,680 KB (3.6 MB) | 1,668 KB (1.6 MB) |
-| 600 | 5,704 KB (5.6 MB) | 3,780 KB (3.7 MB) | 1,924 KB (1.9 MB) |
-| 700 | 6,020 KB (5.9 MB) | 3,912 KB (3.8 MB) | 2,108 KB (2.1 MB) |
-| 800 | 6,352 KB (6.2 MB) | 3,916 KB (3.8 MB) | 2,436 KB (2.4 MB) |
-| 900 | 6,668 KB (6.5 MB) | 4,140 KB (4.0 MB) | 2,528 KB (2.5 MB) |
-| 1,000 | 6,968 KB (6.8 MB) | 4,328 KB (4.2 MB) | 2,640 KB (2.6 MB) |
+| 0 | 3,608 KB (3.5 MB) | 3,077 KB (3.0 MB) | 531 KB (0.5 MB) |
+| 50 | 3,815 KB (3.7 MB) | 3,162 KB (3.1 MB) | 653 KB (0.6 MB) |
+| 100 | 4,149 KB (4.1 MB) | 3,218 KB (3.1 MB) | 931 KB (0.9 MB) |
+| 150 | 4,256 KB (4.2 MB) | 3,299 KB (3.2 MB) | 957 KB (0.9 MB) |
+| 200 | 4,611 KB (4.5 MB) | 3,335 KB (3.3 MB) | 1,276 KB (1.2 MB) |
+| 300 | 4,878 KB (4.8 MB) | 3,438 KB (3.4 MB) | 1,440 KB (1.4 MB) |
+| 400 | 5,185 KB (5.1 MB) | 3,537 KB (3.5 MB) | 1,648 KB (1.6 MB) |
+| 500 | 5,493 KB (5.4 MB) | 3,737 KB (3.7 MB) | 1,756 KB (1.7 MB) |
+| 600 | 5,769 KB (5.6 MB) | 3,771 KB (3.7 MB) | 1,998 KB (2.0 MB) |
+| 700 | 6,064 KB (5.9 MB) | 3,876 KB (3.8 MB) | 2,188 KB (2.1 MB) |
+| 800 | 6,373 KB (6.2 MB) | 3,931 KB (3.8 MB) | 2,442 KB (2.4 MB) |
+| 900 | 6,666 KB (6.5 MB) | 4,181 KB (4.1 MB) | 2,485 KB (2.4 MB) |
+| 1,000 | 7,025 KB (6.9 MB) | 4,252 KB (4.2 MB) | 2,773 KB (2.7 MB) |
 
 ### Growth Slope Analysis
 
 | Metric | service-daemon-rs | [task-supervisor](https://github.com/akhercha/task-supervisor) |
 | :--- | ---: | ---: |
-| Marginal cost per entity | ~3.2 KB | ~1.3 KB |
-| Baseline RSS (0 entities) | 3,680 KB (3.6 MB) | 3,112 KB (3.0 MB) |
-| RSS at 1,000 entities | 6,968 KB (6.8 MB) | 4,328 KB (4.2 MB) |
+| Marginal cost per entity | ~3.4 KB | ~1.2 KB |
+| Baseline RSS (0 entities) | 3,608 KB (3.5 MB) | 3,077 KB (3.0 MB) |
+| RSS at 1,000 entities | 7,025 KB (6.9 MB) | 4,252 KB (4.2 MB) |
 
-- Both curves are strictly linear, confirming zero detectable memory leaks.
-- The delta between the two frameworks grows at approximately **2.0 KB per entity**.
+- Both curves are strictly linear (R² ≈ 0.998), confirming zero detectable memory leaks.
+- The delta between the two frameworks grows at approximately **2.2 KB per entity**.
 
-### Where Does the Extra ~2.0 KB Go?
+### Where Does the Extra ~2.2 KB Go?
 
 The overhead was measured using `std::mem::size_of` on core framework types
 and validated against RSS deltas from
@@ -91,26 +92,27 @@ and validated against RSS deltas from
 | Component | Stack Size | Description |
 | :--- | ---: | :--- |
 | `BackoffController` | 120 B | Retry state: policy (96 B) + current delay + attempt counter |
-| `ServiceDescription` | 24 B | Registry entry: ServiceId + &ServiceEntry ref + CancellationToken |
-| `ServiceIdentity` | 48 B | Task-local handle: ID, name, 2× cancel token, handshake flag |
+| `ServiceDescription` | 24 B | Registry entry: `ServiceId` + `&'static ServiceEntry` ref + `CancellationToken` |
+| `ServiceIdentity` | 48 B | Task-local handle: ID, `&'static str` name, 2× cancel token, handshake flag |
 | `ServiceStatus` | 24 B | Lifecycle enum (Initializing, Healthy, Recovering, etc.) |
 | `CancellationToken` | 8 B | Lightweight pointer to shared cancellation state |
 
 > [!NOTE]
 > Stack sizes only capture **pointer-sized handles**. The remaining budget
 > is consumed by heap-allocated backing stores (Tokio task futures, DashMap
-> buckets, String buffers, and Arc control blocks).
+> buckets, and Arc control blocks). Since `v0.1.x`, service names use
+> `&'static str` (zero heap allocation), reducing per-service overhead.
 
-The full ~2.0 KB per-service delta breaks down as follows:
+The full ~2.2 KB per-service delta breaks down as follows:
 
 ```mermaid
-pie title Per-Service Overhead Delta (~2.0 KB)
-    "Supervisor State (BackoffController + metadata)" : 350
-    "DashMap Slots (StatusPlane + ReloadSignals)" : 250
-    "Tokio Task Runtime (future boxing + header)" : 400
-    "ServiceDescription (Registry entry)" : 200
-    "ServiceIdentity (task-local clone)" : 150
-    "Heap Overhead (String, Arc, bucket growth)" : 650
+pie title Per-Service Overhead Delta (~2.2 KB)
+    "Supervisor State (BackoffController + metadata)" : 380
+    "DashMap Slots (StatusPlane + ReloadSignals)" : 280
+    "Tokio Task Runtime (future boxing + header)" : 420
+    "ServiceDescription (Registry entry)" : 170
+    "ServiceIdentity (task-local handle)" : 130
+    "Heap Overhead (Arc, bucket growth)" : 870
 ```
 
 In plain terms: roughly **20%** goes to the Tokio task runtime itself (which
@@ -121,18 +123,21 @@ shared infrastructure (heap allocations, DashMap amortization).
 #### Deep Dive: Why is Shared Infrastructure so high?
 
 Users often ask why "Shared Infrastructure" / "Heap Overhead" accounts for
-~1 KB of the delta. This is due to three factors inherent in high-performance
-Rust systems:
+a significant portion of the delta. This is due to factors inherent in
+high-performance Rust systems:
 
-1.  **String "Double-dipping"**: While a `String` is 24 bytes on the stack, it
-    requires a separate heap allocation for the actual characters. Since every
-    service has a unique name, this adds **40-64 B** per service.
-2.  **DashMap Concurrency Tax**: To enable lock-free reads across 1,000+ services,
+1.  **DashMap Concurrency Tax**: To enable lock-free reads across 1,000+ services,
     `StatusPlane` uses `DashMap`. Each entry pays for hash bucket metadata,
     control bits, and amortized empty slots.
-3.  **Arc Control Blocks**: We use `Arc` for shared signals and state. Each
+2.  **Arc Control Blocks**: We use `Arc` for shared signals and state. Each
     unique `Arc` allocation carries a **24-32 B** control block (Strong/Weak
     counters) on the heap, which adds up across multiple shared resources.
+
+> [!TIP]
+> Since `v0.1.x`, service names are `&'static str` references into the static
+> `ServiceEntry` registry, eliminating the per-service `String` heap allocation
+> that previously added **40-64 B** per service. Similarly, `ServiceFn` changed
+> from `Arc<dyn Fn>` (vtable + heap) to a plain `fn` pointer (8 B on stack).
 
 ---
 
@@ -182,6 +187,9 @@ The performance data can be reproduced using the following stress test implement
 ### service-daemon-rs Stress Test
 Located at `examples/stress/`. Run with varied scale features:
 ```bash
+# Baseline: framework overhead with zero services
+cargo run --release -p example-stress --no-default-features --features s0
+
 # Example: test with 500 services
 cargo run --release -p example-stress --no-default-features --features s500
 ```
