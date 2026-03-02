@@ -49,11 +49,11 @@ Upper line = service-daemon-rs, Lower line = [task-supervisor](https://github.co
 
 ```mermaid
 xychart-beta
-    title "RSS Memory Growth (KB)"
-    x-axis ["0", "50", "100", "150", "200", "300", "400", "500", "600", "700", "800", "900", "1000"]
-    y-axis "RSS (KB)" 2500 --> 8000
-    line [3608, 3815, 4149, 4256, 4611, 4878, 5185, 5493, 5769, 6064, 6373, 6666, 7025]
-    line [3077, 3162, 3218, 3299, 3335, 3438, 3537, 3737, 3771, 3876, 3931, 4181, 4252]
+title "RSS Memory Growth KB"
+x-axis [0, 50, 100, 150, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
+y-axis "RSS KB" 2500 --> 8000
+line [3608, 3815, 4149, 4256, 4611, 4878, 5185, 5493, 5769, 6064, 6373, 6666, 7025]
+line [3077, 3162, 3218, 3299, 3335, 3438, 3537, 3737, 3771, 3876, 3931, 4181, 4252]
 ```
 
 | Services | service-daemon-rs | [task-supervisor](https://github.com/akhercha/task-supervisor) | Delta |
@@ -106,13 +106,13 @@ and validated against RSS deltas from
 The full ~2.2 KB per-service delta breaks down as follows:
 
 ```mermaid
-pie title Per-Service Overhead Delta (~2.2 KB)
-    "Supervisor State (BackoffController + metadata)" : 380
-    "DashMap Slots (StatusPlane + ReloadSignals)" : 280
-    "Tokio Task Runtime (future boxing + header)" : 420
-    "ServiceDescription (Registry entry)" : 170
-    "ServiceIdentity (task-local handle)" : 130
-    "Heap Overhead (Arc, bucket growth)" : 870
+pie title Per-Service Overhead Delta 2.2 KB
+"Supervisor State (BackoffController + metadata)" : 380
+"DashMap Slots (StatusPlane + ReloadSignals)" : 280
+"Tokio Task Runtime (future boxing + header)" : 420
+"ServiceDescription (Registry entry)" : 170
+"ServiceIdentity (task-local handle)" : 130
+"Heap Overhead (Arc, bucket growth)" : 870
 ```
 
 In plain terms: roughly **20%** goes to the Tokio task runtime itself (which
