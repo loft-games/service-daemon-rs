@@ -415,6 +415,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 if in_flight == 0 {
                     idle_since.get_or_insert_with(tokio::time::Instant::now);
                     Self::try_scale_down(
+                        &semaphore,
                         &current_limit,
                         &scaling,
                         &trigger_name,
@@ -440,9 +441,14 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
     /// Attempt to scale down concurrency if the idle cooldown has elapsed.
     ///
-    /// Called when `in_flight == 0`. Resets `idle_since` to `None` after
-    /// successfully scaling down.
+    /// Called when `in_flight == 0`. Physically revokes excess permits by
+    /// acquiring them via `try_acquire()` and calling `forget()` to permanently
+    /// remove them from the semaphore. This ensures `dispatch` truly cannot
+    /// exceed the reduced concurrency limit.
+    ///
+    /// Resets `idle_since` to `None` after successfully scaling down.
     fn try_scale_down(
+        semaphore: &Semaphore,
         current_limit: &AtomicUsize,
         scaling: &ScalingPolicy,
         trigger_name: &str,
@@ -454,16 +460,30 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             return;
         }
 
-        // Shrink back to initial concurrency.
-        // We cannot revoke permits from a Semaphore, so we update the
-        // logical limit and let excess permits become "phantom" -- they
-        // exist in the semaphore but our limit tracking ignores them.
-        current_limit.store(scaling.initial_concurrency, Ordering::Relaxed);
+        // Physically revoke excess permits by acquiring and forgetting them.
+        // `forget()` permanently reduces the semaphore capacity, ensuring
+        // `dispatch` cannot acquire more permits than `initial_concurrency`.
+        let to_revoke = limit - scaling.initial_concurrency;
+        let mut revoked = 0usize;
+        for _ in 0..to_revoke {
+            match semaphore.try_acquire() {
+                Ok(permit) => {
+                    permit.forget();
+                    revoked += 1;
+                }
+                Err(_) => break, // Rare race with new dispatch; stop early
+            }
+        }
+
+        let new_limit = limit - revoked;
+        current_limit.store(new_limit, Ordering::Relaxed);
         info!(
             trigger = %trigger_name,
             old_limit = limit,
-            new_limit = scaling.initial_concurrency,
-            "Scaled down after cooldown"
+            new_limit,
+            revoked,
+            "Elastic scale-down: revoked {} permits",
+            revoked
         );
         *idle_since = None;
     }
@@ -876,10 +896,10 @@ mod tests {
         assert_eq!(semaphore.available_permits(), 3);
     }
 
-    /// Verifies that scale-down resets the logical limit without removing
-    /// permits from the semaphore (phantom permit strategy).
+    /// Verifies that scale-down physically revokes permits from the semaphore
+    /// via `try_acquire()` + `forget()`, not just a logical counter update.
     #[tokio::test]
-    async fn test_scale_down_resets_logical_limit() {
+    async fn test_scale_down_physically_revokes_permits() {
         let scaling = ScalingPolicy {
             initial_concurrency: 1,
             max_concurrency: 8,
@@ -887,15 +907,84 @@ mod tests {
             ..ScalingPolicy::default()
         };
 
-        let current_limit = Arc::new(AtomicUsize::new(4)); // Simulated scaled-up state
+        // Simulate a scaled-up state: semaphore has 4 permits, limit = 4
+        let semaphore = Arc::new(Semaphore::new(4));
+        let current_limit = Arc::new(AtomicUsize::new(4));
 
-        // Simulate cooldown elapsed
+        // Wait for cooldown to elapse
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // Scale down
-        current_limit.store(scaling.initial_concurrency, Ordering::Relaxed);
+        let mut idle_since = Some(tokio::time::Instant::now() - Duration::from_millis(50));
 
+        TriggerRunner::<()>::try_scale_down(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            4, // current limit
+            &mut idle_since,
+        );
+
+        // Logical limit should be back to initial
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
+        // Physical permits should also be reduced (4 - 3 revoked = 1)
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "Semaphore should have physically lost permits after scale-down"
+        );
+    }
+
+    /// Verifies that a full scale-down → scale-up roundtrip works correctly:
+    /// permits are physically revoked during scale-down and physically restored
+    /// during scale-up.
+    #[tokio::test]
+    async fn test_scale_down_then_scale_up_roundtrip() {
+        let scaling = ScalingPolicy {
+            initial_concurrency: 2,
+            max_concurrency: 8,
+            scale_factor: 2,
+            scale_cooldown: Duration::from_millis(10),
+            ..ScalingPolicy::default()
+        };
+
+        // Start with a scaled-up state: 4 permits
+        let semaphore = Arc::new(Semaphore::new(4));
+        let current_limit = Arc::new(AtomicUsize::new(4));
+
+        // --- Phase 1: Scale down from 4 → 2 ---
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut idle_since = Some(tokio::time::Instant::now() - Duration::from_millis(50));
+
+        TriggerRunner::<()>::try_scale_down(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            4,
+            &mut idle_since,
+        );
+
+        assert_eq!(current_limit.load(Ordering::Relaxed), 2);
+        assert_eq!(semaphore.available_permits(), 2);
+
+        // --- Phase 2: Scale up from 2 → 4 ---
+        // Simulate pressure: acquire both permits so in_flight = 2
+        let _p1 = semaphore.clone().try_acquire_owned().unwrap();
+        let _p2 = semaphore.clone().try_acquire_owned().unwrap();
+
+        TriggerRunner::<()>::try_scale_up(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            2, // current limit
+            2, // in_flight (100% pressure)
+        );
+
+        assert_eq!(current_limit.load(Ordering::Relaxed), 4);
+        // 2 new permits added, but 2 are held by _p1/_p2
+        assert_eq!(semaphore.available_permits(), 2);
     }
 
     /// Verifies that the pressure calculation correctly identifies when

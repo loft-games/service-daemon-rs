@@ -82,7 +82,7 @@ For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdo
 ## 4. State Persistence (The Shelf)
 
 The "Shelf" is a global store where services can deposit data before a reload or after a crash.
-- **Isolation**: Buckets are isolated by `ServiceId`.
+- **Isolation**: Buckets are isolated by `service_name` (`&'static str`), not by `ServiceId`. This is intentional -- Shelf data persists across restarts, while `ServiceId` may change when the Registry is rebuilt.
 - **Survival**: Unlike standard singletons, Shelf data survives the task termination and is inherited by the next "generation" of the same service.
 
 [Back to README](../../README.md)

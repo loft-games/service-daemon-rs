@@ -61,7 +61,7 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
     let new_stats = Arc::new(compute_diff(&*guard));
     guard.publish(new_stats); 
     
-    Ok(()) // Final commit happens on Drop if not manually called
+    Ok(()) // Auto-commit on Drop fires only if DerefMut was invoked and commit() was not called manually
 }
 ```
 

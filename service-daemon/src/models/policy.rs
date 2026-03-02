@@ -268,7 +268,11 @@ impl ScalingPolicyBuilder {
 
     #[must_use]
     pub fn build(self) -> ScalingPolicy {
-        self.policy
+        let mut policy = self.policy;
+        // Enforce invariant: initial_concurrency must not exceed max_concurrency.
+        // Auto-clamp rather than panic so the builder remains infallible.
+        policy.initial_concurrency = policy.initial_concurrency.min(policy.max_concurrency);
+        policy
     }
 }
 
@@ -396,11 +400,14 @@ impl BackoffController {
     /// Convenience method: sleep for the current delay, advance the
     /// backoff, and check cancellation -- all in one call.
     ///
+    /// Internally delegates to [`record_failure`] to keep `attempt_count`
+    /// and `current_delay` in sync.
+    ///
     /// Returns `true` if retry should proceed, `false` if cancelled.
     pub async fn backoff_or_cancel(&mut self, cancel_token: &CancellationToken) -> bool {
         let proceed = self.wait_or_cancel(cancel_token).await;
         if proceed {
-            self.current_delay = self.policy.next_delay(self.current_delay);
+            self.record_failure();
         }
         proceed
     }
@@ -454,6 +461,40 @@ mod tests {
         // scale_threshold minimum is 1
         let policy = ScalingPolicy::builder().scale_threshold(0).build();
         assert_eq!(policy.scale_threshold, 1);
+    }
+
+    #[test]
+    fn test_scaling_policy_builder_initial_exceeds_max() {
+        // When initial_concurrency > max_concurrency, build() should clamp it
+        let policy = ScalingPolicy::builder()
+            .initial_concurrency(64)
+            .max_concurrency(4)
+            .build();
+        assert_eq!(
+            policy.initial_concurrency, 4,
+            "initial_concurrency must be clamped to max_concurrency"
+        );
+        assert_eq!(policy.max_concurrency, 4);
+    }
+
+    #[tokio::test]
+    async fn test_backoff_or_cancel_increments_attempt() {
+        let policy = RestartPolicy {
+            initial_delay: Duration::from_millis(1),
+            jitter_factor: 0.0,
+            ..RestartPolicy::for_testing()
+        };
+        let mut ctrl = BackoffController::new(policy);
+        assert_eq!(ctrl.attempt_count(), 0);
+
+        let token = CancellationToken::new();
+        let proceed = ctrl.backoff_or_cancel(&token).await;
+        assert!(proceed, "Should proceed when not cancelled");
+        assert_eq!(
+            ctrl.attempt_count(),
+            1,
+            "attempt_count must increment after backoff_or_cancel"
+        );
     }
 
     #[test]

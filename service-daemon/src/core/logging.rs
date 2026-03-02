@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 #[cfg(feature = "file-logging")]
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use tokio::sync::{OnceCell, broadcast};
+use std::cell::Cell;
+use std::sync::{Arc, OnceLock};
+use tokio::sync::broadcast;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
@@ -36,25 +37,16 @@ impl Default for LogQueue {
     }
 }
 
-/// Using tokio::sync::OnceCell for async-native initialization.
-static LOG_QUEUE: OnceCell<LogQueue> = OnceCell::const_new();
+/// Global log queue, initialized on first access.
+/// Uses `std::sync::OnceLock` instead of `tokio::sync::OnceCell` because
+/// `LogQueue::default()` is synchronous (just `broadcast::channel`), and
+/// `OnceLock::get_or_init` provides race-free initialization without the
+/// theoretical double-init window that `OnceCell::get() + set()` has.
+static LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
 
-/// Gets the log queue, initializing it if necessary.
-/// This is safe to call from both sync and async contexts due to OnceCell's design.
+/// Gets the log queue, initializing it on first call.
 fn get_log_queue() -> &'static LogQueue {
-    // For the tracing layer (sync context), we use blocking_get or initialize synchronously.
-    // OnceCell::get() returns Option, get_or_init requires async.
-    // Since this is called from a sync tracing layer, we use try_get or a sync fallback.
-    // The LOG_QUEUE will be initialized on first use in either context.
-    LOG_QUEUE.get().unwrap_or_else(|| {
-        // Fallback for sync contexts. Safe because LogQueue::default() is non-async.
-        // If set() fails (another thread raced us), get() still succeeds because the
-        // other thread's value is already stored. This is guaranteed by OnceCell semantics.
-        let _ = LOG_QUEUE.set(LogQueue::default());
-        LOG_QUEUE
-            .get()
-            .expect("OnceCell invariant violated: set() succeeded but get() returned None")
-    })
+    LOG_QUEUE.get_or_init(LogQueue::default)
 }
 
 /// Configuration for file-based log persistence.
@@ -110,7 +102,7 @@ impl Default for FileLogConfig {
 /// Global file log configuration, set once before the daemon starts.
 /// When `None`, file logging is disabled even if the feature is compiled in.
 #[cfg(feature = "file-logging")]
-static FILE_LOG_CONFIG: OnceCell<FileLogConfig> = OnceCell::const_new();
+static FILE_LOG_CONFIG: tokio::sync::OnceCell<FileLogConfig> = tokio::sync::OnceCell::const_new();
 
 /// Enables file-based log persistence with the given configuration.
 ///
@@ -131,7 +123,119 @@ pub fn enable_file_logging(config: FileLogConfig) {
     let _ = FILE_LOG_CONFIG.set(config);
 }
 
+// ---------------------------------------------------------------------------
+// Reentrancy guard: prevents infinite recursion when log_service emits
+// tracing events during log processing.
+//
+// Mechanism: `tracing::info!()` triggers `DaemonLayer::on_event()` synchronously
+// on the SAME OS thread. A thread-local flag detects this reentrancy. When the
+// guard is active, events bypass the LogQueue and are written directly to stderr.
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Thread-local flag set to `true` while `log_service` is processing a log event.
+    /// Checked by `DaemonLayer::on_event()` to prevent recursive queue insertion.
+    static IN_LOG_PROCESSING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// RAII guard that marks the current thread as "inside log processing".
+/// On drop (including panic unwinding), the flag is automatically cleared.
+struct LogProcessingGuard;
+
+impl LogProcessingGuard {
+    /// Activates the reentrancy guard for the current thread.
+    fn enter() -> Self {
+        IN_LOG_PROCESSING.with(|f| f.set(true));
+        LogProcessingGuard
+    }
+}
+
+impl Drop for LogProcessingGuard {
+    fn drop(&mut self) {
+        IN_LOG_PROCESSING.with(|f| f.set(false));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Field collection: extracts message and structured fields from tracing events.
+// ---------------------------------------------------------------------------
+
+/// Collects the message and structured fields from a tracing event.
+///
+/// Implements dual-path capture:
+/// - `record_str`: called for `&str` values, produces clean output without Debug quotes.
+/// - `record_debug`: fallback for `fmt::Arguments`, `u64`, `bool`, etc.
+///   `fmt::Arguments::Debug` delegates to `Display` (no extra quotes).
+struct FieldCollector {
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+impl FieldCollector {
+    fn new() -> Self {
+        Self {
+            message: String::new(),
+            fields: Vec::new(),
+        }
+    }
+
+    /// Builds the final message string.
+    /// If structured fields are present, appends them as `{ key=value, ... }`.
+    fn into_message(self) -> String {
+        if self.fields.is_empty() {
+            self.message
+        } else {
+            let pairs: Vec<String> = self
+                .fields
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+            format!("{} {{ {} }}", self.message, pairs.join(", "))
+        }
+    }
+}
+
+impl tracing::field::Visit for FieldCollector {
+    /// Priority path for `&str` values. Avoids Debug quote wrapping on the message field.
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.message = value.to_string();
+        } else {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+    }
+
+    /// Fallback path for non-string types (`fmt::Arguments`, `u64`, `bool`, etc.).
+    /// `fmt::Arguments::Debug` delegates to `Display`, so no extra quotes are added
+    /// for formatted messages like `tracing::info!("port = {}", 80)`.
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let formatted = format!("{:?}", value);
+        if field.name() == "message" {
+            self.message = formatted;
+        } else {
+            self.fields.push((field.name().to_string(), formatted));
+        }
+    }
+}
+
+/// Formats a log event to stderr in human-readable format.
+/// Shared by both the normal log_service output path and the reentrancy fallback.
+fn format_to_stderr(event: &LogEvent) {
+    eprintln!(
+        "[{}] {:<5} [{}] {}",
+        event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        event.level,
+        event.target,
+        event.message
+    );
+}
+
 /// A non-blocking tracing Layer that captures events and pushes them to the LogQueue.
+///
+/// When reentrancy is detected (i.e., `log_service` emits a tracing event while
+/// processing a log), the event bypasses the queue and is written directly to stderr
+/// to prevent infinite recursion.
 pub struct DaemonLayer;
 
 impl<S> Layer<S> for DaemonLayer
@@ -141,18 +245,10 @@ where
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let metadata = event.metadata();
 
-        // Simple message extraction (can be expanded to handle fields)
-        let mut message = String::new();
-        struct MessageVisitor<'a>(&'a mut String);
-        impl<'a> tracing::field::Visit for MessageVisitor<'a> {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                if field.name() == "message" {
-                    use std::fmt::Write;
-                    let _ = write!(self.0, "{:?}", value);
-                }
-            }
-        }
-        event.record(&mut MessageVisitor(&mut message));
+        // Collect message and structured fields from the event
+        let mut collector = FieldCollector::new();
+        event.record(&mut collector);
+        let message = collector.into_message();
 
         let log_event = Arc::new(LogEvent {
             timestamp: Utc::now(),
@@ -164,7 +260,14 @@ where
             line: metadata.line(),
         });
 
-        // Non-blocking send
+        // Reentrancy check: if log_service is currently processing a log event
+        // on this thread, bypass the queue and write directly to stderr.
+        if IN_LOG_PROCESSING.with(|f| f.get()) {
+            format_to_stderr(&log_event);
+            return;
+        }
+
+        // Normal path: non-blocking send to the broadcast queue
         let _ = get_log_queue().tx.send(log_event);
     }
 }
@@ -217,16 +320,13 @@ pub async fn log_service() -> anyhow::Result<()> {
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
+                        // Activate reentrancy guard: any tracing events emitted
+                        // during this block will bypass the LogQueue and write
+                        // directly to stderr via DaemonLayer's fallback path.
+                        let _guard = LogProcessingGuard::enter();
+
                         // Console output (always active) -- human-readable format
-                        // Uses stderr to avoid infinite recursion if tracing subscriber
-                        // is also watching stdout.
-                        eprintln!(
-                            "[{}] {:<5} [{}] {}",
-                            event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-                            event.level,
-                            event.target,
-                            event.message
-                        );
+                        format_to_stderr(&event);
 
                         // File output (only when file-logging feature is enabled and configured)
                         #[cfg(feature = "file-logging")]
@@ -239,7 +339,7 @@ pub async fn log_service() -> anyhow::Result<()> {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        eprintln!("LogService lagged by {} messages", n);
+                        tracing::warn!(skipped = n, "LogService lagged, some messages were dropped");
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -252,13 +352,8 @@ pub async fn log_service() -> anyhow::Result<()> {
 
     // Drain any remaining logs before exiting
     while let Ok(event) = rx.try_recv() {
-        eprintln!(
-            "[{}] {:<5} [{}] {} (Drained)",
-            event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            event.level,
-            event.target,
-            event.message
-        );
+        let _guard = LogProcessingGuard::enter();
+        format_to_stderr(&event);
 
         #[cfg(feature = "file-logging")]
         if let Some((ref mut writer, _)) = file_writer {
@@ -268,7 +363,7 @@ pub async fn log_service() -> anyhow::Result<()> {
         }
     }
 
-    eprintln!("LogService shutting down (Priority: SYSTEM)");
+    tracing::info!("LogService shutting down (Priority: SYSTEM)");
     Ok(())
 }
 
