@@ -18,7 +18,7 @@ Every event in the framework carries a `TriggerContext` composed of:
 3.  **InstanceSeq**: A sequence number identifying the specific generation/instance offset.
 
 ### Forward Propagation
-When a handler is triggered, the `TriggerRunner` creates a `tracing::Span` that is **permanently linked** to these IDs. Any log message or nested event published within that handler is automatically decorated with the original `MessageId`.
+When a service runs, the `ServiceSupervisor` creates a `tracing::Span` carrying the service's `ServiceId`. When a trigger handler fires, the `TriggerRunner` creates a nested Span carrying `service_id`, `message_id`, and `source_id`. Any log message emitted within these Spans is automatically decorated with the corresponding IDs by `DaemonLayer`.
 
 ### Causal Linking
 If Handler B publishes a new Event Y in response to Event X, Event Y **inherits** the `SourceId` of the original initiator (the stone), but gets its own `MessageId`. This allows developers to trace an entire cascade of events back to a single root cause, even if they cross multiple service boundaries and logical "waves".

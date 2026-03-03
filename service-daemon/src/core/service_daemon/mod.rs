@@ -310,6 +310,10 @@ pub struct ServiceDaemonBuilder {
     external_cancel_token: Option<CancellationToken>,
     /// Type-erased trigger configuration overrides.
     trigger_configs: dashmap::DashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
+    /// Infrastructure tags whose services are always included in the final
+    /// registry, regardless of the user-provided tag filters. Used by
+    /// `MockContext` to auto-include `log_service` in simulation tests.
+    infra_tags: Vec<&'static str>,
     /// Pre-filled resources for simulation (only available with `simulation` feature).
     #[cfg(feature = "simulation")]
     resources: Option<Arc<DaemonResources>>,
@@ -322,6 +326,7 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
             trigger_configs: dashmap::DashMap::new(),
+            infra_tags: Vec::new(),
             #[cfg(feature = "simulation")]
             resources: None,
         }
@@ -342,6 +347,7 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
             trigger_configs: dashmap::DashMap::new(),
+            infra_tags: Vec::new(),
             resources: None,
         }
     }
@@ -418,6 +424,19 @@ impl ServiceDaemonBuilder {
         self
     }
 
+    /// Registers infrastructure tags whose services are always included,
+    /// regardless of the user-provided Registry's include filters.
+    ///
+    /// This is used internally by `MockContext` to auto-include framework
+    /// services (e.g., `log_service`) in simulation tests. The tagged services
+    /// are merged into the final service list in `build()`, deduplicated by
+    /// `ServiceId`.
+    #[must_use]
+    pub fn with_infra_tags(mut self, tags: &[&'static str]) -> Self {
+        self.infra_tags.extend_from_slice(tags);
+        self
+    }
+
     /// Build the `ServiceDaemon`.
     ///
     /// This method is **infallible** -- it always returns a valid daemon.
@@ -429,7 +448,22 @@ impl ServiceDaemonBuilder {
     #[must_use]
     pub fn build(self) -> ServiceDaemon {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
-        let services = registry.into_services();
+        let mut services = registry.into_services();
+
+        // Merge infrastructure services that bypass tag filtering.
+        // Each infra tag is resolved against the global SERVICE_REGISTRY,
+        // and matching services are appended (deduplicated by ServiceId).
+        if !self.infra_tags.is_empty() {
+            let infra_services = Registry::builder()
+                .with_tags(self.infra_tags)
+                .build()
+                .into_services();
+            for svc in infra_services {
+                if !services.iter().any(|s| s.id == svc.id) {
+                    services.push(svc);
+                }
+            }
+        }
 
         // Validate the dependency graph before starting.
         // This converts silent OnceCell deadlocks into clear panic messages.

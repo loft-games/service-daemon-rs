@@ -18,13 +18,7 @@ use service_daemon::ServiceDaemon;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::core::logging::DaemonLayer)
-        .init();
+    service_daemon::core::logging::init_logging();
 
     let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await;

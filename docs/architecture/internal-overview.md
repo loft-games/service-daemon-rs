@@ -75,7 +75,7 @@ The framework is organized into specialized submodules to ensure maintainability
 - **`core/service_daemon/`**: The core orchestrator.
   - `policy.rs`: Resilience configuration (backoff, jitter).
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown, and error suppression during teardown).
-- **`core/logging.rs`**: The high-performance logging system (`DaemonLayer` and `LogService`).
+- **`core/logging.rs`**: The high-performance logging pipeline. `DaemonLayer` (with `LookupSpan`) captures all tracing events, extracts `service_id`/`message_id`/`source_id` from Span context, and pushes `LogEvent` instances to a broadcast queue (capacity: 65,536). Two independent SYSTEM-priority consumers process this queue: `log_service` (ANSI-colored stderr, tag: `__log__`) and `file_log_service` (JSON file persistence, tag: `__file_log__`, feature-gated: `file-logging`). Both use a fill-the-valley batch strategy (safety cap: 1,024). The `init_logging()` convenience function provides one-line setup.
 - **`core/triggers.rs`**: Built-in trigger host implementations. Each host implements the `TriggerHost` trait with `setup` (one-time initialization) and `handle_step` (per-event policy).
 - **`core/trigger_runner.rs`**: The `TriggerRunner` event loop driver and `TriggerInterceptor` pipeline.
   - **Instance Reuse**: Reuses a single `TriggerHost` instance via `&mut self` across all iterations in a service lifecycle, allowing hosts to maintain internal state (counters, buffers) without global shelving. A fresh instance is only created via `setup` during service reloads or restarts.
@@ -114,6 +114,7 @@ graph LR
 
 - **`MockContext`**: A sandbox factory that produces a pre-configured `ServiceDaemonBuilder` and a `SimulationHandle`. No direct execution.
 - **`SimulationHandle`**: Allows dynamic mutation of `DaemonResources` during a running simulation (shelf, status, reload signals).
+- **Infra Tag Injection**: `MockContextBuilder` auto-includes `log_service` (tag: `__log__`) via `ServiceDaemonBuilder::with_infra_tags()`. Users can disable this with `.with_logging(false)` for lightweight tests.
 - **Service Registration**: How `#[service]` works internal machinery.
 - **Strict Feature Gating**: All simulation types (`MockContext`, `SimulationHandle`, `with_resources()`, `resources()`) are `#[cfg(feature = "simulation")]` -- physically absent from production builds.
 

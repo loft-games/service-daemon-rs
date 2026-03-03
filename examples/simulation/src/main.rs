@@ -15,7 +15,7 @@ use example_simulation as _;
 
 /// This file is intentionally minimal -- the real demonstration is in the tests.
 fn main() {
-    tracing_subscriber::fmt::init();
+    service_daemon::core::logging::init_logging();
     tracing::info!("This example is designed to be run as tests:");
     tracing::info!("  cargo test -p example-simulation");
 }

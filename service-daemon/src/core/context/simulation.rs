@@ -264,6 +264,9 @@ pub struct MockContext;
 /// Builder for `MockContext`.
 pub struct MockContextBuilder {
     resources: Arc<DaemonResources>,
+    /// Whether to auto-include framework logging services in the simulation.
+    /// Default: `true` — matches production behavior.
+    enable_logging: bool,
 }
 
 impl MockContext {
@@ -271,6 +274,7 @@ impl MockContext {
     pub fn builder() -> MockContextBuilder {
         MockContextBuilder {
             resources: DaemonResources::new(),
+            enable_logging: true,
         }
     }
 }
@@ -302,6 +306,19 @@ impl MockContextBuilder {
         self
     }
 
+    /// Controls whether framework logging services (`log_service`) are
+    /// automatically included in the simulation registry.
+    ///
+    /// Default: `true` — logging services are included to match production
+    /// behavior and provide consistent log output in tests.
+    ///
+    /// Set to `false` for lightweight tests that don't need log output.
+    #[must_use]
+    pub fn with_logging(mut self, enable: bool) -> Self {
+        self.enable_logging = enable;
+        self
+    }
+
     /// Builds the `MockContext` and returns a pre-configured `ServiceDaemonBuilder`
     /// along with a `SimulationHandle` for dynamic intervention.
     ///
@@ -309,15 +326,20 @@ impl MockContextBuilder {
     /// - Has `Registry` isolation enabled (empty registry, no auto-discovery).
     /// - Uses a testing-friendly restart policy.
     /// - Has the pre-filled `DaemonResources` injected.
+    /// - Includes framework logging services by default (controlled by `with_logging`).
     ///
     /// You can further customize it by calling `.with_registry()` to select
     /// the real service(s) you want to debug via tag filtering.
     pub fn build(self) -> (ServiceDaemonBuilder, SimulationHandle) {
         let handle = SimulationHandle::new(self.resources.clone());
 
-        let builder = ServiceDaemonBuilder::new_isolated()
+        let mut builder = ServiceDaemonBuilder::new_isolated()
             .with_resources(self.resources)
             .with_restart_policy(RestartPolicy::for_testing());
+
+        if self.enable_logging {
+            builder = builder.with_infra_tags(&["__log__"]);
+        }
 
         (builder, handle)
     }

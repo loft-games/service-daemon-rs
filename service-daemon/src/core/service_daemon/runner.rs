@@ -263,7 +263,11 @@ impl ServiceSupervisor {
     /// Owns the `tokio::select!` that races the service against reload signals,
     /// then hands the raw result off to `Outcome`.
     async fn on_running(&mut self) -> SupervisorState {
-        let span = tracing::info_span!("service", name = %self.name);
+        let span = tracing::info_span!(
+            "service",
+            name = %self.name,
+            service_id = %self.service_id,
+        );
 
         // Get or create reload signal
         let reload_signal = self
