@@ -181,6 +181,8 @@ pub enum ServiceStatus {
 }
 
 /// The global service registry -- services register themselves here via `#[service]` macro.
+// `linkme` expands to `#[link_section]`, which edition 2024 considers unsafe.
+#[allow(unsafe_code)]
 #[distributed_slice]
 pub static SERVICE_REGISTRY: [ServiceEntry];
 
@@ -189,6 +191,8 @@ pub static SERVICE_REGISTRY: [ServiceEntry];
 /// Each entry records the provider's type identity and its dependency parameters,
 /// enabling full dependency graph construction (including Provider→Provider edges)
 /// at startup for cycle detection.
+// Same: `linkme` `#[link_section]` in edition 2024.
+#[allow(unsafe_code)]
 #[distributed_slice]
 pub static PROVIDER_REGISTRY: [ProviderEntry];
 

@@ -68,4 +68,9 @@ Our documentation is split by audience to ensure you find exactly what you need 
 
 ## License
 
-MIT
+Licensed under either of
+
+- [MIT license](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.

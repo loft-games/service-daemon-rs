@@ -152,6 +152,10 @@ pub struct CronHost {
     bridge: Arc<tokio::sync::Notify>,
 }
 
+/// Process-wide cron scheduler shared by all trigger hosts.
+///
+/// The daemon owns the process, so a single `OnceCell` scheduler is fine.
+/// Multiple `ServiceDaemon` instances (rare) will share this scheduler.
 #[cfg(feature = "cron")]
 static SHARED_SCHEDULER: tokio::sync::OnceCell<tokio_cron_scheduler::JobScheduler> =
     tokio::sync::OnceCell::const_new();

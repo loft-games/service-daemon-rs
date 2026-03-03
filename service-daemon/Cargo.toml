@@ -1,12 +1,14 @@
 [package]
 name = "service-daemon"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
-description = "A Rust library for automatic service management and dependency injection."
-license = "MIT"
+rust-version = "1.85"
+description = "A sophisticated Rust framework for automatic service management, event-driven triggers, and compile-time dependency injection."
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/loft-games/service-daemon-rs"
 keywords = ["daemon", "service", "dependency-injection", "tokio"]
 categories = ["asynchronous", "rust-patterns"]
+readme = "../README.md"
 
 [features]
 default = ["cron", "uuid-trigger-ids"]
@@ -22,7 +24,7 @@ simulation = []
 file-logging = ["dep:tracing-appender", "dep:serde_json"]
 
 [dependencies]
-service-daemon-macro = { path = "../service-daemon-macro" }
+service-daemon-macro = { version = "0.1.0-alpha.1", path = "../service-daemon-macro" }
 tokio = { version = "1.43", features = ["full", "tracing"] }
 tokio-cron-scheduler = { version = "0.15", optional = true }
 tracing = "0.1"
@@ -33,7 +35,7 @@ futures = "0.3"
 linkme = "0.3"
 uuid = { version = "1.12", features = ["v7"], optional = true }
 tokio-util = "0.7"
-rand = "0.9"
+rand = "0.10"
 dashmap = "6.1"
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1.0", features = ["derive"] }

@@ -8,13 +8,13 @@
 //! - [`ScalingPolicy`]: Stateless elastic-scaling configuration (concurrency
 //!   limits, pressure threshold, cooldown). Only relevant for streaming
 //!   trigger templates (e.g. `Queue`). Declared via
-//!   [`TriggerHost::scaling_policy()`] and optionally overridden by the user
-//!   via [`ServiceDaemonBuilder::with_trigger_config`].
+//!   [`TriggerHost::scaling_policy()`](crate::models::trigger::TriggerHost::scaling_policy) and optionally overridden by the user
+//!   via [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
 //! - [`BackoffController`]: A **stateful** controller that tracks the current
 //!   backoff delay and attempt count. It wraps a `RestartPolicy` and provides
 //!   interruption-aware waiting via `tokio::select!`.
 
-use rand::Rng;
+use rand::RngExt;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -66,7 +66,7 @@ pub struct RestartPolicy {
     ///
     /// This setting does **not** affect services. Services are long-running
     /// background tasks that **always retry forever** by design. To
-    /// permanently stop a service, return [`ServiceError::Fatal`] from the
+    /// permanently stop a service, return [`ServiceError::Fatal`](crate::ServiceError::Fatal) from the
     /// service function instead of relying on this configuration.
     pub trigger_max_retries: Option<u32>,
 }
@@ -167,7 +167,7 @@ impl RestartPolicyBuilder {
     /// # Service retry behavior
     ///
     /// This does **not** affect services. Services always retry forever by
-    /// design. To permanently stop a service, return [`ServiceError::Fatal`]
+    /// design. To permanently stop a service, return [`ServiceError::Fatal`](crate::ServiceError::Fatal)
     /// from the service function instead.
     ///
     /// # Arguments
@@ -195,13 +195,13 @@ impl RestartPolicyBuilder {
 /// should manage concurrent handler dispatch for streaming event sources.
 ///
 /// Trigger templates declare whether they need scaling via
-/// [`TriggerHost::scaling_policy()`]. Only streaming templates (e.g.
+/// [`TriggerHost::scaling_policy()`](crate::models::trigger::TriggerHost::scaling_policy). Only streaming templates (e.g.
 /// `TopicHost` for `Queue`) return `Some(ScalingPolicy)`. Discrete
 /// templates (`SignalHost`, `CronHost`, `WatchHost`) return `None`,
 /// which disables the scale monitor and runs handlers serially.
 ///
 /// Users can override the template default via
-/// [`ServiceDaemonBuilder::with_trigger_config`].
+/// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
 #[derive(Debug, Clone, Copy)]
 pub struct ScalingPolicy {
     /// Number of concurrent handler instances at cold-start (default: 1).
@@ -441,7 +441,7 @@ impl BackoffController {
     /// Convenience method: sleep for the current delay, advance the
     /// backoff, and check cancellation -- all in one call.
     ///
-    /// Internally delegates to [`record_failure`] to keep `attempt_count`
+    /// Internally delegates to [`record_failure`](Self::record_failure) to keep `attempt_count`
     /// and `current_delay` in sync.
     ///
     /// Returns `true` if retry should proceed, `false` if cancelled.

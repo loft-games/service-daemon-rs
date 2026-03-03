@@ -102,6 +102,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         #watcher_fn
 
         /// Auto-generated static registry entry - triggers are specialized services
+        #[allow(unsafe_code)] // linkme uses #[link_section] internally
         #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
         #[linkme(crate = service_daemon::linkme)]
         static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {

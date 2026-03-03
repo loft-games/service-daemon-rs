@@ -1,12 +1,14 @@
 [package]
 name = "service-daemon-macro"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
-description = "Procedural macros for service-daemon-rs."
-license = "MIT"
+rust-version = "1.85"
+description = "Declarative macros for the service-daemon orchestration framework."
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/loft-games/service-daemon-rs"
 keywords = ["daemon", "service", "dependency-injection", "proc-macro"]
-categories = ["asynchronous", "development-tools::procedural-macros"]
+categories = ["asynchronous", "development-tools::procedural-macro-helpers"]
+readme = "../README.md"
 
 [lib]
 proc-macro = true

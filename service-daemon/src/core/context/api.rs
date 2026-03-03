@@ -288,11 +288,11 @@ pub async fn sleep(duration: Duration) -> bool {
 /// Retrieves a user-registered trigger configuration of type `T`.
 ///
 /// Returns `Some(T)` if the user registered this config type via
-/// [`ServiceDaemonBuilder::with_trigger_config`], otherwise `None`.
+/// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config), otherwise `None`.
 ///
 /// This function is typically called from the default `run_as_service`
-/// implementation in [`TriggerHost`] to check for user overrides before
-/// falling back to the template's self-declared [`ScalingPolicy`].
+/// implementation in [`TriggerHost`](crate::models::trigger::TriggerHost) to check for user overrides before
+/// falling back to the template's self-declared [`ScalingPolicy`](crate::models::policy::ScalingPolicy).
 ///
 /// # Panics
 ///

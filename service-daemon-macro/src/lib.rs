@@ -5,6 +5,7 @@
 //! - `#[trigger]` - Event-driven trigger functions
 //! - `#[provider]` - Dependency injection providers
 //! - `#[allow(sync_handler)]` - Suppress warnings for intentionally synchronous functions
+#![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
 use proc_macro_error2::proc_macro_error;

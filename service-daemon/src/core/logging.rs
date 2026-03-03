@@ -318,7 +318,7 @@ pub fn enable_file_logging(config: FileLogConfig) {
 ///     .init();
 /// ```
 ///
-/// File logging is configured separately via [`enable_file_logging()`] and
+/// File logging is configured separately via `enable_file_logging()` and
 /// consumed by the independent `file_log_service`.
 ///
 /// # Panics

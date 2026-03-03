@@ -289,7 +289,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// enables the pressure-based auto-scaler.
     ///
     /// Users can override the template's default via
-    /// [`ServiceDaemonBuilder::with_trigger_config`].
+    /// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
     fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
         None
     }

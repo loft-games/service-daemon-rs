@@ -2,6 +2,7 @@
 //!
 //! Provides automatic service management with Type-Based dependency injection
 //! and monitoring for Rust applications.
+#![deny(unsafe_code)]
 //!
 //! # Features
 //! - **Automatic Service Management**: Uses `#[service]` to register long-running tasks.

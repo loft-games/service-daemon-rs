@@ -184,6 +184,7 @@ pub(super) fn generate_provided_impl(
         }
 
         /// Auto-generated provider registry entry for dependency graph analysis.
+        #[allow(unsafe_code)] // linkme uses #[link_section] internally
         #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
         #[linkme(crate = service_daemon::linkme)]
         static #entry_name: service_daemon::ProviderEntry = service_daemon::ProviderEntry {

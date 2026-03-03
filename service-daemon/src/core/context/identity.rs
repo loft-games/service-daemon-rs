@@ -32,7 +32,7 @@ pub struct DaemonResources {
     /// Indexed by `ServiceId` (strong identity) instead of String for safety and performance.
     pub status_plane: DashMap<ServiceId, ServiceStatus>,
     /// Shelf for cross-generational state persistence (managed values).
-    /// Structure: DashMap<ServiceName (Arc<str>), DashMap<Key, Value>>
+    /// Structure: DashMap\<ServiceName (`Arc<str>`), DashMap\<Key, Value\>\>
     /// Kept as name-keyed because shelf data is user-facing and persists across restarts.
     pub shelf: GlobalShelfMapping,
     /// Signals for services to reload, indexed by `ServiceId`.
