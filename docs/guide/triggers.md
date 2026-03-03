@@ -33,7 +33,7 @@ pub async fn cleanup_handler() -> anyhow::Result<()> {
 
 ## 1. Architecture: Policy vs. Engine
 
-Starting from v0.1.0, triggers follow a decoupled **Policy-Engine** architecture:
+Triggers follow a decoupled **Policy-Engine** architecture:
 
 - **Engine (Generic)**: The `TriggerRunner` manages the main event loop, interceptor pipeline, and standard shutdown/reload handling. Built-in interceptors (`TracingInterceptor`, `RetryInterceptor`) provide tracing and retry for free. It's provided automatically by the framework.
 - **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `TriggerHost` trait's `setup` (one-time initialization) and `handle_step` (per-event waiting) methods.
@@ -106,7 +106,7 @@ enabling structured log correlation without manual intervention.
 
 ## 5. Resilience: Automatic Handler Retries
 
-Starting from v0.1.0, individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
+Individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
 
 ### How it works
 When a handler fails:

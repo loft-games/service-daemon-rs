@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ### 1.1. Shared for Triggers
-Starting from v0.1.0, these same restart policies apply to individual **Trigger Handlers**. If a handler returns `Err`, the framework will back off and retry the specific event before giving up or shutting down.
+These same restart policies apply to individual **Trigger Handlers**. If a handler returns `Err`, the framework will back off and retry the specific event before giving up or shutting down.
 
 ---
 

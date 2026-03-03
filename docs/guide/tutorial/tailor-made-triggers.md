@@ -8,7 +8,7 @@ To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 
 ## 1. The Policy vs. Engine Model
 
-Starting from v0.1.0, triggers are split into two parts:
+Triggers are split into two parts:
 1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **conditional elastic scaling** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency, enabled only when the template declares a `ScalingPolicy` via `TriggerHost::scaling_policy()`.
 2.  **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
 
