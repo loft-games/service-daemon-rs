@@ -307,7 +307,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// Override this only for hosts that cannot fit the `setup` + `handle_step`
     /// model.
     fn run_as_service(
-        name: String,
+        name: &'static str,
         target: Arc<T>,
         handler: TriggerHandler<Self::Payload>,
         _token: CancellationToken,

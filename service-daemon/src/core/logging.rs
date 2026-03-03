@@ -1,12 +1,68 @@
 use chrono::{DateTime, Utc};
 #[cfg(feature = "file-logging")]
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
+
+/// Log severity level with zero heap allocation.
+///
+/// Replaces the previous `String` field with a 1-byte enum, eliminating
+/// a per-event heap allocation for level formatting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "file-logging", derive(Serialize, Deserialize))]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+}
+
+impl LogLevel {
+    /// Converts from tracing's `Level` type. Zero allocation.
+    pub fn from_tracing(level: &tracing::Level) -> Self {
+        match *level {
+            tracing::Level::ERROR => Self::Error,
+            tracing::Level::WARN => Self::Warn,
+            tracing::Level::INFO => Self::Info,
+            tracing::Level::DEBUG => Self::Debug,
+            tracing::Level::TRACE => Self::Trace,
+        }
+    }
+
+    /// Returns the string representation of this log level.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Error => "ERROR",
+            Self::Warn => "WARN",
+            Self::Info => "INFO",
+            Self::Debug => "DEBUG",
+            Self::Trace => "TRACE",
+        }
+    }
+
+    /// Returns the ANSI color escape code pair for console rendering.
+    pub fn ansi_color(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Error => ("\x1b[31m", "\x1b[0m"), // Red
+            Self::Warn => ("\x1b[33m", "\x1b[0m"),  // Yellow
+            Self::Info => ("\x1b[32m", "\x1b[0m"),  // Green
+            Self::Debug => ("\x1b[36m", "\x1b[0m"), // Cyan
+            Self::Trace => ("\x1b[37m", "\x1b[0m"), // White/Gray
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Represents a captured log event with structured metadata.
 ///
@@ -24,11 +80,11 @@ use tracing_subscriber::registry::LookupSpan;
 #[cfg_attr(feature = "file-logging", derive(Serialize, Deserialize))]
 pub struct LogEvent {
     pub timestamp: DateTime<Utc>,
-    pub level: String,
-    pub target: String,
+    pub level: LogLevel,
+    pub target: Cow<'static, str>,
     pub message: String,
-    pub module_path: Option<String>,
-    pub file: Option<String>,
+    pub module_path: Option<Cow<'static, str>>,
+    pub file: Option<Cow<'static, str>>,
     pub line: Option<u32>,
     /// The `ServiceId` of the service that produced this event, extracted from
     /// the enclosing `tracing::Span` created by `ServiceSupervisor` or
@@ -88,10 +144,26 @@ fn get_log_queue() -> &'static LogQueue {
     LOG_QUEUE.get_or_init(LogQueue::default)
 }
 
+/// Time-based log rotation strategy.
+///
+/// Controls how frequently the file appender rotates to a new log file.
+/// Only available when the `file-logging` feature is enabled.
+#[cfg(feature = "file-logging")]
+#[derive(Debug, Clone, Copy, Default)]
+pub enum RotationPolicy {
+    /// Rotate daily (default). Produces files like `prefix.2026-03-03`.
+    #[default]
+    Daily,
+    /// Rotate hourly. Suitable for high-volume services.
+    Hourly,
+    /// Never rotate. Single file, relies on external log rotation tools.
+    Never,
+}
+
 /// Configuration for file-based log persistence.
 ///
-/// Controls the output directory, file prefix, and rotation strategy.
-/// Only available when the `file-logging` feature is enabled.
+/// Controls the output directory, file prefix, rotation strategy, and
+/// retention limit. Only available when the `file-logging` feature is enabled.
 ///
 /// # Rotation Strategy
 /// Uses daily rotation by default. Log files are named with the pattern:
@@ -110,11 +182,19 @@ pub struct FileLogConfig {
     pub directory: String,
     /// File name prefix (e.g., "app" produces "app.2026-02-24").
     pub file_prefix: String,
+    /// Time-based rotation strategy. Default: `RotationPolicy::Daily`.
+    pub rotation: RotationPolicy,
+    /// Maximum number of log files to retain on disk. When a new file
+    /// is created and this limit is exceeded, the oldest matching file
+    /// is deleted. `None` means no cleanup. Default: `Some(30)`.
+    pub max_log_files: Option<usize>,
 }
 
 #[cfg(feature = "file-logging")]
 impl FileLogConfig {
-    /// Creates a new file log configuration.
+    /// Creates a new file log configuration with sensible defaults.
+    ///
+    /// Uses daily rotation and retains the last 30 log files.
     ///
     /// # Arguments
     /// * `directory` - Path to the log output directory (created if missing).
@@ -124,6 +204,8 @@ impl FileLogConfig {
         Self {
             directory: directory.into(),
             file_prefix: file_prefix.into(),
+            rotation: RotationPolicy::Daily,
+            max_log_files: Some(30),
         }
     }
 }
@@ -134,6 +216,8 @@ impl Default for FileLogConfig {
         Self {
             directory: "logs".to_string(),
             file_prefix: "daemon".to_string(),
+            rotation: RotationPolicy::Daily,
+            max_log_files: Some(30),
         }
     }
 }
@@ -333,34 +417,21 @@ impl tracing::field::Visit for FieldCollector {
     }
 }
 
-/// Renders a log event into a formatted string with ANSI color codes.
+/// Renders a log event into the provided buffer with ANSI color codes.
 ///
-/// This is the core formatting logic of the "ConsoleRenderer". It produces
-/// a single-line string containing timestamp, level (colored), target, message,
-/// and any attached IDs or error chain.
-///
-/// Extracted from `render_to_stderr` for unit testability.
-fn render_to_string(event: &LogEvent) -> String {
-    // ANSI color codes by log level
-    let (color, reset) = match event.level.as_str() {
-        "ERROR" => ("\x1b[31m", "\x1b[0m"), // Red
-        "WARN" => ("\x1b[33m", "\x1b[0m"),  // Yellow
-        "INFO" => ("\x1b[32m", "\x1b[0m"),  // Green
-        "DEBUG" => ("\x1b[36m", "\x1b[0m"), // Cyan
-        "TRACE" => ("\x1b[37m", "\x1b[0m"), // White/Gray
-        _ => ("", ""),
-    };
+/// The buffer is cleared but NOT deallocated, allowing memory reuse across
+/// successive calls within a batch loop.
+fn render_to_buf(event: &LogEvent, buf: &mut String) {
+    buf.clear();
+    let (color, reset) = event.level.ansi_color();
 
-    let mut buf = String::with_capacity(256);
-
-    // Core fields: timestamp level [target] message
     use std::fmt::Write;
     let _ = write!(
         buf,
         "{} {}{:<5}{} [{}] {}",
         event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
         color,
-        event.level,
+        event.level.as_str(),
         reset,
         event.target,
         event.message,
@@ -379,22 +450,32 @@ fn render_to_string(event: &LogEvent) -> String {
     if let Some(ref err) = event.error_chain {
         let _ = write!(buf, " error={}", err);
     }
+}
 
+/// Renders a log event to an allocated String for testing.
+///
+/// Convenience wrapper around `render_to_buf` that allocates a fresh buffer.
+/// For batch processing, prefer `render_to_buf` with a reusable buffer.
+#[cfg(test)]
+fn render_to_string(event: &LogEvent) -> String {
+    let mut buf = String::with_capacity(256);
+    render_to_buf(event, &mut buf);
     buf
 }
 
 /// Renders a log event to stderr using ANSI color coding and structured fields.
 ///
-/// Thin wrapper around `render_to_string` that performs a single atomic write
+/// Thin wrapper around `render_to_buf` that performs a single atomic write
 /// to stderr to avoid interleaved output from concurrent threads.
 fn render_to_stderr(event: &LogEvent) {
     use std::io::{self, Write};
 
-    let mut rendered = render_to_string(event);
-    rendered.push('\n');
+    let mut buf = String::with_capacity(256);
+    render_to_buf(event, &mut buf);
+    buf.push('\n');
 
     let stderr = io::stderr();
-    let _ = stderr.lock().write_all(rendered.as_bytes());
+    let _ = stderr.lock().write_all(buf.as_bytes());
 }
 
 /// A non-blocking tracing Layer that captures events and pushes them to the LogQueue.
@@ -452,11 +533,11 @@ where
 
         let log_event = Arc::new(LogEvent {
             timestamp: Utc::now(),
-            level: metadata.level().to_string(),
-            target: metadata.target().to_string(),
+            level: LogLevel::from_tracing(metadata.level()),
+            target: Cow::Borrowed(metadata.target()),
             message,
-            module_path: metadata.module_path().map(|s| s.to_string()),
-            file: metadata.file().map(|s| s.to_string()),
+            module_path: metadata.module_path().map(Cow::Borrowed),
+            file: metadata.file().map(Cow::Borrowed),
             line: metadata.line(),
             service_id,
             message_id,
@@ -571,7 +652,7 @@ impl tracing::field::Visit for SpanFieldVisitor {
 
 /// Formats a `LogEvent` as a structured JSON string for file persistence.
 ///
-/// Output follows IGES 6.8: includes `level`, `time` (ISO 8601), `target`,
+/// Output includes `level`, `time` (ISO 8601), `target`,
 /// `msg`, `caller` (file:line), and `module_path`.
 #[cfg(feature = "file-logging")]
 fn format_event_json(event: &LogEvent) -> String {
@@ -631,8 +712,15 @@ pub async fn log_service() -> anyhow::Result<()> {
                         // Flush the entire batch under a single reentrancy guard
                         {
                             let _guard = LogProcessingGuard::enter();
+                            let mut render_buf = String::with_capacity(256);
                             for event in buffer.drain(..) {
-                                render_to_stderr(&event);
+                                render_to_buf(&event, &mut render_buf);
+                                render_buf.push('\n');
+                                {
+                                    use std::io::Write;
+                                    let stderr = std::io::stderr();
+                                    let _ = stderr.lock().write_all(render_buf.as_bytes());
+                                }
                             }
                         }
                     }
@@ -654,8 +742,15 @@ pub async fn log_service() -> anyhow::Result<()> {
     }
     if !buffer.is_empty() {
         let _guard = LogProcessingGuard::enter();
+        let mut render_buf = String::with_capacity(256);
         for event in buffer.drain(..) {
-            render_to_stderr(&event);
+            render_to_buf(&event, &mut render_buf);
+            render_buf.push('\n');
+            {
+                use std::io::Write;
+                let stderr = std::io::stderr();
+                let _ = stderr.lock().write_all(render_buf.as_bytes());
+            }
         }
     }
 
@@ -687,7 +782,23 @@ pub async fn file_log_service() -> anyhow::Result<()> {
         None => return Ok(()),
     };
 
-    let file_appender = tracing_appender::rolling::daily(&config.directory, &config.file_prefix);
+    let rotation = match config.rotation {
+        RotationPolicy::Daily => tracing_appender::rolling::Rotation::DAILY,
+        RotationPolicy::Hourly => tracing_appender::rolling::Rotation::HOURLY,
+        RotationPolicy::Never => tracing_appender::rolling::Rotation::NEVER,
+    };
+
+    let mut builder = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(rotation)
+        .filename_prefix(&config.file_prefix);
+
+    if let Some(max_files) = config.max_log_files {
+        builder = builder.max_log_files(max_files);
+    }
+
+    let file_appender = builder
+        .build(&config.directory)
+        .expect("Failed to initialize rolling file appender");
     let (mut writer, _guard) = tracing_appender::non_blocking(file_appender);
 
     let mut rx = get_log_queue().tx.subscribe();
@@ -755,7 +866,7 @@ mod tests {
     // Helper: build a synthetic LogEvent with specified fields for testing
     // -----------------------------------------------------------------------
     fn make_event(
-        level: &str,
+        level: LogLevel,
         message: &str,
         service_id: Option<&str>,
         message_id: Option<&str>,
@@ -764,8 +875,8 @@ mod tests {
     ) -> LogEvent {
         LogEvent {
             timestamp: chrono::Utc::now(),
-            level: level.to_string(),
-            target: "test::target".to_string(),
+            level,
+            target: Cow::Borrowed("test::target"),
             message: message.to_string(),
             module_path: None,
             file: None,
@@ -783,7 +894,7 @@ mod tests {
 
     #[test]
     fn render_info_level_contains_green_ansi_code() {
-        let event = make_event("INFO", "hello world", None, None, None, None);
+        let event = make_event(LogLevel::Info, "hello world", None, None, None, None);
         let output = render_to_string(&event);
         // Green foreground: \x1b[32m
         assert!(
@@ -800,7 +911,7 @@ mod tests {
 
     #[test]
     fn render_error_level_contains_red_ansi_code() {
-        let event = make_event("ERROR", "something broke", None, None, None, None);
+        let event = make_event(LogLevel::Error, "something broke", None, None, None, None);
         let output = render_to_string(&event);
         // Red foreground: \x1b[31m
         assert!(
@@ -812,7 +923,7 @@ mod tests {
 
     #[test]
     fn render_warn_level_contains_yellow_ansi_code() {
-        let event = make_event("WARN", "caution", None, None, None, None);
+        let event = make_event(LogLevel::Warn, "caution", None, None, None, None);
         let output = render_to_string(&event);
         // Yellow foreground: \x1b[33m
         assert!(
@@ -824,7 +935,7 @@ mod tests {
 
     #[test]
     fn render_debug_level_contains_cyan_ansi_code() {
-        let event = make_event("DEBUG", "verbose detail", None, None, None, None);
+        let event = make_event(LogLevel::Debug, "verbose detail", None, None, None, None);
         let output = render_to_string(&event);
         assert!(
             output.contains("\x1b[36m"),
@@ -839,7 +950,7 @@ mod tests {
 
     #[test]
     fn render_includes_service_id_when_present() {
-        let event = make_event("INFO", "msg", Some("svc-abc-123"), None, None, None);
+        let event = make_event(LogLevel::Info, "msg", Some("svc-abc-123"), None, None, None);
         let output = render_to_string(&event);
         assert!(
             output.contains("service_id=svc-abc-123"),
@@ -851,7 +962,7 @@ mod tests {
     #[test]
     fn render_includes_all_ids_when_present() {
         let event = make_event(
-            "INFO",
+            LogLevel::Info,
             "triggered",
             Some("svc-001"),
             Some("msg-002"),
@@ -867,7 +978,7 @@ mod tests {
     #[test]
     fn render_includes_error_chain_when_present() {
         let event = make_event(
-            "ERROR",
+            LogLevel::Error,
             "operation failed",
             None,
             None,
@@ -884,7 +995,7 @@ mod tests {
 
     #[test]
     fn render_omits_ids_when_none() {
-        let event = make_event("INFO", "init phase", None, None, None, None);
+        let event = make_event(LogLevel::Info, "init phase", None, None, None, None);
         let output = render_to_string(&event);
         assert!(
             !output.contains("service_id="),
@@ -1036,8 +1147,8 @@ mod tests {
             .find(|e| e.message.contains("queue_beta_marker"))
             .expect("beta event should be in the queue");
 
-        assert_eq!(alpha.level, "INFO");
-        assert_eq!(beta.level, "WARN");
+        assert_eq!(alpha.level, LogLevel::Info);
+        assert_eq!(beta.level, LogLevel::Warn);
     }
 
     #[test]

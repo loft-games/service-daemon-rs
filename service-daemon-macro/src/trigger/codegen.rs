@@ -47,7 +47,7 @@ pub fn generate_event_loop_call(
         let target = <#target_type as service_daemon::Provided>::resolve().await;
         #(#di_resolve_tokens)*
         <#host_path as service_daemon::TriggerHost<#target_type>>::run_as_service(
-            #fn_name_str.to_string(),
+            #fn_name_str,
             target,
             std::sync::Arc::new(move |ctx| {
                 #(#clone_lines)*

@@ -4,7 +4,7 @@
 //! - Configuring `FileLogConfig` for directory and file prefix
 //! - Enabling file logging with `enable_file_logging()` before daemon start
 //! - Automatic daily log rotation via `tracing-appender`
-//! - JSON-structured log output (IGES 6.8 compliant)
+//! - JSON-structured log output
 //!
 //! **Run**: `cargo run -p example-logging`
 //!

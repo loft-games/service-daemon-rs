@@ -54,7 +54,22 @@ tracing_subscriber::registry()
 
 ```rust
 use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
+
+// Daily rotation, retains last 30 log files (defaults)
 enable_file_logging(FileLogConfig::new("logs", "my-app"));
+```
+
+Custom rotation and retention can be configured via the struct fields:
+
+```rust
+use service_daemon::core::logging::{FileLogConfig, RotationPolicy, enable_file_logging};
+
+let config = FileLogConfig {
+    rotation: RotationPolicy::Hourly,
+    max_log_files: Some(48), // keep last 48 hourly files (2 days)
+    ..FileLogConfig::new("logs", "my-app")
+};
+enable_file_logging(config);
 ```
 
 > **Warning**: Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`. The `log_service` handles all console output — adding `fmt::layer()` causes duplicate lines.

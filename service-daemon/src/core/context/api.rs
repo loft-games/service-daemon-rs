@@ -112,6 +112,10 @@ pub fn done() {
 
 /// Shelves a managed value to the daemon. This value will survive service reloads and crashes.
 /// The value is stored in a service-isolated bucket based on the calling service's identity.
+///
+/// # Note
+/// This function is `async` for API consistency with the rest of the context module
+/// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
     let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
@@ -127,6 +131,10 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// The value is **removed** from the service's isolated bucket.
 ///
 /// For a non-destructive read, use [`shelve_clone`] instead.
+///
+/// # Note
+/// This function is `async` for API consistency with the rest of the context module
+/// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
     let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
@@ -153,6 +161,10 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// # Requirements
 /// The stored type `T` must implement `Clone`. This is naturally satisfied
 /// by `Arc<T>` values, which are the primary use case.
+///
+/// # Note
+/// This function is `async` for API consistency with the rest of the context module
+/// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
     let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,

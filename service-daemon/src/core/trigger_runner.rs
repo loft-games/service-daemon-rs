@@ -88,7 +88,7 @@ pub struct DispatchContext<P> {
     /// Globally unique identifier for this event instance.
     pub message_id: String,
     /// Human-readable name of this trigger service (for logging/tracing).
-    pub trigger_name: String,
+    pub trigger_name: &'static str,
     /// The business payload, wrapped in `Arc` for cheap cloning across retries.
     pub payload: Arc<P>,
     /// The user's event handler (needed at the terminal node of the chain).
@@ -204,7 +204,7 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 /// - `P`: The payload type produced by `handle_step`.
 pub struct TriggerRunner<P: Send + Sync + 'static> {
     /// Human-readable name of this trigger service.
-    name: String,
+    name: &'static str,
     /// The `ServiceId` of the trigger service.
     service_id: ServiceId,
     /// Monotonically increasing instance counter for tracing.
@@ -249,7 +249,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// 3. (user interceptors added via `with_interceptor`)
     /// 4. Terminal handler node (implicit)
     pub fn new(
-        name: String,
+        name: &'static str,
         service_id: ServiceId,
         handler: TriggerHandler<P>,
         restart_policy: RestartPolicy,
@@ -302,7 +302,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         };
 
         while !context::is_shutdown() {
-            let Some(transition) = Self::poll_next_event(host, &target, &self.name).await else {
+            let Some(transition) = Self::poll_next_event(host, &target, self.name).await else {
                 break;
             };
 
@@ -398,7 +398,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let scaling = self
             .scaling
             .expect("spawn_scale_monitor requires Some(ScalingPolicy)");
-        let trigger_name = self.name.clone();
+        let trigger_name = self.name;
 
         tokio::spawn(async move {
             // Track how long the queue has been idle (all permits available)
@@ -418,7 +418,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         &semaphore,
                         &current_limit,
                         &scaling,
-                        &trigger_name,
+                        trigger_name,
                         limit,
                         &mut idle_since,
                     );
@@ -431,7 +431,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     &semaphore,
                     &current_limit,
                     &scaling,
-                    &trigger_name,
+                    trigger_name,
                     limit,
                     in_flight,
                 );
@@ -558,7 +558,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             service_id: self.service_id,
             instance_seq: seq,
             message_id,
-            trigger_name: self.name.clone(),
+            trigger_name: self.name,
             payload: Arc::new(payload),
             handler: self.handler.clone(),
         };
@@ -566,7 +566,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         // Build the interceptor chain (must happen on the current task
         // because interceptors are borrowed from &self)
         let chain = self.build_chain();
-        let trigger_name = self.name.clone();
+        let trigger_name = self.name;
 
         // Spawn the dispatch as an independent task so the event loop
         // can immediately return to handle_step for the next event.
@@ -764,7 +764,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                 service_id,
                 instance_seq,
                 message_id: message_id.clone(),
-                trigger_name: trigger_name.clone(),
+                trigger_name,
                 payload: payload.clone(),
                 handler: handler.clone(),
             };
@@ -1026,7 +1026,7 @@ mod tests {
     fn test_runner_no_scaling_serial_dispatch() {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
-            "test_no_scaling".to_string(),
+            "test_no_scaling",
             ServiceId::new(99),
             handler,
             RestartPolicy::default(),
@@ -1050,7 +1050,7 @@ mod tests {
         };
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
-            "test_with_scaling".to_string(),
+            "test_with_scaling",
             ServiceId::new(100),
             handler,
             RestartPolicy::default(),
@@ -1071,7 +1071,7 @@ mod tests {
         let sp = ScalingPolicy::default();
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
-            "test_default_sp".to_string(),
+            "test_default_sp",
             ServiceId::new(101),
             handler,
             RestartPolicy::default(),
@@ -1100,7 +1100,7 @@ mod tests {
 
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
-            "test_builder_sp".to_string(),
+            "test_builder_sp",
             ServiceId::new(102),
             handler,
             RestartPolicy::default(),
