@@ -125,48 +125,60 @@ pub struct LogQueue {
     pub tx: broadcast::Sender<Arc<LogEvent>>,
 }
 
-/// Default broadcast channel capacity for the log queue.
+/// Default number of events each consumer drains per batch cycle.
 ///
-/// Each slot stores an `Arc<LogEvent>` (8 bytes on 64-bit), so the total
-/// baseline memory cost is approximately `capacity * 8` bytes (~512 KB at
-/// the default of 65,536).
-const DEFAULT_LOG_QUEUE_CAPACITY: usize = 65536;
+/// This is the sole user-facing knob for log throughput tuning.
+/// Queue capacity is derived automatically as
+/// `batch_size × LOG_QUEUE_BATCH_MULTIPLIER`.
+const DEFAULT_BATCH_SIZE: usize = 128;
 
-/// Global log queue capacity override, set via [`set_log_queue_capacity()`].
+/// Ratio of broadcast queue capacity to batch size.
+///
+/// A multiplier of 4 means the queue can buffer 4 full drain cycles
+/// of burst before lagging occurs, providing adequate headroom for
+/// temporary producer-consumer imbalance.
+const LOG_QUEUE_BATCH_MULTIPLIER: usize = 4;
+
+/// Global batch size override, set via [`set_log_batch_size()`].
 /// Must be configured before the first call to `get_log_queue()` (which is
 /// triggered by `init_logging()` or the first tracing event).
-static LOG_QUEUE_CAPACITY: OnceLock<usize> = OnceLock::new();
+static LOG_BATCH_SIZE: OnceLock<usize> = OnceLock::new();
 
-/// Sets the broadcast channel capacity for the log event queue.
+/// Returns the effective batch size (user-configured or default).
+fn effective_batch_size() -> usize {
+    LOG_BATCH_SIZE.get().copied().unwrap_or(DEFAULT_BATCH_SIZE)
+}
+
+/// Sets the batch processing size for the log service drain cycle.
 ///
 /// Must be called **before** `init_logging()` or `ServiceDaemon::run()` to
-/// take effect. If not called, defaults to 65,536 slots (~512 KB).
+/// take effect. The broadcast queue capacity is automatically derived as
+/// `batch_size × 4`.
 ///
 /// # When to Use
 ///
-/// - **Resource-constrained environments**: Reduce to `4096` or `8192` to
-///   lower memory usage.
-/// - **High-throughput services**: Increase beyond `65536` if you observe
-///   `LogService lagged` warnings.
+/// - **Resource-constrained environments**: Reduce to `256` or `512` to
+///   lower memory usage (queue capacity becomes 1,024 or 2,048).
+/// - **High-throughput services**: Increase to `2048` or `4096` if you
+///   observe `LogService lagged` warnings (queue becomes 8,192 or 16,384).
 ///
 /// # Example
 /// ```rust,ignore
-/// use service_daemon::set_log_queue_capacity;
+/// use service_daemon::set_log_batch_size;
 ///
-/// // Reduce queue for a lightweight embedded daemon
-/// set_log_queue_capacity(4096);
+/// // Reduce batch size for a lightweight embedded daemon
+/// // Queue capacity will be 512 × 4 = 2,048 slots
+/// set_log_batch_size(512);
 /// service_daemon::core::logging::init_logging();
 /// ```
-pub fn set_log_queue_capacity(capacity: usize) {
-    let _ = LOG_QUEUE_CAPACITY.set(capacity);
+pub fn set_log_batch_size(size: usize) {
+    let _ = LOG_BATCH_SIZE.set(size);
 }
 
 impl Default for LogQueue {
     fn default() -> Self {
-        let capacity = LOG_QUEUE_CAPACITY
-            .get()
-            .copied()
-            .unwrap_or(DEFAULT_LOG_QUEUE_CAPACITY);
+        // Capacity is derived once here and cached by the outer OnceLock<LogQueue>.
+        let capacity = effective_batch_size() * LOG_QUEUE_BATCH_MULTIPLIER;
         let (tx, _) = broadcast::channel(capacity);
         Self { tx }
     }
@@ -709,12 +721,10 @@ fn format_event_json(event: &LogEvent) -> String {
     })
 }
 
-/// Maximum number of events to accumulate in a single drain cycle before
-/// flushing. This is a safety cap — under normal load `try_recv()` returns
-/// `Err(Empty)` long before this limit, so the batch is flushed immediately.
-/// The cap only activates during extreme bursts to bound memory usage and
-/// prevent a single flush pass from monopolizing the tokio worker thread.
-const BATCH_SIZE: usize = 1024;
+// NOTE: The batch size constant (`DEFAULT_BATCH_SIZE`) and its relationship
+// to the broadcast queue capacity (`LOG_QUEUE_BATCH_MULTIPLIER`) are defined
+// at the top of this file, near the `LogQueue` struct. Both `log_service`
+// and `file_log_service` read the effective value via `effective_batch_size()`.
 
 /// A background service that consumes the LogQueue and renders events to stderr.
 /// It uses ShutdownOrder::SYSTEM (100) to ensure it exits last.
@@ -732,7 +742,8 @@ const BATCH_SIZE: usize = 1024;
 #[service_daemon::service(priority = service_daemon::ServicePriority::SYSTEM, tags = ["__log__"])]
 pub async fn log_service() -> anyhow::Result<()> {
     let mut rx = get_log_queue().tx.subscribe();
-    let mut buffer: Vec<Arc<LogEvent>> = Vec::with_capacity(BATCH_SIZE);
+    let batch_size = effective_batch_size();
+    let mut buffer: Vec<Arc<LogEvent>> = Vec::with_capacity(batch_size);
 
     while !service_daemon::is_shutdown() {
         tokio::select! {
@@ -742,7 +753,7 @@ pub async fn log_service() -> anyhow::Result<()> {
                         buffer.push(event);
 
                         // Greedily drain all immediately available events
-                        while buffer.len() < BATCH_SIZE {
+                        while buffer.len() < batch_size {
                             match rx.try_recv() {
                                 Ok(event) => buffer.push(event),
                                 Err(_) => break,
@@ -842,7 +853,8 @@ pub async fn file_log_service() -> anyhow::Result<()> {
     let (mut writer, _guard) = tracing_appender::non_blocking(file_appender);
 
     let mut rx = get_log_queue().tx.subscribe();
-    let mut buffer: Vec<Arc<LogEvent>> = Vec::with_capacity(BATCH_SIZE);
+    let batch_size = effective_batch_size();
+    let mut buffer: Vec<Arc<LogEvent>> = Vec::with_capacity(batch_size);
 
     while !service_daemon::is_shutdown() {
         tokio::select! {
@@ -851,7 +863,7 @@ pub async fn file_log_service() -> anyhow::Result<()> {
                     Ok(event) => {
                         buffer.push(event);
 
-                        while buffer.len() < BATCH_SIZE {
+                        while buffer.len() < batch_size {
                             match rx.try_recv() {
                                 Ok(event) => buffer.push(event),
                                 Err(_) => break,

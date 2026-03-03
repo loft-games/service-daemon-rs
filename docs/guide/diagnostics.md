@@ -4,7 +4,7 @@ To manage complex asynchronous systems, visibility is paramount. `service-daemon
 
 ## 1. Entering the Matrix: `DaemonLayer`
 
-The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue (default capacity: 65,536; configurable via `set_log_queue_capacity()`). Two independent SYSTEM-priority consumers process this queue:
+The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size × 4` (default: 128 × 4 = 512 slots; configurable via `set_log_batch_size()`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
@@ -72,13 +72,14 @@ let config = FileLogConfig {
 enable_file_logging(config);
 ```
 
-**Log queue capacity** — configurable for resource-constrained or high-throughput environments:
+**Log batch size** — controls both drain cycle size and queue capacity:
 
 ```rust
-use service_daemon::set_log_queue_capacity;
+use service_daemon::set_log_batch_size;
 
-// Reduce queue for a lightweight embedded daemon
-set_log_queue_capacity(4096);
+// Reduce batch size for a lightweight embedded daemon
+// Queue capacity will be 512 × 4 = 2,048 slots
+set_log_batch_size(512);
 // Must be called BEFORE init_logging()
 service_daemon::core::logging::init_logging();
 ```
@@ -111,7 +112,7 @@ These IDs are `None` for log events outside a service context (e.g., daemon init
 
 ## 3. Real-Time Instrumentation
 
-The `log_service` and `file_log_service` are SYSTEM-priority background services that independently consume the `LogQueue` broadcast channel using a **fill-the-valley** batch strategy: each greedily drains all available events via `try_recv()` (up to a safety cap of 1,024) before flushing the batch in a single pass. This minimizes lock contention under high throughput while maintaining low latency under normal load.
+The `log_service` and `file_log_service` are SYSTEM-priority background services that independently consume the `LogQueue` broadcast channel using a **fill-the-valley** batch strategy: each greedily drains all available events via `try_recv()` (up to the configured batch size, default 128) before flushing the batch in a single pass. The broadcast queue capacity is automatically derived as `batch_size × 4`, ensuring a consistent relationship between drain speed and buffer depth. This minimizes lock contention under high throughput while maintaining low latency under normal load.
 
 In simulation environments, `MockContext` automatically includes `log_service` via infrastructure tag injection. This can be disabled with `.with_logging(false)` for lightweight tests.
 

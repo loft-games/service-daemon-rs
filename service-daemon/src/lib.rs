@@ -67,8 +67,8 @@ pub use linkme;
 pub use tokio;
 pub use tokio_util;
 
-// Re-export log queue capacity configuration (always available)
-pub use core::logging::set_log_queue_capacity;
+// Re-export log batch size configuration (always available)
+pub use core::logging::set_log_batch_size;
 
 // Conditionally re-export file logging utilities
 #[cfg(feature = "file-logging")]
