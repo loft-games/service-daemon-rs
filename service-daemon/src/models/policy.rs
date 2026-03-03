@@ -51,6 +51,24 @@ pub struct RestartPolicy {
     /// Timeout for waiting for services to stop during wave shutdown
     /// (default: 30 seconds).
     pub wave_stop_timeout: Duration,
+    /// Maximum number of consecutive retries for **trigger handlers** before
+    /// giving up on a single message.
+    ///
+    /// `None` means unlimited retries, which is the **designed default**.
+    /// The framework intentionally retries trigger handlers forever, relying
+    /// on exponential backoff and shutdown signals to terminate retry loops.
+    ///
+    /// Set this to `Some(n)` only when specific trigger handlers should not
+    /// retry indefinitely (e.g., a payment processor where repeated failures
+    /// indicate a permanent upstream issue).
+    ///
+    /// # Service retry behavior
+    ///
+    /// This setting does **not** affect services. Services are long-running
+    /// background tasks that **always retry forever** by design. To
+    /// permanently stop a service, return [`ServiceError::Fatal`] from the
+    /// service function instead of relying on this configuration.
+    pub trigger_max_retries: Option<u32>,
 }
 
 impl Default for RestartPolicy {
@@ -63,6 +81,7 @@ impl Default for RestartPolicy {
             jitter_factor: 0.1, // 10% jitter by default
             wave_spawn_timeout: Duration::from_secs(5),
             wave_stop_timeout: Duration::from_secs(30),
+            trigger_max_retries: None, // Unlimited trigger retries by design
         }
     }
 }
@@ -83,6 +102,7 @@ impl RestartPolicy {
             jitter_factor: 0.0, // No jitter for predictable tests
             wave_spawn_timeout: Duration::from_millis(500),
             wave_stop_timeout: Duration::from_secs(2),
+            trigger_max_retries: None, // Unlimited trigger retries by design
         }
     }
 
@@ -135,6 +155,27 @@ impl RestartPolicyBuilder {
 
     pub fn wave_stop_timeout(mut self, timeout: Duration) -> Self {
         self.policy.wave_stop_timeout = timeout;
+        self
+    }
+
+    /// Set the maximum number of consecutive retries for **trigger handlers**
+    /// before giving up on a single message.
+    ///
+    /// By default, trigger retries are unlimited (`None`). Use this to add
+    /// an explicit safety valve for handlers that should not retry forever.
+    ///
+    /// # Service retry behavior
+    ///
+    /// This does **not** affect services. Services always retry forever by
+    /// design. To permanently stop a service, return [`ServiceError::Fatal`]
+    /// from the service function instead.
+    ///
+    /// # Arguments
+    /// * `count` - Maximum retry attempts per trigger message. After this
+    ///   many consecutive failures, the retry interceptor will propagate
+    ///   the error.
+    pub fn trigger_max_retries(mut self, count: u32) -> Self {
+        self.policy.trigger_max_retries = Some(count);
         self
     }
 
@@ -556,5 +597,49 @@ mod tests {
 
         let result = ctrl.wait_or_cancel(&token).await;
         assert!(!result, "Should return false when cancelled");
+    }
+
+    // -----------------------------------------------------------------------
+    // trigger_max_retries tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_restart_policy_default_trigger_max_retries_is_none() {
+        let policy = RestartPolicy::default();
+        assert_eq!(
+            policy.trigger_max_retries, None,
+            "Default trigger_max_retries must be None (unlimited retries by design)"
+        );
+    }
+
+    #[test]
+    fn test_restart_policy_for_testing_trigger_max_retries_is_none() {
+        let policy = RestartPolicy::for_testing();
+        assert_eq!(
+            policy.trigger_max_retries, None,
+            "for_testing() trigger_max_retries must be None (consistent with design)"
+        );
+    }
+
+    #[test]
+    fn test_restart_policy_builder_trigger_max_retries() {
+        let policy = RestartPolicy::builder().trigger_max_retries(5).build();
+        assert_eq!(policy.trigger_max_retries, Some(5));
+
+        // Verify other fields remain at defaults
+        assert_eq!(policy.initial_delay, Duration::from_secs(1));
+        assert_eq!(policy.max_delay, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn test_restart_policy_builder_without_trigger_max_retries() {
+        // Builder without calling trigger_max_retries() should produce None
+        let policy = RestartPolicy::builder()
+            .initial_delay(Duration::from_millis(500))
+            .build();
+        assert_eq!(
+            policy.trigger_max_retries, None,
+            "Builder without trigger_max_retries() must produce None"
+        );
     }
 }

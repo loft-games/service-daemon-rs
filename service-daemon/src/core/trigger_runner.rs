@@ -749,6 +749,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
             let mut backoff = BackoffController::new(self.policy);
+            let trigger_max_retries = self.policy.trigger_max_retries;
 
             // Preserve shared fields for reconstruction across retries
             let service_id = ctx.service_id;
@@ -778,6 +779,27 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
             // Subsequent retries: call the handler directly (no need to
             // re-enter interceptors below us, since retry IS the re-entry)
             loop {
+                // Safety valve: stop retrying if the trigger_max_retries limit
+                // is reached. When trigger_max_retries is None (the designed
+                // default), this check is skipped and retries continue
+                // indefinitely. This limit does NOT apply to services, which
+                // always retry forever.
+                if let Some(max) = trigger_max_retries
+                    && backoff.attempt_count() >= max
+                {
+                    warn!(
+                        trigger = %trigger_name,
+                        attempts = backoff.attempt_count(),
+                        trigger_max_retries = max,
+                        "Trigger handler exceeded max retry limit, giving up"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Trigger '{}' exceeded max retry limit ({} attempts)",
+                        trigger_name,
+                        max
+                    ));
+                }
+
                 let retry_ctx = TriggerContext {
                     service_id,
                     instance_seq,

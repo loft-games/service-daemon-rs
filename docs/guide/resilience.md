@@ -30,8 +30,42 @@ The framework uses a unified `BackoffController` to manage retry delays, consecu
 > [!NOTE]
 > **Internal Architecture**: For a deep dive into the `BackoffController` state machine and the self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#14-backoffcontroller-internals).
 
-### 1.3. Fatal Errors
-Sometimes a service encounters an error that it cannot recover from via a restart (e.g., a missing required environment variable or an invalid license). In such cases, the service can return `ServiceError::Fatal`.
+### 1.2. Retry Design: Services vs. Triggers
+
+The framework uses a **two-tier retry design** that reflects the fundamentally different lifetimes of services and trigger handlers:
+
+| Layer | Retry Behavior | How to Stop |
+| :--- | :--- | :--- |
+| **Service** | Always retries forever | Return `ServiceError::Fatal` from the service function |
+| **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
+
+**Why the difference?** Services are long-running background tasks — they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
+
+Trigger handlers, on the other hand, process individual messages. A single poison message should not block the entire queue forever. `trigger_max_retries` acts as a safety valve to skip messages that consistently fail.
+
+### 1.3. Trigger Retry Safety Valve: `trigger_max_retries`
+
+For trigger handlers that should **not** retry forever, set an explicit retry limit:
+
+```rust
+let policy = RestartPolicy::builder()
+    .initial_delay(Duration::from_secs(1))
+    .trigger_max_retries(5) // Give up after 5 consecutive failures
+    .build();
+
+let mut daemon = ServiceDaemon::builder()
+    .with_restart_policy(policy)
+    .build();
+```
+
+When `trigger_max_retries` is reached, the `RetryInterceptor` logs a warning and propagates the error. The default is `None` (unlimited retries).
+
+> [!WARNING]
+> Do **not** use `trigger_max_retries` to control service lifecycle. If a service needs to stop permanently, return `ServiceError::Fatal` from the service function instead.
+
+### 1.4. Fatal Errors
+
+Sometimes a service encounters an error that it cannot recover from via a restart (e.g., a missing required environment variable or an invalid license). In such cases, the service should return `ServiceError::Fatal`.
 
 When a service returns a `Fatal` error, the `ServiceDaemon` will **permanently stop** that service and transition its status to `Terminated`, bypassing the restart policy entirely.
 

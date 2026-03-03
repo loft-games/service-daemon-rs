@@ -4,7 +4,7 @@ To manage complex asynchronous systems, visibility is paramount. `service-daemon
 
 ## 1. Entering the Matrix: `DaemonLayer`
 
-The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue (capacity: 65,536). Two independent SYSTEM-priority consumers process this queue:
+The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue (default capacity: 65,536; configurable via `set_log_queue_capacity()`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
@@ -70,6 +70,17 @@ let config = FileLogConfig {
     ..FileLogConfig::new("logs", "my-app")
 };
 enable_file_logging(config);
+```
+
+**Log queue capacity** — configurable for resource-constrained or high-throughput environments:
+
+```rust
+use service_daemon::set_log_queue_capacity;
+
+// Reduce queue for a lightweight embedded daemon
+set_log_queue_capacity(4096);
+// Must be called BEFORE init_logging()
+service_daemon::core::logging::init_logging();
 ```
 
 > **Warning**: Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`. The `log_service` handles all console output — adding `fmt::layer()` causes duplicate lines.

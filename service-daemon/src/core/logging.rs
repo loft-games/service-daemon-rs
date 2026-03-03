@@ -125,9 +125,49 @@ pub struct LogQueue {
     pub tx: broadcast::Sender<Arc<LogEvent>>,
 }
 
+/// Default broadcast channel capacity for the log queue.
+///
+/// Each slot stores an `Arc<LogEvent>` (8 bytes on 64-bit), so the total
+/// baseline memory cost is approximately `capacity * 8` bytes (~512 KB at
+/// the default of 65,536).
+const DEFAULT_LOG_QUEUE_CAPACITY: usize = 65536;
+
+/// Global log queue capacity override, set via [`set_log_queue_capacity()`].
+/// Must be configured before the first call to `get_log_queue()` (which is
+/// triggered by `init_logging()` or the first tracing event).
+static LOG_QUEUE_CAPACITY: OnceLock<usize> = OnceLock::new();
+
+/// Sets the broadcast channel capacity for the log event queue.
+///
+/// Must be called **before** `init_logging()` or `ServiceDaemon::run()` to
+/// take effect. If not called, defaults to 65,536 slots (~512 KB).
+///
+/// # When to Use
+///
+/// - **Resource-constrained environments**: Reduce to `4096` or `8192` to
+///   lower memory usage.
+/// - **High-throughput services**: Increase beyond `65536` if you observe
+///   `LogService lagged` warnings.
+///
+/// # Example
+/// ```rust,ignore
+/// use service_daemon::set_log_queue_capacity;
+///
+/// // Reduce queue for a lightweight embedded daemon
+/// set_log_queue_capacity(4096);
+/// service_daemon::core::logging::init_logging();
+/// ```
+pub fn set_log_queue_capacity(capacity: usize) {
+    let _ = LOG_QUEUE_CAPACITY.set(capacity);
+}
+
 impl Default for LogQueue {
     fn default() -> Self {
-        let (tx, _) = broadcast::channel(65536);
+        let capacity = LOG_QUEUE_CAPACITY
+            .get()
+            .copied()
+            .unwrap_or(DEFAULT_LOG_QUEUE_CAPACITY);
+        let (tx, _) = broadcast::channel(capacity);
         Self { tx }
     }
 }

@@ -67,6 +67,9 @@ pub use linkme;
 pub use tokio;
 pub use tokio_util;
 
+// Re-export log queue capacity configuration (always available)
+pub use core::logging::set_log_queue_capacity;
+
 // Conditionally re-export file logging utilities
 #[cfg(feature = "file-logging")]
 pub use core::logging::{FileLogConfig, RotationPolicy, enable_file_logging};
