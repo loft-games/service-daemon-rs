@@ -7,6 +7,7 @@
 mod policy;
 mod runner;
 
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,9 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
+
+use petgraph::algo::toposort;
+use petgraph::graph::DiGraph;
 
 use crate::core::context::DaemonResources;
 use crate::models::{
@@ -29,7 +33,7 @@ pub use policy::{RestartPolicy, RestartPolicyBuilder};
 /// A handle to the ServiceDaemon that can be used to query status and interact with services.
 #[derive(Clone)]
 pub struct ServiceDaemonHandle {
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl ServiceDaemonHandle {
@@ -80,7 +84,7 @@ pub struct ServiceDaemon {
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl ServiceDaemon {
@@ -112,7 +116,7 @@ impl ServiceDaemon {
     /// This method is gated behind the `simulation` feature to prevent misuse
     /// in production environments.
     #[cfg(feature = "simulation")]
-    pub fn resources(&self) -> DaemonResources {
+    pub fn resources(&self) -> Arc<DaemonResources> {
         self.resources.clone()
     }
 
@@ -266,9 +270,9 @@ impl ServiceDaemon {
         for service in &self.services {
             runner::spawn_service(
                 service.id,
-                service.name.clone(),
-                service.run.clone(),
-                service.watcher.clone(),
+                service.name(),
+                service.entry.wrapper,
+                service.entry.watcher,
                 test_policy,
                 self.running_tasks.clone(),
                 self.resources.clone(),
@@ -302,12 +306,17 @@ impl ServiceDaemon {
 pub struct ServiceDaemonBuilder {
     registry: Option<Registry>,
     restart_policy: RestartPolicy,
-    extra_services: Vec<ServiceDescription>,
     /// External cancellation token for hierarchical lifecycle management.
     external_cancel_token: Option<CancellationToken>,
+    /// Type-erased trigger configuration overrides.
+    trigger_configs: dashmap::DashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
+    /// Infrastructure tags whose services are always included in the final
+    /// registry, regardless of the user-provided tag filters. Used by
+    /// `MockContext` to auto-include `log_service` in simulation tests.
+    infra_tags: Vec<&'static str>,
     /// Pre-filled resources for simulation (only available with `simulation` feature).
     #[cfg(feature = "simulation")]
-    resources: Option<DaemonResources>,
+    resources: Option<Arc<DaemonResources>>,
 }
 
 impl ServiceDaemonBuilder {
@@ -315,8 +324,9 @@ impl ServiceDaemonBuilder {
         Self {
             registry: None,
             restart_policy: RestartPolicy::default(),
-            extra_services: Vec::new(),
             external_cancel_token: None,
+            trigger_configs: dashmap::DashMap::new(),
+            infra_tags: Vec::new(),
             #[cfg(feature = "simulation")]
             resources: None,
         }
@@ -335,8 +345,9 @@ impl ServiceDaemonBuilder {
                     .build(),
             ),
             restart_policy: RestartPolicy::default(),
-            extra_services: Vec::new(),
             external_cancel_token: None,
+            trigger_configs: dashmap::DashMap::new(),
+            infra_tags: Vec::new(),
             resources: None,
         }
     }
@@ -358,26 +369,6 @@ impl ServiceDaemonBuilder {
         self
     }
 
-    /// Add a manually constructed `ServiceDescription` to the daemon.
-    ///
-    /// This is the primary way to inject ad-hoc services in integration tests
-    /// without going through the static `#[service]` registration pipeline.
-    ///
-    /// **Note**: You are responsible for assigning unique `ServiceId` values
-    /// via `ServiceId::new()`.
-    #[must_use]
-    pub fn with_service(mut self, service: ServiceDescription) -> Self {
-        self.extra_services.push(service);
-        self
-    }
-
-    /// Add multiple manually constructed `ServiceDescription` entries at once.
-    #[must_use]
-    pub fn with_services(mut self, services: Vec<ServiceDescription>) -> Self {
-        self.extra_services.extend(services);
-        self
-    }
-
     /// **[Simulation Only]** Inject pre-filled `DaemonResources` into the daemon.
     ///
     /// This allows `MockContext` to pre-populate shelf data, status plane entries,
@@ -388,7 +379,7 @@ impl ServiceDaemonBuilder {
     /// in production environments.
     #[cfg(feature = "simulation")]
     #[must_use]
-    pub fn with_resources(mut self, resources: DaemonResources) -> Self {
+    pub fn with_resources(mut self, resources: Arc<DaemonResources>) -> Self {
         self.resources = Some(resources);
         self
     }
@@ -407,22 +398,86 @@ impl ServiceDaemonBuilder {
         self
     }
 
+    /// Register a trigger-specific configuration override.
+    ///
+    /// The registered config can be retrieved at runtime via
+    /// [`context::trigger_config::<C>()`](crate::core::context::trigger_config).
+    /// This is how users override the defaults declared by trigger templates
+    /// (e.g. [`ScalingPolicy`](crate::models::ScalingPolicy)).
+    ///
+    /// This method can be called multiple times with different config types.
+    /// Each call replaces the previous registration for that type.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut daemon = ServiceDaemon::builder()
+    ///     .with_trigger_config(ScalingPolicy::builder()
+    ///         .initial_concurrency(4)
+    ///         .build())
+    ///     .build();
+    /// ```
+    #[must_use]
+    pub fn with_trigger_config<C: 'static + Clone + Send + Sync>(self, config: C) -> Self {
+        self.trigger_configs
+            .insert(std::any::TypeId::of::<C>(), Box::new(config));
+        self
+    }
+
+    /// Registers infrastructure tags whose services are always included,
+    /// regardless of the user-provided Registry's include filters.
+    ///
+    /// This is used internally by `MockContext` to auto-include framework
+    /// services (e.g., `log_service`) in simulation tests. The tagged services
+    /// are merged into the final service list in `build()`, deduplicated by
+    /// `ServiceId`.
+    #[must_use]
+    pub fn with_infra_tags(mut self, tags: &[&'static str]) -> Self {
+        self.infra_tags.extend_from_slice(tags);
+        self
+    }
+
     /// Build the `ServiceDaemon`.
     ///
     /// This method is **infallible** -- it always returns a valid daemon.
     /// If no registry was provided, all statically registered services are included.
-    /// Any extra services added via `with_service()` are appended after registry services.
+    ///
+    /// During construction, a dependency graph is built from `ServiceParam::type_id`
+    /// metadata. If a circular dependency is detected, the method panics with
+    /// a clear diagnostic showing the cycle path.
     #[must_use]
     pub fn build(self) -> ServiceDaemon {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
         let mut services = registry.into_services();
-        services.extend(self.extra_services);
 
-        // Use injected resources if provided (simulation), otherwise create fresh ones.
+        // Merge infrastructure services that bypass tag filtering.
+        // Each infra tag is resolved against the global SERVICE_REGISTRY,
+        // and matching services are appended (deduplicated by ServiceId).
+        if !self.infra_tags.is_empty() {
+            let infra_services = Registry::builder()
+                .with_tags(self.infra_tags)
+                .build()
+                .into_services();
+            for svc in infra_services {
+                if !services.iter().any(|s| s.id == svc.id) {
+                    services.push(svc);
+                }
+            }
+        }
+
+        // Validate the dependency graph before starting.
+        // This converts silent OnceCell deadlocks into clear panic messages.
+        Self::validate_dependency_graph(&services);
+
         #[cfg(feature = "simulation")]
-        let resources = self.resources.unwrap_or_default();
+        let resources = self.resources.unwrap_or_else(DaemonResources::new);
         #[cfg(not(feature = "simulation"))]
         let resources = DaemonResources::new();
+
+        // Inject user-registered trigger configs into the shared resources.
+        for entry in self.trigger_configs {
+            resources.trigger_configs.insert(entry.0, entry.1);
+        }
 
         ServiceDaemon {
             services,
@@ -433,6 +488,126 @@ impl ServiceDaemonBuilder {
             resources,
         }
     }
+
+    /// Validates the service dependency graph for circular dependencies.
+    ///
+    /// Builds a directed graph using `petgraph` where:
+    /// - **Nodes** are services (identified by name) and provider types
+    ///   (identified by `TypeId`).
+    /// - **Edges** point from each service to its dependency types.
+    ///
+    /// Then runs `petgraph::algo::toposort()` to detect cycles. If the
+    /// graph is acyclic, dependencies are logged for diagnostic visibility.
+    ///
+    /// # Panics
+    /// Panics with a diagnostic message listing the services and types
+    /// involved if a circular dependency is detected.
+    fn validate_dependency_graph(services: &[ServiceDescription]) {
+        // Each node is labeled with a human-readable name.
+        let mut graph = DiGraph::<&str, ()>::new();
+
+        // Maps to avoid duplicate node creation.
+        // service_name -> NodeIndex
+        let mut service_nodes: HashMap<&str, petgraph::graph::NodeIndex> = HashMap::new();
+        // TypeId -> NodeIndex (provider types as nodes)
+        let mut type_nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
+
+        // Phase 1: Service → Provider edges (from ServiceDescription::params).
+        for service in services {
+            let svc_node = *service_nodes
+                .entry(service.name())
+                .or_insert_with(|| graph.add_node(service.name()));
+
+            for param in service.params() {
+                let type_node = *type_nodes
+                    .entry(param.type_id)
+                    .or_insert_with(|| graph.add_node(param.type_name));
+
+                // Edge: service depends on this provider type.
+                graph.add_edge(svc_node, type_node, ());
+            }
+        }
+
+        // Phase 2: Provider → Provider edges (from PROVIDER_REGISTRY).
+        //
+        // This completes the DAG by adding edges between provider types,
+        // enabling detection of circular provider dependencies (e.g.,
+        // ProviderA depends on ProviderB which depends on ProviderA).
+        for provider in crate::models::PROVIDER_REGISTRY.iter() {
+            let prov_node = *type_nodes
+                .entry(provider.type_id)
+                .or_insert_with(|| graph.add_node(provider.name));
+
+            for param in provider.params {
+                let dep_node = *type_nodes
+                    .entry(param.type_id)
+                    .or_insert_with(|| graph.add_node(param.type_name));
+
+                // Edge: this provider depends on another provider type.
+                graph.add_edge(prov_node, dep_node, ());
+            }
+        }
+
+        // Phase 3: Topological sort — Err means a cycle exists.
+        match toposort(&graph, None) {
+            Ok(_order) => {
+                // Graph is acyclic. Log the dependency summary.
+                for service in services {
+                    if !service.params().is_empty() {
+                        let dep_names: Vec<&str> =
+                            service.params().iter().map(|p| p.type_name).collect();
+                        info!(
+                            service = %service.name(),
+                            dependencies = ?dep_names,
+                            "Dependency graph edge"
+                        );
+                    }
+                }
+                for provider in crate::models::PROVIDER_REGISTRY.iter() {
+                    if !provider.params.is_empty() {
+                        let dep_names: Vec<&str> =
+                            provider.params.iter().map(|p| p.type_name).collect();
+                        info!(
+                            provider = %provider.name,
+                            dependencies = ?dep_names,
+                            "Provider dependency edge"
+                        );
+                    }
+                }
+                info!(
+                    total_services = services.len(),
+                    total_providers = crate::models::PROVIDER_REGISTRY.len(),
+                    total_graph_nodes = graph.node_count(),
+                    total_graph_edges = graph.edge_count(),
+                    "Dependency graph validated — no cycles detected"
+                );
+            }
+            Err(cycle_node) => {
+                // Identify the node that caused the cycle.
+                let cycle_label = graph[cycle_node.node_id()];
+
+                // Collect all nodes directly connected to the cycle node
+                // for a useful diagnostic.
+                let involved: Vec<&str> = graph
+                    .node_indices()
+                    .filter(|&n| {
+                        graph.contains_edge(n, cycle_node.node_id())
+                            || graph.contains_edge(cycle_node.node_id(), n)
+                    })
+                    .map(|n| graph[n])
+                    .collect();
+
+                panic!(
+                    "Circular dependency detected in service dependency graph!\n\
+                     Cycle involves: '{}'\n\
+                     Related nodes: {:?}\n\
+                     This would cause a deadlock at runtime. \
+                     Review the #[provider] dependency chain for these types.",
+                    cycle_label, involved
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -441,8 +616,6 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tracing::debug;
-
-    use crate::models::ServiceFn;
 
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {
@@ -510,39 +683,26 @@ mod tests {
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
+    /// Global counter for the `counting_service` test service.
+    static SHORT_RUN_COUNT: AtomicU32 = AtomicU32::new(0);
+
+    /// Test service that increments a global counter on each invocation.
+    #[service_daemon::service(tags = ["__test_short_run__"], priority = 50)]
+    async fn counting_service() -> anyhow::Result<()> {
+        SHORT_RUN_COUNT.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Ok(())
+    }
+
     #[tokio::test]
     async fn test_short_run() {
         setup_tracing();
-        let run_count = Arc::new(AtomicU32::new(0));
-        let run_count_clone = run_count.clone();
+        SHORT_RUN_COUNT.store(0, Ordering::SeqCst);
 
-        let service_fn: ServiceFn = Arc::new(move |_cancel| {
-            let count = run_count_clone.clone();
-            Box::pin(async move {
-                count.fetch_add(1, Ordering::SeqCst);
-                // Simulate a quick service
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                Ok(())
-            })
-        });
-
-        // Build manually with a service
-        let daemon = ServiceDaemon {
-            services: vec![ServiceDescription {
-                id: ServiceId(0),
-                name: "counting_service".to_string(),
-                run: service_fn,
-                watcher: None,
-                priority: 50,
-                cancellation_token: CancellationToken::new(),
-                tags: vec![],
-            }],
-            running_tasks: Arc::new(Mutex::new(HashMap::new())),
-            restart_policy: RestartPolicy::for_testing(),
-            cancellation_token: CancellationToken::new(),
-            external_cancel_token: None,
-            resources: DaemonResources::new(),
-        };
+        let daemon = ServiceDaemon::builder()
+            .with_registry(Registry::builder().with_tag("__test_short_run__").build())
+            .with_restart_policy(RestartPolicy::for_testing())
+            .build();
 
         let start = std::time::Instant::now();
         daemon
@@ -552,7 +712,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Should have run and restarted a few times
-        let count = run_count.load(Ordering::SeqCst);
+        let count = SHORT_RUN_COUNT.load(Ordering::SeqCst);
         assert!(
             count >= 1,
             "Service should have run at least once, got {}",

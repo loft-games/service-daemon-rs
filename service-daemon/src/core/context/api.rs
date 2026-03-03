@@ -6,6 +6,7 @@
 //! the `#[service]` and `#[trigger]` macros.
 
 use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, ServiceIdentity};
+use std::sync::Arc;
 
 use std::any::Any;
 use std::future::Future;
@@ -21,7 +22,7 @@ use crate::models::ServiceStatus;
 #[doc(hidden)]
 pub async fn __run_service_scope<F, Fut>(
     identity: ServiceIdentity,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     f: F,
 ) -> Fut::Output
 where
@@ -111,8 +112,12 @@ pub fn done() {
 
 /// Shelves a managed value to the daemon. This value will survive service reloads and crashes.
 /// The value is stored in a service-isolated bucket based on the calling service's identity.
+///
+/// # Note
+/// This function is `async` for API consistency with the rest of the context module
+/// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
         Err(_) => return,
     };
@@ -126,14 +131,18 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// The value is **removed** from the service's isolated bucket.
 ///
 /// For a non-destructive read, use [`shelve_clone`] instead.
+///
+/// # Note
+/// This function is `async` for API consistency with the rest of the context module
+/// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(&name).and_then(|entry| {
+            r.shelf.get(name).and_then(|entry| {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
@@ -152,14 +161,18 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// # Requirements
 /// The stored type `T` must implement `Clone`. This is naturally satisfied
 /// by `Arc<T>` values, which are the primary use case.
+///
+/// # Note
+/// This function is `async` for API consistency with the rest of the context module
+/// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name.clone()) {
+    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
         Ok(n) => n,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(&name).and_then(|entry| {
+            r.shelf.get(name).and_then(|entry| {
                 entry
                     .get(key)
                     .and_then(|val| val.downcast_ref::<T>().cloned())
@@ -269,72 +282,30 @@ pub async fn sleep(duration: Duration) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Event Publishing API -- "Throwing stones into the water"
+// Trigger Configuration API
 // ---------------------------------------------------------------------------
 
-/// Generates a globally unique message ID for event tracing.
+/// Retrieves a user-registered trigger configuration of type `T`.
 ///
-/// This is useful when you need to manually call a provider's `.push()` or
-/// `.notify()` method and want to correlate the event with a message ID.
+/// Returns `Some(T)` if the user registered this config type via
+/// [`ServiceDaemonBuilder::with_trigger_config`], otherwise `None`.
 ///
-/// # Example
-/// ```rust,ignore
-/// let message_id = service_daemon::generate_message_id();
-/// tracing::info!(%message_id, "Publishing event");
-/// MyQueue::push(payload).await;
-/// ```
-pub fn generate_message_id() -> String {
-    crate::core::trigger_runner::generate_message_id()
-}
-
-/// Publishes an event from the current service context with full traceability.
+/// This function is typically called from the default `run_as_service`
+/// implementation in [`TriggerHost`] to check for user overrides before
+/// falling back to the template's self-declared [`ScalingPolicy`].
 ///
-/// This is the canonical way for a service to "throw a stone" -- it wraps
-/// a provider call (e.g. `push()` or `notify()`) with structured tracing
-/// metadata including the source `ServiceId` and a unique `message_id`.
+/// # Panics
 ///
-/// The closure receives no arguments; it should capture the provider and
-/// payload from the enclosing scope.
-///
-/// # Example
-/// ```rust,ignore
-/// use service_daemon::{publish, service};
-/// use std::sync::Arc;
-///
-/// #[service]
-/// pub async fn my_service(queue: Arc<TaskQueue>) -> anyhow::Result<()> {
-///     service_daemon::done();
-///     while !service_daemon::is_shutdown() {
-///         publish("order_created", async {
-///             TaskQueue::push("new order".to_string()).await;
-///         }).await;
-///         service_daemon::sleep(std::time::Duration::from_secs(5)).await;
-///     }
-///     Ok(())
-/// }
-/// ```
-pub async fn publish<F, Fut>(event_name: &str, action: F)
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = ()>,
-{
-    let message_id = generate_message_id();
-    let source_id = CURRENT_SERVICE
-        .try_with(|id| id.service_id)
-        .unwrap_or(crate::models::ServiceId::new(0));
-
-    let span = tracing::info_span!(
-        "publish",
-        event = %event_name,
-        %message_id,
-        source = %source_id,
-    );
-
-    let _guard = span.enter();
-    tracing::info!("Event published");
-    drop(_guard);
-
-    // Execute the user's publish action within the span
-    use tracing::Instrument;
-    action().instrument(span).await;
+/// Returns `None` if called outside a service scope (no task-local context).
+pub fn trigger_config<T: Any + Clone + Send + Sync>() -> Option<T> {
+    use std::any::TypeId;
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources
+                .trigger_configs
+                .get(&TypeId::of::<T>())
+                .and_then(|entry| entry.value().downcast_ref::<T>().cloned())
+        })
+        .ok()
+        .flatten()
 }

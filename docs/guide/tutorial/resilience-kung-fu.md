@@ -35,11 +35,43 @@ async fn main() -> anyhow::Result<()> {
 ```
 
 ### 1.1. Shared for Triggers
-Starting from v0.1.0, these same restart policies apply to individual **Trigger Handlers**. If a handler returns `Err`, the framework will back off and retry the specific event before giving up or shutting down.
+These same restart policies apply to individual **Trigger Handlers**. If a handler returns `Err`, the framework will back off and retry the specific event before giving up or shutting down.
 
 ---
 
-## 2. Fatal Errors: The Kill Switch
+## 2. Mastering Throughput: Scaling Policy
+
+While `RestartPolicy` handles *time* (delays and retries), the **`ScalingPolicy`** handles *volume*. It determines how many trigger handlers can run concurrently and when to scale up.
+
+The default limit for streaming triggers (like `Queue`) is **64** concurrent handlers. If your system has high throughput requirements, you can tune this:
+
+```rust
+use service_daemon::{ServiceDaemon, ScalingPolicy};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let scaling = ScalingPolicy::builder()
+        .initial_concurrency(4)    // Start with 4 slots
+        .max_concurrency(128)      // Scale up to 128
+        .scale_threshold(3)        // Aggressive scaling: scale up earlier
+        .build();
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_trigger_config(scaling) // Register for all triggers
+        .build();
+
+    daemon.run().await;
+    // ...
+    Ok(())
+}
+```
+
+> [!TIP]
+> **Zero Overhead**: For triggers like `Cron` or `Notify`, scaling is automatically disabled. The framework will never start the background scale monitor or create a semaphore for these types unless they explicitly declare a need for it.
+
+---
+
+## 3. Fatal Errors: The Kill Switch
 
 Sometimes, a service encounter an error that **cannot** be fixed by a restart. For example:
 *   A missing mandatory environment variable.
@@ -65,7 +97,7 @@ async fn license_watcher() -> anyhow::Result<()> {
 
 When a `Fatal` error occurs, the daemon transitions that service to `Terminated` and stops trying. The rest of the system keeps running normally.
 
-## 3. Wave Timeouts
+## 4. Wave Timeouts
 
 The `RestartPolicy` also controls how long the daemon waits for your services to report they are "Healthy" or to "Stop".
 
@@ -73,7 +105,7 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 *   `wave_stop_timeout`: Maximum time to wait for a service to exit before forcefully killing it.
 
 > [!NOTE]
-> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](../../resilience.md) design document.
+> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](../resilience.md) design document.
 
 ---
 

@@ -14,7 +14,7 @@ In `service-daemon-rs`, we don't pass configuration strings or raw integers arou
 use service_daemon::provider;
 
 /// A simple configuration for our heartbeat interval.
-#[provider(default = 5)]
+#[provider(5)]
 pub struct HeartbeatInterval(pub u64);
 ```
 
@@ -32,7 +32,7 @@ use std::time::Duration;
 
 #[service]
 pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Result<()> {
-    tracing::info!("Heartbeat service started with interval: {}s", interval.0);
+    tracing::info!("Heartbeat service started with interval: {}s", interval);
 
     // The core loop: we run until the daemon tells us to stop.
     while !is_shutdown() {

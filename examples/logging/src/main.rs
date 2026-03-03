@@ -4,7 +4,7 @@
 //! - Configuring `FileLogConfig` for directory and file prefix
 //! - Enabling file logging with `enable_file_logging()` before daemon start
 //! - Automatic daily log rotation via `tracing-appender`
-//! - JSON-structured log output (IGES 6.8 compliant)
+//! - JSON-structured log output
 //!
 //! **Run**: `cargo run -p example-logging`
 //!
@@ -17,14 +17,9 @@ use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
+    service_daemon::core::logging::init_logging();
 
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::core::logging::DaemonLayer)
-        .init();
-
+    // Enable file-based JSON log persistence (consumed by file_log_service)
     enable_file_logging(FileLogConfig::new("logs", "my-app"));
 
     let mut daemon = ServiceDaemon::builder().build();

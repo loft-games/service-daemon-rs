@@ -20,6 +20,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use service_daemon::Provided;
 use service_daemon::ServiceDaemon;
 use service_daemon::TT::*;
 use service_daemon::provider;
@@ -48,7 +49,7 @@ fn reset_counters() {
 // ---------------------------------------------------------------------------
 
 /// A broadcast queue carrying `String` payloads for the pressure test.
-#[provider(default = Queue, item_type = "String")]
+#[provider(Queue(String))]
 pub struct PressureQueue;
 
 // ---------------------------------------------------------------------------
@@ -91,8 +92,9 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     reset_counters();
 
     // -- Build and start the daemon --
-    // Default RestartPolicy has initial_concurrency=1, max_concurrency=1024,
-    // scale_factor=2, scale_threshold=5 (~83% utilization triggers scale-up).
+    // TopicHost (Queue template) declares ScalingPolicy::default() via
+    // TriggerHost::scaling_policy(), which gives initial_concurrency=1,
+    // max_concurrency=64, scale_factor=2, scale_threshold=5 (~83% utilization).
     let mut daemon = ServiceDaemon::builder().build();
     let token = daemon.cancel_token();
     daemon.run().await;
@@ -106,7 +108,7 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     let producer = tokio::spawn(async {
         for i in 0..50 {
             // push() may block momentarily if the broadcaster is full
-            let _ = PressureQueue::push(format!("msg-{}", i)).await;
+            let _ = PressureQueue::resolve().await.push(format!("msg-{}", i));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });

@@ -165,7 +165,9 @@ impl<T: Clone> TrackedRwLock<T> {
     /// Locks this `RwLock` with exclusive write access.
     ///
     /// When the returned [TrackedWriteGuard] is dropped, any `Watch` triggers
-    /// listening to this state will be notified.
+    /// listening to this state will be notified **only if the data was actually
+    /// mutated** (i.e., `DerefMut` was invoked). This prevents spurious wakeups
+    /// when write locks are acquired but no modification occurs.
     ///
     /// See also [tokio::sync::RwLock::write].
     pub async fn write(&self) -> TrackedWriteGuard<'_, T> {
@@ -174,6 +176,7 @@ impl<T: Clone> TrackedRwLock<T> {
             notify: self.notify.clone(),
             watch_tx: &self.watch_tx,
             is_committed: false,
+            is_dirty: false,
         }
     }
 }
@@ -192,11 +195,17 @@ impl<T: Clone> Deref for TrackedReadGuard<'_, T> {
 
 /// RAII structure used to release the exclusive write access of a `RwLock`
 /// and notify state observers.
+///
+/// Tracks whether the data was actually mutated via `DerefMut` using an
+/// internal `is_dirty` flag. On `Drop`, auto-commit only fires if the
+/// guard is both dirty and not yet manually committed, preventing
+/// spurious wakeups and unnecessary clones.
 pub struct TrackedWriteGuard<'a, T: Clone> {
     inner: TokioRwLockWriteGuard<'a, Arc<T>>,
     notify: Arc<tokio::sync::Notify>,
     watch_tx: &'a watch::Sender<Arc<T>>,
     is_committed: bool,
+    is_dirty: bool,
 }
 
 impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
@@ -207,6 +216,7 @@ impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
         self.watch_tx.send_replace(new_val);
         self.notify.notify_waiters();
         self.is_committed = true;
+        self.is_dirty = true;
     }
 
     /// Replaces the entire state with a new Arc and commits it.
@@ -228,14 +238,18 @@ impl<T: Clone> Deref for TrackedWriteGuard<'_, T> {
 
 impl<T: Clone> DerefMut for TrackedWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.is_dirty = true;
         Arc::make_mut(&mut self.inner)
     }
 }
 
 impl<T: Clone> Drop for TrackedWriteGuard<'_, T> {
     fn drop(&mut self) {
-        if !self.is_committed {
-            // Automatically commit on drop if not already committed
+        if self.is_dirty && !self.is_committed {
+            // Automatically commit on drop only if data was actually mutated
+            // (DerefMut was called) and not yet manually committed.
+            // This prevents spurious wakeups and unnecessary clones when
+            // a write lock is acquired but no modification occurs.
             let new_val = (*self.inner).clone();
             self.watch_tx.send_replace(new_val);
             self.notify.notify_waiters();
@@ -348,15 +362,33 @@ mod tests {
             );
         }
 
-        // Write notifies on drop
+        // Write WITHOUT mutation does NOT notify (spurious wakeup prevention)
         {
             let _guard = lock.write().await;
             let wait = notify.notified();
             drop(_guard);
-            assert!(tokio::select! {
-                _ = wait => true,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
-            });
+            assert!(
+                tokio::select! {
+                    _ = wait => false,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => true,
+                },
+                "Write lock without mutation should NOT notify"
+            );
+        }
+
+        // Write WITH mutation DOES notify
+        {
+            let mut guard = lock.write().await;
+            *guard = 42; // Triggers DerefMut -> sets is_dirty
+            let wait = notify.notified();
+            drop(guard);
+            assert!(
+                tokio::select! {
+                    _ = wait => true,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+                },
+                "Write lock with mutation should notify"
+            );
         }
     }
 
@@ -397,15 +429,33 @@ mod tests {
         });
         let lock = TrackedMutex { inner: rw };
 
-        // Lock notifies on drop
+        // Lock WITHOUT mutation does NOT notify (spurious wakeup prevention)
         {
             let _guard = lock.lock().await;
             let wait = notify.notified();
             drop(_guard);
-            assert!(tokio::select! {
-                _ = wait => true,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
-            });
+            assert!(
+                tokio::select! {
+                    _ = wait => false,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => true,
+                },
+                "Mutex lock without mutation should NOT notify"
+            );
+        }
+
+        // Lock WITH mutation DOES notify
+        {
+            let mut guard = lock.lock().await;
+            *guard = 99; // Triggers DerefMut -> sets is_dirty
+            let wait = notify.notified();
+            drop(guard);
+            assert!(
+                tokio::select! {
+                    _ = wait => true,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+                },
+                "Mutex lock with mutation should notify"
+            );
         }
     }
 }

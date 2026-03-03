@@ -48,7 +48,7 @@ pub struct DatabaseUrl(pub String);
 
 #[provider]
 async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
-    MyDbPool::connect(&url.0).await.expect("Failed to connect to DB")
+    MyDbPool::connect(&url).await.expect("Failed to connect to DB")
 }
 ```
 
@@ -59,7 +59,7 @@ async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
 *   **Fail Fast**: If a provider cannot be initialized, use `.expect()` or `panic!`. The framework will catch this and report it as a startup error.
 
 > [!TIP]
-> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../../provider-best-practices.md) guide.
+> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../provider-best-practices.md) guide.
 
 ---
 

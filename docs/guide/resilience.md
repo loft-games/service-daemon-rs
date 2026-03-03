@@ -24,20 +24,48 @@ daemon.run().await;
 daemon.wait().await?;
 ```
 
-### 1.1. The `BackoffController` Abstraction
+### 1.1. Backoff & Jitter Strategy
+The framework uses a unified `BackoffController` to manage retry delays, consecutive failure counts, and interruption-aware waiting. This ensures that both standard services and trigger handlers follow the same resilience policy.
 
-Internal to the framework, retry logic is managed by the **`BackoffController`**. This stateful component tracks:
-- Current retry delay.
-- Consecutive failure count.
-- Interruption-aware waiting (respecting shutdown/reload signals during the sleep period).
+> [!NOTE]
+> **Internal Architecture**: For a deep dive into the `BackoffController` state machine and the self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#14-backoffcontroller-internals).
 
-Because this controller is now a shared abstraction, **Trigger Handlers** also benefit from identical exponential backoff and jitter behavior when they encounter errors. The `TriggerRunner` uses `BackoffController` internally via its built-in `RetryInterceptor`, which receives the same `RestartPolicy` configured on the `ServiceDaemon`.
+### 1.2. Retry Design: Services vs. Triggers
 
-### 1.2. Immediate Restart on Reload Signal
-Even if a service is in a restart delay period (e.g. after a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
+The framework uses a **two-tier retry design** that reflects the fundamentally different lifetimes of services and trigger handlers:
 
-### 1.2. Fatal Errors
-Sometimes a service encounters an error that it cannot recover from via a restart (e.g., a missing required environment variable or an invalid license). In such cases, the service can return `ServiceError::Fatal`.
+| Layer | Retry Behavior | How to Stop |
+| :--- | :--- | :--- |
+| **Service** | Always retries forever | Return `ServiceError::Fatal` from the service function |
+| **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
+
+**Why the difference?** Services are long-running background tasks — they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
+
+Trigger handlers, on the other hand, process individual messages. A single poison message should not block the entire queue forever. `trigger_max_retries` acts as a safety valve to skip messages that consistently fail.
+
+### 1.3. Trigger Retry Safety Valve: `trigger_max_retries`
+
+For trigger handlers that should **not** retry forever, set an explicit retry limit:
+
+```rust
+let policy = RestartPolicy::builder()
+    .initial_delay(Duration::from_secs(1))
+    .trigger_max_retries(5) // Give up after 5 consecutive failures
+    .build();
+
+let mut daemon = ServiceDaemon::builder()
+    .with_restart_policy(policy)
+    .build();
+```
+
+When `trigger_max_retries` is reached, the `RetryInterceptor` logs a warning and propagates the error. The default is `None` (unlimited retries).
+
+> [!WARNING]
+> Do **not** use `trigger_max_retries` to control service lifecycle. If a service needs to stop permanently, return `ServiceError::Fatal` from the service function instead.
+
+### 1.4. Fatal Errors
+
+Sometimes a service encounters an error that it cannot recover from via a restart (e.g., a missing required environment variable or an invalid license). In such cases, the service should return `ServiceError::Fatal`.
 
 When a service returns a `Fatal` error, the `ServiceDaemon` will **permanently stop** that service and transition its status to `Terminated`, bypassing the restart policy entirely.
 
@@ -68,6 +96,9 @@ let policy = RestartPolicy::builder()
 - **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`. If the timeout is reached, the daemon logs a warning and proceeds to the next wave to avoid blocking the entire system.
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
+### 2.1. Concurrency & Elastic Scaling
+Resilience also extends to **throughput management**. For streaming triggers (e.g. `Queue`), elastic scaling is governed by a dedicated [`ScalingPolicy`] struct &mdash; separate from `RestartPolicy`. Each trigger template self-declares its scaling requirements via `TriggerHost::scaling_policy()`. Templates that do not need scaling (e.g. `Cron`, `Watch`, `Notify`) return `None` and incur zero scaling overhead. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+
 ## 3. Managing CPU-Intensive & Blocking Tasks
 
 The asynchronous executor (Tokio) relies on cooperative multitasking. If a service performs a long-running CPU computation or a blocking I/O operation without yielding, it will **stall the entire daemon**.
@@ -89,11 +120,19 @@ async fn compute_service() -> anyhow::Result<()> {
 }
 ```
 
-### The `#[allow_sync]` Escape Hatch
-If your function is synchronous but guaranteed to be fast and non-blocking (e.g., in-memory math), use `#[allow_sync]` to suppress runtime warnings.
+### The `#[allow(sync_handler)]` Escape Hatch
+If your function is synchronous but guaranteed to be fast and non-blocking (e.g., in-memory math), use `#[allow(sync_handler)]` to suppress runtime warnings.
+
+**How it works**: The macro system uses **AST-based attribute stripping**. It detects `#[allow(sync_handler)]`, sets a flag to bypass the async-wrapper requirement, and then **strips the attribute** before passing the code to the compiler. This prevents "unknown lint" errors while enabling synchronous execution.
+
+```rust
+#[service]
+#[allow(sync_handler)] // Stripped by macro to avoid unknown lint errors
+pub fn fast_calc() -> anyhow::Result<()> { Ok(()) }
+```
 
 > [!WARNING]
-> **Never** use `#[allow_sync]` for network requests or disk I/O. This will cause severe performance degradation and may block shutdown.
+> **Never** use `#[allow(sync_handler)]` for network requests or disk I/O. This will cause severe performance degradation and may block shutdown.
 
 ## 3. Lifecycle Priorities
 

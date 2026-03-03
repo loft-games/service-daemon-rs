@@ -7,7 +7,7 @@
 //! - Task-local bindings (`CURRENT_SERVICE`, `CURRENT_RESOURCES`)
 
 use dashmap::DashMap;
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::task_local;
@@ -18,44 +18,43 @@ use crate::models::{ServiceId, ServiceStatus};
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
-pub(crate) type GlobalShelfMapping = DashMap<String, ServiceShelf>;
+pub(crate) type GlobalShelfMapping = DashMap<&'static str, ServiceShelf>;
 
 /// Shared daemon resources that are owned by `ServiceDaemon` and plumbed to services.
 ///
-/// This struct holds the references to daemon-managed resources. It is passed
-/// to each service via the `CURRENT_SERVICE` task-local, enabling services to
-/// interact with the daemon's state plane, shelf, and signaling mechanisms
-/// without polluting the global namespace.
-#[derive(Clone)]
+/// This struct holds the concrete daemon-managed resources. A single `Arc<DaemonResources>`
+/// is shared across all service tasks, so cloning the handle only increments one
+/// atomic reference counter instead of five.
+///
+/// **Not `Clone`** -- callers share ownership via `Arc<DaemonResources>`.
 pub struct DaemonResources {
     /// The unified Status Plane: stores the current lifecycle status for each service.
     /// Indexed by `ServiceId` (strong identity) instead of String for safety and performance.
-    pub status_plane: Arc<DashMap<ServiceId, ServiceStatus>>,
+    pub status_plane: DashMap<ServiceId, ServiceStatus>,
     /// Shelf for cross-generational state persistence (managed values).
-    /// Structure: DashMap<ServiceName, DashMap<Key, Value>>
-    /// Kept as String-keyed because shelf data is user-facing and persists across restarts.
-    pub shelf: Arc<GlobalShelfMapping>,
+    /// Structure: DashMap<ServiceName (Arc<str>), DashMap<Key, Value>>
+    /// Kept as name-keyed because shelf data is user-facing and persists across restarts.
+    pub shelf: GlobalShelfMapping,
     /// Signals for services to reload, indexed by `ServiceId`.
-    pub reload_signals: Arc<DashMap<ServiceId, Arc<tokio::sync::Notify>>>,
+    pub reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
     /// Global notification for any status change in the STATUS_PLANE.
-    pub status_changed: Arc<tokio::sync::Notify>,
+    pub status_changed: tokio::sync::Notify,
+    /// Type-erased registry for trigger-specific configurations.
+    /// Users register configs via `ServiceDaemonBuilder::with_trigger_config<C>`.
+    /// Templates read them via `context::trigger_config::<C>()`.
+    pub trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
 
 impl DaemonResources {
-    /// Creates a new set of daemon resources.
-    pub fn new() -> Self {
-        Self {
-            status_plane: Arc::new(DashMap::new()),
-            shelf: Arc::new(DashMap::new()),
-            reload_signals: Arc::new(DashMap::new()),
-            status_changed: Arc::new(tokio::sync::Notify::new()),
-        }
-    }
-}
-
-impl Default for DaemonResources {
-    fn default() -> Self {
-        Self::new()
+    /// Creates a new set of daemon resources wrapped in `Arc` for shared ownership.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            status_plane: DashMap::new(),
+            shelf: DashMap::new(),
+            reload_signals: DashMap::new(),
+            status_changed: tokio::sync::Notify::new(),
+            trigger_configs: DashMap::new(),
+        })
     }
 }
 
@@ -69,7 +68,9 @@ pub struct ServiceIdentity {
     /// Unique runtime ID -- the strong identity for resource lookups.
     pub service_id: ServiceId,
     /// Human-readable name -- the weak identity for logging only.
-    pub name: String,
+    ///
+    /// Points to the static name in `ServiceEntry`, zero-cost to clone.
+    pub name: &'static str,
     pub cancellation_token: CancellationToken,
     pub reload_token: CancellationToken,
     /// Shared flag: true means the auto-handshake (Initializing->Healthy) has been performed.
@@ -81,7 +82,7 @@ impl ServiceIdentity {
     /// Creates a new ServiceIdentity with the handshake flag set to false.
     pub fn new(
         service_id: ServiceId,
-        name: String,
+        name: &'static str,
         cancellation_token: CancellationToken,
         reload_token: CancellationToken,
     ) -> Self {
@@ -99,5 +100,5 @@ task_local! {
     /// Internal: The identity of the currently running service task.
     pub(crate) static CURRENT_SERVICE: ServiceIdentity;
     /// Internal: The daemon resources for the current service task.
-    pub(crate) static CURRENT_RESOURCES: DaemonResources;
+    pub(crate) static CURRENT_RESOURCES: Arc<DaemonResources>;
 }

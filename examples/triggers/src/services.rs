@@ -1,50 +1,43 @@
 //! Source services -- the "stone throwers" of the system.
 //!
-//! These services generate events (publish) that flow through the trigger
-//! system, demonstrating full traceability via `publish()`.
+//! These services generate events that flow through the trigger system.
+//! Provider methods are called directly via DI-injected instances.
 
-use service_daemon::{publish, service};
+use crate::providers::{ComplexJob, JobQueue, TaskQueue, UserNotifier, WorkerQueue};
+use service_daemon::service;
 use std::time::Duration;
 
-/// Periodically publishes events to all provider types, demonstrating
-/// full traceability via `service_daemon::publish()`.
+/// Periodically fires events to all provider types using explicit DI.
 ///
-/// Each publish call automatically captures the current ServiceId and
-/// generates a unique `message_id` visible in structured logs, enabling
-/// full end-to-end event traceability.
+/// Each provider is injected as an `Arc<T>` parameter, making dependencies
+/// visible in the function signature. Calling provider instance methods
+/// (e.g. `notifier.notify()`, `tasks.push(...)`) triggers the
+/// corresponding downstream handlers.
 #[service]
-pub async fn event_producer() -> anyhow::Result<()> {
+pub async fn event_producer(
+    notifier: Arc<UserNotifier>,
+    tasks: Arc<TaskQueue>,
+    workers: Arc<WorkerQueue>,
+    jobs: Arc<JobQueue>,
+) -> anyhow::Result<()> {
     service_daemon::done();
 
     let mut counter = 0u64;
     while !service_daemon::is_shutdown() {
         // Signal: fire the notifier (drives on_tick, on_user_notified, sync_notify_trigger)
-        publish("notify", || async {
-            crate::providers::UserNotifier::notify().await;
-        })
-        .await;
+        notifier.notify();
 
         // Broadcast Queue: all handlers receive every message
-        publish("broadcast_task", || async {
-            let _ = crate::providers::TaskQueue::push(format!("Broadcast #{}", counter)).await;
-        })
-        .await;
+        let _ = tasks.push(format!("Broadcast #{}", counter));
 
-        // Load-Balancing Queue: one handler per message
-        publish("lb_work", || async {
-            let _ = crate::providers::WorkerQueue::push(format!("LB Work #{}", counter)).await;
-        })
-        .await;
+        // Worker Queue: messages are broadcast to all subscribed handlers
+        let _ = workers.push(format!("LB Work #{}", counter));
 
         // Complex payload queue
-        publish("complex_job", || async {
-            let _ = crate::providers::JobQueue::push(crate::providers::ComplexJob {
-                id: counter,
-                data: format!("Complex Data #{}", counter),
-            })
-            .await;
-        })
-        .await;
+        let _ = jobs.push(ComplexJob {
+            id: counter,
+            data: format!("Complex Data #{}", counter),
+        });
 
         tracing::info!(counter, "Event batch published");
         counter += 1;

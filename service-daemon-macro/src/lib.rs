@@ -4,12 +4,11 @@
 //! - `#[service]` - Mark functions as managed services
 //! - `#[trigger]` - Event-driven trigger functions
 //! - `#[provider]` - Dependency injection providers
-//! - `#[allow_sync]` - Suppress warnings for intentionally synchronous functions
+//! - `#[allow(sync_handler)]` - Suppress warnings for intentionally synchronous functions
 
 use proc_macro::TokenStream;
 use proc_macro_error2::proc_macro_error;
 
-mod allow_sync;
 mod common;
 mod provider;
 mod service;
@@ -19,34 +18,6 @@ mod trigger;
 // - trigger/: Macro logic for #[trigger]. Split into mod.rs (main), parser.rs (attributes), and codegen.rs (logic).
 // - service/: Macro logic for #[service]. Split into mod.rs (main) and codegen.rs (helpers).
 // - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, templates.rs (special types), and struct_gen.rs (DI).
-
-/// Marks a synchronous function as intentionally not needing `async`.
-///
-/// Use this attribute to suppress warnings about synchronous functions
-/// blocking the async executor. Only use this when you are certain that
-/// the synchronous function will not perform blocking I/O or long-running
-/// computations.
-///
-/// > [!CAUTION]
-/// > **Misuse Warning**: Using this on truly blocking code (e.g., `std::thread::sleep`,
-/// > network I/O) will stall the entire daemon and break graceful shutdown.
-/// > For blocking operations, use `tokio::task::spawn_blocking` instead.
-///
-/// # Example
-/// ```rust,ignore
-/// use service_daemon::{service, allow_sync};
-///
-/// #[allow_sync]
-/// #[service]
-/// pub fn my_fast_sync_service() -> anyhow::Result<()> {
-///     // This function is intentionally sync and won't block.
-///     Ok(())
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
-    allow_sync::allow_sync_impl(attr, item)
-}
 
 /// Marks a function as a service managed by ServiceDaemon.
 ///
@@ -59,7 +30,8 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// > [!IMPORTANT]
 /// > **Async Preferred**: Always prefer `async fn` for services. Synchronous
-/// > functions will trigger a runtime warning unless annotated with `#[allow_sync]`.
+/// > functions will trigger a runtime warning unless annotated with
+/// > `#[allow(sync_handler)]`.
 ///
 /// # Example
 /// ```rust,ignore
@@ -69,6 +41,13 @@ pub fn allow_sync(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// #[service]
 /// pub async fn my_service(port: Arc<i32>, db: Arc<String>) -> anyhow::Result<()> {
 ///     // service implementation
+/// }
+///
+/// // Intentionally synchronous (fast, no I/O):
+/// #[service]
+/// #[allow(sync_handler)]
+/// pub fn my_sync_service() -> anyhow::Result<()> {
+///     Ok(())
 /// }
 /// ```
 ///
@@ -93,10 +72,10 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```rust,ignore
 /// use service_daemon::provider;
 ///
-/// #[provider(default = 8080)]
+/// #[provider(8080)]
 /// pub struct Port(pub i32);
 ///
-/// #[provider(default = "mysql://localhost")]  // Auto-expands to .to_owned()
+/// #[provider("mysql://localhost")]  // Auto-expands to .to_owned()
 /// pub struct DbUrl(pub String);
 /// ```
 ///
@@ -104,8 +83,28 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```rust,ignore
 /// use service_daemon::provider;
 ///
-/// #[provider(default = "localhost:5432", env_name = "DATABASE_HOST")]
+/// // String field: env var used directly
+/// #[provider("localhost:5432", env = "DATABASE_HOST")]
 /// pub struct DatabaseHost(pub String);
+///
+/// // Non-String field: env var auto-parsed via `.parse()`
+/// #[provider(8080, env = "PORT")]
+/// pub struct Port(pub i32);
+///
+/// // Env-only (no default — panics if env var is missing)
+/// #[provider(env = "API_KEY")]
+/// pub struct ApiKey(pub String);
+/// ```
+///
+/// # Example with template
+/// ```rust,ignore
+/// use service_daemon::provider;
+///
+/// #[provider(Queue(String))]
+/// pub struct TaskQueue;
+///
+/// #[provider(Notify)]
+/// pub struct MySignal;
 /// ```
 ///
 /// # Example with dependencies
@@ -113,10 +112,22 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// use service_daemon::provider;
 /// use std::sync::Arc;
 ///
+/// // Non-Arc fields must implement `Default`.
 /// #[provider]
 /// pub struct AppConfig {
 ///     pub port: Arc<Port>,
 ///     pub db_url: Arc<DbUrl>,
+/// }
+/// ```
+///
+/// # Example with async function (dependency injection)
+/// ```rust,ignore
+/// use service_daemon::provider;
+/// use std::sync::Arc;
+///
+/// #[provider]
+/// pub async fn db_pool(url: Arc<DbUrl>) -> DatabasePool {
+///     DatabasePool::connect(&url).await.expect("DB connection failed")
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -143,8 +154,8 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Template Types
 /// - `Cron`: Uses cron expressions. Target should be a provider for `String` (the cron expression).
-/// - `Queue`/`BQueue`: Broadcast queue (fanout). Target should be a `#[provider(default = Queue)]`.
-/// - `Event`/`Notify`/`Custom`: Signal trigger. Target should be a `#[provider(default = Notify)]`.
+/// - `Queue`/`BQueue`: Broadcast queue (fanout). Target should be a `#[provider(Queue(T))]`.
+/// - `Event`/`Notify`/`Custom`: Signal trigger. Target should be a `#[provider(Notify)]`.
 /// - `Watch`/`State`: State change trigger. Fires when the target provider is modified.
 ///
 /// # Example

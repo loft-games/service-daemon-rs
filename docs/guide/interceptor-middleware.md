@@ -35,7 +35,7 @@ pub struct DispatchContext<P> {
     pub service_id: ServiceId,
     pub instance_seq: u64,
     pub message_id: String,
-    pub trigger_name: String,
+    pub trigger_name: &'static str,
     pub payload: Arc<P>,
     pub handler: TriggerHandler<P>,
 }

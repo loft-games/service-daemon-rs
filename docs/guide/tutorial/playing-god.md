@@ -136,7 +136,7 @@ handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 *   **Status Flipping**: Force services into `NeedReload`, `Recovering`, or `ShuttingDown` to test their reaction logic.
 
 > [!NOTE]
-> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](../../testing-troubleshooting.md).
+> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](../testing-troubleshooting.md).
 
 ---
 

@@ -1,0 +1,8 @@
+error: Provider function parameters must be Arc-wrapped dependencies
+
+         = help: Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>
+
+  --> tests/fail/06_provider_fn_bare_param.rs:11:27
+   |
+11 | pub async fn bad_provider(port: i32) -> String {
+   |                           ^^^^^^^^^

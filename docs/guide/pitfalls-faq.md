@@ -60,3 +60,4 @@ This central hub explains the architectural "why" behind common behaviors and tr
 ### Registry Isolation 
 **Problem**: Integrated services in one test interfere with another test.
 **The Fix**: Use **Tags** and a filtered `Registry` for your tests. See [Testing & Troubleshooting](testing-troubleshooting.md#registry-isolation-in-tests) for implementation details.
+

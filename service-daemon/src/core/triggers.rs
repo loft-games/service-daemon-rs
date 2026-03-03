@@ -18,11 +18,11 @@
 //! 4. Done! The engine takes care of the rest.
 
 use futures::future::BoxFuture;
+use std::any::Any;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::core::context;
 use crate::core::di::Provided;
 use crate::models::trigger::{TriggerHost, TriggerTransition};
 
@@ -65,18 +65,19 @@ where
 /// Subscribes to a `tokio::sync::broadcast` channel and delivers every
 /// received message to the handler. All subscribers see all messages.
 ///
-/// **Note:** Because the payload type `P` is determined by the `TriggerHost<T>`
-/// impl (not at the struct level), the broadcast receiver cannot be stored as
-/// a struct field. Instead, it is created during `setup` via `shelve` for
-/// cross-iteration persistence. This is a pragmatic exception to the stateful
-/// host pattern, necessary for backward-compatible type aliases (`TT::Queue`).
+/// The broadcast receiver is stored as a type-erased field (`Box<dyn Any>`)
+/// because the payload type `P` is determined by the `TriggerHost<T>` impl
+/// (not at the struct level). This avoids the previous `shelve` / magic-string
+/// pattern while remaining compatible with the macro's unparameterized
+/// `TT::Queue` alias.
 ///
 /// # Aliases
 /// `TT::Queue`, `TT::BQueue`, `TT::BroadcastQueue`.
-pub struct TopicHost;
-
-/// Shelve key for the broadcast receiver bridge (TopicHost only).
-const TOPIC_BRIDGE_KEY: &str = "__topic_bridge_rx";
+pub struct TopicHost {
+    /// Type-erased broadcast receiver bridge, initialized in `setup()`.
+    /// Concrete type: `Arc<Mutex<broadcast::Receiver<P>>>`.
+    receiver: Box<dyn Any + Send + Sync>,
+}
 
 impl<T, P> TriggerHost<T> for TopicHost
 where
@@ -91,12 +92,11 @@ where
 
     fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
         Box::pin(async move {
-            // Subscribe and shelve the receiver for handle_step iterations.
-            // This is a targeted use of shelve -- the receiver type is only known
-            // at this impl level, not at the struct level.
-            let rx = Arc::new(Mutex::new(target.subscribe()));
-            context::shelve(TOPIC_BRIDGE_KEY, rx).await;
-            Ok(TopicHost)
+            let rx: Arc<Mutex<tokio::sync::broadcast::Receiver<P>>> =
+                Arc::new(Mutex::new(target.subscribe()));
+            Ok(TopicHost {
+                receiver: Box::new(rx),
+            })
         })
     }
 
@@ -105,11 +105,11 @@ where
         _target: &'a Arc<T>,
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async move {
-            // The receiver was created and shelved during setup.
-            let rx_bridge: Arc<Mutex<tokio::sync::broadcast::Receiver<P>>> =
-                context::shelve_clone(TOPIC_BRIDGE_KEY)
-                    .await
-                    .expect("TopicHost receiver must be initialized in setup");
+            // Recover the concrete receiver type from the type-erased field.
+            let rx_bridge: &Arc<Mutex<tokio::sync::broadcast::Receiver<P>>> = self
+                .receiver
+                .downcast_ref()
+                .expect("TopicHost receiver type mismatch (internal bug)");
 
             let result = rx_bridge.lock().await.recv().await;
             match result {
@@ -124,6 +124,11 @@ where
                 }
             }
         })
+    }
+
+    /// TopicHost is a streaming event source -- declare elastic scaling.
+    fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
+        Some(crate::models::policy::ScalingPolicy::default())
     }
 }
 

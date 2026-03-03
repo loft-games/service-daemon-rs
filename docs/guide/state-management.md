@@ -1,6 +1,35 @@
-# Intelligent# State Management
+# State Management
 
 Effective state management is key to building reactive applications. This guide covers how to manage shared state and persistent service data.
+
+## 0. Quick Start: The Heartbeat Pattern
+
+Every service in `service-daemon-rs` revolves around **Providers** (Data) and **Services** (Logic).
+
+```rust
+use service_daemon::{provider, service, sleep, is_shutdown};
+use std::sync::Arc;
+use std::time::Duration;
+
+// 1. Define a Provider (Type-Safe Global State)
+#[provider(5)]
+pub struct HeartbeatInterval(pub u64);
+
+// 2. Define a Service (The Business Logic)
+#[service]
+pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Result<()> {
+    while !is_shutdown() {
+        tracing::info!("Lub-dub...");
+        sleep(Duration::from_secs(interval.0)).await;
+    }
+    Ok(())
+}
+```
+
+> [!TIP]
+> **Proactive Lifecycle**: `service_daemon::sleep()` is cancellation-aware. It wakes up immediately if a shutdown signal is detected, ensuring your app stops gracefully without hanging.
+
+---
 
 > [!TIP]
 > Unsure whether to use a Provider (State) or the Shelf? See the [State vs. Shelf comparison in the FAQ](pitfalls-faq.md#3-providers--state).
@@ -9,22 +38,30 @@ Effective state management is key to building reactive applications. This guide 
 
 ## 1. Snapshots & Mutability Patterns
 
-### The Snapshot Pattern (Read-Only)
-Declare a dependency as `Arc<T>` to get a consistent, read-only snapshot.
-- **Zero Lockdown**: Readers never block, even during writes.
-- **High Performance**: Identical to a raw pointer path if no mutation is active.
+`StateManager` manages the transition between immutable singletons and mutable tracked state. It provides a **"Macro Illusion"** allowing services to interact with state via standard `RwLock` or `Mutex` interfaces, while internally managing snapshots for the reactive `Watch` system.
 
 ### The Mutability Pattern (Zero-Copy CoW)
 Declare a dependency as `Arc<RwLock<T>>` or `Arc<Mutex<T>>` to gain write access.
-- **Automatic Promotion**: The system upgrades the provider to a "Managed State" if any lock is requested.
-- **Zero-Copy Publishing**: When a writer commits, a new `Arc<T>` is published.
+- **Automatic Promotion**: The system seamlessly upgrades the provider to a `TrackedRwLock` upon the first lock request.
+- **Zero-Copy Publishing**: Use `guard.publish(Arc<T>)` to replace the entire state with a new pointer. This is the **highest performance path** for large types.
+
+> [!NOTE]
+> **Internal Mechanics**: For details on how `StateManager` manages transitions using `OnceCell` and `tokio::sync::watch`, see [Internal Architecture: State Management](../architecture/internal-overview.md#7-coremanaged_staters).
 
 ```rust
 #[service]
-pub async fn writer_service(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
+pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
     let mut guard = stats.write().await;
+    
+    // Path A: In-place mutation (requires T: Clone internally)
     guard.total_processed += 1;
-    Ok(()) // Changes published and Watch triggers fired on Drop
+    guard.commit(); 
+    
+    // Path B: Full replacement (Zero-Copy)
+    let new_stats = Arc::new(compute_diff(&*guard));
+    guard.publish(new_stats); 
+    
+    Ok(()) // Auto-commit on Drop fires only if DerefMut was invoked and commit() was not called manually
 }
 ```
 

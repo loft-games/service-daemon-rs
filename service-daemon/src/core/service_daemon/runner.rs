@@ -54,11 +54,11 @@ enum SupervisorState {
 struct ServiceSupervisor {
     // -- Immutable service identity --
     service_id: ServiceId,
-    name: String,
+    name: &'static str,
     run: ServiceFn,
-    watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+    watcher: Option<fn() -> BoxFuture<'static, ()>>,
     backoff: BackoffController,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
 
     // -- Per-generation mutable context (set during `on_starting`) --
@@ -71,11 +71,11 @@ struct ServiceSupervisor {
 impl ServiceSupervisor {
     fn new(
         service_id: ServiceId,
-        name: String,
+        name: &'static str,
         run: ServiceFn,
-        watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+        watcher: Option<fn() -> BoxFuture<'static, ()>>,
         policy: RestartPolicy,
-        resources: DaemonResources,
+        resources: Arc<DaemonResources>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
@@ -94,11 +94,11 @@ impl ServiceSupervisor {
     /// Spawns the dependency watcher if present.
     fn spawn_watcher(&self) {
         if let Some(watcher) = &self.watcher {
-            let n = self.name.clone();
+            let n = self.name;
             let sid = self.service_id;
             let ct = self.cancellation_token.clone();
             let res = self.resources.clone();
-            let watcher = watcher.clone();
+            let watcher = *watcher;
             tokio::spawn(async move {
                 while !ct.is_cancelled() {
                     let reload_signal = res
@@ -263,7 +263,11 @@ impl ServiceSupervisor {
     /// Owns the `tokio::select!` that races the service against reload signals,
     /// then hands the raw result off to `Outcome`.
     async fn on_running(&mut self) -> SupervisorState {
-        let span = tracing::info_span!("service", name = %self.name);
+        let span = tracing::info_span!(
+            "service",
+            name = %self.name,
+            service_id = %self.service_id,
+        );
 
         // Get or create reload signal
         let reload_signal = self
@@ -281,20 +285,19 @@ impl ServiceSupervisor {
 
         let identity = ServiceIdentity::new(
             self.service_id,
-            self.name.clone(),
+            self.name,
             self.cancellation_token.clone(),
             reload_token.clone(),
         );
 
-        let run_clone = self.run.clone();
+        let run_fn = self.run;
         let token_for_run = self.cancellation_token.clone();
         let resources_clone = self.resources.clone();
         let reload_token_clone = reload_token;
 
         let result = __run_service_scope(identity, resources_clone, || async move {
             let service_future =
-                std::panic::AssertUnwindSafe(run_clone(token_for_run).instrument(span))
-                    .catch_unwind();
+                std::panic::AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
 
             // Integrated signal handling -- replaces the bridge_task
             tokio::select! {
@@ -411,7 +414,7 @@ impl<'a> ServiceWave<'a> {
     fn from_services(services: &'a [ServiceDescription]) -> BTreeMap<u8, ServiceWave<'a>> {
         let mut waves: BTreeMap<u8, Vec<&'a ServiceDescription>> = BTreeMap::new();
         for service in services {
-            waves.entry(service.priority).or_default().push(service);
+            waves.entry(service.priority()).or_default().push(service);
         }
         waves
             .into_iter()
@@ -433,7 +436,7 @@ impl<'a> ServiceWave<'a> {
     /// to skip waiting during shutdown.
     async fn wait_for_healthy(
         &self,
-        resources: &DaemonResources,
+        resources: &Arc<DaemonResources>,
         timeout: Duration,
         daemon_token: &CancellationToken,
     ) {
@@ -488,12 +491,12 @@ impl<'a> ServiceWave<'a> {
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_service(
     service_id: ServiceId,
-    name: String,
+    name: &'static str,
     run: ServiceFn,
-    watcher: Option<Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>,
+    watcher: Option<fn() -> BoxFuture<'static, ()>>,
     policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
 ) {
     let supervisor = ServiceSupervisor::new(
@@ -522,7 +525,7 @@ pub async fn spawn_all_services(
     services: &[ServiceDescription],
     restart_policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     daemon_token: &CancellationToken,
 ) {
     info!("Beginning wave-based startup sequence...");
@@ -546,9 +549,9 @@ pub async fn spawn_all_services(
         for service in &wave.services {
             spawn_service(
                 service.id,
-                service.name.clone(),
-                service.run.clone(),
-                service.watcher.clone(),
+                service.name(),
+                service.entry.wrapper,
+                service.entry.watcher,
                 restart_policy,
                 running_tasks.clone(),
                 resources.clone(),
@@ -572,7 +575,7 @@ pub async fn spawn_all_services(
 pub async fn stop_all_services(
     services: &[ServiceDescription],
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
     daemon_token: CancellationToken,
     grace_period: Duration,
 ) {
@@ -601,7 +604,7 @@ pub async fn stop_all_services(
         let mut join_handles = Vec::new();
         for service in wave.services {
             let sid = service.id;
-            let name = service.name.clone();
+            let name = service.name();
             let handle_opt = {
                 let mut guard = running_tasks.lock().await;
                 guard.remove(&sid)
@@ -626,8 +629,8 @@ pub async fn stop_all_services(
                     }
                     _ = tokio::time::sleep(grace_period) => {
                         warn!(
-                            "Service '{}' did not stop within grace period, forcing abort",
-                            name
+                    "Service '{}' did not stop within grace period, forcing abort",
+                    name
                         );
                         handle.abort();
                         let _ = handle.await;

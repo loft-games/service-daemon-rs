@@ -13,9 +13,9 @@ use service_daemon::provider;
 // Signal Provider
 // =============================================================================
 
-/// A `Notify`-based signal. Calling `UserNotifier::notify()` wakes all
-/// subscribed `Event`/`Notify`/`Signal` triggers, demonstrating one-to-many fanout.
-#[provider(default = Notify)]
+/// A `Notify`-based signal. Calling `notifier.notify()` on a resolved instance
+/// wakes all subscribed `Event`/`Notify`/`Signal` triggers, demonstrating one-to-many fanout.
+#[provider(Notify)]
 pub struct UserNotifier;
 
 // =============================================================================
@@ -26,7 +26,7 @@ pub struct UserNotifier;
 /// `#[trigger(Cron(CleanupSchedule))]`
 /// will fire according to this schedule.
 #[derive(Clone)]
-#[provider(default = "*/30 * * * * *")]
+#[provider("*/30 * * * * *")]
 pub struct CleanupSchedule(pub String);
 
 // =============================================================================
@@ -34,7 +34,7 @@ pub struct CleanupSchedule(pub String);
 // =============================================================================
 
 /// A broadcast queue: every subscribed handler receives every message.
-#[provider(default = Queue, item_type = "String")]
+#[provider(Queue(String))]
 pub struct TaskQueue;
 
 // =============================================================================
@@ -42,7 +42,7 @@ pub struct TaskQueue;
 // =============================================================================
 
 /// A worker queue: messages are broadcast to all subscribed handlers.
-#[provider(default = Queue, item_type = "String")]
+#[provider(Queue(String))]
 pub struct WorkerQueue;
 
 // =============================================================================
@@ -57,7 +57,7 @@ pub struct ComplexJob {
 }
 
 /// A broadcast queue that carries `ComplexJob` payloads.
-#[provider(default = Queue, item_type = "ComplexJob")]
+#[provider(Queue(ComplexJob))]
 pub struct JobQueue;
 
 // =============================================================================
@@ -66,7 +66,7 @@ pub struct JobQueue;
 
 /// A state value that can be watched for changes.
 ///
-/// When any code acquires `ExternalStatus::rwlock()` and modifies the value,
+/// When any code acquires a `RwLock` via the resolved instance and modifies the value,
 /// all `Watch` triggers targeting `ExternalStatus` will fire automatically.
 #[derive(Debug, Clone)]
 #[provider]

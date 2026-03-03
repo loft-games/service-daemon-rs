@@ -1,0 +1,30 @@
+[package]
+name = "example-stress"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Stress test: bulk service registration via macro expansion."
+
+[features]
+default = []
+s0 = []
+s50 = ["s0"]
+s100 = ["s50"]
+s150 = ["s100"]
+s200 = ["s150"]
+s300 = ["s200"]
+s400 = ["s300"]
+s500 = ["s400"]
+s600 = ["s500"]
+s700 = ["s600"]
+s800 = ["s700"]
+s900 = ["s800"]
+s1000 = ["s900"]
+
+[dependencies]
+service-daemon = { path = "../../service-daemon", features = ["macros"] }
+tokio = { version = "1.43", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+paste = "1.0"

@@ -3,12 +3,12 @@
 use service_daemon::{provider, service};
 
 #[derive(Clone)]
-#[provider(default = "localhost:5432")]
+#[provider("localhost:5432")]
 pub struct DbHost(pub String);
 
 #[service(priority = 80, tags = ["infra", "database"])]
 pub async fn tagged_service(host: Arc<DbHost>) -> anyhow::Result<()> {
-    tracing::info!("DB host: {}", host.0);
+    tracing::info!("DB host: {}", host);
     Ok(())
 }
 

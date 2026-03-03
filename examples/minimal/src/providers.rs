@@ -6,8 +6,8 @@
 use service_daemon::provider;
 
 /// Server port configuration.
-/// The `#[provider(default = 8080)]` macro auto-generates `Deref`, `Display`,
+/// The `#[provider(8080)]` macro auto-generates `Deref`, `Display`,
 /// and `Default` implementations, making `Port` injectable into any service.
 #[derive(Clone)]
-#[provider(default = 8080)]
+#[provider(8080)]
 pub struct Port(pub i32);

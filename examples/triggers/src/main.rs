@@ -9,22 +9,22 @@
 //! - **Signal (Event/Notify)**: Fire-and-forget notification
 //! - **Watch**: Fires when a shared state value changes
 //!
-//! ## Event tracing demo (publish -> trigger chain)
+//! ## Event flow demo (DI -> trigger chain)
 //! ```text
 //!                                     +-----------------+
-//!                           publish() |  TickNotifier    |--> on_tick (Signal)
-//!                          +--------> |  (Notify)        |       |
-//!                          |          +-----------------+       | publish("tick_processed")
+//!                    notify_waiters()  |  UserNotifier   |---> on_tick (Signal)
+//!                          +--------> |  (Notify)       |       |
+//!                          |          +-----------------+       | tx.send()
 //!  +----------------+      |          +-----------------+       |
-//!  | event_producer |------+--push()-->|  TaskQueue      |<------+
+//!  | event_producer |------+--send()-->|  TaskQueue      |<------+
 //!  | (Service)      |      |          |  (Broadcast)    |--> handler_a, handler_b
 //!  +----------------+      |          +-----------------+
 //!                          |          +-----------------+
-//!                          +--push()-->|  WorkerQueue    |--> lb_worker_handler
+//!                          +--send()-->|  WorkerQueue    |--> lb_worker_handler
 //!                          |          |  (Queue)        |
 //!                          |          +-----------------+
 //!                          |          +-----------------+
-//!                          +--push()-->|  JobQueue       |--> complex_job_handler
+//!                          +--send()-->|  JobQueue       |--> complex_job_handler
 //!                          |          |  (Queue)        |
 //!                          |          +-----------------+
 //!                          |          +-----------------+
@@ -43,13 +43,7 @@ use example_triggers as _;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer())
-        .with(service_daemon::core::logging::DaemonLayer)
-        .init();
+    service_daemon::core::logging::init_logging();
 
     let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await;

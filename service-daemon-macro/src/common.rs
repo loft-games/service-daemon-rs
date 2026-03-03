@@ -1,5 +1,5 @@
 use proc_macro_error2::abort;
-use quote::{quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned};
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type};
 
 /// Result of extracting and categorizing function parameters.
@@ -21,16 +21,94 @@ pub struct ExtractedParams {
     pub param_entries: Vec<proc_macro2::TokenStream>,
     /// Select arms for the watcher function (reactive updates).
     pub watcher_arms: Vec<proc_macro2::TokenStream>,
+    /// Variable identifiers for DI-resolved dependencies.
+    ///
+    /// Used by trigger codegen to generate `let x = x.clone();` shadow
+    /// bindings inside the per-event `Fn` closure.
+    pub di_idents: Vec<syn::Ident>,
 }
 
-/// Helper to check if `#[allow_sync]` is present on the function's attributes.
-pub fn has_allow_sync(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| {
-        attr.path()
-            .segments
-            .last()
-            .is_some_and(|seg| seg.ident == "allow_sync")
-    })
+/// Extracts the `sync_handler` flag from function attributes and returns
+/// cleaned attributes with `sync_handler` stripped from any `#[allow(...)]`.
+///
+/// This function scans the attribute list for `#[allow(sync_handler)]`.
+/// When found, it:
+/// - Returns `true` to indicate sync is explicitly allowed.
+/// - Strips `sync_handler` from the `#[allow(...)]` list so the compiler
+///   never sees the unknown lint name.
+/// - If `#[allow(sync_handler)]` was the only item, the entire attribute
+///   is removed. If mixed (e.g., `#[allow(dead_code, sync_handler)]`),
+///   only `sync_handler` is removed and `#[allow(dead_code)]` is preserved.
+///
+/// # Returns
+/// `(is_sync_allowed, cleaned_attrs)`
+pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) {
+    let mut found = false;
+    let mut cleaned = Vec::with_capacity(attrs.len());
+
+    for attr in attrs {
+        // Only inspect `#[allow(...)]` attributes
+        if attr.path().is_ident("allow")
+            && let syn::Meta::List(meta_list) = &attr.meta
+        {
+            // Parse the token stream inside allow(...) to find sync_handler
+            let tokens = &meta_list.tokens;
+            let mut has_sync_handler = false;
+            let mut other_idents: Vec<proc_macro2::TokenStream> = Vec::new();
+
+            // Walk tokens: expect comma-separated identifiers
+            for token in tokens.clone().into_iter() {
+                match &token {
+                    proc_macro2::TokenTree::Ident(ident) if ident == "sync_handler" => {
+                        has_sync_handler = true;
+                    }
+                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
+                        // Skip commas — we rebuild them below
+                    }
+                    other => {
+                        other_idents.push(other.clone().into());
+                    }
+                }
+            }
+
+            if has_sync_handler {
+                found = true;
+                // If there are remaining lints, rebuild the #[allow(...)]
+                if !other_idents.is_empty() {
+                    let rebuilt: proc_macro2::TokenStream = other_idents
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .enumerate()
+                        .flat_map(|(i, ts)| {
+                            if i > 0 {
+                                vec![
+                                    proc_macro2::TokenTree::Punct(proc_macro2::Punct::new(
+                                        ',',
+                                        proc_macro2::Spacing::Alone,
+                                    ))
+                                    .into(),
+                                    ts,
+                                ]
+                            } else {
+                                vec![ts]
+                            }
+                        })
+                        .collect();
+
+                    let new_attr: Attribute = syn::parse_quote!(#[allow(#rebuilt)]);
+                    cleaned.push(new_attr);
+                }
+                // If sync_handler was the only item, drop the entire attribute
+                continue;
+            }
+        }
+
+        // Keep all other attributes unchanged
+        cleaned.push(attr.clone());
+    }
+
+    (found, cleaned)
 }
 
 /// Represents the detected intent of a function parameter.
@@ -54,17 +132,6 @@ pub enum WrapperKind {
     ArcRwLock(proc_macro2::Span, proc_macro2::Span),
     /// Arc<Mutex<T>>
     ArcMutex(proc_macro2::Span, proc_macro2::Span),
-}
-
-impl WrapperKind {
-    /// Returns a formatted string representation of the wrapper type.
-    fn format_with_inner(&self, inner_type_str: &str) -> String {
-        match self {
-            WrapperKind::Arc(_) => format!("Arc<{}>", inner_type_str),
-            WrapperKind::ArcRwLock(_, _) => format!("Arc<RwLock<{}>>", inner_type_str),
-            WrapperKind::ArcMutex(_, _) => format!("Arc<Mutex<{}>>", inner_type_str),
-        }
-    }
 }
 
 /// Analyzes a function argument to determine its DI intent.
@@ -113,7 +180,7 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
 /// Decomposes a type to find the inner type and the wrapper kind.
 /// Supports Arc<T>, Arc<RwLock<T>>, Arc<Mutex<T>>.
 /// Now supports qualified paths (e.g., std::sync::Arc) and captures spans.
-fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
+pub(crate) fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
     if let Type::Path(syn::TypePath { path, .. }) = ty
         && let Some(segment) = path.segments.last()
         && segment.ident == "Arc"
@@ -160,6 +227,7 @@ struct ParamProcessor {
     call_args: Vec<proc_macro2::TokenStream>,
     param_entries: Vec<proc_macro2::TokenStream>,
     watcher_arms: Vec<proc_macro2::TokenStream>,
+    di_idents: Vec<syn::Ident>,
     payload_arg_name: Option<syn::Ident>,
 }
 
@@ -172,6 +240,7 @@ impl ParamProcessor {
             call_args: Vec::new(),
             param_entries: Vec::new(),
             watcher_arms: Vec::new(),
+            di_idents: Vec::new(),
             payload_arg_name: None,
         }
     }
@@ -233,7 +302,6 @@ impl ParamProcessor {
     ) {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
-        let arg_type_wrapper_str = wrapper.format_with_inner(&type_str);
 
         match wrapper {
             WrapperKind::Arc(arc_span) => {
@@ -254,7 +322,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = #inner_type::rwlock().await;
+                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
                 });
                 let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
                 self.clean_inputs.push(
@@ -271,7 +339,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = #inner_type::mutex().await;
+                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
                 });
                 let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
                 self.clean_inputs.push(
@@ -289,9 +357,13 @@ impl ParamProcessor {
         }
 
         self.call_args.push(quote! { #arg_name });
-        let key_str = format!("{}_{}", arg_name_str, arg_type_wrapper_str);
+        self.di_idents.push(arg_name.clone());
         self.param_entries.push(quote! {
-            service_daemon::ServiceParam { name: #arg_name_str, type_name: #type_str, key: #key_str }
+            service_daemon::ServiceParam {
+                name: #arg_name_str,
+                type_name: #type_str,
+                type_id: std::any::TypeId::of::<#inner_type>(),
+            }
         });
 
         self.watcher_arms.push(quote! {
@@ -331,6 +403,7 @@ impl ParamProcessor {
             call_args: self.call_args,
             param_entries: self.param_entries,
             watcher_arms: self.watcher_arms,
+            di_idents: self.di_idents,
         }
     }
 }
@@ -345,9 +418,77 @@ pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedPar
     processor.finish()
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Shared codegen helpers (used by both #[service] and #[trigger])
+// -----------------------------------------------------------------------------
+
+/// Generates the call expression for the user's function.
+///
+/// Shared by `#[service]` and `#[trigger]`. The `kind` parameter controls
+/// the sync warning message (e.g., `"Service"` or `"Trigger"`).
+pub fn generate_call_expr(
+    fn_name: &syn::Ident,
+    fn_name_str: &str,
+    call_args: &[proc_macro2::TokenStream],
+    is_async: bool,
+    allow_sync_present: bool,
+    kind: &str,
+) -> proc_macro2::TokenStream {
+    if is_async {
+        quote! { #fn_name(#(#call_args),*).await }
+    } else if allow_sync_present {
+        // User explicitly allowed sync, no warning
+        quote! { #fn_name(#(#call_args),*) }
+    } else {
+        let msg = format!(
+            "{} '{{}}' is synchronous. Consider switching to 'async fn'.",
+            kind
+        );
+        quote! {
+            {
+                tracing::warn!(#msg, #fn_name_str);
+                #fn_name(#(#call_args),*)
+            }
+        }
+    }
+}
+
+/// Generates the watcher function and pointer for dependency change monitoring.
+///
+/// Shared by `#[service]` and `#[trigger]`. Both pass their watcher arms
+/// (collected by `extract_params`); triggers should push the target's
+/// `changed()` arm to the list before calling this function.
+///
+/// # Returns
+/// A tuple of `(watcher_fn_tokens, watcher_ptr_tokens)`.
+pub fn generate_watcher(
+    fn_name: &syn::Ident,
+    watcher_select_arms: &[proc_macro2::TokenStream],
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let watcher_name = format_ident!("{}_watcher", fn_name);
+
+    if !watcher_select_arms.is_empty() {
+        (
+            quote! {
+                /// Auto-generated watcher -- notifies when dependencies change
+                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
+                    Box::pin(async move {
+                        service_daemon::tokio::select! {
+                            #(#watcher_select_arms),*
+                        }
+                    })
+                }
+            },
+            quote! { Some(#watcher_name) },
+        )
+    } else {
+        (quote! {}, quote! { None })
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tags parsing (shared by #[service] and #[trigger])
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 /// A parsed list of static tag strings from `tags = ["a", "b"]` syntax.
 ///

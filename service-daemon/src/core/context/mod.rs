@@ -23,8 +23,8 @@ pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{
-    __run_service_scope, done, generate_message_id, is_shutdown, publish, shelve, shelve_clone,
-    sleep, state, unshelve, wait_shutdown,
+    __run_service_scope, done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config,
+    unshelve, wait_shutdown,
 };
 
 #[cfg(feature = "simulation")]
@@ -38,23 +38,28 @@ mod tests {
     use super::*;
     use crate::models::{ServiceId, ServiceStatus};
     use std::future::Future;
+    use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
-    fn create_test_resources() -> DaemonResources {
+    fn create_test_resources() -> Arc<DaemonResources> {
         DaemonResources::new()
     }
 
-    fn create_test_identity(name: &str) -> ServiceIdentity {
+    fn create_test_identity(name: &'static str) -> ServiceIdentity {
         ServiceIdentity::new(
             ServiceId::new(0),
-            name.to_string(),
+            name,
             CancellationToken::new(),
             CancellationToken::new(),
         )
     }
 
     /// Helper to run a future in a service scope (for tests).
-    async fn in_scope<F, Fut, T>(identity: ServiceIdentity, resources: DaemonResources, f: F) -> T
+    async fn in_scope<F, Fut, T>(
+        identity: ServiceIdentity,
+        resources: Arc<DaemonResources>,
+        f: F,
+    ) -> T
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = T>,
@@ -199,6 +204,99 @@ mod tests {
             assert_eq!(status2, Some(ServiceStatus::Initializing));
         })
         .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests: trigger_config registry
+    // -----------------------------------------------------------------------
+
+    /// Verify that trigger_config returns None when no config is registered.
+    #[tokio::test]
+    async fn test_trigger_config_returns_none_when_empty() {
+        let resources = create_test_resources();
+        let identity = create_test_identity("tc_empty");
+
+        let result = in_scope(identity, resources, || async {
+            trigger_config::<crate::models::ScalingPolicy>()
+        })
+        .await;
+
+        assert!(result.is_none());
+    }
+
+    /// Verify that trigger_config returns the registered config.
+    #[tokio::test]
+    async fn test_trigger_config_returns_registered_value() {
+        use std::any::TypeId;
+
+        let resources = create_test_resources();
+        let sp = crate::models::ScalingPolicy::builder()
+            .initial_concurrency(8)
+            .max_concurrency(32)
+            .build();
+        resources
+            .trigger_configs
+            .insert(TypeId::of::<crate::models::ScalingPolicy>(), Box::new(sp));
+
+        let identity = create_test_identity("tc_registered");
+
+        let result = in_scope(identity, resources, || async {
+            trigger_config::<crate::models::ScalingPolicy>()
+        })
+        .await;
+
+        let fetched = result.expect("should return Some");
+        assert_eq!(fetched.initial_concurrency, 8);
+        assert_eq!(fetched.max_concurrency, 32);
+    }
+
+    /// Verify that multiple config types are independently stored and retrieved.
+    #[tokio::test]
+    async fn test_trigger_config_multiple_types_isolation() {
+        use std::any::TypeId;
+
+        #[derive(Debug, Clone, PartialEq)]
+        struct MyCustomConfig {
+            rate_limit: u32,
+        }
+
+        let resources = create_test_resources();
+
+        // Register two different types
+        let sp = crate::models::ScalingPolicy::builder()
+            .initial_concurrency(4)
+            .build();
+        let custom = MyCustomConfig { rate_limit: 100 };
+        resources
+            .trigger_configs
+            .insert(TypeId::of::<crate::models::ScalingPolicy>(), Box::new(sp));
+        resources
+            .trigger_configs
+            .insert(TypeId::of::<MyCustomConfig>(), Box::new(custom));
+
+        let identity = create_test_identity("tc_multi");
+
+        in_scope(identity, resources, || async {
+            let sp = trigger_config::<crate::models::ScalingPolicy>()
+                .expect("ScalingPolicy should be present");
+            assert_eq!(sp.initial_concurrency, 4);
+
+            let custom =
+                trigger_config::<MyCustomConfig>().expect("MyCustomConfig should be present");
+            assert_eq!(custom.rate_limit, 100);
+
+            // Unregistered type should return None
+            let missing = trigger_config::<String>();
+            assert!(missing.is_none());
+        })
+        .await;
+    }
+
+    /// Verify that trigger_config returns None outside a service scope.
+    #[tokio::test]
+    async fn test_trigger_config_outside_scope_returns_none() {
+        let result = trigger_config::<crate::models::ScalingPolicy>();
+        assert!(result.is_none());
     }
 }
 

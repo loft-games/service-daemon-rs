@@ -17,7 +17,7 @@ use std::time::Duration;
 /// 4. Test verifies the service read the pre-filled value
 #[tokio::test]
 async fn test_real_service_reads_pre_filled_shelf() {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = service_daemon::core::logging::try_init_logging();
 
     // Phase 1: Build sandbox with pre-filled shelf data
     let (builder, handle) = MockContext::builder()
@@ -56,7 +56,7 @@ async fn test_real_service_reads_pre_filled_shelf() {
 /// 4. Service observes the mutation on its next poll
 #[tokio::test]
 async fn test_god_hand_shelf_mutation_with_real_service() {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = service_daemon::core::logging::try_init_logging();
 
     let (builder, handle) = MockContext::builder().build();
 
@@ -104,7 +104,7 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
 /// 4. Service observes the mutation on its next poll
 #[tokio::test]
 async fn test_two_phase_god_hand_with_real_service() {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = service_daemon::core::logging::try_init_logging();
 
     // Phase 1: pre-fill initial config
     let (builder, handle) = MockContext::builder()
@@ -154,7 +154,7 @@ async fn test_two_phase_god_hand_with_real_service() {
 /// assigned by `Registry`, then flips the status via the God Hand.
 #[tokio::test]
 async fn test_god_hand_status_flip_with_real_service() {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = service_daemon::core::logging::try_init_logging();
 
     let (builder, handle) = MockContext::builder().build();
 
@@ -174,14 +174,20 @@ async fn test_god_hand_status_flip_with_real_service() {
     // Wait for the runner to spawn the service and write initial status
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Discover the real ServiceId via the new API
+    // Discover all ServiceIds -- now includes both status_watcher_service
+    // and infra services (log_service) that are auto-included.
     let ids = handle.service_ids();
-    assert_eq!(
-        ids.len(),
-        1,
-        "Should have exactly one service (status_watcher_service)"
+    assert!(
+        ids.len() >= 1,
+        "Should have at least one service (status_watcher_service)"
     );
-    let svc_id = ids[0];
+
+    // Find the status_watcher_service by checking which service wrote
+    // the "observed_status" shelf key (only status_watcher_service does this).
+    let svc_id = ids
+        .into_iter()
+        .find(|id| handle.get_status(*id).is_some())
+        .expect("status_watcher_service should be registered");
 
     // -- God Hand: flip status to Healthy --
     handle.set_status(svc_id, ServiceStatus::Healthy);

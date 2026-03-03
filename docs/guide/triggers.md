@@ -1,10 +1,39 @@
-# Event Triggers
+Triggers are specialized services with built-in event loops that execute your functions when specific events occur. They consume zero CPU while waiting.
 
-Triggers are specialized services with built-in event loops that execute your functions when specific events occur.
+## 0. Quick Start: Chain Reactions
 
-## 0. Architecture: Policy vs. Engine
+Triggers become powerful when they talk to each other. A trigger can "fire" another by calling a provider's method directly.
 
-Starting from v0.1.0, triggers follow a decoupled **Policy-Engine** architecture:
+```rust
+use service_daemon::prelude::*;
+
+// 1. Define a Signal Provider
+#[provider(Notify)]
+pub struct CleanupSignal;
+
+// 2. A trigger that performs work and notifies others
+#[trigger(Queue(JobQueue))]
+pub async fn worker(job: Job, signal: Arc<CleanupSignal>) -> anyhow::Result<()> {
+    tracing::info!("Processing job {}", job.id);
+    
+    // Fire the signal directly via the DI-injected instance
+    signal.notify();
+    Ok(())
+}
+
+// 3. A reactive handler listening for that signal
+#[trigger(Notify(CleanupSignal))]
+pub async fn cleanup_handler() -> anyhow::Result<()> {
+    tracing::info!("Cleaning up...");
+    Ok(())
+}
+```
+
+---
+
+## 1. Architecture: Policy vs. Engine
+
+Triggers follow a decoupled **Policy-Engine** architecture:
 
 - **Engine (Generic)**: The `TriggerRunner` manages the main event loop, interceptor pipeline, and standard shutdown/reload handling. Built-in interceptors (`TracingInterceptor`, `RetryInterceptor`) provide tracing and retry for free. It's provided automatically by the framework.
 - **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `TriggerHost` trait's `setup` (one-time initialization) and `handle_step` (per-event waiting) methods.
@@ -67,38 +96,17 @@ pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()
 2. **Explicit Payload**: Any parameter marked with `#[payload]` is the payload (allows `Arc<Payload>`).
 3. **DI Resources**: All other `Arc<T>` parameters are resolved via the DI system.
 
-## 4. Event Traceability (Publishing)
+## 4. Event Flow
 
-Starting from v0.1.0, any event published within a service can be traced throughout the entire system.
-
-### Using `publish()`
-Wrap your event production logic in `service_daemon::publish()` to capture the current `InstanceId` and generate a unique `MessageId`.
-
-```rust
-use service_daemon::publish;
-
-#[service]
-async fn my_service() -> anyhow::Result<()> {
-    while !service_daemon::is_shutdown() {
-        // Traceable event publishing
-        publish("my_event", || async {
-            MyProvider::notify().await;
-        }).await;
-
-        service_daemon::sleep(Duration::from_secs(10)).await;
-    }
-    Ok(())
-}
-```
-
-### Traceability Benefits
-- **Source Attribution**: See exactly which service instance fired a signal.
-- **Message IDs**: Correlation of logs across multiple trigger handlers.
-- **Debug Visibility**: High-priority diagnostics via `DaemonLayer`.
+Services and triggers emit events by calling provider instance methods directly (e.g.
+`notifier.notify()`, `queue.push(...)`) after resolving the provider via DI.
+The framework's `TriggerRunner` automatically
+assigns a unique `message_id` and `source_id` to each dispatched event,
+enabling structured log correlation without manual intervention.
 
 ## 5. Resilience: Automatic Handler Retries
 
-Starting from v0.1.0, individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
+Individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
 
 ### How it works
 When a handler fails:
@@ -116,7 +124,7 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 | Handler Signature | What Happens | `Clone` Required? |
 |:---|:---|:---|
 | `async fn handler(data: T)` | Macro auto-clones from `Arc` | **Yes** |
-| `async fn handler(data: Arc<T>)` | Zero-copy pointer pass | **No** |
+| `async fn handler(#[payload] data: Arc<T>)` | Zero-copy pointer pass | **No** |
 
 > [!TIP]
 > For large payloads or types that cannot implement `Clone`, declare your handler parameter as `Arc<T>`. This gives you true zero-copy access and works with any type.
@@ -125,33 +133,31 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 
 ## 6. Elastic Scaling (Async Dispatch)
 
-Trigger handlers are dispatched **asynchronously** -- the event loop does not block on handler completion. This is achieved through a `Semaphore`-gated `tokio::spawn` mechanism:
+Elastic scaling is **automatically enabled** only for streaming trigger templates that declare scaling support (e.g. `Queue` / `TopicHost`). Other templates (`Cron`, `Watch`, `Notify`) dispatch handlers serially with zero scaling overhead.
 
-1. **Semaphore Backpressure**: Each dispatch acquires a permit from a concurrency semaphore (initialized to `initial_concurrency` from `RestartPolicy`).
-2. **Async Spawn**: The interceptor chain + handler is spawned as an independent tokio task.
-3. **Scale Monitor**: A background task monitors semaphore pressure and dynamically adds permits when utilization exceeds the `scale_threshold` ratio.
+Each trigger template declares its scaling needs via `TriggerHost::scaling_policy()`. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
 
-### Policy Configuration
+---
 
-All elastic scaling parameters live in `RestartPolicy`:
+## 7. Instance Lifecycle & State Reuse
 
-| Parameter | Default | Description |
-|:---|:---|:---|
-| `initial_concurrency` | 1 | Starting dispatch slots |
-| `max_concurrency` | 1024 | Hard upper limit |
-| `scale_factor` | 2 | Multiplier on each scale-up |
-| `scale_threshold` | 5 | Pressure ratio to trigger scaling |
-| `scale_cooldown` | 30s | Idle time before scaling down |
+Unlike standard services where the macro-wrapped function is re-executed on every iteration, triggers leverage a **Stateful Host** model:
 
-### Scaling Algorithm
+1.  **Instantiation**: The `TriggerHost` is created **once** via `setup()` when the service starts.
+2.  **State Persistence**: The `TriggerRunner` maintains a reference to this instance and calls `handle_step(&mut self, ...)` in a loop.
+3.  **State Reuse**: You can store resources (e.g., a `tokio::sync::mpsc::Receiver` or a local cache) as struct fields in your `TriggerHost`. These fields are preserved across all event iterations.
+4.  **Reload Boundary**: When a reload signal is received (e.g., configuration change), the current `TriggerRunner` and its `TriggerHost` are dropped, and a **new** instance is created.
 
-```text
-pressure_limit = current_limit × threshold / (threshold + 1)
-if in_flight >= pressure_limit → scale up by scale_factor
-if idle > scale_cooldown       → shrink to initial_concurrency
-```
+This design enables high-performance event processing by avoiding repeated setup overhead while ensuring clean resource isolation during reloads.
 
-Users do not need to configure anything -- the defaults provide sensible auto-scaling for most workloads.
+---
+
+### 8. Elastic Scaling & Backpressure Details
+
+Elastic scaling is governed by the [`ScalingPolicy`]. The framework automatically adjusts concurrency based on pressure and ensures backpressure via a shared semaphore.
+
+> [!NOTE]
+> **Scaling Internals**: For the mathematical pressure formula, 1-second monitoring logic, and the "Shadow Permits" implementation details, see [Internal Architecture: Trigger Scaling](../architecture/internal-overview.md#7-coretrigger_runner_rs).
 
 ---
 

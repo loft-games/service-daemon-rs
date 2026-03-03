@@ -42,8 +42,7 @@ pub mod models;
 
 // Re-export commonly used items
 pub use core::context::{
-    done, generate_message_id, is_shutdown, publish, shelve, shelve_clone, sleep, state, unshelve,
-    wait_shutdown,
+    done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config, unshelve, wait_shutdown,
 };
 pub use core::di::Provided;
 pub use core::service_daemon::{
@@ -51,9 +50,10 @@ pub use core::service_daemon::{
 };
 pub use models::service::ServicePriority;
 pub use models::{
-    BackoffController, Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ServiceDescription,
-    ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT,
-    TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
+    BackoffController, PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, Result,
+    SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder, ServiceDescription, ServiceEntry,
+    ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
 };
 pub use std::sync::Arc;
 
@@ -67,9 +67,12 @@ pub use linkme;
 pub use tokio;
 pub use tokio_util;
 
+// Re-export log batch size configuration (always available)
+pub use core::logging::set_log_batch_size;
+
 // Conditionally re-export file logging utilities
 #[cfg(feature = "file-logging")]
-pub use core::logging::{FileLogConfig, enable_file_logging};
+pub use core::logging::{FileLogConfig, RotationPolicy, enable_file_logging};
 
 // Conditionally re-export dependencies based on features
 #[cfg(feature = "cron")]
@@ -79,7 +82,7 @@ pub use tokio_cron_scheduler;
 pub use uuid;
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{allow_sync, provider, service, trigger};
+pub use service_daemon_macro::{provider, service, trigger};
 
 /// A prelude module for commonly used items and trigger templates.
 ///

@@ -20,6 +20,7 @@ use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
 use crate::models::{ServiceId, ServiceStatus};
 
 use std::any::Any;
+use std::sync::Arc;
 
 // =============================================================================
 // SimulationHandle -- The "God Hand" for dynamic intervention
@@ -41,12 +42,12 @@ use std::any::Any;
 #[derive(Clone)]
 pub struct SimulationHandle {
     /// Reference to the daemon's shared resources.
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
 }
 
 impl SimulationHandle {
     /// Creates a new `SimulationHandle` wrapping the given resources.
-    pub(crate) fn new(resources: DaemonResources) -> Self {
+    pub(crate) fn new(resources: Arc<DaemonResources>) -> Self {
         Self { resources }
     }
 
@@ -55,12 +56,8 @@ impl SimulationHandle {
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
-    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &str, key: &str, value: T) {
-        let entry = self
-            .resources
-            .shelf
-            .entry(service_name.to_string())
-            .or_default();
+    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &'static str, key: &str, value: T) {
+        let entry = self.resources.shelf.entry(service_name).or_default();
         entry.insert(key.to_string(), Box::new(value));
     }
 
@@ -120,11 +117,14 @@ impl SimulationHandle {
         service_name: &str,
         key: &str,
     ) -> Option<T> {
-        self.resources.shelf.get(service_name).and_then(|entry| {
-            entry
-                .get(key)
-                .and_then(|val| val.downcast_ref::<T>().cloned())
-        })
+        self.resources
+            .shelf
+            .get(service_name as &str)
+            .and_then(|entry| {
+                entry
+                    .get(key)
+                    .and_then(|val| val.downcast_ref::<T>().cloned())
+            })
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -145,7 +145,7 @@ impl SimulationHandle {
     pub fn has_shelf(&self, service_name: &str, key: &str) -> bool {
         self.resources
             .shelf
-            .get(service_name)
+            .get(service_name as &str)
             .is_some_and(|entry| entry.contains_key(key))
     }
 
@@ -155,7 +155,7 @@ impl SimulationHandle {
     pub fn shelf_keys(&self, service_name: &str) -> Vec<String> {
         self.resources
             .shelf
-            .get(service_name)
+            .get(service_name as &str)
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
     }
@@ -246,7 +246,7 @@ impl SimulationHandle {
     /// daemon_task.await;  // safe
     /// ```
     #[doc(hidden)]
-    pub fn resources(&self) -> DaemonResources {
+    pub fn resources(&self) -> Arc<DaemonResources> {
         self.resources.clone()
     }
 }
@@ -263,7 +263,10 @@ pub struct MockContext;
 
 /// Builder for `MockContext`.
 pub struct MockContextBuilder {
-    resources: DaemonResources,
+    resources: Arc<DaemonResources>,
+    /// Whether to auto-include framework logging services in the simulation.
+    /// Default: `true` — matches production behavior.
+    enable_logging: bool,
 }
 
 impl MockContext {
@@ -271,6 +274,7 @@ impl MockContext {
     pub fn builder() -> MockContextBuilder {
         MockContextBuilder {
             resources: DaemonResources::new(),
+            enable_logging: true,
         }
     }
 }
@@ -280,13 +284,14 @@ impl MockContextBuilder {
     ///
     /// This simulates previously shelved data, useful for testing crash recovery
     /// and state persistence logic.
-    pub fn with_shelf<T: Any + Send + Sync>(self, service_name: &str, key: &str, data: T) -> Self {
+    pub fn with_shelf<T: Any + Send + Sync>(
+        self,
+        service_name: &'static str,
+        key: &str,
+        data: T,
+    ) -> Self {
         {
-            let entry = self
-                .resources
-                .shelf
-                .entry(service_name.to_string())
-                .or_default();
+            let entry = self.resources.shelf.entry(service_name).or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self
@@ -301,6 +306,19 @@ impl MockContextBuilder {
         self
     }
 
+    /// Controls whether framework logging services (`log_service`) are
+    /// automatically included in the simulation registry.
+    ///
+    /// Default: `true` — logging services are included to match production
+    /// behavior and provide consistent log output in tests.
+    ///
+    /// Set to `false` for lightweight tests that don't need log output.
+    #[must_use]
+    pub fn with_logging(mut self, enable: bool) -> Self {
+        self.enable_logging = enable;
+        self
+    }
+
     /// Builds the `MockContext` and returns a pre-configured `ServiceDaemonBuilder`
     /// along with a `SimulationHandle` for dynamic intervention.
     ///
@@ -308,15 +326,20 @@ impl MockContextBuilder {
     /// - Has `Registry` isolation enabled (empty registry, no auto-discovery).
     /// - Uses a testing-friendly restart policy.
     /// - Has the pre-filled `DaemonResources` injected.
+    /// - Includes framework logging services by default (controlled by `with_logging`).
     ///
-    /// You can further customize it by calling `.with_service()` to add the
-    /// real service(s) you want to debug.
+    /// You can further customize it by calling `.with_registry()` to select
+    /// the real service(s) you want to debug via tag filtering.
     pub fn build(self) -> (ServiceDaemonBuilder, SimulationHandle) {
         let handle = SimulationHandle::new(self.resources.clone());
 
-        let builder = ServiceDaemonBuilder::new_isolated()
+        let mut builder = ServiceDaemonBuilder::new_isolated()
             .with_resources(self.resources)
             .with_restart_policy(RestartPolicy::for_testing());
+
+        if self.enable_logging {
+            builder = builder.with_infra_tags(&["__log__"]);
+        }
 
         (builder, handle)
     }

@@ -5,7 +5,7 @@
 
 use service_daemon::provider;
 
-#[provider(default = "A")]
+#[provider("A")]
 pub enum BadProvider {
     A,
     B,

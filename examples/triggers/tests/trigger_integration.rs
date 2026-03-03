@@ -4,7 +4,7 @@
 //! signal firing, and watch state changes through the public API.
 
 use example_triggers::providers::{ExternalStatus, UserNotifier};
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
+use service_daemon::{Provided, Registry, RestartPolicy, ServiceDaemon};
 
 /// Helper: Create an isolated registry that filters out all auto-registered services.
 fn isolated_registry() -> Registry {
@@ -46,7 +46,7 @@ async fn test_signal_trigger_fires() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // Fire the signal
-    UserNotifier::notify().await;
+    UserNotifier::resolve().await.notify();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     cancel.cancel();
@@ -70,7 +70,7 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
 
     // Modify ExternalStatus -- this should trigger the Watch handler
     {
-        let lock = ExternalStatus::rwlock().await;
+        let lock = ExternalStatus::resolve().await.rwlock().await;
         let mut guard = lock.write().await;
         guard.message = "Watch test update".to_string();
         guard.updated_count = 1;

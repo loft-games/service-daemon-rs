@@ -13,7 +13,7 @@ The most common trigger is the `Queue`. Imagine you have a background job queue,
 ```rust
 use service_daemon::prelude::*; // TT is here!
 
-#[provider(default = Queue, item_type = "Job")]
+#[provider(Queue(Job))]
 pub struct JobQueue;
 
 #[trigger(Queue(JobQueue))]
@@ -35,7 +35,7 @@ Let's say after processing a `Job`, we want to notify a cleanup service.
 
 ```rust
 // A simple signal provider
-#[provider(default = Notify)]
+#[provider(Notify)]
 pub struct CleanupSignal;
 
 #[trigger(Queue(JobQueue))]
@@ -47,7 +47,7 @@ async fn process_and_notify(
     
     // Fire the signal directly. 
     // The framework handles the back-end orchestration.
-    signal.notify().await;
+    signal.notify();
     
     Ok(())
 }
@@ -82,7 +82,7 @@ async fn complex_worker(
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
 4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
-5.  **Elastic Scaling**: The framework dispatches handlers asynchronously and automatically scales concurrency based on pressure — zero configuration needed.
+5.  **Elastic Scaling**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and automatically scales concurrency based on pressure via the dedicated `ScalingPolicy`. Other templates dispatch serially with no scaling overhead. You can customize these limits globally—see [**Resilience Kung-Fu**](resilience-kung-fu.md#2-mastering-throughput-scaling-policy).
 
 > [!TIP]
 > **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../triggers.md).

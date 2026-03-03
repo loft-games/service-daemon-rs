@@ -51,11 +51,11 @@ pub async fn mqtt_provider() -> MqttBus {
 
 ## 3. When is it a "Magic Provider"?
 
-"Magic" refers to hardcoded templates inside the `#[provider]` macro (e.g., `#[provider(default = Notify)]`). 
+"Magic" refers to hardcoded templates inside the `#[provider]` macro (e.g., `#[provider(Notify)]`). 
 
 **Avoid creating new Magic Providers unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
-* The provider requires **special code generation** (like automatically creating `push()` or `subscribe()` methods via macro).
+* The provider requires **special code generation** (like automatically creating `push()` or `subscribe()` instance methods via macro).
 
 > [!IMPORTANT]
 > Business-specific components (MQTT, Database, API Clients) are **NOT** Magic Providers. They should be implemented as regular `async fn` providers.
@@ -74,7 +74,7 @@ pub async fn mqtt_provider() -> MqttBus {
 
 | Goal | Best Approach |
 | :--- | :--- |
-| Inject a constant | `#[provider(default = 80)] struct Port(i32);` |
+| Inject a constant | `#[provider(80)] struct Port(i32);` |
 | Inject a DB Connection | `#[provider] async fn db() -> Pool { ... }` |
-| Signal between services | `#[provider(default = Notify)] struct Signal;` |
-| Fan-out events | `#[provider(default = Queue)] struct Bus;` |
+| Signal between services | `#[provider(Notify)] struct Signal;` |
+| Fan-out events | `#[provider(Queue(String))] struct Bus;` |

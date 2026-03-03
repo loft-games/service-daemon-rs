@@ -33,7 +33,7 @@ use tokio::sync::Semaphore;
 use tracing::{Instrument, info, warn};
 
 use crate::core::context;
-use crate::models::policy::{BackoffController, RestartPolicy};
+use crate::models::policy::{BackoffController, RestartPolicy, ScalingPolicy};
 use crate::models::service::ServiceId;
 use crate::models::trigger::{
     TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, TriggerTransition,
@@ -43,13 +43,18 @@ use crate::models::trigger::{
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Generates a globally unique message ID for each trigger event.
+/// Generates a globally unique, time-ordered message ID for each trigger event.
+///
+/// When the `uuid-trigger-ids` feature is enabled, this produces a UUID v7
+/// string whose high bits encode a millisecond-precision timestamp, guaranteeing
+/// lexicographic (dictionary) ordering that mirrors chronological ordering.
+/// This is beneficial for database indexing and ordered event replay.
 ///
 /// This is also called by the public `context::generate_message_id()` API.
 pub(crate) fn generate_message_id() -> String {
     #[cfg(feature = "uuid-trigger-ids")]
     {
-        uuid::Uuid::new_v4().to_string()
+        uuid::Uuid::now_v7().to_string()
     }
     #[cfg(not(feature = "uuid-trigger-ids"))]
     {
@@ -83,7 +88,7 @@ pub struct DispatchContext<P> {
     /// Globally unique identifier for this event instance.
     pub message_id: String,
     /// Human-readable name of this trigger service (for logging/tracing).
-    pub trigger_name: String,
+    pub trigger_name: &'static str,
     /// The business payload, wrapped in `Arc` for cheap cloning across retries.
     pub payload: Arc<P>,
     /// The user's event handler (needed at the terminal node of the chain).
@@ -199,7 +204,7 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 /// - `P`: The payload type produced by `handle_step`.
 pub struct TriggerRunner<P: Send + Sync + 'static> {
     /// Human-readable name of this trigger service.
-    name: String,
+    name: &'static str,
     /// The `ServiceId` of the trigger service.
     service_id: ServiceId,
     /// Monotonically increasing instance counter for tracing.
@@ -209,10 +214,16 @@ pub struct TriggerRunner<P: Send + Sync + 'static> {
     /// Registered interceptor chain (executed in registration order, onion model).
     /// Stored as `Arc` to allow cheap cloning into `tokio::spawn` tasks.
     interceptors: Vec<Arc<dyn TriggerInterceptor<P>>>,
-    /// The restart/scaling policy governing backoff and elastic concurrency.
-    policy: RestartPolicy,
+    /// The restart policy governing backoff for handler retries.
+    #[allow(dead_code)]
+    // stored for future use; currently passed to RetryInterceptor at construction
+    restart_policy: RestartPolicy,
+    /// Optional elastic-scaling policy. `None` means serial dispatch
+    /// (single permit, no scale monitor).
+    scaling: Option<ScalingPolicy>,
     /// Semaphore controlling the number of concurrent handler invocations.
-    /// Permits start at `policy.initial_concurrency` and grow elastically.
+    /// With `scaling = None`, this holds exactly 1 permit (serial mode).
+    /// With `scaling = Some(sp)`, starts at `sp.initial_concurrency`.
     semaphore: Arc<Semaphore>,
     /// Current concurrency limit (tracked separately because `Semaphore`
     /// doesn't expose its total permit count).
@@ -220,13 +231,17 @@ pub struct TriggerRunner<P: Send + Sync + 'static> {
 }
 
 impl<P: Send + Sync + 'static> TriggerRunner<P> {
-    /// Create a new runner with the given name, handler, and policy.
+    /// Create a new runner with the given name, handler, restart policy,
+    /// and optional scaling policy.
     ///
     /// The built-in `TracingInterceptor` and `RetryInterceptor` are
     /// automatically registered, providing per-dispatch tracing and
     /// exponential-backoff retry for free.
     ///
-    /// The semaphore is initialized with `policy.initial_concurrency` permits.
+    /// When `scaling` is `Some`, the semaphore is initialized with
+    /// `scaling.initial_concurrency` permits and a background scale
+    /// monitor is spawned. When `None`, the semaphore holds exactly
+    /// 1 permit (serial dispatch, no elastic scaling).
     ///
     /// The default interceptor order is:
     /// 1. `TracingInterceptor` — wraps everything in a tracing span
@@ -234,12 +249,13 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// 3. (user interceptors added via `with_interceptor`)
     /// 4. Terminal handler node (implicit)
     pub fn new(
-        name: String,
+        name: &'static str,
         service_id: ServiceId,
         handler: TriggerHandler<P>,
-        policy: RestartPolicy,
+        restart_policy: RestartPolicy,
+        scaling: Option<ScalingPolicy>,
     ) -> Self {
-        let initial = policy.initial_concurrency;
+        let initial = scaling.map_or(1, |sp| sp.initial_concurrency);
         Self {
             name,
             service_id,
@@ -247,9 +263,12 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             handler,
             interceptors: vec![
                 Arc::new(TracingInterceptor),
-                Arc::new(RetryInterceptor { policy }),
+                Arc::new(RetryInterceptor {
+                    policy: restart_policy,
+                }),
             ],
-            policy,
+            restart_policy,
+            scaling,
             semaphore: Arc::new(Semaphore::new(initial)),
             current_limit: Arc::new(AtomicUsize::new(initial)),
         }
@@ -275,12 +294,15 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         T: Send + Sync + 'static,
         H: TriggerHost<T, Payload = P>,
     {
-        // Spawn the scale monitor as a background task. It observes semaphore
-        // pressure and dynamically adjusts concurrency limits.
-        let monitor_handle = self.spawn_scale_monitor();
+        // Only spawn the scale monitor if elastic scaling is enabled.
+        let monitor_handle = if self.scaling.is_some() {
+            Some(self.spawn_scale_monitor())
+        } else {
+            None
+        };
 
         while !context::is_shutdown() {
-            let Some(transition) = Self::poll_next_event(host, &target, &self.name).await else {
+            let Some(transition) = Self::poll_next_event(host, &target, self.name).await else {
                 break;
             };
 
@@ -290,7 +312,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         }
 
         // Stop the scale monitor when the event loop exits
-        monitor_handle.abort();
+        if let Some(handle) = monitor_handle {
+            handle.abort();
+        }
 
         Ok(())
     }
@@ -363,11 +387,18 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// New permits are added via `Semaphore::add_permits()`; shrinking is
     /// deferred -- we simply stop adding new permits and let the natural
     /// permit release bring the effective concurrency down.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called when `self.scaling` is `None`. Callers must check
+    /// `self.scaling.is_some()` before calling.
     fn spawn_scale_monitor(&self) -> tokio::task::JoinHandle<()> {
         let semaphore = self.semaphore.clone();
         let current_limit = self.current_limit.clone();
-        let policy = self.policy;
-        let trigger_name = self.name.clone();
+        let scaling = self
+            .scaling
+            .expect("spawn_scale_monitor requires Some(ScalingPolicy)");
+        let trigger_name = self.name;
 
         tokio::spawn(async move {
             // Track how long the queue has been idle (all permits available)
@@ -384,9 +415,10 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 if in_flight == 0 {
                     idle_since.get_or_insert_with(tokio::time::Instant::now);
                     Self::try_scale_down(
+                        &semaphore,
                         &current_limit,
-                        &policy,
-                        &trigger_name,
+                        &scaling,
+                        trigger_name,
                         limit,
                         &mut idle_since,
                     );
@@ -398,8 +430,8 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 Self::try_scale_up(
                     &semaphore,
                     &current_limit,
-                    &policy,
-                    &trigger_name,
+                    &scaling,
+                    trigger_name,
                     limit,
                     in_flight,
                 );
@@ -409,30 +441,49 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
     /// Attempt to scale down concurrency if the idle cooldown has elapsed.
     ///
-    /// Called when `in_flight == 0`. Resets `idle_since` to `None` after
-    /// successfully scaling down.
+    /// Called when `in_flight == 0`. Physically revokes excess permits by
+    /// acquiring them via `try_acquire()` and calling `forget()` to permanently
+    /// remove them from the semaphore. This ensures `dispatch` truly cannot
+    /// exceed the reduced concurrency limit.
+    ///
+    /// Resets `idle_since` to `None` after successfully scaling down.
     fn try_scale_down(
+        semaphore: &Semaphore,
         current_limit: &AtomicUsize,
-        policy: &RestartPolicy,
+        scaling: &ScalingPolicy,
         trigger_name: &str,
         limit: usize,
         idle_since: &mut Option<tokio::time::Instant>,
     ) {
         let Some(since) = *idle_since else { return };
-        if since.elapsed() < policy.scale_cooldown || limit <= policy.initial_concurrency {
+        if since.elapsed() < scaling.scale_cooldown || limit <= scaling.initial_concurrency {
             return;
         }
 
-        // Shrink back to initial concurrency.
-        // We cannot revoke permits from a Semaphore, so we update the
-        // logical limit and let excess permits become "phantom" -- they
-        // exist in the semaphore but our limit tracking ignores them.
-        current_limit.store(policy.initial_concurrency, Ordering::Relaxed);
+        // Physically revoke excess permits by acquiring and forgetting them.
+        // `forget()` permanently reduces the semaphore capacity, ensuring
+        // `dispatch` cannot acquire more permits than `initial_concurrency`.
+        let to_revoke = limit - scaling.initial_concurrency;
+        let mut revoked = 0usize;
+        for _ in 0..to_revoke {
+            match semaphore.try_acquire() {
+                Ok(permit) => {
+                    permit.forget();
+                    revoked += 1;
+                }
+                Err(_) => break, // Rare race with new dispatch; stop early
+            }
+        }
+
+        let new_limit = limit - revoked;
+        current_limit.store(new_limit, Ordering::Relaxed);
         info!(
             trigger = %trigger_name,
             old_limit = limit,
-            new_limit = policy.initial_concurrency,
-            "Scaled down after cooldown"
+            new_limit,
+            revoked,
+            "Elastic scale-down: revoked {} permits",
+            revoked
         );
         *idle_since = None;
     }
@@ -444,23 +495,23 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     fn try_scale_up(
         semaphore: &Semaphore,
         current_limit: &AtomicUsize,
-        policy: &RestartPolicy,
+        scaling: &ScalingPolicy,
         trigger_name: &str,
         limit: usize,
         in_flight: usize,
     ) {
-        if limit >= policy.max_concurrency {
+        if limit >= scaling.max_concurrency {
             return;
         }
 
-        let threshold = policy.scale_threshold;
+        let threshold = scaling.scale_threshold;
         let pressure_limit = limit * threshold / (threshold + 1);
 
         if in_flight < pressure_limit {
             return;
         }
 
-        let new_limit = (limit * policy.scale_factor).min(policy.max_concurrency);
+        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
         let added = new_limit - limit;
 
         if added == 0 {
@@ -507,7 +558,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             service_id: self.service_id,
             instance_seq: seq,
             message_id,
-            trigger_name: self.name.clone(),
+            trigger_name: self.name,
             payload: Arc::new(payload),
             handler: self.handler.clone(),
         };
@@ -515,7 +566,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         // Build the interceptor chain (must happen on the current task
         // because interceptors are borrowed from &self)
         let chain = self.build_chain();
-        let trigger_name = self.name.clone();
+        let trigger_name = self.name;
 
         // Spawn the dispatch as an independent task so the event loop
         // can immediately return to handle_step for the next event.
@@ -698,6 +749,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
             let mut backoff = BackoffController::new(self.policy);
+            let trigger_max_retries = self.policy.trigger_max_retries;
 
             // Preserve shared fields for reconstruction across retries
             let service_id = ctx.service_id;
@@ -713,7 +765,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                 service_id,
                 instance_seq,
                 message_id: message_id.clone(),
-                trigger_name: trigger_name.clone(),
+                trigger_name,
                 payload: payload.clone(),
                 handler: handler.clone(),
             };
@@ -727,6 +779,27 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
             // Subsequent retries: call the handler directly (no need to
             // re-enter interceptors below us, since retry IS the re-entry)
             loop {
+                // Safety valve: stop retrying if the trigger_max_retries limit
+                // is reached. When trigger_max_retries is None (the designed
+                // default), this check is skipped and retries continue
+                // indefinitely. This limit does NOT apply to services, which
+                // always retry forever.
+                if let Some(max) = trigger_max_retries
+                    && backoff.attempt_count() >= max
+                {
+                    warn!(
+                        trigger = %trigger_name,
+                        attempts = backoff.attempt_count(),
+                        trigger_max_retries = max,
+                        "Trigger handler exceeded max retry limit, giving up"
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Trigger '{}' exceeded max retry limit ({} attempts)",
+                        trigger_name,
+                        max
+                    ));
+                }
+
                 let retry_ctx = TriggerContext {
                     service_id,
                     instance_seq,
@@ -761,14 +834,14 @@ mod tests {
     /// to the configured `initial_concurrency`.
     #[tokio::test]
     async fn test_semaphore_limits_concurrency() {
-        let policy = RestartPolicy {
+        let scaling = ScalingPolicy {
             initial_concurrency: 2,
             max_concurrency: 8,
-            ..RestartPolicy::default()
+            ..ScalingPolicy::default()
         };
 
-        let semaphore = Arc::new(Semaphore::new(policy.initial_concurrency));
-        let current_limit = Arc::new(AtomicUsize::new(policy.initial_concurrency));
+        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency));
+        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency));
 
         // Acquire 2 permits -- should succeed (matches initial_concurrency)
         let _p1 = semaphore.clone().acquire_owned().await.unwrap();
@@ -787,19 +860,19 @@ mod tests {
     /// Verifies that `add_permits` correctly expands the concurrency limit.
     #[tokio::test]
     async fn test_semaphore_scale_up() {
-        let policy = RestartPolicy {
+        let scaling = ScalingPolicy {
             initial_concurrency: 1,
             max_concurrency: 4,
             scale_factor: 2,
-            ..RestartPolicy::default()
+            ..ScalingPolicy::default()
         };
 
-        let semaphore = Arc::new(Semaphore::new(policy.initial_concurrency));
-        let current_limit = Arc::new(AtomicUsize::new(policy.initial_concurrency));
+        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency));
+        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency));
 
         // Simulate scale-up: double the limit
         let limit = current_limit.load(Ordering::Relaxed);
-        let new_limit = (limit * policy.scale_factor).min(policy.max_concurrency);
+        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
         let added = new_limit - limit;
 
         semaphore.add_permits(added);
@@ -810,7 +883,7 @@ mod tests {
 
         // Scale up again: 2 -> 4
         let limit = current_limit.load(Ordering::Relaxed);
-        let new_limit = (limit * policy.scale_factor).min(policy.max_concurrency);
+        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
         let added = new_limit - limit;
 
         semaphore.add_permits(added);
@@ -823,19 +896,19 @@ mod tests {
     /// Verifies that scale-up respects `max_concurrency` ceiling.
     #[tokio::test]
     async fn test_scale_up_respects_max_concurrency() {
-        let policy = RestartPolicy {
+        let scaling = ScalingPolicy {
             initial_concurrency: 1,
             max_concurrency: 3,
             scale_factor: 4,
-            ..RestartPolicy::default()
+            ..ScalingPolicy::default()
         };
 
-        let semaphore = Arc::new(Semaphore::new(policy.initial_concurrency));
-        let current_limit = Arc::new(AtomicUsize::new(policy.initial_concurrency));
+        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency));
+        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency));
 
-        // Scale-up: 1 * 4 = 4, but max is 3 → clamp to 3
+        // Scale-up: 1 * 4 = 4, but max is 3 -> clamp to 3
         let limit = current_limit.load(Ordering::Relaxed);
-        let new_limit = (limit * policy.scale_factor).min(policy.max_concurrency);
+        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
         let added = new_limit - limit;
 
         semaphore.add_permits(added);
@@ -845,26 +918,95 @@ mod tests {
         assert_eq!(semaphore.available_permits(), 3);
     }
 
-    /// Verifies that scale-down resets the logical limit without removing
-    /// permits from the semaphore (phantom permit strategy).
+    /// Verifies that scale-down physically revokes permits from the semaphore
+    /// via `try_acquire()` + `forget()`, not just a logical counter update.
     #[tokio::test]
-    async fn test_scale_down_resets_logical_limit() {
-        let policy = RestartPolicy {
+    async fn test_scale_down_physically_revokes_permits() {
+        let scaling = ScalingPolicy {
             initial_concurrency: 1,
             max_concurrency: 8,
             scale_cooldown: Duration::from_millis(10),
-            ..RestartPolicy::default()
+            ..ScalingPolicy::default()
         };
 
-        let current_limit = Arc::new(AtomicUsize::new(4)); // Simulated scaled-up state
+        // Simulate a scaled-up state: semaphore has 4 permits, limit = 4
+        let semaphore = Arc::new(Semaphore::new(4));
+        let current_limit = Arc::new(AtomicUsize::new(4));
 
-        // Simulate cooldown elapsed
+        // Wait for cooldown to elapse
         tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // Scale down
-        current_limit.store(policy.initial_concurrency, Ordering::Relaxed);
+        let mut idle_since = Some(tokio::time::Instant::now() - Duration::from_millis(50));
 
+        TriggerRunner::<()>::try_scale_down(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            4, // current limit
+            &mut idle_since,
+        );
+
+        // Logical limit should be back to initial
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
+        // Physical permits should also be reduced (4 - 3 revoked = 1)
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "Semaphore should have physically lost permits after scale-down"
+        );
+    }
+
+    /// Verifies that a full scale-down → scale-up roundtrip works correctly:
+    /// permits are physically revoked during scale-down and physically restored
+    /// during scale-up.
+    #[tokio::test]
+    async fn test_scale_down_then_scale_up_roundtrip() {
+        let scaling = ScalingPolicy {
+            initial_concurrency: 2,
+            max_concurrency: 8,
+            scale_factor: 2,
+            scale_cooldown: Duration::from_millis(10),
+            ..ScalingPolicy::default()
+        };
+
+        // Start with a scaled-up state: 4 permits
+        let semaphore = Arc::new(Semaphore::new(4));
+        let current_limit = Arc::new(AtomicUsize::new(4));
+
+        // --- Phase 1: Scale down from 4 → 2 ---
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let mut idle_since = Some(tokio::time::Instant::now() - Duration::from_millis(50));
+
+        TriggerRunner::<()>::try_scale_down(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            4,
+            &mut idle_since,
+        );
+
+        assert_eq!(current_limit.load(Ordering::Relaxed), 2);
+        assert_eq!(semaphore.available_permits(), 2);
+
+        // --- Phase 2: Scale up from 2 → 4 ---
+        // Simulate pressure: acquire both permits so in_flight = 2
+        let _p1 = semaphore.clone().try_acquire_owned().unwrap();
+        let _p2 = semaphore.clone().try_acquire_owned().unwrap();
+
+        TriggerRunner::<()>::try_scale_up(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            2, // current limit
+            2, // in_flight (100% pressure)
+        );
+
+        assert_eq!(current_limit.load(Ordering::Relaxed), 4);
+        // 2 new permits added, but 2 are held by _p1/_p2
+        assert_eq!(semaphore.available_permits(), 2);
     }
 
     /// Verifies that the pressure calculation correctly identifies when
@@ -894,5 +1036,130 @@ mod tests {
         let limit: usize = 12;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // New tests: TriggerRunner conditional scaling initialization
+    // -----------------------------------------------------------------------
+
+    /// When `scaling = None`, TriggerRunner should initialize with exactly
+    /// 1 permit (serial dispatch) and current_limit = 1.
+    #[test]
+    fn test_runner_no_scaling_serial_dispatch() {
+        let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
+        let runner = TriggerRunner::new(
+            "test_no_scaling",
+            ServiceId::new(99),
+            handler,
+            RestartPolicy::default(),
+            None, // no scaling
+        );
+
+        // Serial mode: exactly 1 permit available
+        assert_eq!(runner.semaphore.available_permits(), 1);
+        assert_eq!(runner.current_limit.load(Ordering::Relaxed), 1);
+        assert!(runner.scaling.is_none());
+    }
+
+    /// When `scaling = Some(ScalingPolicy)`, TriggerRunner should initialize
+    /// with `initial_concurrency` permits and store the policy.
+    #[test]
+    fn test_runner_with_scaling_initializes_permits() {
+        let sp = ScalingPolicy {
+            initial_concurrency: 4,
+            max_concurrency: 16,
+            ..ScalingPolicy::default()
+        };
+        let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
+        let runner = TriggerRunner::new(
+            "test_with_scaling",
+            ServiceId::new(100),
+            handler,
+            RestartPolicy::default(),
+            Some(sp),
+        );
+
+        assert_eq!(runner.semaphore.available_permits(), 4);
+        assert_eq!(runner.current_limit.load(Ordering::Relaxed), 4);
+        assert!(runner.scaling.is_some());
+        let stored = runner.scaling.unwrap();
+        assert_eq!(stored.max_concurrency, 16);
+    }
+
+    /// Verify that the default ScalingPolicy (used by TopicHost) produces
+    /// expected initial values in TriggerRunner.
+    #[test]
+    fn test_runner_default_scaling_policy_values() {
+        let sp = ScalingPolicy::default();
+        let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
+        let runner = TriggerRunner::new(
+            "test_default_sp",
+            ServiceId::new(101),
+            handler,
+            RestartPolicy::default(),
+            Some(sp),
+        );
+
+        // Default initial_concurrency is 1
+        assert_eq!(runner.semaphore.available_permits(), 1);
+        assert_eq!(runner.current_limit.load(Ordering::Relaxed), 1);
+        // But scaling IS enabled
+        assert!(runner.scaling.is_some());
+        assert_eq!(runner.scaling.unwrap().max_concurrency, 64);
+    }
+
+    /// Verify that custom ScalingPolicy via builder integrates correctly
+    /// with TriggerRunner initialization.
+    #[test]
+    fn test_runner_custom_scaling_via_builder() {
+        let sp = ScalingPolicy::builder()
+            .initial_concurrency(8)
+            .max_concurrency(64)
+            .scale_factor(4)
+            .scale_threshold(3)
+            .scale_cooldown(Duration::from_secs(10))
+            .build();
+
+        let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
+        let runner = TriggerRunner::new(
+            "test_builder_sp",
+            ServiceId::new(102),
+            handler,
+            RestartPolicy::default(),
+            Some(sp),
+        );
+
+        assert_eq!(runner.semaphore.available_permits(), 8);
+        assert_eq!(runner.current_limit.load(Ordering::Relaxed), 8);
+        let stored = runner.scaling.unwrap();
+        assert_eq!(stored.scale_factor, 4);
+        assert_eq!(stored.scale_threshold, 3);
+        assert_eq!(stored.scale_cooldown, Duration::from_secs(10));
+    }
+
+    // -----------------------------------------------------------------------
+    // UUID v7 monotonic ordering test
+    // -----------------------------------------------------------------------
+
+    /// Verifies that `generate_message_id` produces lexicographically ordered
+    /// IDs when the `uuid-trigger-ids` feature is enabled (UUID v7).
+    ///
+    /// UUID v7 encodes a millisecond-precision timestamp in its high bits,
+    /// so consecutive calls should yield IDs that sort in chronological order.
+    /// This property is critical for database index locality and ordered
+    /// event replay.
+    #[cfg(feature = "uuid-trigger-ids")]
+    #[test]
+    fn test_message_id_monotonic_ordering() {
+        let mut previous = generate_message_id();
+        for _ in 0..100 {
+            let current = generate_message_id();
+            assert!(
+                current >= previous,
+                "UUID v7 IDs must be monotonically non-decreasing: \
+                 previous={previous}, current={current}"
+            );
+            previous = current;
+        }
     }
 }

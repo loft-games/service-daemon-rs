@@ -125,7 +125,7 @@ pub struct DispatchContext<P> {
     pub service_id: ServiceId,     // Which trigger service
     pub instance_seq: u64,         // Invocation sequence number
     pub message_id: String,        // Globally unique event ID
-    pub trigger_name: String,      // Human-readable trigger name
+    pub trigger_name: &'static str, // Human-readable trigger name
     pub payload: Arc<P>,           // Your business data (cheap to clone)
     pub handler: TriggerHandler<P>, // The final handler function
 }
