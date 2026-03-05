@@ -8,7 +8,7 @@ The `#[service]` and `#[trigger]` macros are the soul of the framework's "Invisi
 
 We've mentioned tags before, but let's see why they are a "Power User" feature. Tags allow you to create **Application Profiles**.
 
-```rust
+```rust,ignore
 #[service(tags = ["critical", "api"])]
 async fn payment_gateway() { ... }
 
@@ -18,7 +18,7 @@ async fn log_purger() { ... }
 
 In your `main.rs`, you can choose which "personality" the process assumes:
 
-```rust
+```rust,ignore
 // Only run the critical API services in this container
 let reg = Registry::builder().with_tag("api").build();
 #[tokio::main]
@@ -62,4 +62,4 @@ You've completed the Grand Tour. You've gone from a simple heartbeat to understa
 
 Now, go forth and build something reliable!
 
-[**<- Previous Step: The Interceptor Gauntlet**](interceptor-gauntlet.md) | [**Back to the Grand Tour ->**](grand-tour.md)
+[**<- Previous Step: The Interceptor Gauntlet**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/interceptor-gauntlet.md) | [**Back to the Grand Tour ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/grand-tour.md)

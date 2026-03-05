@@ -10,7 +10,7 @@ In this chapter, we'll learn how to tune the engine's resilience.
 
 By default, `ServiceDaemon` uses exponential backoff. You can customize this globally to match your environment.
 
-```rust
+```rust,ignore
 use service_daemon::{ServiceDaemon, RestartPolicy};
 use std::time::Duration;
 
@@ -45,7 +45,7 @@ While `RestartPolicy` handles *time* (delays and retries), the **`ScalingPolicy`
 
 The default limit for streaming triggers (like `Queue`) is **64** concurrent handlers. If your system has high throughput requirements, you can tune this:
 
-```rust
+```rust,ignore
 use service_daemon::{ServiceDaemon, ScalingPolicy};
 
 #[tokio::main]
@@ -80,7 +80,7 @@ Sometimes, a service encounter an error that **cannot** be fixed by a restart. F
 
 In these cases, you should use `ServiceError::Fatal`.
 
-```rust
+```rust,ignore
 use service_daemon::models::ServiceError;
 
 #[service]
@@ -105,8 +105,8 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 *   `wave_stop_timeout`: Maximum time to wait for a service to exit before forcefully killing it.
 
 > [!NOTE]
-> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](../resilience.md) design document.
+> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/resilience.md) design document.
 
 ---
 
-[**<- Previous Step: DIY Providers**](diy-providers.md) | [**Next Step: Waves of Orchestration ->**](orchestration-waves.md)
+[**<- Previous Step: DIY Providers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/diy-providers.md) | [**Next Step: Waves of Orchestration ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/orchestration-waves.md)

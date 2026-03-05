@@ -10,7 +10,7 @@ This simple example introduces the three pillars of the framework: **Providers**
 
 In `service-daemon-rs`, we don't pass configuration strings or raw integers around. We use **Providers**. A provider is just a type that the framework knows how to "provide" to your services.
 
-```rust
+```rust,ignore
 use service_daemon::provider;
 
 /// A simple configuration for our heartbeat interval.
@@ -25,7 +25,7 @@ pub struct HeartbeatInterval(pub u64);
 
 Now, let's write the logic. A service is an `async fn` marked with `#[service]`. It can "ask" for any provider by simply adding it to its arguments as an `Arc<T>`.
 
-```rust
+```rust,ignore
 use service_daemon::{service, sleep, is_shutdown};
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +58,7 @@ You'll notice we use `tracing::info!` instead of `println!`. In `service-daemon-
 
 Finally, you just need to tell the framework to run. It will find all your `#[service]` functions automatically and start them in the background.
 
-```rust
+```rust,ignore
 use service_daemon::ServiceDaemon;
 
 #[tokio::main]
@@ -87,4 +87,4 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-[**Next Step: Reactive Triggers ->**](reactive-triggers.md)
+[**Next Step: Reactive Triggers ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md)

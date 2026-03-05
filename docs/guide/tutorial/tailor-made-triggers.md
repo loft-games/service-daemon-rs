@@ -28,7 +28,7 @@ Let's imagine you want a trigger that fires whenever a file is created.
 
 ### Stateless Host (No Initialization Needed)
 
-```rust
+```rust,ignore
 use service_daemon::{TriggerHost, TriggerTransition, Provided};
 use service_daemon::futures::future::BoxFuture;
 use std::sync::Arc;
@@ -63,7 +63,7 @@ where
 
 If your trigger needs to set up resources (like a network connection or scheduler job), do it in `setup` and store them as struct fields:
 
-```rust
+```rust,ignore
 pub struct WebSocketHost {
     connection: WebSocketConnection,
 }
@@ -108,7 +108,7 @@ Your `handle_step` method returns an instruction to the engine:
 
 By default, custom triggers dispatch events **serially** (no scaling overhead). If your trigger is a streaming event source that benefits from concurrent handler execution, override `scaling_policy()`:
 
-```rust
+```rust,ignore
 fn scaling_policy() -> Option<ScalingPolicy> {
     Some(ScalingPolicy::default())
 }
@@ -120,7 +120,7 @@ This enables the framework's pressure-based auto-scaler (`scale_monitor`). Users
 
 Sometimes, `handle_step` is simply not enough. If you're integrating a legacy C library with weird threading requirements, or a high-performance system that requires full control over the execution loop, you can override the **`run_as_service`** engine itself.
 
-```rust
+```rust,ignore
 impl<T> TriggerHost<T> for MyUltimateHost {
     // ...
     fn run_as_service(
@@ -146,4 +146,4 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 
 ---
 
-[**<- Previous Step: Under the Hood**](under-the-hood.md) | [**Next Step: The Interceptor Gauntlet ->**](interceptor-gauntlet.md)
+[**<- Previous Step: Under the Hood**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/under-the-hood.md) | [**Next Step: The Interceptor Gauntlet ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/interceptor-gauntlet.md)

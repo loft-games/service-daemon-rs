@@ -10,7 +10,7 @@ You shouldn't put complex initialization logic inside a macro. Instead, you can 
 
 If your provider requires `async` setup (like connecting to a server), define a function marked with `#[provider]`.
 
-```rust
+```rust,ignore
 use service_daemon::provider;
 use rumqttc::{AsyncClient, MqttOptions};
 
@@ -42,7 +42,7 @@ By default, every service that asks for `Arc<MqttBus>` will receive the **same i
 
 Providers can depend on other providers! The framework handles the dependency graph for you.
 
-```rust
+```rust,ignore
 #[provider]
 pub struct DatabaseUrl(pub String);
 
@@ -59,8 +59,8 @@ async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
 *   **Fail Fast**: If a provider cannot be initialized, use `.expect()` or `panic!`. The framework will catch this and report it as a startup error.
 
 > [!TIP]
-> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../provider-best-practices.md) guide.
+> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/provider-best-practices.md) guide.
 
 ---
 
-[**<- Previous Step: The Art of Recovery**](art-of-recovery.md) | [**Next Step: Resilience Kung-Fu ->**](resilience-kung-fu.md)
+[**<- Previous Step: The Art of Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/art-of-recovery.md) | [**Next Step: Resilience Kung-Fu ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/resilience-kung-fu.md)

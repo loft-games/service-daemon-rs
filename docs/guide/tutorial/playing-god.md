@@ -19,7 +19,7 @@ service_daemon = { version = "...", features = ["simulation"] }
 
 In a simulation test, you run a **fully functional but isolated Daemon**. Instead of global auto-discovery, you use a `MockContext` to inject controlled resources and specific services into a sandbox.
 
-```rust
+```rust,ignore
 use service_daemon::prelude::*;
 use std::time::Duration;
 
@@ -109,7 +109,7 @@ The `SimulationHandle` allows you to reach into the running sandbox and change t
 ### Snapshot Inspection
 These methods allow you to inspect the current state of a service or the shelf without interfering with the running daemon. 
 
-```rust
+```rust,ignore
 // Inspect shelf values
 let val: Option<String> = handle.get_shelf("svc", "key");
 
@@ -121,7 +121,7 @@ if handle.has_shelf("svc", "key") { ... }
 ```
 
 ### Mutation API
-```rust
+```rust,ignore
 // Mid-test: Change the status of a service to force a reload
 handle.set_status(service_id, ServiceStatus::NeedReload);
 
@@ -136,8 +136,8 @@ handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 *   **Status Flipping**: Force services into `NeedReload`, `Recovering`, or `ShuttingDown` to test their reaction logic.
 
 > [!NOTE]
-> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](../testing-troubleshooting.md).
+> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/testing-troubleshooting.md).
 
 ---
 
-[**-- Previous Step: Waves of Orchestration**](orchestration-waves.md) | [**Next Step: Under the Hood --**](under-the-hood.md)
+[**-- Previous Step: Waves of Orchestration**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/orchestration-waves.md) | [**Next Step: Under the Hood --**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/under-the-hood.md)

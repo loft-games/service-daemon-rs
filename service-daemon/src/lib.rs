@@ -40,6 +40,7 @@ extern crate self as service_daemon;
 
 pub mod core;
 pub mod models;
+pub mod tutorial;
 
 // Re-export commonly used items
 pub use core::context::{
