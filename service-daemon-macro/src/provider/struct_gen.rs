@@ -7,35 +7,52 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::ItemStruct;
 use syn::spanned::Spanned;
 
-use super::parser::ProviderArgs;
-use super::templates::{generate_broadcast_queue_template, generate_notify_template};
+use super::parser::{ProviderArgs, ProviderKind, TemplateArg};
+use super::templates::{
+    generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
+};
 
 /// Attempts to generate a template-based provider if the args specify a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
+///
+/// Also emits warnings for unused named arguments (e.g., `capacity` on Notify).
 fn try_generate_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     provider_args: &ProviderArgs,
 ) -> Option<TokenStream> {
-    let ProviderArgs::Template {
-        name,
-        inner_type,
-        capacity,
-    } = provider_args
-    else {
+    let ProviderKind::Template { name, arg } = &provider_args.kind else {
         return None;
     };
 
     match name.to_string().as_str() {
-        // Signal templates
-        "Notify" | "Event" => Some(generate_notify_template(struct_name, vis, attrs)),
+        // Signal templates — no named arguments are useful
+        "Notify" | "Event" => {
+            if provider_args.env.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name, "Notify/Event template does not use `env`; it will be ignored"
+                );
+            }
+            if provider_args.capacity.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name, "Notify/Event template does not use `capacity`; it will be ignored"
+                );
+            }
+            Some(generate_notify_template(struct_name, vis, attrs))
+        }
         // Broadcast queue templates (fanout - all handlers receive the event)
         "BroadcastQueue" | "Queue" | "BQueue" => {
-            let item_type = inner_type
-                .clone()
-                .unwrap_or_else(|| syn::parse_quote!(String));
-            let cap = capacity.unwrap_or(100);
+            let item_type = match arg {
+                Some(TemplateArg::Type(ty)) => (*ty).clone(),
+                _ => syn::parse_quote!(String),
+            };
+            let cap = provider_args.capacity.unwrap_or(100);
+            if provider_args.env.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name, "Queue template does not use `env`; it will be ignored"
+                );
+            }
             Some(generate_broadcast_queue_template(
                 struct_name,
                 vis,
@@ -44,12 +61,37 @@ fn try_generate_template(
                 cap,
             ))
         }
+        // Listen template (TCP listener with FD cloning)
+        "Listen" => {
+            let bind_addr = match arg {
+                Some(TemplateArg::Addr(lit)) => lit,
+                _ => {
+                    proc_macro_error2::abort!(
+                        name,
+                        "Listen template requires a bind address";
+                        help = r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#
+                    );
+                }
+            };
+            if provider_args.capacity.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name, "Listen template does not use `capacity`; it will be ignored"
+                );
+            }
+            Some(generate_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                bind_addr,
+                provider_args.env.as_ref(),
+            ))
+        }
         _ => {
             // Unknown template name — emit helpful error at the exact span
             proc_macro_error2::abort!(
                 name,
                 "Unknown provider template '{}'", name;
-                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue"
+                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen"
             );
         }
     }
@@ -354,14 +396,21 @@ fn generate_default_impl(
         return quote! {};
     };
 
-    // Extract default value expression and optional env from args.
-    // No sentinel detection needed — `default_value` is `Option<syn::Expr>`.
-    let (default_expr_opt, env_opt) = match provider_args {
-        ProviderArgs::Value {
-            default_value, env, ..
-        } => (default_value.as_ref(), env.as_ref()),
-        _ => (None, None),
+    // Extract default value expression from args.
+    let default_expr_opt = match &provider_args.kind {
+        ProviderKind::Value { default_value } => default_value.as_ref(),
+        _ => None,
     };
+    // Read env from the shared field.
+    let env_opt = provider_args.env.as_ref();
+
+    // Capacity on Value providers is semantically invalid — emit error.
+    if provider_args.capacity.is_some() {
+        proc_macro_error2::emit_error!(
+            struct_name,
+            "`capacity` is not supported on value providers; use a template like Queue instead"
+        );
+    }
 
     // Helper to wrap string literals with .to_owned() for String fields
     let expand_value = |expr: &syn::Expr| -> proc_macro2::TokenStream {

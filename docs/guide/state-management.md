@@ -65,7 +65,38 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
 }
 ```
 
-## 2. Unified Status Plane
+## 2. Specialized Templates
+
+`service-daemon-rs` provides several built-in templates for common infrastructure needs. These templates are "early-initialized" during the **System Wave**, meaning they are ready before any business logic starts.
+
+### Early-Binding Listeners (`Listen`)
+The `Listen` template is designed for cloud-native environments (Kubernetes, Knative) where health probes start hitting your port as soon as the container is "Running".
+
+Normal `TcpListener::bind()` inside an async service starts too late. If your DB migration takes 10 seconds, the probe fails, and the container restarts.
+
+- **Early Binding**: The port is bound immediately during system startup.
+- **FD Cloning**: Each call to `listener.get()` returns a new `tokio::net::TcpListener` by cloning the underlying OS file descriptor (`dup`). This allows multiple services or reload generations to share the same port.
+- **Fail-Fast**: If the port is already in use, the framework panics immediately during startup, preventing "silent failures."
+
+```rust
+// In your providers definition:
+#[derive(Clone)]
+#[provider(Listen("0.0.0.0:8080", env = "LISTEN_ADDR"))]
+pub struct ApiListener;
+
+// In your service:
+#[service(priority = ServicePriority::EXTERNAL)]
+pub async fn web_server(listener: Arc<ApiListener>) -> anyhow::Result<()> {
+    let l = listener.get(); // Clones the FD into a tokio listener
+    axum::serve(l, my_app).await.map_err(Into::into)
+}
+```
+
+### Signal & Queues
+- **Notify**: Wraps `tokio::sync::Notify`. Ideal for manual triggers.
+- **Queue / BQueue / BroadcastQueue**: Integrated event channels with configurable `capacity`.
+
+## 3. Unified Status Plane
 
 The Status Plane provides services with lifecycle awareness via the `ServiceStatus` enum.
 
