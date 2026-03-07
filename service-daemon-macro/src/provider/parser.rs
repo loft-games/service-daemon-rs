@@ -22,7 +22,14 @@ use syn::parse::{Parse, ParseStream};
 use syn::{Ident, Token};
 
 /// Known template names that trigger struct-body replacement.
-const TEMPLATE_NAMES: &[&str] = &["Notify", "Event", "Queue", "BQueue", "BroadcastQueue", "Listen"];
+const TEMPLATE_NAMES: &[&str] = &[
+    "Notify",
+    "Event",
+    "Queue",
+    "BQueue",
+    "BroadcastQueue",
+    "Listen",
+];
 
 /// Returns `true` if the identifier matches a known template name.
 fn is_template_name(ident: &Ident) -> bool {
@@ -133,10 +140,16 @@ impl Parse for ProviderArgs {
                         arg = Some(TemplateArg::Type(Box::new(content.parse::<syn::Type>()?)));
                     }
 
-                    // If there are trailing tokens inside the parentheses (e.g., `, env = "..."`),
-                    // we jump into the trailing attrs parsing for THAT sub-stream.
+                    // Reject unexpected trailing tokens inside parentheses.
+                    // Named attributes like `env` must be placed outside:
+                    //   #[provider(Listen("addr"), env = "VAR")]
                     if !content.is_empty() {
-                        return Self::parse_trailing_attrs(&content, ProviderKind::Template { name, arg }, None, None);
+                        return Err(syn::Error::new(
+                            content.span(),
+                            "Unexpected tokens inside template parentheses; \
+                             named attributes like `env` belong outside: \
+                             #[provider(Listen(\"addr\"), env = \"VAR\")]",
+                        ));
                     }
                 }
 
@@ -171,7 +184,9 @@ impl Parse for ProviderArgs {
                 // Continue with phase 2 for any remaining `, key = value` pairs
                 return Self::parse_trailing_attrs(
                     input,
-                    ProviderKind::Value { default_value: None },
+                    ProviderKind::Value {
+                        default_value: None,
+                    },
                     env,
                     capacity,
                 );
@@ -320,7 +335,10 @@ mod tests {
         let args = parse_args(quote! { 8080 }).unwrap();
         match &args.kind {
             ProviderKind::Value { default_value } => {
-                assert!(default_value.is_some(), "default_value should be Some for literal");
+                assert!(
+                    default_value.is_some(),
+                    "default_value should be Some for literal"
+                );
             }
             _ => panic!("Expected Value variant"),
         }
@@ -347,7 +365,10 @@ mod tests {
         let args = parse_args(quote! { env = "API_KEY" }).unwrap();
         match &args.kind {
             ProviderKind::Value { default_value } => {
-                assert!(default_value.is_none(), "env-only should have None default_value");
+                assert!(
+                    default_value.is_none(),
+                    "env-only should have None default_value"
+                );
             }
             _ => panic!("Expected Value variant with env-only"),
         }
@@ -432,6 +453,20 @@ mod tests {
             err_msg.contains("Unknown provider attribute"),
             "Error message should mention unknown provider attribute, got: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn listen_template_env_inside_parens_is_error() {
+        // Old syntax `Listen("addr", env = "VAR")` should now be rejected.
+        // The correct form is `Listen("addr"), env = "VAR"` (outside parentheses).
+        let result = parse_args(quote! { Listen("0.0.0.0:8080", env = "LISTEN_ADDR") });
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unexpected tokens inside template parentheses"),
+            "Error should mention unexpected tokens inside parentheses, got: {}",
+            err_msg,
         );
     }
 

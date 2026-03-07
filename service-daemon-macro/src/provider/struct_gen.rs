@@ -31,12 +31,14 @@ fn try_generate_template(
         "Notify" | "Event" => {
             if provider_args.env.is_some() {
                 proc_macro_error2::emit_warning!(
-                    name, "Notify/Event template does not use `env`; it will be ignored"
+                    name,
+                    "Notify/Event template does not use `env`; it will be ignored"
                 );
             }
             if provider_args.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
-                    name, "Notify/Event template does not use `capacity`; it will be ignored"
+                    name,
+                    "Notify/Event template does not use `capacity`; it will be ignored"
                 );
             }
             Some(generate_notify_template(struct_name, vis, attrs))
@@ -50,7 +52,8 @@ fn try_generate_template(
             let cap = provider_args.capacity.unwrap_or(100);
             if provider_args.env.is_some() {
                 proc_macro_error2::emit_warning!(
-                    name, "Queue template does not use `env`; it will be ignored"
+                    name,
+                    "Queue template does not use `env`; it will be ignored"
                 );
             }
             Some(generate_broadcast_queue_template(
@@ -75,7 +78,8 @@ fn try_generate_template(
             };
             if provider_args.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
-                    name, "Listen template does not use `capacity`; it will be ignored"
+                    name,
+                    "Listen template does not use `capacity`; it will be ignored"
                 );
             }
             Some(generate_listen_template(

@@ -12,5 +12,5 @@ use service_daemon::provider;
 #[provider(8080)]
 pub struct Port(pub i32);
 
-#[provider(Listen("0.0.0.0:8081", env = "MINIMAL_LISTEN_ADDR"))]
+#[provider(Listen("0.0.0.0:8081"), env = "MINIMAL_LISTEN_ADDR")]
 pub struct MinimalListener;

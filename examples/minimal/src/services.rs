@@ -16,7 +16,10 @@ use tracing::info;
 #[service]
 pub async fn listener_service(listener: Arc<MinimalListener>) -> anyhow::Result<()> {
     let l = listener.get();
-    info!("Listener service: Port is already bound at {}", l.local_addr()?);
+    info!(
+        "Listener service: Port is already bound at {}",
+        l.local_addr()?
+    );
 
     while !service_daemon::is_shutdown() {
         if !service_daemon::sleep(std::time::Duration::from_secs(10)).await {

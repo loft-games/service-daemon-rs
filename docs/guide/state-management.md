@@ -81,7 +81,7 @@ Normal `TcpListener::bind()` inside an async service starts too late. If your DB
 ```rust
 // In your providers definition:
 #[derive(Clone)]
-#[provider(Listen("0.0.0.0:8080", env = "LISTEN_ADDR"))]
+#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]
 pub struct ApiListener;
 
 // In your service:
