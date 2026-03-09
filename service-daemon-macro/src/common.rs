@@ -111,10 +111,14 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
     (found, cleaned)
 }
 
-/// Represents the detected intent of a function parameter.
+/// Represents the shared parser classification for a function parameter.
 #[derive(Debug, Clone)]
 pub enum ParamIntent {
-    /// An event payload (optionally wrapped in Arc).
+    /// A parameter routed through the shared payload lane.
+    ///
+    /// For `#[trigger]`, this is the actual trigger payload (optionally wrapped
+    /// in `Arc`). For `#[service]`, the same lane is only used to reject
+    /// unsupported bare or `#[payload]` parameters with a service-specific error.
     Payload { is_arc: bool },
     /// A DI dependency.
     Dependency {
@@ -171,7 +175,11 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
             ));
         }
 
-        // Implicit payload (non-wrapped type)
+        // This parser is shared by `#[service]` and `#[trigger]`, so bare
+        // non-wrapper parameters flow through one common classification branch.
+        // For triggers that branch represents the real payload parameter. For
+        // services it is only the internal rejection path for unsupported
+        // signatures; services do not conceptually have payload parameters.
         return Some((arg_name, ParamIntent::Payload { is_arc: false }));
     }
     None
@@ -258,17 +266,23 @@ impl ParamProcessor {
     ///   to produce a friendly compiler error if `T: Clone` is missing.
     fn process_payload(&mut self, arg: &FnArg, arg_name: syn::Ident, is_arc: bool) {
         if !self.allow_payload {
+            // `#[service]` and `#[trigger]` share the same parameter processor.
+            // Bare or `#[payload]` parameters arrive here because they use the
+            // shared payload classification lane. For services, that lane exists
+            // only so we can reject unsupported signatures with accurate wording;
+            // it does not mean services semantically support payloads.
             abort!(
                 arg,
-                "Services do not support event payloads. Only Arc<T> dependencies are allowed.";
-                help = "Remove the payload parameter or use #[trigger] instead."
+                "#[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].";
+                help = "Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead."
             );
         }
 
         if self.payload_arg_name.is_some() {
             abort!(
                 arg,
-                "Multiple payload parameters detected. Only one parameter can be the event payload."
+                "Multiple payload parameters detected. A trigger can accept only one payload parameter.";
+                help = "Keep one bare or #[payload] parameter and convert the others to Arc<T> dependencies."
             );
         }
         self.payload_arg_name = Some(arg_name);
@@ -390,8 +404,8 @@ impl ParamProcessor {
 
         abort!(
             arg,
-            "Unsupported parameter type. Service parameters must be Arc wrappers.";
-            help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>."
+            "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.";
+            help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies. Use one bare parameter only when defining a trigger payload."
         );
     }
 
@@ -408,8 +422,12 @@ impl ParamProcessor {
     }
 }
 
-/// Extracts and categorizes parameters from the function signature.
-/// Supported by both `#[service]` and `#[trigger]`.
+/// Extracts parameters from the function signature using the shared parser.
+///
+/// Both `#[service]` and `#[trigger]` use this function. The `allow_payload`
+/// flag determines whether the shared payload lane is accepted as real trigger
+/// payload semantics or reused as the rejection path for unsupported service
+/// signatures.
 pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedParams {
     let mut processor = ParamProcessor::new(allow_payload);
     for arg in &sig.inputs {

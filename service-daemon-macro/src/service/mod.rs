@@ -83,7 +83,10 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Detect #[allow(sync_handler)] and strip it from the attribute list
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
-    // Extract parameters and categorize them
+    // `extract_params(..., false)` uses the shared parser in service mode.
+    // Bare or `#[payload]` parameters still flow through the shared payload
+    // lane internally, but that lane is only used to reject invalid service
+    // signatures. `#[service]` parameters must be Arc-based dependencies.
     let ExtractedParams {
         clean_inputs,
         resolve_tokens,

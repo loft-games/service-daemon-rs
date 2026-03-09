@@ -40,7 +40,10 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let priority_tokens = args.priority;
     let tags_tokens = args.tags;
 
-    // Extract parameters and categorize them
+    // `extract_params(..., true)` uses the shared parser in trigger mode.
+    // Here the shared payload lane is the real trigger payload semantics:
+    // exactly one bare or `#[payload]` parameter may be accepted, while
+    // Arc-based parameters are treated as framework-managed dependencies.
     let ExtractedParams {
         clean_inputs,
         resolve_tokens,

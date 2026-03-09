@@ -1,8 +1,8 @@
-//! Fail case: #[service] rejects payload parameters.
+//! Fail case: #[service] rejects bare parameters even if the author thinks of them as payload-like.
 //!
-//! Services do NOT support event payloads. Only triggers can
-//! accept payloads. Using a non-Arc parameter in a service
-//! should produce a clear error message.
+//! Payloads belong only to `#[trigger]`. In `#[service]`, a bare parameter like
+//! `String` is still an invalid signature because service parameters must be
+//! Arc-based framework-managed dependencies.
 
 use service_daemon::service;
 

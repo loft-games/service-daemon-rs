@@ -38,6 +38,11 @@ This central hub explains the architectural "why" behind common behaviors and tr
 > [!WARNING]
 > Do **NOT** use `is_shutdown()` inside a `state().match()` loop. The `state()` stream handles shutdown automatically.
 
+### Why did my `#[service]` parameter get treated like a payload?
+**Problem**: A `#[service]` function with a bare parameter like `data: String` or `port: i32` fails with what looks like a payload-related macro error.
+**Cause**: Services do not have payload parameters. Every `#[service]` parameter must be a framework-managed dependency written as `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`. The current macro implementation uses a shared parser for both `#[service]` and `#[trigger]`, so a bare parameter is routed through the same internal branch that handles trigger payloads. For services, that branch is only the rejection path for an unsupported signature; it is an implementation detail, not the semantic contract of `#[service]`.
+**The Fix**: For services, wrap dependencies as `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`. If you intended to handle an event payload, use `#[trigger]` instead.
+
 ---
 
 ## 3. Providers & State

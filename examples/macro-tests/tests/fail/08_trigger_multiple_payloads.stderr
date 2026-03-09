@@ -1,0 +1,8 @@
+error: Multiple payload parameters detected. A trigger can accept only one payload parameter.
+
+         = help: Keep one bare or #[payload] parameter and convert the others to Arc<T> dependencies.
+
+ --> tests/fail/08_trigger_multiple_payloads.rs:9:47
+  |
+9 | pub async fn too_many_payloads(first: String, second: String) -> anyhow::Result<()> {
+  |                                               ^^^^^^^^^^^^^^
