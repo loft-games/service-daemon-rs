@@ -140,19 +140,17 @@ impl TupleStructInfo {
     }
 }
 
-/// Generates the standard `Provided` trait impl + convenience methods (`rwlock()`/`mutex()`)
-/// for a provider type, and registers a `ProviderEntry` in the `PROVIDER_REGISTRY`
-/// for dependency graph analysis.
+/// Generates the provider capability trait impls and convenience methods
+/// for a provider type, and registers a `ProviderEntry` in the
+/// `PROVIDER_REGISTRY` for dependency graph analysis.
 ///
 /// This shared function eliminates the code duplication that previously existed
 /// across struct providers, fn providers, and template providers.
 ///
 /// # Arguments
-/// * `type_tokens` — The type that implements `Provided` (as a token stream).
+/// * `type_tokens` — The type that implements provider traits (as a token stream).
 /// * `singleton_name` — The unique static `StateManager` identifier.
 /// * `constructor` — The expression to create `Arc<Self>` on first resolution.
-/// * `changed_body` — Custom `changed()` body, or `None` for the standard
-///   `StateManager::changed()` implementation.
 /// * `user_span`  — The span of the user's type definition (struct name or fn
 ///   return type). Used for `quote_spanned!` so that missing trait bound errors
 ///   (e.g., `Clone`) point to the user's code, not the macro output.
@@ -161,14 +159,9 @@ pub(super) fn generate_provided_impl(
     type_tokens: &proc_macro2::TokenStream,
     singleton_name: &syn::Ident,
     constructor: &proc_macro2::TokenStream,
-    changed_body: Option<proc_macro2::TokenStream>,
     user_span: proc_macro2::Span,
     param_entries: &[proc_macro2::TokenStream],
 ) -> proc_macro2::TokenStream {
-    let changed_impl = changed_body.unwrap_or_else(|| {
-        quote! { #singleton_name.changed().await }
-    });
-
     // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
     // the compiler error points to the user's struct definition or fn return
     // type rather than an opaque macro expansion site.
@@ -177,6 +170,14 @@ pub(super) fn generate_provided_impl(
             fn __assert_provider_bounds<T: Clone + Send + Sync + 'static>() {}
             fn __check() { __assert_provider_bounds::<#type_tokens>(); }
         };
+    };
+
+    let watchable_impl = quote! {
+        impl service_daemon::WatchableProvided for #type_tokens {
+            async fn changed() {
+                #singleton_name.changed().await
+            }
+        }
     };
 
     // Generate a unique entry name for the PROVIDER_REGISTRY slice.
@@ -199,7 +200,9 @@ pub(super) fn generate_provided_impl(
                     #constructor
                 }).await
             }
+        }
 
+        impl service_daemon::ManagedProvided for #type_tokens {
             async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
                     #constructor
@@ -211,21 +214,19 @@ pub(super) fn generate_provided_impl(
                     #constructor
                 }).await
             }
-
-            async fn changed() {
-                #changed_impl
-            }
         }
+
+        #watchable_impl
 
         impl #type_tokens {
             /// Resolves a tracked RwLock for this provider.
             pub async fn rwlock(&self) -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
-                <Self as service_daemon::Provided>::resolve_rwlock().await
+                <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
             }
 
             /// Resolves a tracked Mutex for this provider.
             pub async fn mutex(&self) -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
-                <Self as service_daemon::Provided>::resolve_mutex().await
+                <Self as service_daemon::ManagedProvided>::resolve_mutex().await
             }
         }
 
@@ -314,7 +315,6 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         &type_tokens,
         &singleton_name,
         &constructor,
-        None,
         struct_name.span(),
         &param_entries,
     );
@@ -510,8 +510,8 @@ fn generate_default_impl(
 ///
 /// Supports automatic injection for:
 /// - `Arc<T>` fields -> `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` fields -> `<T as Provided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` fields -> `<T as Provided>::resolve_mutex().await`
+/// - `Arc<RwLock<T>>` fields -> `<T as ManagedProvided>::resolve_rwlock().await`
+/// - `Arc<Mutex<T>>` fields -> `<T as ManagedProvided>::resolve_mutex().await`
 /// - Other fields -> `Default::default()`
 ///
 /// Uses `decompose_type` from `common` to avoid duplicating Arc pattern matching (Fix #8).
@@ -531,12 +531,12 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                     match wrapper {
                         Some(crate::common::WrapperKind::ArcRwLock(_, _)) => {
                             quote! {
-                                #field_name: <#inner_type as service_daemon::Provided>::resolve_rwlock().await
+                                #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await
                             }
                         }
                         Some(crate::common::WrapperKind::ArcMutex(_, _)) => {
                             quote! {
-                                #field_name: <#inner_type as service_daemon::Provided>::resolve_mutex().await
+                                #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await
                             }
                         }
                         Some(crate::common::WrapperKind::Arc(_)) => {

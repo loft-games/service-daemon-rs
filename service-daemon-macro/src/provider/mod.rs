@@ -79,8 +79,8 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Supports the same `Arc<T>` injection patterns as `#[service]` / `#[trigger]`:
 /// - `Arc<T>` -> `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` -> `<T as Provided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` -> `<T as Provided>::resolve_mutex().await`
+/// - `Arc<RwLock<T>>` -> `<T as ManagedProvided>::resolve_rwlock().await`
+/// - `Arc<Mutex<T>>` -> `<T as ManagedProvided>::resolve_mutex().await`
 ///
 /// The function is preserved as-is with its original signature. The generated
 /// `Provided` impl calls the function with resolved dependencies.
@@ -131,12 +131,12 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
             match wrapper {
                 Some(crate::common::WrapperKind::ArcRwLock(_, _)) => {
                     resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await;
                     });
                 }
                 Some(crate::common::WrapperKind::ArcMutex(_, _)) => {
                     resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await;
                     });
                 }
                 Some(crate::common::WrapperKind::Arc(_)) => {
@@ -201,7 +201,6 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         &type_tokens,
         &singleton_name,
         &constructor,
-        None,
         return_type.span(),
         &param_entries,
     );

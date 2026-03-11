@@ -336,7 +336,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve_rwlock().await;
+                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await;
                 });
                 let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
                 self.clean_inputs.push(
@@ -353,7 +353,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve_mutex().await;
+                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await;
                 });
                 let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
                 self.clean_inputs.push(
@@ -378,10 +378,6 @@ impl ParamProcessor {
                 type_name: #type_str,
                 type_id: std::any::TypeId::of::<#inner_type>(),
             }
-        });
-
-        self.watcher_arms.push(quote! {
-            _ = <#inner_type as service_daemon::Provided>::changed() => {}
         });
     }
 

@@ -1030,7 +1030,7 @@ mod tests {
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 5);
         assert!(5 >= pressure_limit, "5 of 6 should trigger scale-up");
-        assert!(!(4 >= pressure_limit), "4 of 6 should NOT trigger scale-up");
+        assert!(4 < pressure_limit, "4 of 6 should NOT trigger scale-up");
 
         // Case 3: limit=12 → pressure_limit = 10
         let limit: usize = 12;

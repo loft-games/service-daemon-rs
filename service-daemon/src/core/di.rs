@@ -1,56 +1,66 @@
 use crate::core::managed_state::{Mutex, RwLock};
 use std::sync::Arc;
 
-/// A trait for types that can be provided by the DI system.
+/// A trait for types that can be resolved by the DI system as read-only snapshots.
 ///
-/// This trait is typically implemented by the `#[provider]` macro.
-/// If you see a compile error about this trait not being implemented,
-/// it means you forgot to add a `#[provider]` for that type.
+/// This trait is typically implemented by the `#[provider]` macro. All
+/// `#[provider]` forms currently auto-generate `Provided`, `ManagedProvided`,
+/// and `WatchableProvided` together.
+///
+/// If you see a compile error about this trait not being implemented, it means
+/// you forgot to add `#[provider]` for that type or write a manual provider impl.
 #[diagnostic::on_unimplemented(
     message = "Missing Provider: The type `{Self}` cannot be injected.",
-    label = "this requires `{Self}`, but no `#[provider]` exists for it",
+    label = "this requires `{Self}: Provided`",
     note = "Add `#[provider]` to a function returning `{Self}`, or use `#[provider]` on the struct definition."
 )]
 pub trait Provided: 'static + Send + Sync + Clone + Sized {
     /// Resolves a read-only snapshot of this type.
     ///
-    /// If promoted to managed state, this returns a consistent snapshot.
-    /// Otherwise, it returns the global immutable singleton.
+    /// If the provider has been promoted to managed state, this returns the
+    /// latest published snapshot. Otherwise, it returns the global immutable
+    /// singleton value.
     fn resolve() -> impl std::future::Future<Output = Arc<Self>> + Send;
+}
 
-    /// Resolves a live RwLock for this type (tracked for modifications).
-    ///
-    /// This is used when a service requests `Arc<RwLock<T>>`.
-    fn resolve_rwlock() -> impl std::future::Future<Output = Arc<RwLock<Self>>> + Send {
-        async {
-            panic!(
-                "Type {} does not support RwLock resolution. Did you use #[provider]?",
-                std::any::type_name::<Self>()
-            )
-        }
-    }
+/// A trait for provider types that support managed mutable state.
+///
+/// This capability is required for `Arc<RwLock<T>>` and `Arc<Mutex<T>>`
+/// injection. The `#[provider]` macro auto-generates this impl by delegating to
+/// `StateManager`.
+///
+/// Current pre-release behavior: `#[provider]` does not try to defer to manual
+/// impls. If you also hand-write `ManagedProvided` for the same type, Rust will
+/// emit the normal duplicate-impl compile error.
+#[diagnostic::on_unimplemented(
+    message = "Managed Provider required: `{Self}` cannot be injected as `Arc<RwLock<_>>` or `Arc<Mutex<_>>`.",
+    label = "this injection requires `{Self}: ManagedProvided`",
+    note = "Add `#[provider]` to let the macro generate managed-state support, or implement `ManagedProvided` manually for `{Self}`."
+)]
+pub trait ManagedProvided: Provided {
+    /// Resolves a live tracked `RwLock` for this type.
+    fn resolve_rwlock() -> impl std::future::Future<Output = Arc<RwLock<Self>>> + Send;
 
-    /// Resolves a live Mutex for this type (tracked for modifications).
-    ///
-    /// This is used when a service requests `Arc<Mutex<Self>>`.
-    fn resolve_mutex() -> impl std::future::Future<Output = Arc<Mutex<Self>>> + Send {
-        async {
-            panic!(
-                "Type {} does not support Mutex resolution. Did you use #[provider]?",
-                std::any::type_name::<Self>()
-            )
-        }
-    }
+    /// Resolves a live tracked `Mutex` for this type.
+    fn resolve_mutex() -> impl std::future::Future<Output = Arc<Mutex<Self>>> + Send;
+}
 
-    /// Returns a future that resolves when the state for this type is modified.
-    ///
-    /// This is used by the `Watch` trigger template.
-    fn changed() -> impl std::future::Future<Output = ()> + Send {
-        async {
-            panic!(
-                "Type {} does not support change notification. Did you use #[provider]?",
-                std::any::type_name::<Self>()
-            )
-        }
-    }
+/// A trait for managed provider types that also support change notifications.
+///
+/// This capability is required for `Watch(T)` triggers. The default
+/// `#[provider]` implementation maps `changed()` to the underlying
+/// `StateManager::changed()` notification, so the watch semantics are uniformly
+/// defined as: *notify when a new managed-state snapshot is published*.
+///
+/// Current pre-release behavior: `#[provider]` does not try to defer to manual
+/// impls. If you also hand-write `WatchableProvided` for the same type, Rust
+/// will emit the normal duplicate-impl compile error.
+#[diagnostic::on_unimplemented(
+    message = "Watchable Provider required: `{Self}` cannot be used with `Watch(...)` triggers.",
+    label = "this trigger requires `{Self}: WatchableProvided`",
+    note = "Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `{Self}`."
+)]
+pub trait WatchableProvided: ManagedProvided {
+    /// Returns a future that resolves when a new managed-state snapshot is published.
+    fn changed() -> impl std::future::Future<Output = ()> + Send;
 }

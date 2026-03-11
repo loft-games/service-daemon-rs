@@ -24,6 +24,9 @@ pub struct TriggerArgs {
     /// This is passed directly to the generated code as
     /// `<#host_path as TriggerHost<#target>>::run_as_service(...)`.
     pub host_path: syn::Path,
+    /// Whether the host is a `Watch` trigger and therefore requires
+    /// `WatchableProvided` on the target type.
+    pub is_watch_host: bool,
     /// The target type as a token stream (e.g., `MetricsData`, `crate::providers::JobQueue`).
     pub target: TokenStream,
     /// Optional priority value (defaults to 50 if not specified).
@@ -49,6 +52,10 @@ impl Parse for TriggerArgs {
         //         Using syn::Path allows LSPs like rust-analyzer to "see" a Rust path
         //         and provide completions based on what's in scope.
         let host_path: syn::Path = input.parse()?;
+        let is_watch_host = host_path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Watch");
 
         // Step 2: Parse the parenthesized target type.
         //         e.g., `(MetricsData)` or `(crate::providers::JobQueue)`
@@ -93,6 +100,7 @@ impl Parse for TriggerArgs {
 
         Ok(TriggerArgs {
             host_path,
+            is_watch_host,
             target,
             priority,
             tags,

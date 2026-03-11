@@ -1,6 +1,11 @@
 # Tailor-Made Triggers
 
-The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State). But world-class systems often need more--like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
+The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State).
+
+> [!NOTE]
+> `Watch(T)` requires the target type to implement `WatchableProvided`.
+
+But world-class systems often need more--like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
 
 To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 
@@ -9,15 +14,18 @@ To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 ## 1. The Policy vs. Engine Model
 
 Triggers are split into two parts:
-1.  **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **conditional elastic scaling** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency, enabled only when the template declares a `ScalingPolicy` via `TriggerHost::scaling_policy()`.
-2.  **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
+
+1. **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **conditional elastic scaling** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency, enabled only when the template declares a `ScalingPolicy` via `TriggerHost::scaling_policy()`.
+2. **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
+
 
 ### Why `Clone` for Payloads?
+
 The framework wraps every payload in `Arc<P>` internally so that retries only clone a pointer. If your handler receives a **bare `T`**, the framework must clone the data out of the `Arc` -- so `T` must implement `Clone`. If your handler receives `Arc<T>`, no cloning happens at all.
 
 > [!TIP]
 > **What if my data isn't `Clone`?**
-> If your payload is large or cannot implement `Clone`, wrap it in an `Arc`: `type Payload = Arc<MyData>`, and declare your handler parameter as `Arc<Arc<MyData>>` or simply use `#[payload] data: Arc<MyData>`. 
+> If your payload is large or cannot implement `Clone`, wrap it in an `Arc`: `type Payload = Arc<MyData>`, and declare your handler parameter as `Arc<Arc<MyData>>` or simply use `#[payload] data: Arc<MyData>`.
 > Since `Arc` itself is always `Clone`, the retry mechanism will work perfectly without touching the underlying data.
 
 This decoupled design means you spend zero time on boilerplate and focus entirely on the event-waiting logic.
@@ -29,7 +37,7 @@ Let's imagine you want a trigger that fires whenever a file is created.
 ### Stateless Host (No Initialization Needed)
 
 ```rust,ignore
-use service_daemon::{TriggerHost, TriggerTransition, Provided};
+use service_daemon::{TriggerHost, TriggerTransition, Provided, WatchableProvided};
 use service_daemon::futures::future::BoxFuture;
 use std::sync::Arc;
 use std::path::PathBuf;

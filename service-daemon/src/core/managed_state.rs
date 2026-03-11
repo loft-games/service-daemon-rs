@@ -354,12 +354,10 @@ mod tests {
             let _guard = lock.read().await;
             let wait = notify.notified();
             drop(_guard);
-            assert!(
-                tokio::select! {
-                    _ = wait => true,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => false,
-                } == false
-            );
+            assert!(!tokio::select! {
+                _ = wait => true,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => false,
+            });
         }
 
         // Write WITHOUT mutation does NOT notify (spurious wakeup prevention)

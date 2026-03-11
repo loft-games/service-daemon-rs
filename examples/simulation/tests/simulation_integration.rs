@@ -178,7 +178,7 @@ async fn test_god_hand_status_flip_with_real_service() {
     // and infra services (log_service) that are auto-included.
     let ids = handle.service_ids();
     assert!(
-        ids.len() >= 1,
+        !ids.is_empty(),
         "Should have at least one service (status_watcher_service)"
     );
 

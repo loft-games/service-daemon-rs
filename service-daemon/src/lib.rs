@@ -46,7 +46,7 @@ pub mod tutorial;
 pub use core::context::{
     done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config, unshelve, wait_shutdown,
 };
-pub use core::di::Provided;
+pub use core::di::{ManagedProvided, Provided, WatchableProvided};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
 };
@@ -94,7 +94,7 @@ pub mod prelude {
     pub use crate::core::context::{
         is_shutdown, shelve, shelve_clone, sleep, state, unshelve, wait_shutdown,
     };
-    pub use crate::core::di::Provided;
+    pub use crate::core::di::{ManagedProvided, Provided, WatchableProvided};
     pub use crate::models::service::ServicePriority;
     pub use crate::models::service::ServiceStatus;
     pub use crate::models::trigger::TT;

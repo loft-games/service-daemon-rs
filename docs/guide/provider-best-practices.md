@@ -65,8 +65,8 @@ pub async fn mqtt_provider() -> MqttBus {
 ## 4. Common Misconceptions
 
 * **"I need a Magic Provider for my DB"**: No! Use an `async fn` provider that returns your connection pool.
-* **"Magic Providers are faster"**: No! They use the same `StateManager` and `Provided` trait under the hood. They are just shorthand for common patterns.
-* **"Provided is hard to implement"**: You should **never** implement `Provided` manually. Let `#[provider]` do it for you.
+* **"Magic Providers are faster"**: No! They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are just shorthand for common patterns.
+* **"Provided is hard to implement"**: You should **never** implement provider capability traits manually for normal usage. Let `#[provider]` do it for you.
 
 ---
 

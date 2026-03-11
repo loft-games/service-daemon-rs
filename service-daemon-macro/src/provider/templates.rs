@@ -39,8 +39,9 @@ fn has_clone_derive(attrs: &[syn::Attribute]) -> bool {
 /// Shared context for all template-based providers.
 ///
 /// Encapsulates the common boilerplate (singleton name generation, Clone derive
-/// detection, constructor, and `Provided` impl) that every template needs.
-/// Individual templates only supply their struct body and convenience methods.
+/// detection, constructor, and provider capability impls) that every template
+/// needs. Individual templates only supply their struct body and convenience
+/// methods.
 struct TemplateContext<'a> {
     struct_name: &'a syn::Ident,
     vis: &'a syn::Visibility,
@@ -52,8 +53,10 @@ struct TemplateContext<'a> {
 impl<'a> TemplateContext<'a> {
     /// Creates a new template context with all common boilerplate pre-computed.
     ///
-    /// All templates use `Self::default()` as the constructor and mark their
-    /// `changed()` as `pending()` since templates are not watchable state.
+    /// All templates use `Self::default()` as the constructor. They default to
+    /// the full provider capability set: snapshot resolution, managed-state
+    /// injection, and watch notifications backed by `StateManager` snapshot
+    /// publication.
     fn new(
         struct_name: &'a syn::Ident,
         vis: &'a syn::Visibility,
@@ -71,17 +74,12 @@ impl<'a> TemplateContext<'a> {
         };
 
         let constructor = quote! { std::sync::Arc::new(Self::default()) };
-        let changed_body = Some(quote! {
-            // Templates are not watchable state. Wait indefinitely.
-            std::future::pending::<()>().await;
-        });
 
         let type_tokens = quote! { #struct_name };
         let provided_impl = generate_provided_impl(
             &type_tokens,
             &singleton_name,
             &constructor,
-            changed_body,
             struct_name.span(),
             &[],
         );

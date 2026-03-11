@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::core::di::Provided;
+use crate::core::di::{Provided, WatchableProvided};
 use crate::models::trigger::{TriggerHost, TriggerTransition};
 
 // ===========================================================================
@@ -228,7 +228,7 @@ pub struct WatchHost;
 
 impl<T> TriggerHost<T> for WatchHost
 where
-    T: Provided + Send + Sync + 'static,
+    T: WatchableProvided + Send + Sync + 'static,
 {
     type Payload = ();
 

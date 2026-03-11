@@ -37,6 +37,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as TriggerArgs);
     let host_path = &args.host_path;
     let target_type = args.target;
+    let is_watch_host = args.is_watch_host;
     let priority_tokens = args.priority;
     let tags_tokens = args.tags;
 
@@ -65,9 +66,11 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Triggers always watch their target for configuration changes,
     // in addition to any DI dependency watchers from extract_params.
-    watcher_arms.push(quote! {
-        _ = <#target_type as service_daemon::Provided>::changed() => {}
-    });
+    if is_watch_host {
+        watcher_arms.push(quote! {
+            _ = <#target_type as service_daemon::WatchableProvided>::changed() => {}
+        });
+    }
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
     let event_loop_call = generate_event_loop_call(

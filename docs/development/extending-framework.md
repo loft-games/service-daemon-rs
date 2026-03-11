@@ -27,7 +27,7 @@ pub struct MyHost {
 impl<T> TriggerHost<T> for MyHost
 where
     T: Provided + Send + Sync + 'static,
-{
+{ // NOTE: for Watch-style triggers, prefer `T: WatchableProvided`.
     type Payload = String;
 
     fn setup(_target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
