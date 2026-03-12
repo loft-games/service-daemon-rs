@@ -101,6 +101,10 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let wrapper_name = format_ident!("{}_wrapper", fn_name);
     let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
+    let scope_mod = format_ident!(
+        "__SERVICE_USER_SCOPE_{}",
+        fn_name.to_string().to_uppercase()
+    );
 
     let is_async = input.sig.asyncness.is_some();
     let call_expr = generate_call_expr(
@@ -114,14 +118,27 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
+    let inner_vis = match vis {
+        syn::Visibility::Public(_) => quote!(pub),
+        _ => quote!(pub(crate)),
+    };
+
     let expanded = quote! {
-        #(#cleaned_attrs)*
-        #vis #clean_sig {
+        mod #scope_mod {
+            #[allow(unused_imports)]
+            use super::*;
+
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
             use service_daemon::core::managed_state::{RwLock, Mutex};
-            #body
+
+            #(#cleaned_attrs)*
+            #inner_vis #clean_sig {
+                #body
+            }
         }
+
+        #vis use #scope_mod::#fn_name;
 
         /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
         pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {

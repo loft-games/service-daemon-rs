@@ -158,9 +158,10 @@ impl TupleStructInfo {
 pub(super) fn generate_provided_impl(
     type_tokens: &proc_macro2::TokenStream,
     singleton_name: &syn::Ident,
-    constructor: &proc_macro2::TokenStream,
     user_span: proc_macro2::Span,
     param_entries: &[proc_macro2::TokenStream],
+    eager: bool,
+    init_fn: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
     // the compiler error points to the user's struct definition or fn return
@@ -189,6 +190,13 @@ pub(super) fn generate_provided_impl(
             .replace(|c: char| !c.is_alphanumeric(), "_")
     );
 
+    let init_fn_name = format_ident!(
+        "__PROVIDER_INIT_{}",
+        type_name_str
+            .to_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+
     quote! {
         #bounds_assertion
 
@@ -197,7 +205,9 @@ pub(super) fn generate_provided_impl(
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::sync::Arc<Self> {
                 #singleton_name.resolve_snapshot(|| async {
-                    #constructor
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    #init_fn
                 }).await
             }
         }
@@ -205,13 +215,17 @@ pub(super) fn generate_provided_impl(
         impl service_daemon::ManagedProvided for #type_tokens {
             async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
-                    #constructor
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    #init_fn
                 }).await
             }
 
             async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async {
-                    #constructor
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    #init_fn
                 }).await
             }
         }
@@ -230,6 +244,19 @@ pub(super) fn generate_provided_impl(
             }
         }
 
+        fn #init_fn_name(
+            policy: service_daemon::RestartPolicy,
+            cancel: service_daemon::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::futures::future::BoxFuture<'static, ()> {
+            Box::pin(async move {
+                let _ = #singleton_name
+                    .resolve_snapshot(|| async {
+                        #init_fn
+                    })
+                    .await;
+            })
+        }
+
         /// Auto-generated provider registry entry for dependency graph analysis.
         #[allow(unsafe_code)] // linkme uses #[link_section] internally
         #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
@@ -239,6 +266,8 @@ pub(super) fn generate_provided_impl(
             module: module_path!(),
             type_id: std::any::TypeId::of::<#type_tokens>(),
             params: &[#(#param_entries),*],
+            eager: #eager,
+            init: #init_fn_name,
         };
     }
 }
@@ -270,7 +299,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     let default_impl = generate_default_impl(&tuple_info, &args, struct_name);
 
     // Generate constructor based on field type (async for named structs with Arc deps)
-    let constructor = generate_constructor(fields);
+    let constructor = generate_constructor(struct_name, fields);
 
     // Collect dependency metadata from struct fields for PROVIDER_REGISTRY.
     // Only named fields with Arc-wrapped types are injectable dependencies.
@@ -311,12 +340,21 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
 
     // Use the shared Provided impl generator (Fix #1)
     let type_tokens = quote! { #struct_name };
+    let eager = args.eager;
+
+    let init_fn = quote! {
+        let _ = policy;
+        let _ = cancel;
+        #constructor
+    };
+
     let provided_impl = generate_provided_impl(
         &type_tokens,
         &singleton_name,
-        &constructor,
         struct_name.span(),
         &param_entries,
+        eager,
+        &init_fn,
     );
 
     let expanded = quote! {
@@ -445,14 +483,16 @@ fn generate_default_impl(
                     std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
                 }
             } else {
-                // No fallback: env var is REQUIRED. Panic with a descriptive message.
+                // No fallback: env var is REQUIRED.
+                // Keep Default infallible by using an explicit fail-fast exit path.
                 quote! {
                     std::env::var(#env_str).unwrap_or_else(|_| {
-                        panic!(
-                            "Required environment variable '{}' is not set (needed by provider '{}'). \
+                        eprintln!(
+                            "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
                              Set it or add a default: #[provider(\"...\", env = \"{}\")]",
                             #env_str, #struct_name_str, #env_str
-                        )
+                        );
+                        std::process::exit(1)
                     })
                 }
             }
@@ -473,18 +513,20 @@ fn generate_default_impl(
                 quote! {
                     std::env::var(#env_str)
                         .unwrap_or_else(|_| {
-                            panic!(
-                                "Required environment variable '{}' is not set (needed by provider '{}'). \
+                            eprintln!(
+                                "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
                                  Set it or add a default: #[provider(value, env = \"{}\")]",
                                 #env_str, #struct_name_str, #env_str
-                            )
+                            );
+                            std::process::exit(1)
                         })
                         .parse::<#inner_ty>()
                         .unwrap_or_else(|e| {
-                            panic!(
-                                "Environment variable '{}' for provider '{}' cannot be parsed: {}",
+                            eprintln!(
+                                "FATAL: Environment variable '{}' for provider '{}' cannot be parsed: {}",
                                 #env_str, #struct_name_str, e
-                            )
+                            );
+                            std::process::exit(1)
                         })
                 }
             }
@@ -515,7 +557,10 @@ fn generate_default_impl(
 /// - Other fields -> `Default::default()`
 ///
 /// Uses `decompose_type` from `common` to avoid duplicating Arc pattern matching (Fix #8).
-fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
+fn generate_constructor(
+    struct_name: &syn::Ident,
+    fields: &syn::Fields,
+) -> proc_macro2::TokenStream {
     match fields {
         syn::Fields::Named(named_fields) => {
             let field_inits: Vec<_> = named_fields
@@ -563,7 +608,7 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                 .collect();
 
             quote! {
-                std::sync::Arc::new(Self {
+                std::sync::Arc::new(#struct_name {
                     #(#field_inits),*
                 })
             }
@@ -571,7 +616,7 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
         syn::Fields::Unnamed(_) | syn::Fields::Unit => {
             // Tuple struct or unit struct - use Default (sync init is fine here)
             quote! {
-                std::sync::Arc::new(Self::default())
+                std::sync::Arc::new(#struct_name::default())
             }
         }
     }

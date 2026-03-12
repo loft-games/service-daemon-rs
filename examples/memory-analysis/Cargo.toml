@@ -5,6 +5,10 @@ edition = "2024"
 publish = false
 description = "Memory overhead analysis: measures per-service RSS delta and struct sizes."
 
+[features]
+# Enable compile-time size guard assertions in this example.
+memory-analysis = []
+
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = ["macros"] }
 tokio = { version = "1.43", features = ["full"] }

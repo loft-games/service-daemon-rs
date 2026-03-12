@@ -73,15 +73,22 @@ impl<'a> TemplateContext<'a> {
             quote! { #[derive(Clone)] }
         };
 
-        let constructor = quote! { std::sync::Arc::new(Self::default()) };
+        let constructor = quote! { std::sync::Arc::new(#struct_name::default()) };
 
         let type_tokens = quote! { #struct_name };
+        let init_fn = quote! {
+            let _ = policy;
+            let _ = cancel;
+            #constructor
+        };
+
         let provided_impl = generate_provided_impl(
             &type_tokens,
             &singleton_name,
-            &constructor,
             struct_name.span(),
             &[],
+            false,
+            &init_fn,
         );
 
         Self {
@@ -228,17 +235,15 @@ pub fn generate_listen_template(
     addr: &syn::LitStr,
     env: Option<&syn::LitStr>,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs);
-    let TemplateContext {
-        struct_name,
-        vis,
-        attrs,
-        clone_derive,
-        provided_impl,
-        ..
-    } = &ctx;
-
     let struct_name_str = struct_name.to_string();
+
+    // Listen uses a custom fallible initializer (bind may fail).
+    // We bypass TemplateContext here to control constructor/init generation.
+    let clone_derive = if has_clone_derive(attrs) {
+        quote! {}
+    } else {
+        quote! { #[derive(Clone)] }
+    };
 
     // Build the address resolution expression:
     // - With env: try env var first, fall back to the literal default
@@ -252,6 +257,43 @@ pub fn generate_listen_template(
         quote! { #addr.to_owned() }
     };
 
+    let singleton_name = format_ident!(
+        "__PROVIDER_SINGLETON_{}",
+        struct_name.to_string().to_uppercase()
+    );
+
+    let type_tokens = quote! { #struct_name };
+    let init_fn = quote! {
+        let addr = #addr_expr;
+        service_daemon::core::provider_init::init_fallible(
+            policy,
+            cancel,
+            || async {
+                let listener = std::net::TcpListener::bind(&addr)
+                    .map_err(|e| service_daemon::ProviderError::Retryable(format!(
+                        "Provider '{}' failed to bind TCP port '{}': {}",
+                        #struct_name_str, addr, e
+                    )))?;
+                listener.set_nonblocking(true)
+                    .map_err(|e| service_daemon::ProviderError::Fatal(format!(
+                        "Provider '{}' failed to set nonblocking for '{}': {}",
+                        #struct_name_str, addr, e
+                    )))?;
+                Ok(#struct_name(std::sync::Arc::new(listener)))
+            },
+        )
+        .await
+    };
+
+    let provided_impl = generate_provided_impl(
+        &type_tokens,
+        &singleton_name,
+        struct_name.span(),
+        &[],
+        false,
+        &init_fn,
+    );
+
     let expanded = quote! {
         #(#attrs)*
         #clone_derive
@@ -262,17 +304,23 @@ pub fn generate_listen_template(
                 let addr = #addr_expr;
                 let listener = std::net::TcpListener::bind(&addr)
                     .unwrap_or_else(|e| {
-                        panic!(
-                            "FATAL: Provider '{}' failed to bind TCP port '{}': {}. \
-                             Is another process using this port?",
+                        eprintln!(
+                            "FATAL: Provider '{}' failed to bind TCP port '{}': {}. Is another process using this port?",
                             #struct_name_str, addr, e
-                        )
+                        );
+                        std::process::exit(1)
                     });
                 // CRITICAL: Must set nonblocking before converting to tokio,
                 // otherwise `tokio::net::TcpListener::from_std` will panic
                 // or the event loop will hang indefinitely.
                 listener.set_nonblocking(true)
-                    .expect("Failed to set TCP listener to nonblocking mode");
+                    .unwrap_or_else(|e| {
+                        eprintln!(
+                            "FATAL: Provider '{}' failed to set nonblocking for '{}': {}",
+                            #struct_name_str, addr, e
+                        );
+                        std::process::exit(1)
+                    });
                 Self(std::sync::Arc::new(listener))
             }
         }

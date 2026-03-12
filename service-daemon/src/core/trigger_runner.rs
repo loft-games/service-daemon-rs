@@ -214,10 +214,6 @@ pub struct TriggerRunner<P: Send + Sync + 'static> {
     /// Registered interceptor chain (executed in registration order, onion model).
     /// Stored as `Arc` to allow cheap cloning into `tokio::spawn` tasks.
     interceptors: Vec<Arc<dyn TriggerInterceptor<P>>>,
-    /// The restart policy governing backoff for handler retries.
-    #[allow(dead_code)]
-    // stored for future use; currently passed to RetryInterceptor at construction
-    restart_policy: RestartPolicy,
     /// Optional elastic-scaling policy. `None` means serial dispatch
     /// (single permit, no scale monitor).
     scaling: Option<ScalingPolicy>,
@@ -267,7 +263,6 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     policy: restart_policy,
                 }),
             ],
-            restart_policy,
             scaling,
             semaphore: Arc::new(Semaphore::new(initial)),
             current_limit: Arc::new(AtomicUsize::new(initial)),
@@ -586,15 +581,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         });
     }
 
-    /// Build and invoke the interceptor chain (synchronous path).
-    ///
-    /// Used internally for the `Reload` transition where we need
-    /// to await completion before entering the idle state.
-    #[allow(dead_code)]
-    async fn invoke_chain(&self, ctx: DispatchContext<P>) -> anyhow::Result<()> {
-        let chain = self.build_chain();
-        chain(ctx).await
-    }
+    // -----------------------------------------------------------------------
+    // Dispatch pipeline
+    // -----------------------------------------------------------------------
 
     /// Build the interceptor call chain as a `'static` boxed closure.
     ///

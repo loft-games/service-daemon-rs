@@ -1,3 +1,29 @@
+error[E0603]: function `needs_rwlock` is private
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:15:10
+   |
+15 | async fn needs_rwlock(_state: Arc<RwLock<SnapshotOnly>>) -> anyhow::Result<()> {
+   |          ^^^^^^^^^^^^ private function
+   |
+note: the function `needs_rwlock` is defined here
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:14:1
+   |
+14 | #[service]
+   | ^^^^^^^^^^
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0603]: function `needs_mutex` is private
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:20:10
+   |
+20 | async fn needs_mutex(_state: Arc<Mutex<SnapshotOnly>>) -> anyhow::Result<()> {
+   |          ^^^^^^^^^^^ private function
+   |
+note: the function `needs_mutex` is defined here
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:19:1
+   |
+19 | #[service]
+   | ^^^^^^^^^^
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: Managed Provider required: `SnapshotOnly` cannot be injected as `Arc<RwLock<_>>` or `Arc<Mutex<_>>`.
   --> tests/fail/11_only_provided_cannot_inject_managed.rs:15:42
    |

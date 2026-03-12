@@ -6,10 +6,9 @@
 //! the `#[service]` and `#[trigger]` macros.
 
 use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, ServiceIdentity};
-use std::sync::Arc;
-
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -298,7 +297,6 @@ pub async fn sleep(duration: Duration) -> bool {
 ///
 /// Returns `None` if called outside a service scope (no task-local context).
 pub fn trigger_config<T: Any + Clone + Send + Sync>() -> Option<T> {
-    use std::any::TypeId;
     CURRENT_RESOURCES
         .try_with(|resources| {
             resources

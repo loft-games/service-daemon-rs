@@ -19,6 +19,49 @@ use crate::common::extract_sync_handler_flag;
 pub use parser::ProviderArgs;
 use struct_gen::generate_struct_provider;
 
+fn extract_fallible_provider_type(ty: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+
+    let last = tp.path.segments.last()?;
+    if last.ident != "Result" {
+        return None;
+    }
+
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+
+    // Expect Result<Ok, Err>
+    let mut iter = args.args.iter();
+    let ok = iter.next()?;
+    let err = iter.next()?;
+
+    let ok_ty = match ok {
+        syn::GenericArgument::Type(t) => t.clone(),
+        _ => return None,
+    };
+    let err_ty = match err {
+        syn::GenericArgument::Type(t) => t,
+        _ => return None,
+    };
+
+    // Only accept error type whose last segment ident is ProviderError
+    if let syn::Type::Path(err_path) = err_ty {
+        if err_path
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "ProviderError")
+        {
+            return Some(ok_ty);
+        }
+    }
+
+    None
+}
+
 /// Implementation of the `#[provider]` attribute macro.
 ///
 /// Uses a peek-first-token strategy to determine the item kind before parsing,
@@ -103,8 +146,14 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         }
     };
 
+    // Detect fallible provider: Result<T, ProviderError>
+    let (provided_type, is_fallible) = match extract_fallible_provider_type(&return_type) {
+        Some(inner) => (inner, true),
+        None => ((*return_type).clone(), false),
+    };
+
     let fn_name_str = fn_name.to_string();
-    let return_type_str = quote!(#return_type).to_string().replace(" ", "");
+    let return_type_str = quote!(#provided_type).to_string().replace(" ", "");
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&item_fn.attrs);
 
     // Process function parameters for DI resolution
@@ -190,19 +239,50 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
     );
 
     // Constructor resolves dependencies then calls the function
-    let constructor = quote! {
-        #(#resolve_tokens)*
-        std::sync::Arc::new(#fn_call_with_args)
+    let constructor = if is_fallible {
+        quote! {
+            #(#resolve_tokens)*
+            service_daemon::core::provider_init::init_fallible(
+                service_daemon::RestartPolicy::default(),
+                service_daemon::tokio_util::sync::CancellationToken::new(),
+                || async { #fn_call_with_args },
+            )
+            .await
+        }
+    } else {
+        quote! {
+            #(#resolve_tokens)*
+            std::sync::Arc::new(#fn_call_with_args)
+        }
     };
 
     // Use the shared Provided impl generator
-    let type_tokens = quote! { #return_type };
+    let type_tokens = quote! { #provided_type };
+    let init_fn = if is_fallible {
+        quote! {
+            #(#resolve_tokens)*
+            service_daemon::core::provider_init::init_fallible(
+                policy,
+                cancel,
+                || async { #fn_call_with_args },
+            )
+            .await
+        }
+    } else {
+        quote! {
+            let _ = policy;
+            let _ = cancel;
+            #constructor
+        }
+    };
+
     let provided_impl = struct_gen::generate_provided_impl(
         &type_tokens,
         &singleton_name,
-        &constructor,
         return_type.span(),
         &param_entries,
+        false,
+        &init_fn,
     );
 
     let expanded = quote! {

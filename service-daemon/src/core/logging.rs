@@ -1,12 +1,17 @@
 use chrono::{DateTime, Utc};
 #[cfg(feature = "file-logging")]
 use serde::{Deserialize, Serialize};
+
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::fmt::Write as _;
+use std::io::{Write as _, stderr};
 use std::sync::{Arc, OnceLock};
+
 use tokio::sync::broadcast;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 
 /// Log severity level with zero heap allocation.
@@ -325,8 +330,6 @@ pub fn enable_file_logging(config: FileLogConfig) {
 /// Panics if a global subscriber has already been set. Use
 /// [`try_init_logging()`] in test environments where multiple tests may race.
 pub fn init_logging() {
-    use tracing_subscriber::prelude::*;
-
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
@@ -351,8 +354,6 @@ pub fn init_logging() {
 /// }
 /// ```
 pub fn try_init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
-    use tracing_subscriber::prelude::*;
-
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
@@ -476,8 +477,6 @@ impl tracing::field::Visit for FieldCollector {
 fn render_to_buf(event: &LogEvent, buf: &mut String) {
     buf.clear();
     let (color, reset) = event.level.ansi_color();
-
-    use std::fmt::Write;
     let _ = write!(
         buf,
         "{} {}{:<5}{} [{}] {}",
@@ -520,13 +519,11 @@ fn render_to_string(event: &LogEvent) -> String {
 /// Thin wrapper around `render_to_buf` that performs a single atomic write
 /// to stderr to avoid interleaved output from concurrent threads.
 fn render_to_stderr(event: &LogEvent) {
-    use std::io::{self, Write};
-
     let mut buf = String::with_capacity(256);
     render_to_buf(event, &mut buf);
     buf.push('\n');
 
-    let stderr = io::stderr();
+    let stderr = stderr();
     let _ = stderr.lock().write_all(buf.as_bytes());
 }
 
@@ -768,8 +765,7 @@ pub async fn log_service() -> anyhow::Result<()> {
                                 render_to_buf(&event, &mut render_buf);
                                 render_buf.push('\n');
                                 {
-                                    use std::io::Write;
-                                    let stderr = std::io::stderr();
+                                    let stderr = stderr();
                                     let _ = stderr.lock().write_all(render_buf.as_bytes());
                                 }
                             }
@@ -798,8 +794,7 @@ pub async fn log_service() -> anyhow::Result<()> {
             render_to_buf(&event, &mut render_buf);
             render_buf.push('\n');
             {
-                use std::io::Write;
-                let stderr = std::io::stderr();
+                let stderr = stderr();
                 let _ = stderr.lock().write_all(render_buf.as_bytes());
             }
         }
@@ -872,7 +867,6 @@ pub async fn file_log_service() -> anyhow::Result<()> {
 
                         // Flush batch to file
                         {
-                            use std::io::Write;
                             for event in buffer.drain(..) {
                                 let json_line = format_event_json(&event);
                                 let _ = writeln!(writer, "{}", json_line);
@@ -899,7 +893,6 @@ pub async fn file_log_service() -> anyhow::Result<()> {
         buffer.push(event);
     }
     if !buffer.is_empty() {
-        use std::io::Write;
         for event in buffer.drain(..) {
             let json_line = format_event_json(&event);
             let _ = writeln!(writer, "{}", json_line);
@@ -1077,8 +1070,6 @@ mod tests {
     /// Uses `tracing::subscriber::with_default` for test isolation — does NOT
     /// set a global subscriber, so tests can run in parallel.
     fn collect_events_with_daemon_layer(f: impl FnOnce()) -> Vec<Arc<LogEvent>> {
-        use tracing_subscriber::prelude::*;
-
         let mut rx = get_log_queue().tx.subscribe();
 
         // Drain any stale events from prior tests sharing the global queue

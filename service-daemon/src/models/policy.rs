@@ -48,6 +48,11 @@ pub struct RestartPolicy {
     /// Timeout for waiting for services to become healthy during wave
     /// startup (default: 5 seconds).
     pub wave_spawn_timeout: Duration,
+    /// Timeout for provider initialization during eager init or fallible
+    /// provider retries.
+    ///
+    /// Default: equals `wave_spawn_timeout`.
+    pub provider_init_timeout: Duration,
     /// Timeout for waiting for services to stop during wave shutdown
     /// (default: 30 seconds).
     pub wave_stop_timeout: Duration,
@@ -73,13 +78,15 @@ pub struct RestartPolicy {
 
 impl Default for RestartPolicy {
     fn default() -> Self {
+        let wave_spawn_timeout = Duration::from_secs(5);
         Self {
             initial_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(300), // 5 minutes
             multiplier: 2.0,
             reset_after: Duration::from_secs(60),
             jitter_factor: 0.1, // 10% jitter by default
-            wave_spawn_timeout: Duration::from_secs(5),
+            wave_spawn_timeout,
+            provider_init_timeout: wave_spawn_timeout,
             wave_stop_timeout: Duration::from_secs(30),
             trigger_max_retries: None, // Unlimited trigger retries by design
         }
@@ -94,13 +101,15 @@ impl RestartPolicy {
 
     /// Create a restart policy for testing with shorter delays.
     pub fn for_testing() -> Self {
+        let wave_spawn_timeout = Duration::from_millis(500);
         Self {
             initial_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(2),
             multiplier: 2.0,
             reset_after: Duration::from_secs(5),
             jitter_factor: 0.0, // No jitter for predictable tests
-            wave_spawn_timeout: Duration::from_millis(500),
+            wave_spawn_timeout,
+            provider_init_timeout: wave_spawn_timeout,
             wave_stop_timeout: Duration::from_secs(2),
             trigger_max_retries: None, // Unlimited trigger retries by design
         }
@@ -150,6 +159,16 @@ impl RestartPolicyBuilder {
 
     pub fn wave_spawn_timeout(mut self, timeout: Duration) -> Self {
         self.policy.wave_spawn_timeout = timeout;
+        self
+    }
+
+    /// Set the provider initialization timeout.
+    ///
+    /// This controls how long fallible providers may keep retrying during
+    /// eager init (and during lazy resolution when using the fallible
+    /// provider init helper).
+    pub fn provider_init_timeout(mut self, timeout: Duration) -> Self {
+        self.policy.provider_init_timeout = timeout;
         self
     }
 
@@ -463,6 +482,7 @@ mod tests {
         let policy = RestartPolicy::default();
         assert_eq!(policy.initial_delay, Duration::from_secs(1));
         assert_eq!(policy.max_delay, Duration::from_secs(300));
+        assert_eq!(policy.provider_init_timeout, policy.wave_spawn_timeout);
     }
 
     #[test]
@@ -619,6 +639,7 @@ mod tests {
             policy.trigger_max_retries, None,
             "for_testing() trigger_max_retries must be None (consistent with design)"
         );
+        assert_eq!(policy.provider_init_timeout, policy.wave_spawn_timeout);
     }
 
     #[test]
@@ -636,10 +657,12 @@ mod tests {
         // Builder without calling trigger_max_retries() should produce None
         let policy = RestartPolicy::builder()
             .initial_delay(Duration::from_millis(500))
+            .provider_init_timeout(Duration::from_secs(9))
             .build();
         assert_eq!(
             policy.trigger_max_retries, None,
             "Builder without trigger_max_retries() must produce None"
         );
+        assert_eq!(policy.provider_init_timeout, Duration::from_secs(9));
     }
 }

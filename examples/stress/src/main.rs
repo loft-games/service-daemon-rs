@@ -14,6 +14,13 @@
 
 use example_stress as _;
 
+#[cfg(feature = "s0")]
+use service_daemon::ServiceDaemon;
+#[cfg(feature = "s0")]
+use tracing_subscriber::layer::SubscriberExt;
+#[cfg(feature = "s0")]
+use tracing_subscriber::util::SubscriberInitExt;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "s0"))]
@@ -30,10 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(feature = "s0")]
 async fn run_stress_test() -> anyhow::Result<()> {
-    use service_daemon::ServiceDaemon;
     // Minimal tracing setup (suppress noisy output for benchmarking)
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer())

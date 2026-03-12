@@ -52,6 +52,8 @@ pub struct ProviderArgs {
     pub env: Option<syn::LitStr>,
     /// Optional capacity for queue-like templates.
     pub capacity: Option<usize>,
+    /// Whether this provider should be initialized eagerly at daemon startup.
+    pub eager: bool,
 }
 
 /// The primary category of the provider.
@@ -114,6 +116,7 @@ impl Parse for ProviderArgs {
                 kind: ProviderKind::Empty,
                 env: None,
                 capacity: None,
+                eager: false,
             });
         }
 
@@ -162,6 +165,7 @@ impl Parse for ProviderArgs {
 
                 let mut env = None;
                 let mut capacity = None;
+                let mut eager = false;
                 match key.to_string().as_str() {
                     "env" => {
                         env = Some(input.parse::<syn::LitStr>()?);
@@ -170,11 +174,14 @@ impl Parse for ProviderArgs {
                         let lit: syn::LitInt = input.parse()?;
                         capacity = Some(lit.base10_parse::<usize>()?);
                     }
+                    "eager" => {
+                        eager = input.parse::<syn::LitBool>()?.value;
+                    }
                     other => {
                         return Err(syn::Error::new(
                             key.span(),
                             format!(
-                                "Unknown provider attribute '{}'. Supported: env, capacity",
+                                "Unknown provider attribute '{}'. Supported: env, capacity, eager",
                                 other
                             ),
                         ));
@@ -189,6 +196,7 @@ impl Parse for ProviderArgs {
                     },
                     env,
                     capacity,
+                    eager,
                 );
             } else {
                 // Not a template name — treat as an expression
@@ -207,7 +215,7 @@ impl Parse for ProviderArgs {
         };
 
         // ── Phase 2: Unified trailing named arguments ───────────────────
-        Self::parse_trailing_attrs(input, kind, None, None)
+        Self::parse_trailing_attrs(input, kind, None, None, false)
     }
 }
 
@@ -222,6 +230,7 @@ impl ProviderArgs {
         kind: ProviderKind,
         mut env: Option<syn::LitStr>,
         mut capacity: Option<usize>,
+        mut eager: bool,
     ) -> syn::Result<Self> {
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -240,11 +249,14 @@ impl ProviderArgs {
                     let lit: syn::LitInt = input.parse()?;
                     capacity = Some(lit.base10_parse::<usize>()?);
                 }
+                "eager" => {
+                    eager = input.parse::<syn::LitBool>()?.value;
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "Unknown provider attribute '{}'. Supported: env, capacity",
+                            "Unknown provider attribute '{}'. Supported: env, capacity, eager",
                             other
                         ),
                     ));
@@ -256,6 +268,7 @@ impl ProviderArgs {
             kind,
             env,
             capacity,
+            eager,
         })
     }
 }
@@ -276,6 +289,7 @@ mod tests {
         assert!(matches!(args.kind, ProviderKind::Empty));
         assert!(args.env.is_none());
         assert!(args.capacity.is_none());
+        assert!(!args.eager);
     }
 
     // -- Template branch ----------------------------------------------------------
@@ -292,6 +306,7 @@ mod tests {
         }
         assert!(args.env.is_none());
         assert!(args.capacity.is_none());
+        assert!(!args.eager);
     }
 
     #[test]
@@ -343,6 +358,7 @@ mod tests {
             _ => panic!("Expected Value variant"),
         }
         assert!(args.env.is_none());
+        assert!(!args.eager);
     }
 
     #[test]
@@ -373,6 +389,16 @@ mod tests {
             _ => panic!("Expected Value variant with env-only"),
         }
         assert_eq!(args.env.as_ref().unwrap().value(), "API_KEY");
+        assert!(!args.eager);
+    }
+
+    #[test]
+    fn eager_bool_parses() {
+        let args = parse_args(quote! { eager = true }).unwrap();
+        assert!(
+            matches!(&args.kind, ProviderKind::Value { default_value } if default_value.is_none())
+        );
+        assert!(args.eager);
     }
 
     // -- Unknown ident falls through to expression --------------------------------
@@ -426,6 +452,7 @@ mod tests {
             _ => panic!("Expected Template variant"),
         }
         assert!(args.env.is_none());
+        assert!(!args.eager);
     }
 
     #[test]

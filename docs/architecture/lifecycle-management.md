@@ -85,4 +85,55 @@ The "Shelf" is a global store where services can deposit data before a reload or
 - **Isolation**: Buckets are isolated by `service_name` (`&'static str`), not by `ServiceId`. This is intentional -- Shelf data persists across restarts, while `ServiceId` may change when the Registry is rebuilt.
 - **Survival**: Unlike standard singletons, Shelf data survives the task termination and is inherited by the next "generation" of the same service.
 
+## 5. Provider Initialization Errors
+
+This section describes the error model for Providers whose initialization may fail (e.g., network binding, external configuration, credentials).
+
+### 5.1. Fallible Providers
+
+A Provider is considered **fallible** if its definition explicitly returns:
+
+- `Result<T, ProviderError>`
+
+> Important: Providers return the **plain** `T` value. The framework remains responsible for wrapping it in `Arc<T>` internally, consistent with the current provider design.
+
+### 5.2. `ProviderError` Semantics
+
+`ProviderError` is intended to be a public, extensible enum and must be marked `#[non_exhaustive]`.
+
+The initial semantic surface area is intentionally small:
+
+- `ProviderError::Fatal(...)`
+  - **Immediate process exit** (strong fail-fast).
+  - No retries.
+- `ProviderError::Retryable(...)`
+  - Retry with backoff according to `RestartPolicy`.
+  - If retries exceed `provider_init_timeout`, exit the process.
+
+#### FUTURE: Degraded providers
+
+Future versions may extend `ProviderError` with additional semantics (e.g. a `Degraded` outcome), but this is **not implemented yet**.
+
+If/when introduced, the following questions must be answered in the framework contract before enabling it:
+
+- Does the daemon continue startup, and what is the readiness/health behaviour?
+- How do services observe (and react to) the degraded state without pushing complexity into business code?
+
+### 5.3. Lazy vs. Eager Provider Initialization
+
+The default behavior is **lazy** for all providers (including `Listen`).
+
+A provider may opt into **eager** initialization via an explicit macro parameter:
+
+- `#[provider(..., eager = true)]`
+
+Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work.
+
+### 5.4. RestartPolicy reuse
+
+Provider initialization retries should reuse the existing `RestartPolicy` model.
+
+- A new `provider_init_timeout` is planned.
+- By default, it should match `wave_spawn_timeout` to keep timeouts consistent unless explicitly configured.
+
 [Back to README](../../README.md)

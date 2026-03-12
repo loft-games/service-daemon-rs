@@ -88,14 +88,32 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut clean_sig = sig.clone();
     clean_sig.inputs = clean_inputs;
 
+    let scope_mod = format_ident!(
+        "__TRIGGER_USER_SCOPE_{}",
+        fn_name.to_string().to_uppercase()
+    );
+
+    let inner_vis = match vis {
+        syn::Visibility::Public(_) => quote!(pub),
+        _ => quote!(pub(crate)),
+    };
+
     let expanded = quote! {
-        #(#cleaned_attrs)*
-        #vis #clean_sig {
+        mod #scope_mod {
+            #[allow(unused_imports)]
+            use super::*;
+
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
             use service_daemon::core::managed_state::{RwLock, Mutex};
-            #body
+
+            #(#cleaned_attrs)*
+            #inner_vis #clean_sig {
+                #body
+            }
         }
+
+        #vis use #scope_mod::#fn_name;
 
         /// Auto-generated trigger wrapper - acts as an event-loop "Call Host"
         /// This is registered as a Service, so it benefits from ServiceDaemon's lifecycle management.

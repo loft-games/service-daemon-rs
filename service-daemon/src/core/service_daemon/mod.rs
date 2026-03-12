@@ -7,8 +7,9 @@
 mod policy;
 mod runner;
 
-use std::any::TypeId;
-use std::collections::HashMap;
+use dashmap::DashMap;
+use std::any::{Any, TypeId};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -18,6 +19,9 @@ use tracing::{info, instrument};
 
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
+
+#[cfg(unix)]
+use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::DaemonResources;
 use crate::models::{
@@ -94,6 +98,96 @@ impl ServiceDaemon {
         ServiceDaemonBuilder::new()
     }
 
+    async fn eager_init_reachable_providers(&self) {
+        let mut providers_by_id: HashMap<TypeId, &'static crate::models::ProviderEntry> =
+            HashMap::new();
+        for entry in crate::models::PROVIDER_REGISTRY.iter() {
+            providers_by_id.insert(entry.type_id, entry);
+        }
+
+        // 1) Collect initial reachable set from service parameters.
+        let mut reachable: HashSet<TypeId> = HashSet::new();
+        let mut queue: VecDeque<TypeId> = VecDeque::new();
+        for svc in &self.services {
+            for p in svc.params() {
+                if reachable.insert(p.type_id) {
+                    queue.push_back(p.type_id);
+                }
+            }
+        }
+
+        // 2) Expand via provider->provider edges.
+        while let Some(tid) = queue.pop_front() {
+            let Some(p) = providers_by_id.get(&tid) else {
+                continue;
+            };
+            for dep in p.params {
+                if reachable.insert(dep.type_id) {
+                    queue.push_back(dep.type_id);
+                }
+            }
+        }
+
+        // 3) Filter eager targets.
+        let eager_targets: Vec<&'static crate::models::ProviderEntry> = reachable
+            .iter()
+            .filter_map(|tid| providers_by_id.get(tid).copied())
+            .filter(|p| p.eager)
+            .collect();
+
+        if eager_targets.is_empty() {
+            return;
+        }
+
+        // 4) Toposort reachable provider DAG to get a deterministic init order.
+        // Nodes are provider TypeIds; edges are dep -> provider.
+        let mut graph = DiGraph::<TypeId, ()>::new();
+        let mut nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
+
+        for tid in reachable.iter().copied() {
+            if providers_by_id.contains_key(&tid) {
+                nodes.entry(tid).or_insert_with(|| graph.add_node(tid));
+            }
+        }
+
+        for (&tid, entry) in providers_by_id.iter() {
+            if !reachable.contains(&tid) {
+                continue;
+            }
+            let Some(&prov_node) = nodes.get(&tid) else {
+                continue;
+            };
+            for dep in entry.params {
+                if !reachable.contains(&dep.type_id) {
+                    continue;
+                }
+                if let Some(&dep_node) = nodes.get(&dep.type_id) {
+                    graph.add_edge(dep_node, prov_node, ());
+                }
+            }
+        }
+
+        let order = toposort(&graph, None).unwrap_or_else(|_| {
+            // Cycles should already be detected by validate_dependency_graph().
+            // If we reach here, keep behavior explicit.
+            panic!("Circular dependency detected in provider graph during eager init");
+        });
+
+        // 5) Execute init in order, only for eager providers.
+        let eager_ids: HashSet<TypeId> = eager_targets.iter().map(|p| p.type_id).collect();
+        for node in order {
+            let tid = graph[node];
+            if !eager_ids.contains(&tid) {
+                continue;
+            }
+            let entry = providers_by_id
+                .get(&tid)
+                .copied()
+                .expect("provider must exist in providers_by_id");
+            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await;
+        }
+    }
+
     /// Get the cancellation token for this daemon.
     pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancellation_token.clone()
@@ -138,6 +232,11 @@ impl ServiceDaemon {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
 
+        // Eager-initialize reachable providers before spawning services.
+        //
+        // This is opt-in (providers must specify `eager = true`).
+        self.eager_init_reachable_providers().await;
+
         // Spawn all services in the background
         runner::spawn_all_services(
             &self.services,
@@ -175,7 +274,6 @@ impl ServiceDaemon {
         // Wait for shutdown signal (Ctrl+C, SIGTERM, or token cancellation)
         #[cfg(unix)]
         {
-            use tokio::signal::unix::{SignalKind, signal};
             let mut sigint = signal(SignalKind::interrupt()).map_err(|e| {
                 crate::models::ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
             })?;
@@ -261,7 +359,7 @@ impl ServiceDaemon {
     }
 
     /// Run for a limited duration (for testing).
-    #[allow(dead_code)]
+    #[cfg(feature = "simulation")]
     #[instrument(skip(self))]
     pub async fn run_for_duration(self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
@@ -309,7 +407,7 @@ pub struct ServiceDaemonBuilder {
     /// External cancellation token for hierarchical lifecycle management.
     external_cancel_token: Option<CancellationToken>,
     /// Type-erased trigger configuration overrides.
-    trigger_configs: dashmap::DashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>,
+    trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
     /// Infrastructure tags whose services are always included in the final
     /// registry, regardless of the user-provided tag filters. Used by
     /// `MockContext` to auto-include `log_service` in simulation tests.
@@ -325,7 +423,7 @@ impl ServiceDaemonBuilder {
             registry: None,
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
-            trigger_configs: dashmap::DashMap::new(),
+            trigger_configs: DashMap::new(),
             infra_tags: Vec::new(),
             #[cfg(feature = "simulation")]
             resources: None,
@@ -346,7 +444,7 @@ impl ServiceDaemonBuilder {
             ),
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
-            trigger_configs: dashmap::DashMap::new(),
+            trigger_configs: DashMap::new(),
             infra_tags: Vec::new(),
             resources: None,
         }
@@ -420,7 +518,7 @@ impl ServiceDaemonBuilder {
     #[must_use]
     pub fn with_trigger_config<C: 'static + Clone + Send + Sync>(self, config: C) -> Self {
         self.trigger_configs
-            .insert(std::any::TypeId::of::<C>(), Box::new(config));
+            .insert(TypeId::of::<C>(), Box::new(config));
         self
     }
 
@@ -694,6 +792,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "simulation")]
     #[tokio::test]
     async fn test_short_run() {
         setup_tracing();

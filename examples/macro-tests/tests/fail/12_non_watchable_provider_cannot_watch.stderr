@@ -1,3 +1,16 @@
+error[E0603]: function `watch_state` is private
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:28:10
+   |
+28 | async fn watch_state(_snapshot: Arc<NotWatchable>) -> anyhow::Result<()> {
+   |          ^^^^^^^^^^^ private function
+   |
+note: the function `watch_state` is defined here
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
+   |
+27 | #[trigger(Watch(NotWatchable))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: this error originates in the attribute macro `trigger` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
   --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
    |
