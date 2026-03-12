@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+#[cfg(feature = "simulation")]
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
