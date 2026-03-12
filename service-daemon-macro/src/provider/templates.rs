@@ -61,6 +61,7 @@ impl<'a> TemplateContext<'a> {
         struct_name: &'a syn::Ident,
         vis: &'a syn::Visibility,
         attrs: &'a [syn::Attribute],
+        eager: bool,
     ) -> Self {
         let singleton_name = format_ident!(
             "__PROVIDER_SINGLETON_{}",
@@ -87,7 +88,7 @@ impl<'a> TemplateContext<'a> {
             &singleton_name,
             struct_name.span(),
             &[],
-            false,
+            eager,
             &init_fn,
         );
 
@@ -106,8 +107,9 @@ pub fn generate_notify_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
+    eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs);
+    let ctx = TemplateContext::new(struct_name, vis, attrs, eager);
     let TemplateContext {
         struct_name,
         vis,
@@ -160,8 +162,9 @@ pub fn generate_broadcast_queue_template(
     attrs: &[syn::Attribute],
     item_type: &syn::Type,
     capacity: usize,
+    eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs);
+    let ctx = TemplateContext::new(struct_name, vis, attrs, eager);
     let TemplateContext {
         struct_name,
         vis,
@@ -234,6 +237,7 @@ pub fn generate_listen_template(
     attrs: &[syn::Attribute],
     addr: &syn::LitStr,
     env: Option<&syn::LitStr>,
+    eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
 
@@ -268,18 +272,31 @@ pub fn generate_listen_template(
         service_daemon::core::provider_init::init_fallible(
             policy,
             cancel,
-            || async {
-                let listener = std::net::TcpListener::bind(&addr)
-                    .map_err(|e| service_daemon::ProviderError::Retryable(format!(
-                        "Provider '{}' failed to bind TCP port '{}': {}",
-                        #struct_name_str, addr, e
-                    )))?;
-                listener.set_nonblocking(true)
-                    .map_err(|e| service_daemon::ProviderError::Fatal(format!(
-                        "Provider '{}' failed to set nonblocking for '{}': {}",
-                        #struct_name_str, addr, e
-                    )))?;
-                Ok(#struct_name(std::sync::Arc::new(listener)))
+            move || {
+                let addr = addr.clone();
+                async move {
+                    let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
+                        let msg = format!(
+                            "Provider '{}' failed to bind TCP port '{}': {}",
+                            #struct_name_str, addr, e
+                        );
+                        match e.kind() {
+                            std::io::ErrorKind::AddrInUse
+                            | std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::TimedOut => {
+                                service_daemon::ProviderError::Retryable(msg)
+                            }
+                            _ => service_daemon::ProviderError::Fatal(msg),
+                        }
+                    })?;
+                    listener.set_nonblocking(true).map_err(|e| {
+                        service_daemon::ProviderError::Fatal(format!(
+                            "Provider '{}' failed to set nonblocking for '{}': {}",
+                            #struct_name_str, addr, e
+                        ))
+                    })?;
+                    Ok(#struct_name(std::sync::Arc::new(listener)))
+                }
             },
         )
         .await
@@ -290,7 +307,7 @@ pub fn generate_listen_template(
         &singleton_name,
         struct_name.span(),
         &[],
-        false,
+        eager,
         &init_fn,
     );
 

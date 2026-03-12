@@ -99,14 +99,8 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     if has_fn {
         let item_fn = parse_macro_input!(item as ItemFn);
-        if !attr.is_empty() {
-            proc_macro_error2::emit_warning!(
-                proc_macro2::TokenStream::from(attr),
-                "#[provider] on fn ignores arguments";
-                help = "Use `#[provider]` without arguments for fn providers"
-            );
-        }
-        return generate_async_fn_provider(item_fn);
+        let args = parse_macro_input!(attr as ProviderArgs);
+        return generate_async_fn_provider(item_fn, args.eager);
     }
 
     // Error for unsupported items - use abort! for enhanced error
@@ -127,7 +121,7 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// The function is preserved as-is with its original signature. The generated
 /// `Provided` impl calls the function with resolved dependencies.
-fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
+fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let fn_name = &item_fn.sig.ident;
     let fn_vis = &item_fn.vis;
     let fn_block = &item_fn.block;
@@ -245,7 +239,10 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
             service_daemon::core::provider_init::init_fallible(
                 service_daemon::RestartPolicy::default(),
                 service_daemon::tokio_util::sync::CancellationToken::new(),
-                || async { #fn_call_with_args },
+                move || {
+                    #(let #call_args = #call_args.clone();)*
+                    async move { #fn_call_with_args }
+                },
             )
             .await
         }
@@ -264,7 +261,10 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
             service_daemon::core::provider_init::init_fallible(
                 policy,
                 cancel,
-                || async { #fn_call_with_args },
+                move || {
+                    #(let #call_args = #call_args.clone();)*
+                    async move { #fn_call_with_args }
+                },
             )
             .await
         }
@@ -281,7 +281,7 @@ fn generate_async_fn_provider(item_fn: ItemFn) -> TokenStream {
         &singleton_name,
         return_type.span(),
         &param_entries,
-        false,
+        eager,
         &init_fn,
     );
 

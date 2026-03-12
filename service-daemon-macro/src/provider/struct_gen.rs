@@ -41,7 +41,12 @@ fn try_generate_template(
                     "Notify/Event template does not use `capacity`; it will be ignored"
                 );
             }
-            Some(generate_notify_template(struct_name, vis, attrs))
+            Some(generate_notify_template(
+                struct_name,
+                vis,
+                attrs,
+                provider_args.eager,
+            ))
         }
         // Broadcast queue templates (fanout - all handlers receive the event)
         "BroadcastQueue" | "Queue" | "BQueue" => {
@@ -62,6 +67,7 @@ fn try_generate_template(
                 attrs,
                 &item_type,
                 cap,
+                provider_args.eager,
             ))
         }
         // Listen template (TCP listener with FD cloning)
@@ -88,6 +94,7 @@ fn try_generate_template(
                 attrs,
                 bind_addr,
                 provider_args.env.as_ref(),
+                provider_args.eager,
             ))
         }
         _ => {
@@ -228,19 +235,32 @@ pub(super) fn generate_provided_impl(
                     #init_fn
                 }).await
             }
+
+            async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                #singleton_name.resolve_managed(|| async {
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    Ok({ #init_fn })
+                }).await
+            }
         }
 
         #watchable_impl
 
         impl #type_tokens {
             /// Resolves a tracked RwLock for this provider.
-            pub async fn rwlock(&self) -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+            pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
             }
 
             /// Resolves a tracked Mutex for this provider.
-            pub async fn mutex(&self) -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+            pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 <Self as service_daemon::ManagedProvided>::resolve_mutex().await
+            }
+
+            /// Resolves the raw managed result for this provider.
+            pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                <Self as service_daemon::ManagedProvided>::resolve_managed().await
             }
         }
 

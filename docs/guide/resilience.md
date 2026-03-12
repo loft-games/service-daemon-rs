@@ -82,7 +82,29 @@ async fn license_checker() -> anyhow::Result<()> {
 }
 ```
 
-## 2. Advanced Resilience: Wave Timeouts
+## 2. Initialization Resilience: Providers
+
+The `ServiceDaemon` provides robust initialization for **Providers** through managed retry cycles and error prioritization.
+
+### 2.1. Provider Error Mapping: Retryable vs Fatal
+
+When a provider fails to initialize, it can influence the daemon's behavior by returning specific error variants:
+
+- **Retryable**: The daemon will retry the initialization using the global `RestartPolicy`. Useful for transient issues like temporary network partitions.
+- **Fatal**: The daemon will immediately stop the startup process and shutdown. Useful for configuration errors (e.g., invalid connection string).
+
+### 2.2. Smart Listen Strategy (`Listen` Template)
+
+The `Listen` template includes built-in intelligent error mapping for common I/O issues:
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| `AddrInUse` | **Retryable** | Port is occupied, likely by an old instance still shutting down during rolling updates. |
+| `Interrupted` | **Retryable** | System signal interrupted the bind operation. |
+| `PermissionDenied` | **Fatal** | Attempted to bind to a low port (e.g., 80) without root privileges. |
+| `AddrNotAvailable` | **Fatal** | Attempted to bind to an IP address that doesn't exist on the host. |
+
+## 3. Advanced Resilience: Wave Timeouts
 
 The `RestartPolicy` also controls how long the daemon waits for services during startup and shutdown waves.
 

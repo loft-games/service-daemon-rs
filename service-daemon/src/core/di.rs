@@ -43,6 +43,10 @@ pub trait ManagedProvided: Provided {
 
     /// Resolves a live tracked `Mutex` for this type.
     fn resolve_mutex() -> impl std::future::Future<Output = Arc<Mutex<Self>>> + Send;
+
+    /// Resolves the raw initialization result for this provider.
+    fn resolve_managed()
+    -> impl std::future::Future<Output = std::result::Result<Arc<Self>, crate::ProviderError>> + Send;
 }
 
 /// A trait for managed provider types that also support change notifications.

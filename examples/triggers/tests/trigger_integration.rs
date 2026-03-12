@@ -70,7 +70,7 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
 
     // Modify ExternalStatus -- this should trigger the Watch handler
     {
-        let lock = ExternalStatus::resolve().await.rwlock().await;
+        let lock = ExternalStatus::resolve_rwlock().await;
         let mut guard = lock.write().await;
         guard.message = "Watch test update".to_string();
         guard.updated_count = 1;

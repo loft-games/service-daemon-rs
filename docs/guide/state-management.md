@@ -65,6 +65,19 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
 }
 ```
 
+### Advanced: capturing errors with `resolve_managed()`
+
+Standard injection via `Arc<T>` or `Arc<RwLock<T>>` hides initialization errors (the daemon handles retries or shutdown). For advanced monitoring or testing, use the `resolve_managed()` associated function to capture the raw `Result`:
+
+```rust
+let result = MyProvider::resolve_managed().await;
+match result {
+    Ok(arc) => println!("Provider ready"),
+    Err(ProviderError::Retryable(msg)) => println!("Waiting for: {}", msg),
+    Err(ProviderError::Fatal(msg)) => println!("Permanent failure: {}", msg),
+}
+```
+
 ## 2. Specialized Templates
 
 `service-daemon-rs` provides several built-in templates for common infrastructure needs. These templates are "early-initialized" during the **System Wave**, meaning they are ready before any business logic starts.
@@ -76,7 +89,23 @@ Normal `TcpListener::bind()` inside an async service starts too late. If your DB
 
 - **Early Binding**: The port is bound immediately during system startup.
 - **FD Cloning**: Each call to `listener.get()` returns a new `tokio::net::TcpListener` by cloning the underlying OS file descriptor (`dup`). This allows multiple services or reload generations to share the same port.
-- **Fail-Fast**: If the port is already in use, the framework panics immediately during startup, preventing "silent failures."
+- **Resilience & Auto-Retry**: Built-in intelligent error mapping (see [Resilience Guide](resilience.md#22-smart-listen-strategy)). Transient errors like `AddrInUse` trigger automatic retries, while permission issues result in a fatal shutdown.
+
+### Eager Initialization: `eager = true`
+
+Providers are lazy-initialized upon their first injection by default. For providers that must start regardless of injection (e.g., health-check listeners or global telemetry), the `eager = true` parameter forces initialization during the system startup wave.
+
+```rust
+#[derive(Clone)]
+#[provider(Listen("0.0.0.0:8080"), eager = true)]
+pub struct HealthListener;
+
+#[provider(eager = true)]
+pub async fn telemetry_init() -> StatsClient {
+    // This will run immediately on startup regardless of injection
+    init_tracing_pipeline().await
+}
+```
 
 ```rust
 // In your providers definition:

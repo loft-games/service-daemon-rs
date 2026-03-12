@@ -9,6 +9,7 @@
 - **Declarative Services**: Mark functions as managed tasks with `#[service]`.
 - **Event-Driven Triggers**: Use `#[trigger]` for Cron, Queues, and State Watchers.
 - **Type-Safe DI**: Dependency injection resolved at compile-time with zero boilerplate.
+- **Eager Initialization**: Opt-in non-lazy startup via `eager = true` for all provider types (Struct, Fn, Templates).
 - **Resilient Lifecycle**: Exponential backoff, jitter, wave-based startup/shutdown, and **fatal error handling**.
 - **Early-Binding Listeners**: Use `#[provider(Listen("addr"))]` to bind ports at system-init, ensuring K8s/Knative readiness probes pass even while other services are still starting.
 - **Smart State**: Transparent change tracking and zero-copy state snapshots.

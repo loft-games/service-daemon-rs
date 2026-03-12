@@ -23,11 +23,11 @@ fn provider_init_exit(code: i32, msg: &str) -> ! {
 pub async fn init_fallible<T, Init, Fut>(
     policy: RestartPolicy,
     cancel: CancellationToken,
-    init: Init,
+    mut init: Init,
 ) -> Arc<T>
 where
     T: Send + Sync + 'static,
-    Init: Fn() -> Fut,
+    Init: FnMut() -> Fut,
     Fut: Future<Output = Result<T, ProviderError>> + Send,
 {
     let start = Instant::now();

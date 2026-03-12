@@ -1,3 +1,11 @@
+error[E0046]: not all trait items implemented, missing: `resolve_managed`
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:17:1
+   |
+17 | impl service_daemon::ManagedProvided for NotWatchable {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `resolve_managed` in implementation
+   |
+   = help: implement the missing item: `fn resolve_managed() -> impl std::future::Future<Output = Result<Arc<Self>, ProviderError>> + std::marker::Send { todo!() }`
+
 error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
   --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
    |
