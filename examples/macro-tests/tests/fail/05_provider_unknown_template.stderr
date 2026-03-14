@@ -1,4 +1,4 @@
-error: Unknown provider attribute 'bogus'. Supported: env
+error: Unknown provider attribute 'bogus'. Supported: env, capacity, eager
  --> tests/fail/05_provider_unknown_template.rs:6:18
   |
 6 | #[provider(8080, bogus = "bad")]

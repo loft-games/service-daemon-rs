@@ -10,7 +10,7 @@ In `service-daemon-rs`, we don't just "let it crash". We provide a mechanism for
 
 To handle lifecycle events, we use `state()` instead of `is_shutdown()`. This allows our service to respond to different phases of its life.
 
-```rust
+```rust,ignore
 use service_daemon::{done, service, sleep, state};
 use service_daemon::models::ServiceStatus;
 use std::time::Duration;
@@ -67,7 +67,7 @@ INFO robust_service: Final cleanup before shutdown.
 
 If a service needs to restart (e.g., because a dependency updated), it will be destroyed and re-created. How do you keep your progress? You put it on the **Shelf**.
 
-```rust
+```rust,ignore
 use service_daemon::prelude::*; // shelve, unshelve, done, state, sleep
 
 #[service]
@@ -133,7 +133,7 @@ INFO counter_service: Count is: 3
 To the user, it looks like a seamless update. To the developer, it's a clean state migration.
 
 > [!NOTE]
-> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](../state-management.md) design document.
+> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/state-management.md) design document.
 
 ## 3. Why this matters? (The Provider Update)
 
@@ -149,7 +149,7 @@ Sometimes you don't want to just "read" a provider; you want to **change** it. W
 
 Crucially, when one service modifies a managed provider, every other service depending on it will undergo a **Warm Restart** (`ServiceStatus::Restoring`).
 
-```rust
+```rust,ignore
 // 1. The Writer: Modifies shared stats
 #[service]
 pub async fn stats_writer(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()> {
@@ -196,4 +196,4 @@ This pattern enables **Reactive Architecture**: your services automatically adap
 
 ---
 
-[**<- Previous Step: Reactive Triggers**](reactive-triggers.md) | [**Next Step: DIY Providers ->**](diy-providers.md)
+[**<- Previous Step: Reactive Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md) | [**Next Step: DIY Providers ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/diy-providers.md)

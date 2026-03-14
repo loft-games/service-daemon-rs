@@ -10,7 +10,7 @@ A Trigger is a specialized service that sleeps until an event occurs.
 
 The most common trigger is the `Queue`. Imagine you have a background job queue, and you want a worker to process items as they arrive.
 
-```rust
+```rust,ignore
 use service_daemon::prelude::*; // TT is here!
 
 #[provider(Queue(Job))]
@@ -33,7 +33,7 @@ Triggers are even more powerful when they talk to each other. A trigger can "fir
 
 Let's say after processing a `Job`, we want to notify a cleanup service.
 
-```rust
+```rust,ignore
 // A simple signal provider
 #[provider(Notify)]
 pub struct CleanupSignal;
@@ -65,7 +65,7 @@ By default, the framework treats the first argument that is *not* an `Arc<T>` as
 
 However, if your payload is also wrapped in an `Arc` (common for zero-copy job processing) or if you want to be explicit, use the **`#[payload]`** attribute:
 
-```rust
+```rust,ignore
 #[trigger(Queue(JobQueue))]
 async fn complex_worker(
     #[payload] job: Arc<ComplexJob>, // Explicitly marked as payload
@@ -82,11 +82,11 @@ async fn complex_worker(
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
 4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
-5.  **Elastic Scaling**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and automatically scales concurrency based on pressure via the dedicated `ScalingPolicy`. Other templates dispatch serially with no scaling overhead. You can customize these limits globally—see [**Resilience Kung-Fu**](resilience-kung-fu.md#2-mastering-throughput-scaling-policy).
+5.  **Elastic Scaling**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and automatically scales concurrency based on pressure via the dedicated `ScalingPolicy`. Other templates dispatch serially with no scaling overhead. You can customize these limits globally—see [**Resilience Kung-Fu**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/resilience-kung-fu.md#2-mastering-throughput-scaling-policy).
 
 > [!TIP]
-> **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../triggers.md).
+> **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/triggers.md).
 
 ---
 
-[**<- Previous Step: Hello, Heartbeat!**](hello-heartbeat.md) | [**Next Step: The Art of Recovery ->**](art-of-recovery.md)
+[**<- Previous Step: Hello, Heartbeat!**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/hello-heartbeat.md) | [**Next Step: The Art of Recovery ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/art-of-recovery.md)

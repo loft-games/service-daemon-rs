@@ -1,5 +1,5 @@
 //! Pass case: A provider struct with `Arc<RwLock<T>>` and `Arc<Mutex<T>>` fields
-//! should automatically inject via `resolve_rwlock()` and `resolve_mutex()`.
+//! should automatically inject using `ManagedProvided` (`resolve_rwlock()` / `resolve_mutex()`).
 
 use service_daemon::core::managed_state::{Mutex, RwLock};
 use service_daemon::provider;

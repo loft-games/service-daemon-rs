@@ -1,0 +1,169 @@
+<svg width="600" height="400" viewBox="0 0 600 400" xmlns="http://www.w3.org/2000/svg">
+    <!-- Background layer -->
+    <rect width="600" height="400" fill="#0f172a" />
+
+    <defs>
+        <!-- Grid background -->
+        <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+            <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="1" />
+        </pattern>
+
+        <!-- Basic Glow Filter -->
+        <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="4" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+        </filter>
+
+        <!-- Daemon Core Specialized High-intensity Light Filter -->
+        <filter id="coreGlow" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur stdDeviation="10" result="blur" />
+            <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.23  0 0 0 0 0.51  0 0 0 0 0.96  0 0 0 1 0" />
+            <feMerge>
+                <feMergeNode />
+                <feMergeNode in="SourceGraphic" />
+            </feMerge>
+        </filter>
+
+        <!-- Daemon Core Gradient -->
+        <radialGradient id="daemonGradient">
+            <stop offset="0%" stop-color="#60a5fa" />
+            <stop offset="70%" stop-color="#1d4ed8" stop-opacity="0.6" />
+            <stop offset="100%" stop-color="#1e3a8a" stop-opacity="0" />
+        </radialGradient>
+    </defs>
+
+    <!-- Draw the background grid -->
+    <rect width="600" height="400" fill="url(#grid)" />
+
+    <!-- Title Layer -->
+    <g transform="translate(30, 40)">
+        <text fill="#94a3b8" font-family="monospace" font-size="14" font-weight="bold">
+            SERVICE DAEMON
+            <tspan x="0" dy="20" font-size="10" font-weight="normal" opacity="0.6">
+                LIGHTWEIGHT SERVICE SUPERVISOR
+            </tspan>
+        </text>
+        <rect x="0" y="30" width="200" height="1" fill="#334155" />
+    </g>
+
+    <!-- ================= Daemon Core management process ================= -->
+    <g transform="translate(300, 200)">
+        <!-- Energy halo layer -->
+        <circle r="45" fill="url(#daemonGradient)" filter="url(#coreGlow)">
+            <animate attributeName="r" values="42;48;42" dur="4s" repeatCount="indefinite" />
+            <animate attributeName="opacity" values="0.5;0.8;0.5" dur="4s" repeatCount="indefinite" />
+        </circle>
+
+        <!-- Core entity -->
+        <circle r="22" fill="#1e40af" stroke="#60a5fa" stroke-width="2" filter="url(#glow)" />
+        <circle r="8" fill="#eff6ff">
+            <animate attributeName="opacity" values="1;0.4;1" dur="2s" repeatCount="indefinite" />
+        </circle>
+
+        <!-- External rotating orbit -->
+        <circle r="55" fill="none" stroke="#3b82f6" stroke-width="1" stroke-dasharray="10 160" opacity="0.6">
+            <animateTransform attributeName="transform" type="rotate" from="0" to="360" dur="10s"
+                repeatCount="indefinite" />
+        </circle>
+        <circle r="55" fill="none" stroke="#60a5fa" stroke-width="1" stroke-dasharray="5 165" opacity="0.4">
+            <animateTransform attributeName="transform" type="rotate" from="360" to="0" dur="15s"
+                repeatCount="indefinite" />
+        </circle>
+
+        <!-- Label layer -->
+        <text y="75" text-anchor="middle" fill="#60a5fa" font-family="monospace" font-size="13" font-weight="bold"
+            letter-spacing="3">DAEMON</text>
+    </g>
+
+    <!-- Node 1 (0s) -->
+    <g>
+        <animateTransform attributeName="transform" type="translate" values="150,150; 170,140; 150,150" dur="8.3s"
+            repeatCount="indefinite" />
+        <g>
+            <circle r="8" fill="#10b981" filter="url(#glow)">
+                <animate attributeName="fill" values="#10b981; #10b981; #ef4444; #ef4444; #3b82f6; #3b82f6; #10b981"
+                    keyTimes="0; 0.333; 0.334; 0.5; 0.501; 0.75; 1" dur="12s" repeatCount="indefinite" />
+            </circle>
+            <g opacity="0">
+                <text y="-20" text-anchor="middle" fill="#ef4444" font-family="monospace" font-size="11"
+                    font-weight="bold">CRASHED!</text>
+                <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0; 0.333; 0.334; 0.45; 0.46; 1"
+                    dur="12s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" from="0 0" to="0 -15" dur="12s"
+                    repeatCount="indefinite" />
+            </g>
+        </g>
+    </g>
+
+    <!-- Node 2 (-4.5s) -->
+    <g>
+        <animateTransform attributeName="transform" type="translate" values="420,110; 400,130; 420,110" dur="10.7s"
+            repeatCount="indefinite" />
+        <g>
+            <circle r="8" fill="#10b981" filter="url(#glow)">
+                <animate attributeName="fill" values="#10b981; #10b981; #ef4444; #ef4444; #3b82f6; #3b82f6; #10b981"
+                    keyTimes="0; 0.333; 0.334; 0.5; 0.501; 0.75; 1" dur="12s" begin="-4.5s" repeatCount="indefinite" />
+            </circle>
+            <g opacity="0">
+                <text y="-20" text-anchor="middle" fill="#ef4444" font-family="monospace" font-size="11"
+                    font-weight="bold">CRASHED!</text>
+                <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0; 0.333; 0.334; 0.45; 0.46; 1"
+                    dur="12s" begin="-4.5s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" from="0 0" to="0 -15" dur="12s"
+                    begin="-4.5s" repeatCount="indefinite" />
+            </g>
+        </g>
+    </g>
+
+    <!-- Node 3 (-8.2s) -->
+    <g>
+        <animateTransform attributeName="transform" type="translate" values="120,280; 140,290; 120,280" dur="9.1s"
+            repeatCount="indefinite" />
+        <g>
+            <circle r="8" fill="#10b981" filter="url(#glow)">
+                <animate attributeName="fill" values="#10b981; #10b981; #ef4444; #ef4444; #3b82f6; #3b82f6; #10b981"
+                    keyTimes="0; 0.333; 0.334; 0.5; 0.501; 0.75; 1" dur="12s" begin="-8.2s" repeatCount="indefinite" />
+            </circle>
+            <g opacity="0">
+                <text y="-20" text-anchor="middle" fill="#ef4444" font-family="monospace" font-size="11"
+                    font-weight="bold">CRASHED!</text>
+                <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0; 0.333; 0.334; 0.45; 0.46; 1"
+                    dur="12s" begin="-8.2s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" from="0 0" to="0 -15" dur="12s"
+                    begin="-8.2s" repeatCount="indefinite" />
+            </g>
+        </g>
+    </g>
+
+    <!-- Node 4 (-2.1s) -->
+    <g>
+        <animateTransform attributeName="transform" type="translate" values="460,290; 440,270; 460,290" dur="13.2s"
+            repeatCount="indefinite" />
+        <g>
+            <circle r="8" fill="#10b981" filter="url(#glow)">
+                <animate attributeName="fill" values="#10b981; #10b981; #ef4444; #ef4444; #3b82f6; #3b82f6; #10b981"
+                    keyTimes="0; 0.333; 0.334; 0.5; 0.501; 0.75; 1" dur="12s" begin="-2.1s" repeatCount="indefinite" />
+            </circle>
+            <g opacity="0">
+                <text y="-20" text-anchor="middle" fill="#ef4444" font-family="monospace" font-size="11"
+                    font-weight="bold">CRASHED!</text>
+                <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0; 0.333; 0.334; 0.45; 0.46; 1"
+                    dur="12s" begin="-2.1s" repeatCount="indefinite" />
+                <animateTransform attributeName="transform" type="translate" from="0 0" to="0 -15" dur="12s"
+                    begin="-2.1s" repeatCount="indefinite" />
+            </g>
+        </g>
+    </g>
+
+    <!-- Legend -->
+    <g transform="translate(460, 30)">
+        <circle r="4" fill="#10b981" cx="0" cy="0" />
+        <text x="12" y="4" fill="#94a3b8" font-family="monospace" font-size="10">Healthy</text>
+        <circle r="4" fill="#ef4444" cx="0" cy="18" />
+        <text x="12" y="22" fill="#94a3b8" font-family="monospace" font-size="10">Crashed</text>
+        <circle r="4" fill="#3b82f6" cx="0" cy="36" />
+        <text x="12" y="40" fill="#94a3b8" font-family="monospace" font-size="10">Recovering</text>
+    </g>
+
+
+</svg>

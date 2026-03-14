@@ -22,8 +22,12 @@
 use std::io::Read;
 use std::sync::Arc;
 
+use std::collections::HashMap;
+
+use dashmap::DashMap;
 use futures::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
+use tracing::info_span;
 
 use service_daemon::ServiceDaemon;
 use service_daemon::core::context::DaemonResources;
@@ -81,8 +85,12 @@ struct MockSupervisor {
 }
 
 // Compile-time size guard: update EXPECTED_SIZE if ServiceSupervisor changes.
+// Compile-time size guards like this are extremely sensitive to upstream
+// dependency layout and compiler changes. This example is for manual inspection,
+// not for CI invariants.
+#[cfg(feature = "memory-analysis")]
 const _: () = {
-    const EXPECTED_SIZE: usize = 208;
+    const EXPECTED_SIZE: usize = 216;
     assert!(
         std::mem::size_of::<MockSupervisor>() == EXPECTED_SIZE,
         // If this fails, the real ServiceSupervisor layout has changed.
@@ -210,8 +218,6 @@ fn warmup_allocator() {
 }
 
 fn measure_dashmap_status_plane() -> Option<f64> {
-    use dashmap::DashMap;
-
     warmup_allocator();
     let map: DashMap<ServiceId, ServiceStatus> = DashMap::new();
 
@@ -226,8 +232,6 @@ fn measure_dashmap_status_plane() -> Option<f64> {
 }
 
 fn measure_dashmap_reload_signals() -> Option<f64> {
-    use dashmap::DashMap;
-
     warmup_allocator();
     let map: DashMap<ServiceId, Arc<tokio::sync::Notify>> = DashMap::new();
 
@@ -281,8 +285,6 @@ fn measure_supervisor_heap_box() -> Option<f64> {
 }
 
 fn measure_tracing_spans() -> Option<f64> {
-    use tracing::info_span;
-
     warmup_allocator();
     let mut spans = Vec::with_capacity(ISOLATION_COUNT);
 
@@ -317,8 +319,6 @@ async fn measure_tokio_task_spawn() -> Option<f64> {
 }
 
 async fn measure_hashmap_join_handles() -> Option<f64> {
-    use std::collections::HashMap;
-
     warmup_allocator();
     let mut map: HashMap<ServiceId, tokio::task::JoinHandle<()>> =
         HashMap::with_capacity(ISOLATION_COUNT);

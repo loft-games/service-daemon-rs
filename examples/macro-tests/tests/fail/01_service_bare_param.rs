@@ -1,7 +1,8 @@
-//! Fail case: #[service] rejects non-Arc parameter (bare type).
+//! Fail case: #[service] rejects bare dependency-like parameters.
 //!
-//! A service function MUST wrap all dependencies in Arc<T>.
-//! Using a bare `i32` should produce a compile-time error from the macro.
+//! Services do not have payload parameters. Every service dependency must be
+//! declared as `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`.
+//! A bare `i32` therefore fails as an unsupported service signature.
 
 use service_daemon::service;
 

@@ -1,8 +1,8 @@
-error: Services do not support event payloads. Only Arc<T> dependencies are allowed.
+error: #[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].
 
-         = help: Remove the payload parameter or use #[trigger] instead.
+         = help: Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead.
 
- --> tests/fail/01_service_bare_param.rs:9:26
-  |
-9 | pub async fn bad_service(port: i32) -> anyhow::Result<()> {
-  |                          ^^^^^^^^^
+  --> tests/fail/01_service_bare_param.rs:10:26
+   |
+10 | pub async fn bad_service(port: i32) -> anyhow::Result<()> {
+   |                          ^^^^^^^^^

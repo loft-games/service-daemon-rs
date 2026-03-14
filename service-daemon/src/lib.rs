@@ -40,21 +40,22 @@ extern crate self as service_daemon;
 
 pub mod core;
 pub mod models;
+pub mod tutorial;
 
 // Re-export commonly used items
 pub use core::context::{
     done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config, unshelve, wait_shutdown,
 };
-pub use core::di::Provided;
+pub use core::di::{ManagedProvided, Provided, WatchableProvided};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
 };
 pub use models::service::ServicePriority;
 pub use models::{
-    BackoffController, PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, Result,
-    SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder, ServiceDescription, ServiceEntry,
-    ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerContext,
-    TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
+    BackoffController, PROVIDER_REGISTRY, ProviderEntry, ProviderError, Registry, RegistryBuilder,
+    Result, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder, ServiceDescription,
+    ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT,
+    TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
 };
 pub use std::sync::Arc;
 
@@ -93,7 +94,7 @@ pub mod prelude {
     pub use crate::core::context::{
         is_shutdown, shelve, shelve_clone, sleep, state, unshelve, wait_shutdown,
     };
-    pub use crate::core::di::Provided;
+    pub use crate::core::di::{ManagedProvided, Provided, WatchableProvided};
     pub use crate::models::service::ServicePriority;
     pub use crate::models::service::ServiceStatus;
     pub use crate::models::trigger::TT;

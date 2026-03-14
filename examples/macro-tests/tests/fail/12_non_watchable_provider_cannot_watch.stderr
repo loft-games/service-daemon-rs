@@ -1,0 +1,56 @@
+error[E0046]: not all trait items implemented, missing: `resolve_managed`
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:17:1
+   |
+17 | impl service_daemon::ManagedProvided for NotWatchable {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `resolve_managed` in implementation
+   |
+   = help: implement the missing item: `fn resolve_managed() -> impl std::future::Future<Output = Result<Arc<Self>, ProviderError>> + std::marker::Send { todo!() }`
+
+error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
+   |
+27 | #[trigger(Watch(NotWatchable))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `NotWatchable`
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:6:1
+   |
+ 6 | struct NotWatchable;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `NotWatchable`.
+help: the trait `TriggerHost<T>` is implemented for `State`
+  --> $WORKSPACE/service-daemon/src/core/triggers.rs
+   |
+   | / impl<T> TriggerHost<T> for WatchHost
+   | | where
+   | |     T: WatchableProvided + Send + Sync + 'static,
+   | |_________________________________________________^
+   = note: required for `State` to implement `TriggerHost<NotWatchable>`
+   = note: this error originates in the attribute macro `trigger` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:17
+   |
+27 | #[trigger(Watch(NotWatchable))]
+   |                 ^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `NotWatchable`
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:6:1
+   |
+ 6 | struct NotWatchable;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `NotWatchable`.
+
+error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
+   |
+27 | #[trigger(Watch(NotWatchable))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `NotWatchable`
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:6:1
+   |
+ 6 | struct NotWatchable;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `NotWatchable`.
+   = note: this error originates in the attribute macro `trigger` (in Nightly builds, run with -Z macro-backtrace for more info)

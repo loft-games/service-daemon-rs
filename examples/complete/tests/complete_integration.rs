@@ -8,6 +8,8 @@
 //! are used for state observation since test assertions run outside the
 //! service context.
 
+use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
+use service_daemon::Provided;
 use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -299,11 +301,8 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
 /// any service that holds `Arc<T>` (snapshot) rather than `Arc<RwLock<T>>`.
 #[tokio::test]
 async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
-    use example_complete::providers::typed_providers::GlobalStats;
-    use service_daemon::Provided;
-
     // Acquire the RwLock (promotes to managed state)
-    let lock = GlobalStats::resolve().await.rwlock().await;
+    let lock = GlobalStats::resolve_rwlock().await;
     let lock_clone = lock.clone();
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -354,9 +353,6 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 /// this test will fail with a type error or incorrect output.
 #[tokio::test]
 async fn test_fn_provider_dependency_chain() {
-    use example_complete::providers::fn_providers::ConnectionString;
-    use service_daemon::Provided;
-
     // Resolve the async fn provider — this triggers the full dependency chain.
     let conn_str = ConnectionString::resolve().await;
 

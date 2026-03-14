@@ -10,7 +10,7 @@ In a large system, order matters. You can't start your API Gateway before your D
 
 Every service and trigger has a priority. The default is `50`. High numbers mean "more important".
 
-```rust
+```rust,ignore
 use service_daemon::ServicePriority;
 
 #[service(priority = ServicePriority::SYSTEM)] // 100
@@ -55,4 +55,4 @@ When you stop the system (Ctrl+C), the process reverses. We want to stop the "ou
 
 ---
 
-[**<- Previous Step: Resilience Kung-Fu**](resilience-kung-fu.md) | [**Next Step: Playing God: Simulator ->**](playing-god.md)
+[**<- Previous Step: Resilience Kung-Fu**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/resilience-kung-fu.md) | [**Next Step: Playing God: Simulator ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/playing-god.md)

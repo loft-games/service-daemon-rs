@@ -7,9 +7,6 @@
 //! 2. **`handle_step`**: Per-iteration logic -- wait for the next event using
 //!    the resources initialised in `setup`.
 //!
-//! This eliminates the `shelve` / `shelve_clone` pattern that previously
-//! caused deep nesting inside `handle_step`.
-//!
 //! # Adding a new trigger host
 //!
 //! 1. Define a struct with the resources it needs.
@@ -23,7 +20,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::core::di::Provided;
+use crate::core::di::{Provided, WatchableProvided};
 use crate::models::trigger::{TriggerHost, TriggerTransition};
 
 // ===========================================================================
@@ -228,7 +225,7 @@ pub struct WatchHost;
 
 impl<T> TriggerHost<T> for WatchHost
 where
-    T: Provided + Send + Sync + 'static,
+    T: WatchableProvided + Send + Sync + 'static,
 {
     type Payload = ();
 

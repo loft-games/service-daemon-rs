@@ -15,6 +15,12 @@ use service_daemon::provider;
 
 /// A `Notify`-based signal. Calling `notifier.notify()` on a resolved instance
 /// wakes all subscribed `Event`/`Notify`/`Signal` triggers, demonstrating one-to-many fanout.
+///
+/// Template providers like this are injectable.
+///
+/// In the current capability model, all `#[provider(...)]` forms are also watchable
+/// by default. The `Watch(T)` semantics are uniformly defined as: notify when a
+/// new managed-state snapshot is published.
 #[provider(Notify)]
 pub struct UserNotifier;
 

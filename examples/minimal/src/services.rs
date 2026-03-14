@@ -5,9 +5,29 @@
 //! - Use `sleep()` to avoid busy-waiting.
 //! - The framework handles `Initializing -> Healthy` transition automatically.
 
-use crate::providers::Port;
+use crate::providers::{MinimalListener, Port};
 use service_daemon::service;
 use tracing::info;
+
+/// A service that demonstrates the Listen template.
+///
+/// It doesn't run a full HTTP server, but shows how to obtain
+/// the listener which was bound early during system-init wave.
+#[service]
+pub async fn listener_service(listener: Arc<MinimalListener>) -> anyhow::Result<()> {
+    let l = listener.get();
+    info!(
+        "Listener service: Port is already bound at {}",
+        l.local_addr()?
+    );
+
+    while !service_daemon::is_shutdown() {
+        if !service_daemon::sleep(std::time::Duration::from_secs(10)).await {
+            break;
+        }
+    }
+    Ok(())
+}
 
 /// A heartbeat service that logs periodically until shutdown.
 ///

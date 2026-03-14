@@ -24,7 +24,7 @@ Each layer decides **if, when, and how many times** to call the next one.
 
 Let's write a simple timing interceptor that logs how long each dispatch takes.
 
-```rust
+```rust,ignore
 use service_daemon::core::trigger_runner::{
     DispatchContext, Next, TriggerInterceptor,
 };
@@ -66,7 +66,7 @@ That's it. Three key things happened:
 Unlike simple "before/after" hooks, interceptors have full control over the flow. Here are some patterns:
 
 ### Short-Circuit (Reject)
-```rust
+```rust,ignore
 Box::pin(async move {
     if !self.is_allowed(&ctx.trigger_name) {
         return Err(anyhow::anyhow!("Trigger blocked by policy"));
@@ -76,7 +76,7 @@ Box::pin(async move {
 ```
 
 ### Observe Only (Pass-Through)
-```rust
+```rust,ignore
 Box::pin(async move {
     tracing::debug!("About to dispatch: {}", ctx.trigger_name);
     next(ctx).await
@@ -84,7 +84,7 @@ Box::pin(async move {
 ```
 
 ### Wrap in Context (e.g., Tracing Span)
-```rust
+```rust,ignore
 Box::pin(async move {
     let span = tracing::info_span!("my_custom_span");
     next(ctx).instrument(span).await
@@ -95,7 +95,7 @@ Box::pin(async move {
 
 Sometimes you want an interceptor that only works with a specific payload type. No problem -- just implement it for that type only:
 
-```rust
+```rust,ignore
 impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
     fn intercept<'a>(
         &'a self,
@@ -120,7 +120,7 @@ The compiler will enforce that this interceptor can only be registered on a `Tri
 
 The context that flows through the chain carries everything needed for dispatch:
 
-```rust
+```rust,ignore
 pub struct DispatchContext<P> {
     pub service_id: ServiceId,     // Which trigger service
     pub instance_seq: u64,         // Invocation sequence number
@@ -140,4 +140,4 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 
 ---
 
-[**<- Previous Step: Tailor-Made Triggers**](tailor-made-triggers.md) | [**Next Step: Macro Magic Unleashed ->**](macro-magic.md)
+[**<- Previous Step: Tailor-Made Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/tailor-made-triggers.md) | [**Next Step: Macro Magic Unleashed ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/macro-magic.md)

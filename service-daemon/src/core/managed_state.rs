@@ -111,6 +111,24 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         self.snapshot_cache.get_or_init(init).await.clone()
     }
 
+    /// Resolves as the raw initialization result.
+    pub async fn resolve_managed<F, Fut>(
+        &self,
+        init: F,
+    ) -> std::result::Result<Arc<T>, crate::ProviderError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<Arc<T>, crate::ProviderError>> + Send,
+    {
+        // 1. Dynamic Check: If lock is already initialized, we return the latest snapshot
+        if let Some(rx) = self.watch_rx.get() {
+            return Ok(rx.borrow().clone());
+        }
+
+        // 2. Fallible Logic
+        init().await
+    }
+
     /// Convenience method to get a snapshot. Panics if not initialized.
     ///
     /// # Panics
@@ -354,12 +372,10 @@ mod tests {
             let _guard = lock.read().await;
             let wait = notify.notified();
             drop(_guard);
-            assert!(
-                tokio::select! {
-                    _ = wait => true,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => false,
-                } == false
-            );
+            assert!(!tokio::select! {
+                _ = wait => true,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => false,
+            });
         }
 
         // Write WITHOUT mutation does NOT notify (spurious wakeup prevention)

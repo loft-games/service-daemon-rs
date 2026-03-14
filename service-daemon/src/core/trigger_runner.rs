@@ -172,9 +172,8 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 /// Encapsulates the trigger event loop, signal handling, and interceptor pipeline.
 ///
 /// `TriggerRunner` replaces the inline `while/select!/match` structure that was
-/// previously embedded in `TriggerHost::run_as_service`. It uses the
-/// interceptor architecture where each cross-cutting concern (tracing, retry)
-/// is a composable [`TriggerInterceptor`] layer.
+/// used to drive the event loop. It uses the interceptor architecture where each
+/// cross-cutting concern (tracing, retry) is a composable [`TriggerInterceptor`] layer.
 ///
 /// # Elastic Scaling
 ///
@@ -214,10 +213,6 @@ pub struct TriggerRunner<P: Send + Sync + 'static> {
     /// Registered interceptor chain (executed in registration order, onion model).
     /// Stored as `Arc` to allow cheap cloning into `tokio::spawn` tasks.
     interceptors: Vec<Arc<dyn TriggerInterceptor<P>>>,
-    /// The restart policy governing backoff for handler retries.
-    #[allow(dead_code)]
-    // stored for future use; currently passed to RetryInterceptor at construction
-    restart_policy: RestartPolicy,
     /// Optional elastic-scaling policy. `None` means serial dispatch
     /// (single permit, no scale monitor).
     scaling: Option<ScalingPolicy>,
@@ -267,7 +262,6 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     policy: restart_policy,
                 }),
             ],
-            restart_policy,
             scaling,
             semaphore: Arc::new(Semaphore::new(initial)),
             current_limit: Arc::new(AtomicUsize::new(initial)),
@@ -586,15 +580,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         });
     }
 
-    /// Build and invoke the interceptor chain (synchronous path).
-    ///
-    /// Used internally for the `Reload` transition where we need
-    /// to await completion before entering the idle state.
-    #[allow(dead_code)]
-    async fn invoke_chain(&self, ctx: DispatchContext<P>) -> anyhow::Result<()> {
-        let chain = self.build_chain();
-        chain(ctx).await
-    }
+    // -----------------------------------------------------------------------
+    // Dispatch pipeline
+    // -----------------------------------------------------------------------
 
     /// Build the interceptor call chain as a `'static` boxed closure.
     ///
@@ -1030,7 +1018,7 @@ mod tests {
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 5);
         assert!(5 >= pressure_limit, "5 of 6 should trigger scale-up");
-        assert!(!(4 >= pressure_limit), "4 of 6 should NOT trigger scale-up");
+        assert!(4 < pressure_limit, "4 of 6 should NOT trigger scale-up");
 
         // Case 3: limit=12 → pressure_limit = 10
         let limit: usize = 12;

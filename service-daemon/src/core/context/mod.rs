@@ -37,6 +37,7 @@ pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 mod tests {
     use super::*;
     use crate::models::{ServiceId, ServiceStatus};
+    use std::any::TypeId;
     use std::future::Future;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -227,8 +228,6 @@ mod tests {
     /// Verify that trigger_config returns the registered config.
     #[tokio::test]
     async fn test_trigger_config_returns_registered_value() {
-        use std::any::TypeId;
-
         let resources = create_test_resources();
         let sp = crate::models::ScalingPolicy::builder()
             .initial_concurrency(8)
@@ -253,8 +252,6 @@ mod tests {
     /// Verify that multiple config types are independently stored and retrieved.
     #[tokio::test]
     async fn test_trigger_config_multiple_types_isolation() {
-        use std::any::TypeId;
-
         #[derive(Debug, Clone, PartialEq)]
         struct MyCustomConfig {
             rate_limit: u32,

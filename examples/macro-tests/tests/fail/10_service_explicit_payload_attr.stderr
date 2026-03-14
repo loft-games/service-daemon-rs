@@ -1,0 +1,8 @@
+error: #[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].
+
+         = help: Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead.
+
+ --> tests/fail/10_service_explicit_payload_attr.rs:9:44
+  |
+9 | pub async fn bad_service_with_payload_attr(#[payload] data: String) -> anyhow::Result<()> {
+  |                                            ^^^^^^^^^^^^^^^^^^^^^^^

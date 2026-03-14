@@ -7,41 +7,94 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::ItemStruct;
 use syn::spanned::Spanned;
 
-use super::parser::ProviderArgs;
-use super::templates::{generate_broadcast_queue_template, generate_notify_template};
+use super::parser::{ProviderArgs, ProviderKind, TemplateArg};
+use super::templates::{
+    generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
+};
 
 /// Attempts to generate a template-based provider if the args specify a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
+///
+/// Also emits warnings for unused named arguments (e.g., `capacity` on Notify).
 fn try_generate_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     provider_args: &ProviderArgs,
 ) -> Option<TokenStream> {
-    let ProviderArgs::Template {
-        name,
-        inner_type,
-        capacity,
-    } = provider_args
-    else {
+    let ProviderKind::Template { name, arg } = &provider_args.kind else {
         return None;
     };
 
     match name.to_string().as_str() {
-        // Signal templates
-        "Notify" | "Event" => Some(generate_notify_template(struct_name, vis, attrs)),
+        // Signal templates — no named arguments are useful
+        "Notify" | "Event" => {
+            if provider_args.env.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name,
+                    "Notify/Event template does not use `env`; it will be ignored"
+                );
+            }
+            if provider_args.capacity.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name,
+                    "Notify/Event template does not use `capacity`; it will be ignored"
+                );
+            }
+            Some(generate_notify_template(
+                struct_name,
+                vis,
+                attrs,
+                provider_args.eager,
+            ))
+        }
         // Broadcast queue templates (fanout - all handlers receive the event)
         "BroadcastQueue" | "Queue" | "BQueue" => {
-            let item_type = inner_type
-                .clone()
-                .unwrap_or_else(|| syn::parse_quote!(String));
-            let cap = capacity.unwrap_or(100);
+            let item_type = match arg {
+                Some(TemplateArg::Type(ty)) => (*ty).clone(),
+                _ => syn::parse_quote!(String),
+            };
+            let cap = provider_args.capacity.unwrap_or(100);
+            if provider_args.env.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name,
+                    "Queue template does not use `env`; it will be ignored"
+                );
+            }
             Some(generate_broadcast_queue_template(
                 struct_name,
                 vis,
                 attrs,
                 &item_type,
                 cap,
+                provider_args.eager,
+            ))
+        }
+        // Listen template (TCP listener with FD cloning)
+        "Listen" => {
+            let bind_addr = match arg {
+                Some(TemplateArg::Addr(lit)) => lit,
+                _ => {
+                    proc_macro_error2::abort!(
+                        name,
+                        "Listen template requires a bind address";
+                        help = r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#
+                    );
+                }
+            };
+            if provider_args.capacity.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name,
+                    "Listen template does not use `capacity`; it will be ignored"
+                );
+            }
+            Some(generate_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                bind_addr,
+                provider_args.env.as_ref(),
+                provider_args.eager,
             ))
         }
         _ => {
@@ -49,7 +102,7 @@ fn try_generate_template(
             proc_macro_error2::abort!(
                 name,
                 "Unknown provider template '{}'", name;
-                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue"
+                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen"
             );
         }
     }
@@ -94,19 +147,14 @@ impl TupleStructInfo {
     }
 }
 
-/// Generates the standard `Provided` trait impl + convenience methods (`rwlock()`/`mutex()`)
-/// for a provider type, and registers a `ProviderEntry` in the `PROVIDER_REGISTRY`
-/// for dependency graph analysis.
-///
-/// This shared function eliminates the code duplication that previously existed
-/// across struct providers, fn providers, and template providers.
+/// Generates the provider capability trait impls and convenience methods
+/// for a provider type, and registers a `ProviderEntry` in the
+/// `PROVIDER_REGISTRY` for dependency graph analysis.
 ///
 /// # Arguments
-/// * `type_tokens` — The type that implements `Provided` (as a token stream).
+/// * `type_tokens` — The type that implements provider traits (as a token stream).
 /// * `singleton_name` — The unique static `StateManager` identifier.
 /// * `constructor` — The expression to create `Arc<Self>` on first resolution.
-/// * `changed_body` — Custom `changed()` body, or `None` for the standard
-///   `StateManager::changed()` implementation.
 /// * `user_span`  — The span of the user's type definition (struct name or fn
 ///   return type). Used for `quote_spanned!` so that missing trait bound errors
 ///   (e.g., `Clone`) point to the user's code, not the macro output.
@@ -114,15 +162,11 @@ impl TupleStructInfo {
 pub(super) fn generate_provided_impl(
     type_tokens: &proc_macro2::TokenStream,
     singleton_name: &syn::Ident,
-    constructor: &proc_macro2::TokenStream,
-    changed_body: Option<proc_macro2::TokenStream>,
     user_span: proc_macro2::Span,
     param_entries: &[proc_macro2::TokenStream],
+    eager: bool,
+    init_fn: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let changed_impl = changed_body.unwrap_or_else(|| {
-        quote! { #singleton_name.changed().await }
-    });
-
     // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
     // the compiler error points to the user's struct definition or fn return
     // type rather than an opaque macro expansion site.
@@ -133,10 +177,25 @@ pub(super) fn generate_provided_impl(
         };
     };
 
+    let watchable_impl = quote! {
+        impl service_daemon::WatchableProvided for #type_tokens {
+            async fn changed() {
+                #singleton_name.changed().await
+            }
+        }
+    };
+
     // Generate a unique entry name for the PROVIDER_REGISTRY slice.
     let type_name_str = quote!(#type_tokens).to_string().replace(' ', "");
     let entry_name = format_ident!(
         "__PROVIDER_ENTRY_{}",
+        type_name_str
+            .to_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+
+    let init_fn_name = format_ident!(
+        "__PROVIDER_INIT_{}",
         type_name_str
             .to_uppercase()
             .replace(|c: char| !c.is_alphanumeric(), "_")
@@ -150,37 +209,69 @@ pub(super) fn generate_provided_impl(
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::sync::Arc<Self> {
                 #singleton_name.resolve_snapshot(|| async {
-                    #constructor
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    #init_fn
                 }).await
             }
+        }
 
+        impl service_daemon::ManagedProvided for #type_tokens {
             async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
                 #singleton_name.resolve_rwlock(|| async {
-                    #constructor
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    #init_fn
                 }).await
             }
 
             async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
                 #singleton_name.resolve_mutex(|| async {
-                    #constructor
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    #init_fn
                 }).await
             }
 
-            async fn changed() {
-                #changed_impl
+            async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                #singleton_name.resolve_managed(|| async {
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                    Ok({ #init_fn })
+                }).await
             }
         }
 
+        #watchable_impl
+
         impl #type_tokens {
             /// Resolves a tracked RwLock for this provider.
-            pub async fn rwlock(&self) -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
-                <Self as service_daemon::Provided>::resolve_rwlock().await
+            pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+                <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
             }
 
             /// Resolves a tracked Mutex for this provider.
-            pub async fn mutex(&self) -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
-                <Self as service_daemon::Provided>::resolve_mutex().await
+            pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+                <Self as service_daemon::ManagedProvided>::resolve_mutex().await
             }
+
+            /// Resolves the raw managed result for this provider.
+            pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                <Self as service_daemon::ManagedProvided>::resolve_managed().await
+            }
+        }
+
+        fn #init_fn_name(
+            policy: service_daemon::RestartPolicy,
+            cancel: service_daemon::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::futures::future::BoxFuture<'static, ()> {
+            Box::pin(async move {
+                let _ = #singleton_name
+                    .resolve_snapshot(|| async {
+                        #init_fn
+                    })
+                    .await;
+            })
         }
 
         /// Auto-generated provider registry entry for dependency graph analysis.
@@ -192,6 +283,8 @@ pub(super) fn generate_provided_impl(
             module: module_path!(),
             type_id: std::any::TypeId::of::<#type_tokens>(),
             params: &[#(#param_entries),*],
+            eager: #eager,
+            init: #init_fn_name,
         };
     }
 }
@@ -223,7 +316,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     let default_impl = generate_default_impl(&tuple_info, &args, struct_name);
 
     // Generate constructor based on field type (async for named structs with Arc deps)
-    let constructor = generate_constructor(fields);
+    let constructor = generate_constructor(struct_name, fields);
 
     // Collect dependency metadata from struct fields for PROVIDER_REGISTRY.
     // Only named fields with Arc-wrapped types are injectable dependencies.
@@ -262,15 +355,23 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         struct_name.to_string().to_uppercase()
     );
 
-    // Use the shared Provided impl generator (Fix #1)
+    // Use the shared Provided impl generator
     let type_tokens = quote! { #struct_name };
+    let eager = args.eager;
+
+    let init_fn = quote! {
+        let _ = policy;
+        let _ = cancel;
+        #constructor
+    };
+
     let provided_impl = generate_provided_impl(
         &type_tokens,
         &singleton_name,
-        &constructor,
-        None,
         struct_name.span(),
         &param_entries,
+        eager,
+        &init_fn,
     );
 
     let expanded = quote! {
@@ -354,14 +455,21 @@ fn generate_default_impl(
         return quote! {};
     };
 
-    // Extract default value expression and optional env from args.
-    // No sentinel detection needed — `default_value` is `Option<syn::Expr>`.
-    let (default_expr_opt, env_opt) = match provider_args {
-        ProviderArgs::Value {
-            default_value, env, ..
-        } => (default_value.as_ref(), env.as_ref()),
-        _ => (None, None),
+    // Extract default value expression from args.
+    let default_expr_opt = match &provider_args.kind {
+        ProviderKind::Value { default_value } => default_value.as_ref(),
+        _ => None,
     };
+    // Read env from the shared field.
+    let env_opt = provider_args.env.as_ref();
+
+    // Capacity on Value providers is semantically invalid — emit error.
+    if provider_args.capacity.is_some() {
+        proc_macro_error2::emit_error!(
+            struct_name,
+            "`capacity` is not supported on value providers; use a template like Queue instead"
+        );
+    }
 
     // Helper to wrap string literals with .to_owned() for String fields
     let expand_value = |expr: &syn::Expr| -> proc_macro2::TokenStream {
@@ -392,14 +500,15 @@ fn generate_default_impl(
                     std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
                 }
             } else {
-                // No fallback: env var is REQUIRED. Panic with a descriptive message.
+                // No fallback: env var is REQUIRED.
+                // Keep Default infallible by using an explicit fail-fast panic path.
                 quote! {
                     std::env::var(#env_str).unwrap_or_else(|_| {
                         panic!(
-                            "Required environment variable '{}' is not set (needed by provider '{}'). \
+                            "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
                              Set it or add a default: #[provider(\"...\", env = \"{}\")]",
                             #env_str, #struct_name_str, #env_str
-                        )
+                        );
                     })
                 }
             }
@@ -421,17 +530,17 @@ fn generate_default_impl(
                     std::env::var(#env_str)
                         .unwrap_or_else(|_| {
                             panic!(
-                                "Required environment variable '{}' is not set (needed by provider '{}'). \
+                                "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
                                  Set it or add a default: #[provider(value, env = \"{}\")]",
                                 #env_str, #struct_name_str, #env_str
-                            )
+                            );
                         })
                         .parse::<#inner_ty>()
                         .unwrap_or_else(|e| {
                             panic!(
-                                "Environment variable '{}' for provider '{}' cannot be parsed: {}",
+                                "FATAL: Environment variable '{}' for provider '{}' cannot be parsed: {}",
                                 #env_str, #struct_name_str, e
-                            )
+                            );
                         })
                 }
             }
@@ -457,12 +566,15 @@ fn generate_default_impl(
 ///
 /// Supports automatic injection for:
 /// - `Arc<T>` fields -> `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` fields -> `<T as Provided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` fields -> `<T as Provided>::resolve_mutex().await`
+/// - `Arc<RwLock<T>>` fields -> `<T as ManagedProvided>::resolve_rwlock().await`
+/// - `Arc<Mutex<T>>` fields -> `<T as ManagedProvided>::resolve_mutex().await`
 /// - Other fields -> `Default::default()`
 ///
-/// Uses `decompose_type` from `common` to avoid duplicating Arc pattern matching (Fix #8).
-fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
+/// Uses `decompose_type` from `common` to handle Arc pattern matching consistently.
+fn generate_constructor(
+    struct_name: &syn::Ident,
+    fields: &syn::Fields,
+) -> proc_macro2::TokenStream {
     match fields {
         syn::Fields::Named(named_fields) => {
             let field_inits: Vec<_> = named_fields
@@ -478,12 +590,12 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                     match wrapper {
                         Some(crate::common::WrapperKind::ArcRwLock(_, _)) => {
                             quote! {
-                                #field_name: <#inner_type as service_daemon::Provided>::resolve_rwlock().await
+                                #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await
                             }
                         }
                         Some(crate::common::WrapperKind::ArcMutex(_, _)) => {
                             quote! {
-                                #field_name: <#inner_type as service_daemon::Provided>::resolve_mutex().await
+                                #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await
                             }
                         }
                         Some(crate::common::WrapperKind::Arc(_)) => {
@@ -510,7 +622,7 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
                 .collect();
 
             quote! {
-                std::sync::Arc::new(Self {
+                std::sync::Arc::new(#struct_name {
                     #(#field_inits),*
                 })
             }
@@ -518,7 +630,7 @@ fn generate_constructor(fields: &syn::Fields) -> proc_macro2::TokenStream {
         syn::Fields::Unnamed(_) | syn::Fields::Unit => {
             // Tuple struct or unit struct - use Default (sync init is fine here)
             quote! {
-                std::sync::Arc::new(Self::default())
+                std::sync::Arc::new(#struct_name::default())
             }
         }
     }

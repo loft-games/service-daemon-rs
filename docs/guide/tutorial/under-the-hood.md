@@ -13,7 +13,7 @@ The **Registry** is a collection of `ServiceEntry` structures.
 > [!TIP]
 > You can filter the registry by **Tags**. This allows you to run "Core" services in one process and "Edge" services in another, even if they are all compiled into the same binary.
 
-For a deep dive into how macros generate these entries, see [Macros Deep Dive](../../architecture/macros-deep-dive.md).
+For a deep dive into how macros generate these entries, see [Macros Deep Dive](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macros-deep-dive.md).
 
 ## 2. The Runner (The Engine)
 
@@ -22,7 +22,7 @@ The **Runner** is responsible for the actual `tokio::spawn` calls.
 *   It handles the **Handshake Protocol**. When a service starts, the Runner waits for the `Healthy` status before starting the next wave.
 *   It monitors for **Panics**. If a service thread crashes, the Runner catches it, records the error, and schedules a restart.
 
-Learn more about the internal orchestration logic in the [Internal Overview](../../architecture/internal-overview.md).
+Learn more about the internal orchestration logic in the [Internal Overview](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md).
 
 ## 3. The Status Plane (The Observer)
 
@@ -36,8 +36,8 @@ The **Shelf** is a simple key-value store tied to the lifetime of the `ServiceDa
 *   It uses `Any` for type-safe storage and retrieval.
 *   Values on the shelf survive service restarts (Reloads/Crashes) but are cleared when the entire Daemon process stops.
 
-Explore advanced [Lifecycle Management](../../architecture/lifecycle-management.md) to see how components collaborate.
+Explore advanced [Lifecycle Management](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md) to see how components collaborate.
 
 ---
 
-[**<- Previous Step: Playing God: Simulator**](playing-god.md) | [**Next Step: Tailor-Made Triggers ->**](tailor-made-triggers.md)
+[**<- Previous Step: Playing God: Simulator**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/playing-god.md) | [**Next Step: Tailor-Made Triggers ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/tailor-made-triggers.md)

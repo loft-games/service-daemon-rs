@@ -31,11 +31,11 @@ pub struct AppConfig {
     pub db_url: Arc<DbUrl>,
 }
 
-/// Global statistics -- demonstrates automatic RwLock promotion.
+/// Global statistics -- demonstrates automatic managed and watchable state.
 ///
-/// When a service requests `Arc<RwLock<GlobalStats>>`, the daemon
-/// automatically promotes this value into managed state. Multiple
-/// services can thus share and mutate it safely.
+/// When a service requests `Arc<RwLock<GlobalStats>>` or `Arc<Mutex<GlobalStats>>`,
+/// the daemon automatically promotes this value into managed state. Normal
+/// `#[provider]` types also remain watchable, so `Watch(GlobalStats)` is valid.
 #[derive(Clone, Default)]
 #[provider]
 pub struct GlobalStats {

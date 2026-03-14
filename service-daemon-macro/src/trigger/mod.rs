@@ -37,10 +37,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as TriggerArgs);
     let host_path = &args.host_path;
     let target_type = args.target;
+    let is_watch_host = args.is_watch_host;
     let priority_tokens = args.priority;
     let tags_tokens = args.tags;
 
-    // Extract parameters and categorize them
+    // `extract_params(..., true)` uses the shared parser in trigger mode.
+    // Here the shared payload lane is the real trigger payload semantics:
+    // exactly one bare or `#[payload]` parameter may be accepted, while
+    // Arc-based parameters are treated as framework-managed dependencies.
     let ExtractedParams {
         clean_inputs,
         resolve_tokens,
@@ -62,9 +66,11 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Triggers always watch their target for configuration changes,
     // in addition to any DI dependency watchers from extract_params.
-    watcher_arms.push(quote! {
-        _ = <#target_type as service_daemon::Provided>::changed() => {}
-    });
+    if is_watch_host {
+        watcher_arms.push(quote! {
+            _ = <#target_type as service_daemon::WatchableProvided>::changed() => {}
+        });
+    }
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
     let event_loop_call = generate_event_loop_call(
@@ -82,14 +88,32 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut clean_sig = sig.clone();
     clean_sig.inputs = clean_inputs;
 
+    let scope_mod = format_ident!(
+        "__TRIGGER_USER_SCOPE_{}",
+        fn_name.to_string().to_uppercase()
+    );
+
+    let inner_vis = match vis {
+        syn::Visibility::Public(_) => quote!(pub),
+        _ => quote!(pub(crate)),
+    };
+
     let expanded = quote! {
-        #(#cleaned_attrs)*
-        #vis #clean_sig {
+        mod #scope_mod {
+            #[allow(unused_imports)]
+            use super::*;
+
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
             use service_daemon::core::managed_state::{RwLock, Mutex};
-            #body
+
+            #(#cleaned_attrs)*
+            #inner_vis #clean_sig {
+                #body
+            }
         }
+
+        #vis use #scope_mod::#fn_name;
 
         /// Auto-generated trigger wrapper - acts as an event-loop "Call Host"
         /// This is registered as a Service, so it benefits from ServiceDaemon's lifecycle management.
