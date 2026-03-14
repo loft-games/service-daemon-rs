@@ -7,20 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0-alpha.2] - 2026-03-13
+## [0.1.0-alpha.2] - 2026-03-14
 
 ### Added
 
-- **Eager Initialization**: Added `eager = true` parameter support for all `#[provider]` types (Struct, Async Fn, and Templates).
-- **Listen Template Resilience**: Integrated automatic error mapping for TCP/Unix listeners. 
-  - `AddrInUse`, `Interrupted`, `TimedOut` are now marked as `Retryable`.
-  - `PermissionDenied`, `AddrNotAvailable` are marked as `Fatal`.
-- **API: resolve_managed**: Added `ManagedProvided::resolve_managed()` to allow capturing raw `ProviderError` for advanced testing and status monitoring.
+- **Eager Initialization**: Added `eager = true` parameter support for all `#[provider]` types, ensuring critical resources are ready before service startup.
+- **Resilient Providers**: Integrated native support for fallible initialization with `ProviderError` and `RestartPolicy` coordination.
+- **Listen Template**: New `Listen` provider template for early-binding TCP listeners with file descriptor cloning support.
 
 ### Changed
 
-- **Internal API Normalization**: Renamed internal `StateManager` methods to `resolve_rwlock` and `resolve_mutex` for better clarity and alignment with trait methods.
-- **Example Refresh**: Updated all example projects to use the new standardized DI resolution patterns.
+- **DI Architecture Overhaul**: Refactored `ManagedState` to support zero-cost resolution and enhanced lock-upgrading semantics.
+- **Semantic Renaming**: Internal cleanup of `StateManager` methods to align with `ManagedProvided` trait for better developer ergonomics.
+- **Documentation**: New tutorial suite embedded in `src/tutorial.rs` for optimized `docs.rs` rendering.
 
 ## [0.1.0-alpha.1] - 2026-03-04
 
