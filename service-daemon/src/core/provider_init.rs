@@ -5,15 +5,12 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-#[cfg(test)]
-fn provider_init_exit(code: i32, msg: &str) -> ! {
-    panic!("provider_init_exit({code}): {msg}");
-}
-
-#[cfg(not(test))]
-fn provider_init_exit(code: i32, msg: &str) -> ! {
-    eprintln!("{msg}");
-    std::process::exit(code);
+/// Panic with the provided message to signal a fatal provider initialization failure.
+///
+/// This is used internally by the orchestration engine to ensure the current
+/// initialization task fails fast when an unrecoverable error (e.g., config error) occurs.
+fn provider_init_exit(_code: i32, msg: &str) -> ! {
+    panic!("{}", msg);
 }
 
 /// Initialize a fallible provider with backoff + timeout.

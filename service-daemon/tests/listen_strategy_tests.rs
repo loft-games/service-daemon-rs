@@ -1,3 +1,4 @@
+use service_daemon::ManagedProvided;
 use service_daemon_macro::provider;
 
 #[derive(Debug)]
@@ -8,7 +9,6 @@ pub struct ConflictListener;
 async fn test_listen_addr_resolution() {
     // Direct test: resolve the provider and check success.
     // By using a free high port, we ensure no FATAL panic is triggered.
-    use service_daemon::ManagedProvided;
     let result = <ConflictListener as ManagedProvided>::resolve_managed().await;
 
     assert!(
@@ -19,23 +19,26 @@ async fn test_listen_addr_resolution() {
 }
 
 #[derive(Debug)]
-#[provider(Listen("127.0.0.1:28082"))] // Changed from 80 to 28082 to avoid permission denied
+#[provider(Listen("127.0.0.1:80"))]
 pub struct RootListener;
 
 #[tokio::test]
 async fn test_listen_permission_denied_fatal() {
-    // This test originally targeted port 80 to test PermissionDenied -> Fatal.
-    // In CI/User environment without root, it triggers FATAL exit.
-    // We change it to a normal port to ensure test pass, while still testing
-    // the provider resolution mechanic.
-
-    use service_daemon::ManagedProvided;
-    let result = <RootListener as ManagedProvided>::resolve_managed().await;
-
-    match result {
-        Ok(_) => {
-            // Success on non-privileged port
-        }
-        Err(e) => panic!("Expected success on high port, got {:?}", e),
+    // Guard: if running with root privileges, port 80 binds successfully.
+    // We skip the test in this case as the Fatal path won't trigger.
+    if std::net::TcpListener::bind("127.0.0.1:80").is_ok() {
+        return;
     }
+
+    // With the exit-to-panic refactor, provider_init_exit now panics.
+    // Spawn in a separate task to catch the panic via JoinHandle.
+    let handle = tokio::spawn(async {
+        let _ = <RootListener as ManagedProvided>::resolve_managed().await;
+    });
+
+    let result = handle.await;
+    assert!(
+        result.is_err(),
+        "Expected Fatal panic on privileged port 80, but the provider succeeded"
+    );
 }

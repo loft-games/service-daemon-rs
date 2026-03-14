@@ -39,9 +39,9 @@ This central hub explains the architectural "why" behind common behaviors and tr
 > Do **NOT** use `is_shutdown()` inside a `state().match()` loop. The `state()` stream handles shutdown automatically.
 
 ### Why did my `#[service]` parameter get treated like a payload?
-**Problem**: A `#[service]` function with a bare parameter like `data: String` or `port: i32` fails with what looks like a payload-related macro error.
-**Cause**: Services do not have payload parameters. Every `#[service]` parameter must be a framework-managed dependency written as `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`. The current macro implementation uses a shared parser for both `#[service]` and `#[trigger]`, so a bare parameter is routed through the same internal branch that handles trigger payloads. For services, that branch is only the rejection path for an unsupported signature; it is an implementation detail, not the semantic contract of `#[service]`.
-**The Fix**: For services, wrap dependencies as `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`. If you intended to handle an event payload, use `#[trigger]` instead.
+**Problem**: A `#[service]` function with a bare parameter like `data: String` or `port: i32` fails with a macro error.
+**Cause**: Services do not support payload parameters. Every parameter must be a framework-managed dependency (`Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`). The macro system uses a shared validation path for services and triggers, and bare parameters are currently rejected at the same point where trigger payloads are validated.
+**The Fix**: Wrap dependencies in `Arc<T>`. If you meant to handle an event payload, use `#[trigger]` instead.
 
 ---
 

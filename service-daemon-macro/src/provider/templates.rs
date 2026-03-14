@@ -321,22 +321,20 @@ pub fn generate_listen_template(
                 let addr = #addr_expr;
                 let listener = std::net::TcpListener::bind(&addr)
                     .unwrap_or_else(|e| {
-                        eprintln!(
+                        panic!(
                             "FATAL: Provider '{}' failed to bind TCP port '{}': {}. Is another process using this port?",
                             #struct_name_str, addr, e
                         );
-                        std::process::exit(1)
                     });
                 // CRITICAL: Must set nonblocking before converting to tokio,
                 // otherwise `tokio::net::TcpListener::from_std` will panic
                 // or the event loop will hang indefinitely.
                 listener.set_nonblocking(true)
                     .unwrap_or_else(|e| {
-                        eprintln!(
+                        panic!(
                             "FATAL: Provider '{}' failed to set nonblocking for '{}': {}",
                             #struct_name_str, addr, e
                         );
-                        std::process::exit(1)
                     });
                 Self(std::sync::Arc::new(listener))
             }

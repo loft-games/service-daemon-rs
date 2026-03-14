@@ -16,8 +16,7 @@ use tracing_subscriber::registry::LookupSpan;
 
 /// Log severity level with zero heap allocation.
 ///
-/// Replaces the previous `String` field with a 1-byte enum, eliminating
-/// a per-event heap allocation for level formatting.
+/// Encoded as a 1-byte enum to guarantee zero overhead during level formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "file-logging", derive(Serialize, Deserialize))]
 pub enum LogLevel {
@@ -190,10 +189,8 @@ impl Default for LogQueue {
 }
 
 /// Global log queue, initialized on first access.
-/// Uses `std::sync::OnceLock` instead of `tokio::sync::OnceCell` because
-/// `LogQueue::default()` is synchronous (just `broadcast::channel`), and
-/// `OnceLock::get_or_init` provides race-free initialization without the
-/// theoretical double-init window that `OnceCell::get() + set()` has.
+///
+/// Uses `std::sync::OnceLock` for race-free, synchronous initialization.
 static LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
 
 /// Gets the log queue, initializing it on first call.

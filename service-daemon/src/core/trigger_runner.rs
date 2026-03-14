@@ -172,9 +172,8 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 /// Encapsulates the trigger event loop, signal handling, and interceptor pipeline.
 ///
 /// `TriggerRunner` replaces the inline `while/select!/match` structure that was
-/// previously embedded in `TriggerHost::run_as_service`. It uses the
-/// interceptor architecture where each cross-cutting concern (tracing, retry)
-/// is a composable [`TriggerInterceptor`] layer.
+/// used to drive the event loop. It uses the interceptor architecture where each
+/// cross-cutting concern (tracing, retry) is a composable [`TriggerInterceptor`] layer.
 ///
 /// # Elastic Scaling
 ///

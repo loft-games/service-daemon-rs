@@ -20,20 +20,18 @@ pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
 pub(crate) type GlobalShelfMapping = DashMap<&'static str, ServiceShelf>;
 
-/// Shared daemon resources that are owned by `ServiceDaemon` and plumbed to services.
+/// Identity and resource container for a running service daemon.
 ///
-/// This struct holds the concrete daemon-managed resources. A single `Arc<DaemonResources>`
-/// is shared across all service tasks, so cloning the handle only increments one
-/// atomic reference counter instead of five.
+/// Holds the shared state, lifecycle controls, and diagnostics infrastructure.
+/// Optimized for minimum atomic overhead.
 ///
 /// **Not `Clone`** -- callers share ownership via `Arc<DaemonResources>`.
 pub struct DaemonResources {
-    /// The unified Status Plane: stores the current lifecycle status for each service.
-    /// Indexed by `ServiceId` (strong identity) instead of String for safety and performance.
+    /// The current lifecycle status of all services in the registry.
+    /// Indexed by `ServiceId` for safety and performance.
     pub status_plane: DashMap<ServiceId, ServiceStatus>,
-    /// Shelf for cross-generational state persistence (managed values).
-    /// Structure: DashMap\<ServiceName (`Arc<str>`), DashMap\<Key, Value\>\>
-    /// Kept as name-keyed because shelf data is user-facing and persists across restarts.
+    /// Global storage for service-owned arbitrary data (the shelf).
+    /// Keyed by service name to support persistence and user-facing inspection.
     pub shelf: GlobalShelfMapping,
     /// Signals for services to reload, indexed by `ServiceId`.
     pub reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,

@@ -7,9 +7,6 @@
 //! 2. **`handle_step`**: Per-iteration logic -- wait for the next event using
 //!    the resources initialised in `setup`.
 //!
-//! This eliminates the `shelve` / `shelve_clone` pattern that previously
-//! caused deep nesting inside `handle_step`.
-//!
 //! # Adding a new trigger host
 //!
 //! 1. Define a struct with the resources it needs.

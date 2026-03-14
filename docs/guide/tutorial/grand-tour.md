@@ -12,7 +12,7 @@ In this tutorial, we will walk through the progression of a real-world system:
 
 1.  [**Hello, Heartbeat!**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/hello-heartbeat.md) -- Your first service. We'll learn the basics of defining and running a background task.
 2.  [**Reactive Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md) -- Events, queues, and automation. Learn how to make your system react to the world.
-3.  [**The Art of Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/art-of-recovery.md) -- Resilience by design. See how services survive failures and restore their soul (state).
+3.  [**The Art of Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/art-of-recovery.md) -- Resilience by design. See how services survive failures and restore their persistent state.
 4.  [**DIY Providers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/diy-providers.md) -- Integrating external worlds like MQTT or Databases without the boilerplate.
 5.  [**Resilience Kung-Fu**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/resilience-kung-fu.md) -- Master the exponential backoff and the "Kill Switch" for fatal errors.
 6.  [**Waves of Orchestration**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/orchestration-waves.md) -- Directing the startup and shutdown symphony with priorities.

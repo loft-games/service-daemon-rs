@@ -1,6 +1,6 @@
 # Diagnostics & The DaemonLayer
 
-To manage complex asynchronous systems, visibility is paramount. `service-daemon-rs` provides a high-fidelity diagnostic layer built on top of `tracing`.
+To manage complex asynchronous systems, visibility is paramount. `service-daemon-rs` provides a high-fidelity diagnostic layer built on top of `tracing`. For the underlying high-performance design philosophy (Zero-allocation, context extraction), see **[Architecture Overview](../architecture/internal-overview.md)**.
 
 ## 1. Entering the Matrix: `DaemonLayer`
 
@@ -110,16 +110,6 @@ Every log event inside a service or trigger Span is automatically tagged with:
 
 These IDs are `None` for log events outside a service context (e.g., daemon initialization).
 
-## 3. Real-Time Instrumentation
-
-The `log_service` and `file_log_service` are SYSTEM-priority background services that independently consume the `LogQueue` broadcast channel using a **fill-the-valley** batch strategy: each greedily drains all available events via `try_recv()` (up to the configured batch size, default 128) before flushing the batch in a single pass. The broadcast queue capacity is automatically derived as `batch_size × 4`, ensuring a consistent relationship between drain speed and buffer depth. This minimizes lock contention under high throughput while maintaining low latency under normal load.
-
-In simulation environments, `MockContext` automatically includes `log_service` via infrastructure tag injection. This can be disabled with `.with_logging(false)` for lightweight tests.
-
-| Field | Description |
-| :--- | :--- |
-| `System Pressure` | High-level saturate metric for the entire Wave. |
-| `Wave Status` | Current active startup/shutdown wave. |
-| `Panic Counts` | Persistent failure counters. |
+- `Panic Counts`: Persistent failure counters.
 
 [Back to README](../../README.md)

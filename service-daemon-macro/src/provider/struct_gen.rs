@@ -151,9 +151,6 @@ impl TupleStructInfo {
 /// for a provider type, and registers a `ProviderEntry` in the
 /// `PROVIDER_REGISTRY` for dependency graph analysis.
 ///
-/// This shared function eliminates the code duplication that previously existed
-/// across struct providers, fn providers, and template providers.
-///
 /// # Arguments
 /// * `type_tokens` — The type that implements provider traits (as a token stream).
 /// * `singleton_name` — The unique static `StateManager` identifier.
@@ -358,7 +355,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         struct_name.to_string().to_uppercase()
     );
 
-    // Use the shared Provided impl generator (Fix #1)
+    // Use the shared Provided impl generator
     let type_tokens = quote! { #struct_name };
     let eager = args.eager;
 
@@ -504,15 +501,14 @@ fn generate_default_impl(
                 }
             } else {
                 // No fallback: env var is REQUIRED.
-                // Keep Default infallible by using an explicit fail-fast exit path.
+                // Keep Default infallible by using an explicit fail-fast panic path.
                 quote! {
                     std::env::var(#env_str).unwrap_or_else(|_| {
-                        eprintln!(
+                        panic!(
                             "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
                              Set it or add a default: #[provider(\"...\", env = \"{}\")]",
                             #env_str, #struct_name_str, #env_str
                         );
-                        std::process::exit(1)
                     })
                 }
             }
@@ -533,20 +529,18 @@ fn generate_default_impl(
                 quote! {
                     std::env::var(#env_str)
                         .unwrap_or_else(|_| {
-                            eprintln!(
+                            panic!(
                                 "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
                                  Set it or add a default: #[provider(value, env = \"{}\")]",
                                 #env_str, #struct_name_str, #env_str
                             );
-                            std::process::exit(1)
                         })
                         .parse::<#inner_ty>()
                         .unwrap_or_else(|e| {
-                            eprintln!(
+                            panic!(
                                 "FATAL: Environment variable '{}' for provider '{}' cannot be parsed: {}",
                                 #env_str, #struct_name_str, e
                             );
-                            std::process::exit(1)
                         })
                 }
             }
@@ -576,7 +570,7 @@ fn generate_default_impl(
 /// - `Arc<Mutex<T>>` fields -> `<T as ManagedProvided>::resolve_mutex().await`
 /// - Other fields -> `Default::default()`
 ///
-/// Uses `decompose_type` from `common` to avoid duplicating Arc pattern matching (Fix #8).
+/// Uses `decompose_type` from `common` to handle Arc pattern matching consistently.
 fn generate_constructor(
     struct_name: &syn::Ident,
     fields: &syn::Fields,

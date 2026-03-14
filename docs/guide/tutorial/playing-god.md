@@ -2,7 +2,7 @@
 
 Testing background services is notoriously difficult. How do you test what happens when a database fails mid-flight? Or how your service reacts when its configuration is swapped at 2 AM?
 
-The `simulation` feature (God-mode) gives you total control over the environment.
+The `simulation` feature (God-mode) gives you total control over the environment. For the core architectural sandbox model and God-hand interaction logic, see **[Architecture Overview](../../architecture/internal-overview.md)**.
 
 ---
 
