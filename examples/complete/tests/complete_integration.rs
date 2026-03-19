@@ -8,16 +8,15 @@
 //! are used for state observation since test assertions run outside the
 //! service context.
 
-use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
-use service_daemon::Provided;
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
+use service_daemon::{Provided, Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
 
 // ===========================================================================
 // Test services for: test_ordered_startup
 // ===========================================================================
-
-use std::sync::Mutex as StdMutex;
 
 /// Shared start sequence for ordered startup tests.
 static STARTUP_SEQ: std::sync::LazyLock<StdMutex<Vec<u8>>> =

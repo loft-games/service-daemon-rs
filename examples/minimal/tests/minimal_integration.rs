@@ -1,6 +1,7 @@
 //! Integration tests for the Minimal example.
 
 use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Verifies that a minimal daemon can start and stop cleanly
 /// without any complex lifecycle management.
@@ -27,8 +28,6 @@ async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 // Test service for is_shutdown() responsiveness
 // ---------------------------------------------------------------------------
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Global flag: set to `true` when the test service exits after `is_shutdown()`.
 static SHUTDOWN_EXITED: AtomicBool = AtomicBool::new(false);
