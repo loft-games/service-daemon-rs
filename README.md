@@ -17,6 +17,42 @@
 - **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
 - **Tag-based Registry**: Filter services by tags for selective loading (`#[service(tags = ["infra"])]`).
 
+## Quick Start
+
+```rust
+use service_daemon::prelude::*;
+use service_daemon::{ServiceDaemon, provider, service, sleep};
+use tracing::info;
+use std::sync::Arc;
+
+// 1. Define an injectable provider with a default value
+#[derive(Clone)]
+#[provider(8080)]
+pub struct Port(pub i32);
+
+// 2. Define a managed service using proc-macros
+#[service]
+pub async fn heartbeat_service(port: Arc<Port>) -> anyhow::Result<()> {
+    while !is_shutdown() {
+        info!("Heartbeat: service is alive on port {}", port);
+        // Interruptible sleep: returns false if shutdown is requested
+        if !sleep(std::time::Duration::from_secs(5)).await {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // 3. Build and run the daemon
+    let mut daemon = ServiceDaemon::builder().build();
+    daemon.run().await;
+    daemon.wait().await?;
+    Ok(())
+}
+```
+
 ## Get Started
 
 Looking to build your first reliable background system? Follow our **[Grand Tour](docs/guide/tutorial/grand-tour.md)** tutorial series!
