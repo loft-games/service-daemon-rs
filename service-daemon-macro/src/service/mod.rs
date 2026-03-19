@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::parse::Parse;
 use syn::{ItemFn, Token, parse_macro_input};
 
-use crate::common::{ExtractedParams, TagsList, extract_sync_handler_flag};
+use crate::common::{ExtractedParams, TagsList, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
 
 // -----------------------------------------------------------------------------
@@ -118,10 +118,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
-    let inner_vis = match vis {
-        syn::Visibility::Public(_) => quote!(pub),
-        _ => quote!(pub(crate)),
-    };
+    let inner_vis = scope_inner_visibility(vis);
 
     let expanded = quote! {
         mod #scope_mod {

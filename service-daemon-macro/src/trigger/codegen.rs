@@ -16,7 +16,7 @@ use quote::quote;
 ///
 /// Because the per-event closure has the `Fn` trait (called multiple times),
 /// each DI-resolved `Arc<T>` is `.clone()`-d into the closure body via shadow
-/// bindings (`let x = x.clone();`). This is an `Arc` reference-count bump —
+/// bindings (`let x = x.clone();`). This is an `Arc` reference-count bump -
 /// zero allocation, same semantics as the old per-event resolve.
 ///
 /// # Arguments

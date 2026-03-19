@@ -12,10 +12,10 @@ Every time a trigger fires, the event payload passes through a chain of intercep
 
 ```text
 dispatch(payload)
-  +-- TracingInterceptor         ← creates the tracing span
-        +-- RetryInterceptor     ← retries on failure
+  +-- TracingInterceptor         <- creates the tracing span
+        +-- RetryInterceptor     <- retries on failure
               +-- [your interceptors here]
-                    +-- handler  ← your business logic
+                    +-- handler  <- your business logic
 ```
 
 Each layer decides **if, when, and how many times** to call the next one.
@@ -136,7 +136,7 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 ---
 
 > [!NOTE]
-> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically — and safe cross-task sharing for async dispatch.
+> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically - and safe cross-task sharing for async dispatch.
 
 ---
 

@@ -9,7 +9,7 @@ use service_daemon::provider;
 #[derive(Clone)]
 pub struct SyncConfig(pub i32);
 
-/// Sync fn provider — generates a runtime warning on first call.
+/// Sync fn provider - generates a runtime warning on first call.
 #[provider]
 pub fn sync_config() -> SyncConfig {
     SyncConfig(42)
@@ -19,7 +19,7 @@ pub fn sync_config() -> SyncConfig {
 #[derive(Clone)]
 pub struct SilentSyncConfig(pub i32);
 
-/// Sync fn provider with explicit opt-in — no warning generated.
+/// Sync fn provider with explicit opt-in - no warning generated.
 #[provider]
 #[allow(sync_handler)]
 pub fn silent_sync_config() -> SilentSyncConfig {

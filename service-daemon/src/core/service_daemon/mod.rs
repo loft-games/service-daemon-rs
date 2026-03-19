@@ -611,7 +611,7 @@ impl ServiceDaemonBuilder {
         // TypeId -> NodeIndex (provider types as nodes)
         let mut type_nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
 
-        // Phase 1: Service → Provider edges (from ServiceDescription::params).
+        // Phase 1: Service -> Provider edges (from ServiceDescription::params).
         for service in services {
             let svc_node = *service_nodes
                 .entry(service.name())
@@ -627,7 +627,7 @@ impl ServiceDaemonBuilder {
             }
         }
 
-        // Phase 2: Provider → Provider edges (from PROVIDER_REGISTRY).
+        // Phase 2: Provider -> Provider edges (from PROVIDER_REGISTRY).
         //
         // This completes the DAG by adding edges between provider types,
         // enabling detection of circular provider dependencies (e.g.,
@@ -647,7 +647,7 @@ impl ServiceDaemonBuilder {
             }
         }
 
-        // Phase 3: Topological sort — Err means a cycle exists.
+        // Phase 3: Topological sort - Err means a cycle exists.
         match toposort(&graph, None) {
             Ok(_order) => {
                 // Graph is acyclic. Log the dependency summary.
@@ -678,7 +678,7 @@ impl ServiceDaemonBuilder {
                     total_providers = crate::models::PROVIDER_REGISTRY.len(),
                     total_graph_nodes = graph.node_count(),
                     total_graph_edges = graph.edge_count(),
-                    "Dependency graph validated — no cycles detected"
+                    "Dependency graph validated - no cycles detected"
                 );
             }
             Err(cycle_node) => {

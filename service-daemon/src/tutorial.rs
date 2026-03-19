@@ -10,21 +10,21 @@
 
 #![doc = include_str!("../../docs/guide/tutorial/grand-tour.md")]
 
-/// Your first service – learn the basics of Providers, Services, and the Daemon.
+/// Your first service - learn the basics of Providers, Services, and the Daemon.
 ///
 /// **Tutorial Chapter 1**
 pub mod hello_heartbeat {
     #![doc = include_str!("../../docs/guide/tutorial/hello-heartbeat.md")]
 }
 
-/// Events, queues, and automation – make your system react to the world.
+/// Events, queues, and automation - make your system react to the world.
 ///
 /// **Tutorial Chapter 2**
 pub mod reactive_triggers {
     #![doc = include_str!("../../docs/guide/tutorial/reactive-triggers.md")]
 }
 
-/// Resilience by design – graceful migration and state recovery.
+/// Resilience by design - graceful migration and state recovery.
 ///
 /// **Tutorial Chapter 3**
 pub mod art_of_recovery {

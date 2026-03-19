@@ -20,7 +20,7 @@
 //! Each interceptor receives a [`DispatchContext`] by value and a `next`
 //! callback. The interceptor decides **if, when, and how many times** to
 //! call `next`, enabling patterns like retry, tracing spans, rate limiting,
-//! and circuit breaking — all as composable, user-extensible layers.
+//! and circuit breaking - all as composable, user-extensible layers.
 //!
 //! The `TriggerRunner` owns the `select!` + shutdown logic, so that trigger
 //! hosts only need to implement `handle_step` and get a clean, flat event loop.
@@ -239,8 +239,8 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// 1 permit (serial dispatch, no elastic scaling).
     ///
     /// The default interceptor order is:
-    /// 1. `TracingInterceptor` — wraps everything in a tracing span
-    /// 2. `RetryInterceptor` — retries the inner chain on failure
+    /// 1. `TracingInterceptor` - wraps everything in a tracing span
+    /// 2. `RetryInterceptor` - retries the inner chain on failure
     /// 3. (user interceptors added via `with_interceptor`)
     /// 4. Terminal handler node (implicit)
     pub fn new(
@@ -945,7 +945,7 @@ mod tests {
         );
     }
 
-    /// Verifies that a full scale-down → scale-up roundtrip works correctly:
+    /// Verifies that a full scale-down -> scale-up roundtrip works correctly:
     /// permits are physically revoked during scale-down and physically restored
     /// during scale-up.
     #[tokio::test]
@@ -962,7 +962,7 @@ mod tests {
         let semaphore = Arc::new(Semaphore::new(4));
         let current_limit = Arc::new(AtomicUsize::new(4));
 
-        // --- Phase 1: Scale down from 4 → 2 ---
+        // --- Phase 1: Scale down from 4 -> 2 ---
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut idle_since = Some(tokio::time::Instant::now() - Duration::from_millis(50));
 
@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(current_limit.load(Ordering::Relaxed), 2);
         assert_eq!(semaphore.available_permits(), 2);
 
-        // --- Phase 2: Scale up from 2 → 4 ---
+        // --- Phase 2: Scale up from 2 -> 4 ---
         // Simulate pressure: acquire both permits so in_flight = 2
         let _p1 = semaphore.clone().try_acquire_owned().unwrap();
         let _p2 = semaphore.clone().try_acquire_owned().unwrap();
@@ -1004,7 +1004,7 @@ mod tests {
         // With threshold=5, pressure_limit = limit * 5 / 6
         let threshold: usize = 5;
 
-        // Case 1: limit=1 → pressure_limit = 0 → any in_flight triggers scale
+        // Case 1: limit=1 -> pressure_limit = 0 -> any in_flight triggers scale
         let limit: usize = 1;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 0);
@@ -1013,14 +1013,14 @@ mod tests {
             "Single in-flight should trigger scale-up"
         );
 
-        // Case 2: limit=6 → pressure_limit = 5 → need 5+ in_flight to trigger
+        // Case 2: limit=6 -> pressure_limit = 5 -> need 5+ in_flight to trigger
         let limit: usize = 6;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 5);
         assert!(5 >= pressure_limit, "5 of 6 should trigger scale-up");
         assert!(4 < pressure_limit, "4 of 6 should NOT trigger scale-up");
 
-        // Case 3: limit=12 → pressure_limit = 10
+        // Case 3: limit=12 -> pressure_limit = 10
         let limit: usize = 12;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 10);

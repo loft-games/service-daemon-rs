@@ -11,7 +11,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::common::{ExtractedParams, extract_sync_handler_flag};
+use crate::common::{ExtractedParams, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
 use codegen::generate_event_loop_call;
 use parser::TriggerArgs;
@@ -33,7 +33,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
     // Parse attributes using syn-based structured parsing.
-    // The host path is now a real Rust path — no keyword validation needed.
+    // The host path is now a real Rust path - no keyword validation needed.
     let args = parse_macro_input!(attr as TriggerArgs);
     let host_path = &args.host_path;
     let target_type = args.target;
@@ -93,10 +93,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         fn_name.to_string().to_uppercase()
     );
 
-    let inner_vis = match vis {
-        syn::Visibility::Public(_) => quote!(pub),
-        _ => quote!(pub(crate)),
-    };
+    let inner_vis = scope_inner_visibility(vis);
 
     let expanded = quote! {
         mod #scope_mod {

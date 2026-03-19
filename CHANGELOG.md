@@ -25,11 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `#[service]` macro — declarative long-running task registration with lifecycle management.
-- `#[trigger]` macro — event-driven handlers with built-in host types:
+- `#[service]` macro - declarative long-running task registration with lifecycle management.
+- `#[trigger]` macro - event-driven handlers with built-in host types:
   - `TT::Cron`, `TT::Signal` / `TT::Notify`, `TT::Queue` / `TT::BroadcastQueue`, `TT::Watch` / `TT::State`.
   - Custom hosts via `TriggerHost<T>` trait.
-- `#[provider]` macro — compile-time dependency injection:
+- `#[provider]` macro - compile-time dependency injection:
   - Struct providers, function providers, template providers (`Notify`, `Queue`).
   - `env = "VAR_NAME"` for environment variable binding.
 - Resilience: exponential backoff with jitter, wave-based priority startup/shutdown, auto-restart on panic.

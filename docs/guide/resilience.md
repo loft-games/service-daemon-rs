@@ -39,7 +39,7 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 | **Service** | Always retries forever | Return `ServiceError::Fatal` from the service function |
 | **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
 
-**Why the difference?** Services are long-running background tasks — they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
+**Why the difference?** Services are long-running background tasks - they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
 
 Trigger handlers, on the other hand, process individual messages. A single poison message should not block the entire queue forever. `trigger_max_retries` acts as a safety valve to skip messages that consistently fail.
 

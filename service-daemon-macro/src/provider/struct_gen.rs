@@ -27,7 +27,7 @@ fn try_generate_template(
     };
 
     match name.to_string().as_str() {
-        // Signal templates — no named arguments are useful
+        // Signal templates - no named arguments are useful
         "Notify" | "Event" => {
             if provider_args.env.is_some() {
                 proc_macro_error2::emit_warning!(
@@ -98,7 +98,7 @@ fn try_generate_template(
             ))
         }
         _ => {
-            // Unknown template name — emit helpful error at the exact span
+            // Unknown template name - emit helpful error at the exact span
             proc_macro_error2::abort!(
                 name,
                 "Unknown provider template '{}'", name;
@@ -152,13 +152,13 @@ impl TupleStructInfo {
 /// `PROVIDER_REGISTRY` for dependency graph analysis.
 ///
 /// # Arguments
-/// * `type_tokens` — The type that implements provider traits (as a token stream).
-/// * `singleton_name` — The unique static `StateManager` identifier.
-/// * `constructor` — The expression to create `Arc<Self>` on first resolution.
-/// * `user_span`  — The span of the user's type definition (struct name or fn
+/// * `type_tokens` - The type that implements provider traits (as a token stream).
+/// * `singleton_name` - The unique static `StateManager` identifier.
+/// * `constructor` - The expression to create `Arc<Self>` on first resolution.
+/// * `user_span`  - The span of the user's type definition (struct name or fn
 ///   return type). Used for `quote_spanned!` so that missing trait bound errors
 ///   (e.g., `Clone`) point to the user's code, not the macro output.
-/// * `param_entries` — Dependency metadata tokens for `PROVIDER_REGISTRY` registration.
+/// * `param_entries` - Dependency metadata tokens for `PROVIDER_REGISTRY` registration.
 pub(super) fn generate_provided_impl(
     type_tokens: &proc_macro2::TokenStream,
     singleton_name: &syn::Ident,
@@ -463,7 +463,7 @@ fn generate_default_impl(
     // Read env from the shared field.
     let env_opt = provider_args.env.as_ref();
 
-    // Capacity on Value providers is semantically invalid — emit error.
+    // Capacity on Value providers is semantically invalid - emit error.
     if provider_args.capacity.is_some() {
         proc_macro_error2::emit_error!(
             struct_name,

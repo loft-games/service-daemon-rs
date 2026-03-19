@@ -1,6 +1,6 @@
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned};
-use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type};
+use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
 
 /// Result of extracting and categorizing function parameters.
 ///
@@ -63,7 +63,7 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
                         has_sync_handler = true;
                     }
                     proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
-                        // Skip commas — we rebuild them below
+                        // Skip commas - we rebuild them below
                     }
                     other => {
                         other_idents.push(other.clone().into());
@@ -109,6 +109,81 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
     }
 
     (found, cleaned)
+}
+
+/// Computes the visibility used for the *inner* item defined inside the
+/// macro-generated user scope module.
+///
+/// The `#[service]` / `#[trigger]` macros place the user function inside a
+/// private `mod __*_USER_SCOPE_* { ... }` to keep imports out of the function
+/// body (import hygiene) while applying the tracked-lock "Macro Illusion".
+///
+/// Moving the function into a child module changes the meaning of restricted
+/// visibilities like `pub(super)` / `pub(in super::...)` / `pub(in self::...)`.
+/// This helper preserves the user's original visibility semantics by "bridging"
+/// and shifting relative paths one level outward when needed.
+pub fn scope_inner_visibility(user_vis: &Visibility) -> proc_macro2::TokenStream {
+    match user_vis {
+        Visibility::Public(_) => quote!(pub),
+
+        // Private item: make it visible to the parent module so the outer
+        // `use scope_mod::fn_name;` can compile, without expanding the API.
+        Visibility::Inherited => quote!(pub(super)),
+
+        Visibility::Restricted(restricted) => {
+            let path = &restricted.path;
+
+            let is_absolute = path.leading_colon.is_some()
+                || path
+                    .segments
+                    .first()
+                    .is_some_and(|seg| seg.ident == "crate");
+            if is_absolute {
+                return quote!(#user_vis);
+            }
+
+            let is_self = path.is_ident("self");
+            if is_self {
+                // `pub(self)` / `pub(in self)` is effectively module-private.
+                // Inside the generated scope module that would become *too*
+                // private (not visible to the parent), so we bridge with
+                // `pub(super)`.
+                return quote!(pub(super));
+            }
+
+            let new_path: proc_macro2::TokenStream =
+                if path.segments.first().is_some_and(|seg| seg.ident == "self") {
+                    // `pub(in self::...)` -> `pub(in super::...)`
+                    let rest_segments = path
+                        .segments
+                        .iter()
+                        .skip(1)
+                        .cloned()
+                        .collect::<syn::punctuated::Punctuated<
+                        syn::PathSegment,
+                        syn::Token![::],
+                    >>();
+                    let rest_path = syn::Path {
+                        leading_colon: None,
+                        segments: rest_segments,
+                    };
+                    quote!(super::#rest_path)
+                } else if path
+                    .segments
+                    .first()
+                    .is_some_and(|seg| seg.ident == "super")
+                {
+                    // `pub(super)` / `pub(in super::...)` -> shift one level outward.
+                    quote!(super::#path)
+                } else {
+                    // Any other relative `pub(in foo::bar)` path must be resolved
+                    // from the original module, not from the generated child.
+                    quote!(super::#path)
+                };
+
+            quote!(pub(in #new_path))
+        }
+    }
 }
 
 /// Represents the shared parser classification for a function parameter.
@@ -259,9 +334,9 @@ impl ParamProcessor {
     /// This method generates the correct extraction code based on
     /// whether the user's handler expects `Arc<T>` or bare `T`:
     ///
-    /// - **`is_arc == true`**: user declared `Arc<T>` — pass the
+    /// - **`is_arc == true`**: user declared `Arc<T>` - pass the
     ///   framework's `Arc` directly (zero-copy, no `Clone` needed).
-    /// - **`is_arc == false`**: user declared `T` — dereference the
+    /// - **`is_arc == false`**: user declared `T` - dereference the
     ///   `Arc` and clone the data. Uses a descriptive trait call
     ///   to produce a friendly compiler error if `T: Clone` is missing.
     fn process_payload(&mut self, arg: &FnArg, arg_name: syn::Ident, is_arc: bool) {
@@ -294,12 +369,12 @@ impl ParamProcessor {
         self.clean_inputs.push(clean_arg);
 
         if is_arc {
-            // User wants Arc<T> — pass the framework's Arc pointer
+            // User wants Arc<T> - pass the framework's Arc pointer
             // directly. This is a zero-copy path and does NOT require
             // the inner type to implement Clone.
             self.call_args.push(quote! { payload });
         } else {
-            // User wants bare T — must clone out of the Arc.
+            // User wants bare T - must clone out of the Arc.
             // Uses a descriptive helper to produce a clear compiler
             // error when T does not implement Clone.
             self.call_args
@@ -540,5 +615,75 @@ impl TagsList {
         } else {
             quote::quote! { &[#(#tag_strs),*] }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scope_inner_visibility;
+    use quote::quote;
+    use syn::Visibility;
+
+    #[test]
+    fn scope_inner_visibility_public_stays_public() {
+        let vis: Visibility = syn::parse_quote!(pub);
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub).to_string()
+        );
+    }
+
+    #[test]
+    fn scope_inner_visibility_private_bridges_to_parent() {
+        let vis: Visibility = syn::parse_quote!();
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub(super)).to_string()
+        );
+    }
+
+    #[test]
+    fn scope_inner_visibility_pub_crate_keeps_pub_crate() {
+        let vis: Visibility = syn::parse_quote!(pub(crate));
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub(crate)).to_string()
+        );
+    }
+
+    #[test]
+    fn scope_inner_visibility_pub_super_shifts_one_level() {
+        let vis: Visibility = syn::parse_quote!(pub(super));
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub(in super::super)).to_string()
+        );
+    }
+
+    #[test]
+    fn scope_inner_visibility_pub_in_super_path_shifts_one_level() {
+        let vis: Visibility = syn::parse_quote!(pub(in super::foo));
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub(in super::super::foo)).to_string()
+        );
+    }
+
+    #[test]
+    fn scope_inner_visibility_pub_in_self_path_becomes_super() {
+        let vis: Visibility = syn::parse_quote!(pub(in self::foo));
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub(in super::foo)).to_string()
+        );
+    }
+
+    #[test]
+    fn scope_inner_visibility_pub_self_bridges_to_parent() {
+        let vis: Visibility = syn::parse_quote!(pub(self));
+        assert_eq!(
+            scope_inner_visibility(&vis).to_string(),
+            quote!(pub(super)).to_string()
+        );
     }
 }

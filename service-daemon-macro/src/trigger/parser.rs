@@ -4,7 +4,7 @@
 //!   `#[trigger(Watch(MetricsData), priority = 80)]`
 //!
 //! The first argument is always a template call in the form `Template(Target)`.
-//! `Template` is any type path that implements `TriggerHost<Target>` — no
+//! `Template` is any type path that implements `TriggerHost<Target>` - no
 //! keyword validation is performed here; the compiler will catch invalid types.
 //! Optional named arguments like `priority = N` follow after a comma.
 
@@ -43,7 +43,7 @@ pub struct TriggerArgs {
 /// Where `HostPath` is any valid Rust type path (e.g., `Watch`, `TT::Queue`,
 /// `service_daemon::TT::Cron`) and `TargetType` is any valid Rust type path.
 ///
-/// No compile-time validation of the host path is performed — if the path
+/// No compile-time validation of the host path is performed - if the path
 /// does not refer to a type implementing `TriggerHost<Target>`, the Rust
 /// compiler will emit a clear error at the call site.
 impl Parse for TriggerArgs {

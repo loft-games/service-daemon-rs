@@ -189,7 +189,7 @@ pub static SERVICE_REGISTRY: [ServiceEntry];
 /// The global provider registry -- providers register themselves here via `#[provider]` macro.
 ///
 /// Each entry records the provider's type identity and its dependency parameters,
-/// enabling full dependency graph construction (including Provider→Provider edges)
+/// enabling full dependency graph construction (including Provider->Provider edges)
 /// at startup for cycle detection.
 // Same: `linkme` `#[link_section]` in edition 2024.
 #[allow(unsafe_code)]

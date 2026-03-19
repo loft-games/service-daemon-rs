@@ -238,7 +238,7 @@ pub struct ScalingPolicy {
     /// scale-up event (default: 2).
     ///
     /// For example, with `scale_factor = 2`, limits grow as:
-    /// 1 → 2 → 4 → 8 → ... → `max_concurrency`.
+    /// 1 -> 2 -> 4 -> 8 -> ... -> `max_concurrency`.
     pub scale_factor: usize,
     /// Pressure ratio threshold that triggers a scale-up (default: 5).
     ///

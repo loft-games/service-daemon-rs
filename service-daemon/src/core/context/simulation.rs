@@ -265,7 +265,7 @@ pub struct MockContext;
 pub struct MockContextBuilder {
     resources: Arc<DaemonResources>,
     /// Whether to auto-include framework logging services in the simulation.
-    /// Default: `true` — matches production behavior.
+    /// Default: `true` - matches production behavior.
     enable_logging: bool,
 }
 
@@ -309,7 +309,7 @@ impl MockContextBuilder {
     /// Controls whether framework logging services (`log_service`) are
     /// automatically included in the simulation registry.
     ///
-    /// Default: `true` — logging services are included to match production
+    /// Default: `true` - logging services are included to match production
     /// behavior and provide consistent log output in tests.
     ///
     /// Set to `false` for lightweight tests that don't need log output.

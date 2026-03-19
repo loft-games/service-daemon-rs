@@ -7,10 +7,10 @@ each layer full control over when, whether, and how many times the next layer is
 
 ```text
 dispatch(payload)
-  +-- TracingInterceptor.intercept(ctx, next)       ← outermost: wraps in tracing span
-        +-- RetryInterceptor.intercept(ctx, next)   ← retries inner chain on failure
+  +-- TracingInterceptor.intercept(ctx, next)       <- outermost: wraps in tracing span
+        +-- RetryInterceptor.intercept(ctx, next)   <- retries inner chain on failure
               +-- [user interceptors...]
-                    +-- handler(TriggerContext)      ← terminal: calls user handler
+                    +-- handler(TriggerContext)      <- terminal: calls user handler
 ```
 
 Each interceptor receives a `DispatchContext<P>` (owned) and a `next` callback. It decides **if, when,
@@ -68,7 +68,7 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 ## 4. Writing a Custom Interceptor
 
 ### Generic Interceptor (any payload)
-Use a blanket `impl<P>` — works with every trigger type:
+Use a blanket `impl<P>` - works with every trigger type:
 
 ```rust
 use service_daemon::core::trigger_runner::{
@@ -120,7 +120,7 @@ impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
 
 > [!TIP]
 > Payload-specific interceptors can only be registered on `TriggerRunner<SmsPayload>`.
-> The compiler enforces this at build time — no runtime surprises.
+> The compiler enforces this at build time - no runtime surprises.
 
 ## 5. Interceptor Patterns
 
@@ -139,7 +139,7 @@ next(ctx).await
 ```
 
 ### Retry (call multiple times)
-The built-in `RetryInterceptor` demonstrates this pattern — it calls `next` once,
+The built-in `RetryInterceptor` demonstrates this pattern - it calls `next` once,
 then reconstructs the context and calls the handler directly for subsequent attempts.
 
 ### Wrap in Span (tracing)
@@ -153,8 +153,8 @@ next(ctx).instrument(span).await
 The type parameter `P` is bound at the **trait level** (`TriggerInterceptor<P>`), not at the method level.
 This makes the trait object-safe within a specific `TriggerRunner<P>`:
 
-- `Vec<Arc<dyn TriggerInterceptor<P>>>` — dynamic composition with safe cross-task sharing
-- Full compile-time payload type safety — no `Any` or `downcast`
+- `Vec<Arc<dyn TriggerInterceptor<P>>>` - dynamic composition with safe cross-task sharing
+- Full compile-time payload type safety - no `Any` or `downcast`
 - Generic interceptors via `impl<P> TriggerInterceptor<P> for T`
 - Payload-specific interceptors via `impl TriggerInterceptor<MyPayload> for T`
 - Interceptors are `Arc`-wrapped, enabling safe `tokio::spawn` for async dispatch

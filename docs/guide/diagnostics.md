@@ -4,12 +4,12 @@ To manage complex asynchronous systems, visibility is paramount. `service-daemon
 
 ## 1. Entering the Matrix: `DaemonLayer`
 
-The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size × 4` (default: 128 × 4 = 512 slots; configurable via `set_log_batch_size()`). Two independent SYSTEM-priority consumers process this queue:
+The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
 
-Both consumers use a **fill-the-valley** batch strategy with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers — failure in one does not affect the other.
+Both consumers use a **fill-the-valley** batch strategy with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
 
 ### Enabling Diagnostics
 
@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-**Test environments** — use `try_init_logging()` to handle parallel test races:
+**Test environments** - use `try_init_logging()` to handle parallel test races:
 
 ```rust
 #[tokio::test]
@@ -37,7 +37,7 @@ async fn my_test() {
 }
 ```
 
-**Custom subscriber stacks** (Sentry, OpenTelemetry, etc.) — use `DaemonLayer` directly:
+**Custom subscriber stacks** (Sentry, OpenTelemetry, etc.) - use `DaemonLayer` directly:
 
 ```rust
 use service_daemon::core::logging::DaemonLayer;
@@ -50,7 +50,7 @@ tracing_subscriber::registry()
     .init();
 ```
 
-**File logging** — configured independently:
+**File logging** - configured independently:
 
 ```rust
 use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
@@ -72,19 +72,19 @@ let config = FileLogConfig {
 enable_file_logging(config);
 ```
 
-**Log batch size** — controls both drain cycle size and queue capacity:
+**Log batch size** - controls both drain cycle size and queue capacity:
 
 ```rust
 use service_daemon::set_log_batch_size;
 
 // Reduce batch size for a lightweight embedded daemon
-// Queue capacity will be 512 × 4 = 2,048 slots
+// Queue capacity will be 512 * 4 = 2,048 slots
 set_log_batch_size(512);
 // Must be called BEFORE init_logging()
 service_daemon::core::logging::init_logging();
 ```
 
-> **Warning**: Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`. The `log_service` handles all console output — adding `fmt::layer()` causes duplicate lines.
+> **Warning**: Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`. The `log_service` handles all console output - adding `fmt::layer()` causes duplicate lines.
 
 ## 2. What to Look For
 

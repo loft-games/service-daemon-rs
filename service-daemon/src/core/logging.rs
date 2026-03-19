@@ -133,7 +133,7 @@ pub struct LogQueue {
 ///
 /// This is the sole user-facing knob for log throughput tuning.
 /// Queue capacity is derived automatically as
-/// `batch_size × LOG_QUEUE_BATCH_MULTIPLIER`.
+/// `batch_size * LOG_QUEUE_BATCH_MULTIPLIER`.
 const DEFAULT_BATCH_SIZE: usize = 128;
 
 /// Ratio of broadcast queue capacity to batch size.
@@ -157,7 +157,7 @@ fn effective_batch_size() -> usize {
 ///
 /// Must be called **before** `init_logging()` or `ServiceDaemon::run()` to
 /// take effect. The broadcast queue capacity is automatically derived as
-/// `batch_size × 4`.
+/// `batch_size * 4`.
 ///
 /// # When to Use
 ///
@@ -171,7 +171,7 @@ fn effective_batch_size() -> usize {
 /// use service_daemon::set_log_batch_size;
 ///
 /// // Reduce batch size for a lightweight embedded daemon
-/// // Queue capacity will be 512 × 4 = 2,048 slots
+/// // Queue capacity will be 512 * 4 = 2,048 slots
 /// set_log_batch_size(512);
 /// service_daemon::core::logging::init_logging();
 /// ```
@@ -607,8 +607,8 @@ where
 /// `source_id` fields from ancestor Spans.
 ///
 /// These fields are injected by:
-/// - `ServiceSupervisor::on_running` — creates `info_span!("service", service_id = ...)`
-/// - `TracingInterceptor` — creates `info_span!("trigger", service_id = ..., message_id = ...)`
+/// - `ServiceSupervisor::on_running` - creates `info_span!("service", service_id = ...)`
+/// - `TracingInterceptor` - creates `info_span!("trigger", service_id = ..., message_id = ...)`
 ///
 /// The walk proceeds from innermost (current) to outermost Span, returning
 /// the first value found for each field.
@@ -665,9 +665,9 @@ struct SpanFields {
 /// Visitor that extracts known ID fields from Span attributes during creation.
 ///
 /// Recognizes:
-/// - `service_id` — from `ServiceSupervisor::on_running` and `TracingInterceptor`
-/// - `message_id` — from `TracingInterceptor` (trigger dispatch)
-/// - `instance_id` — from `TracingInterceptor`, mapped to `source_id`
+/// - `service_id` - from `ServiceSupervisor::on_running` and `TracingInterceptor`
+/// - `message_id` - from `TracingInterceptor` (trigger dispatch)
+/// - `instance_id` - from `TracingInterceptor`, mapped to `source_id`
 ///
 /// All other fields are ignored. Values are captured via `Display` formatting.
 #[derive(Debug, Default)]
@@ -805,7 +805,7 @@ pub async fn log_service() -> anyhow::Result<()> {
 ///
 /// Subscribes to the same `LogQueue` broadcast channel as `log_service`,
 /// consuming events independently. Each consumer has its own cursor into
-/// the broadcast ring buffer — neither blocks the other.
+/// the broadcast ring buffer - neither blocks the other.
 ///
 /// ## Activation
 /// Only runs when `enable_file_logging()` has been called before daemon start
@@ -1064,7 +1064,7 @@ mod tests {
     /// Installs a temporary subscriber with DaemonLayer, runs the closure,
     /// and returns collected LogEvents from the broadcast queue.
     ///
-    /// Uses `tracing::subscriber::with_default` for test isolation — does NOT
+    /// Uses `tracing::subscriber::with_default` for test isolation - does NOT
     /// set a global subscriber, so tests can run in parallel.
     fn collect_events_with_daemon_layer(f: impl FnOnce()) -> Vec<Arc<LogEvent>> {
         let mut rx = get_log_queue().tx.subscribe();

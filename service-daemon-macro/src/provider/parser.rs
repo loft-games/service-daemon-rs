@@ -120,7 +120,7 @@ impl Parse for ProviderArgs {
             });
         }
 
-        // ── Phase 1: Identify the primary kind ──────────────────────────
+        // == Phase 1: Identify the primary kind ==========================
 
         let kind = if input.peek(Ident) {
             let ident: Ident = input.fork().parse()?;
@@ -158,7 +158,7 @@ impl Parse for ProviderArgs {
 
                 ProviderKind::Template { name, arg }
             } else if input.peek2(Token![=]) {
-                // Named-arg-only — e.g., `#[provider(env = "API_KEY")]`
+                // Named-arg-only - e.g., `#[provider(env = "API_KEY")]`
                 // Consume the key=value directly (no comma prefix).
                 let key: Ident = input.parse()?;
                 input.parse::<Token![=]>()?;
@@ -199,7 +199,7 @@ impl Parse for ProviderArgs {
                     eager,
                 );
             } else {
-                // Not a template name — treat as an expression
+                // Not a template name - treat as an expression
                 // (e.g., a constant identifier used as a default value)
                 let default_value: syn::Expr = input.parse()?;
                 ProviderKind::Value {
@@ -207,14 +207,14 @@ impl Parse for ProviderArgs {
                 }
             }
         } else {
-            // Literal or expression — default value
+            // Literal or expression - default value
             let default_value: syn::Expr = input.parse()?;
             ProviderKind::Value {
                 default_value: Some(default_value),
             }
         };
 
-        // ── Phase 2: Unified trailing named arguments ───────────────────
+        // == Phase 2: Core mapping logic =================================
         Self::parse_trailing_attrs(input, kind, None, None, false)
     }
 }

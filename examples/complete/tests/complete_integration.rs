@@ -346,13 +346,13 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 /// This test is a **regression guard** for P1 (async fn provider parameter injection).
 /// It exercises the full dependency chain at runtime:
 ///
-///   `Port(8080)` + `DbUrl("mysql://localhost")` → `ConnectionString("mysql://localhost:8080")`
+///   `Port(8080)` + `DbUrl("mysql://localhost")` -> `ConnectionString("mysql://localhost:8080")`
 ///
 /// If the macro fails to generate DI resolution code for function parameters,
 /// this test will fail with a type error or incorrect output.
 #[tokio::test]
 async fn test_fn_provider_dependency_chain() {
-    // Resolve the async fn provider — this triggers the full dependency chain.
+    // Resolve the async fn provider - this triggers the full dependency chain.
     let conn_str = ConnectionString::resolve().await;
 
     // The connection string should be assembled from Port(8080) + DbUrl("mysql://localhost")

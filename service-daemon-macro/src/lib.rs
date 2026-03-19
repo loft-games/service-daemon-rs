@@ -92,7 +92,7 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// #[provider(8080, env = "PORT")]
 /// pub struct Port(pub i32);
 ///
-/// // Env-only (no default — panics if env var is missing)
+/// // Env-only (no default - panics if env var is missing)
 /// #[provider(env = "API_KEY")]
 /// pub struct ApiKey(pub String);
 /// ```
