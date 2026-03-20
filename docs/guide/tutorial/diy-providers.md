@@ -52,11 +52,34 @@ async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
 }
 ```
 
-## 4. Best Practices
+## 4. Error Handling and Retries
+
+Modern applications must handle startup failures gracefully (e.g., waiting for a database to become ready). Instead of just panicking, you can return a `Result<T, ProviderError>`.
+
+The framework provides two error types:
+*   **`ProviderError::Fatal("msg")`**: Use this for configuration errors. The daemon will fail-fast and exit immediately.
+*   **`ProviderError::Retryable("msg")`**: Use this for connectivity issues. The framework will automatically retry with exponential backoff until the `provider_init_timeout` is reached.
+
+```rust
+use service_daemon::{provider, ProviderError};
+
+#[provider]
+async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
+    MyDb::connect(&url).await.map_err(|e| {
+        if is_transient(e) {
+            ProviderError::Retryable(format!("DB not ready: {e}"))
+        } else {
+            ProviderError::Fatal(format!("Invalid DB config: {e}"))
+        }
+    })
+}
+```
+
+## 5. Best Practices
 
 *   **Keep it clean**: Use Providers for *Shared Resources* (DB, MQTT, Config). Use Services for *Action* (Running the business logic).
 *   **Don't Block**: Always use `async` providers for network/disk operations.
-*   **Fail Fast**: If a provider cannot be initialized, use `.expect()` or `panic!`. The framework will catch this and report it as a startup error.
+*   **Fail Gracefully**: Prefer `ProviderError::Retryable` for network resources to make your application resilient to startup order issues (e.g., in Docker Compose or K8s).
 
 > [!TIP]
 > **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/provider-best-practices.md) guide.
