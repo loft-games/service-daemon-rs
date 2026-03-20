@@ -82,8 +82,8 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 *   **Fail Gracefully**: Prefer `ProviderError::Retryable` for network resources to make your application resilient to startup order issues (e.g., in Docker Compose or K8s).
 
 > [!TIP]
-> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](docs/guide/provider-best-practices.md) guide.
+> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../provider-best-practices.md) guide.
 
 ---
 
-[**<- Previous Step: State Management & Recovery**](docs/guide/tutorial/state-recovery.md) | [**Next Step: Error Handling & Retries ->**](docs/guide/tutorial/error-handling.md)
+[**<- Previous Step: State Management & Recovery**](./state-recovery.md) | [**Next Step: Error Handling & Retries ->**](./error-handling.md)

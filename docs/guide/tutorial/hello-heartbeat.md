@@ -87,4 +87,4 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-[**Next Step: Reactive Triggers ->**](docs/guide/tutorial/reactive-triggers.md)
+[**Next Step: Reactive Triggers ->**](./reactive-triggers.md)

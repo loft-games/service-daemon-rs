@@ -55,4 +55,4 @@ When you stop the system (Ctrl+C), the process reverses. We want to stop the "ou
 
 ---
 
-[**<- Previous Step: Error Handling & Retries**](docs/guide/tutorial/error-handling.md) | [**Next Step: Unit Testing & Simulation ->**](docs/guide/tutorial/unit-testing.md)
+[**<- Previous Step: Error Handling & Retries**](./error-handling.md) | [**Next Step: Unit Testing & Simulation ->**](./unit-testing.md)

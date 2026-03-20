@@ -3,7 +3,7 @@
 The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State).
 
 > [!NOTE]
-> `Watch(T)` requires the target type to implement `WatchableProvided`.
+> `Watch(T)` requires the target type to implement `WatchableProvided`. (Note: This is automatically handled by the `#[provider]` macro.)
 
 But world-class systems often need more--like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
 
@@ -154,4 +154,4 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 
 ---
 
-[**<- Previous Step: Under the Hood**](docs/guide/tutorial/under-the-hood.md) | [**Next Step: Trigger Middlewares (Interceptors) ->**](docs/guide/tutorial/trigger-interceptors.md)
+[**<- Previous Step: Under the Hood**](./under-the-hood.md) | [**Next Step: Trigger Middlewares (Interceptors) ->**](./trigger-interceptors.md)

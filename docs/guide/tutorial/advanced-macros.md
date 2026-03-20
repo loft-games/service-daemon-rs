@@ -62,4 +62,4 @@ You've completed the Quick Start Guide. You've gone from a simple heartbeat to u
 
 Now, go forth and build something reliable!
 
-[**<- Previous Step: Trigger Middlewares (Interceptors)**](docs/guide/tutorial/trigger-interceptors.md) | [**Back to the Quick Start Guide ->**](docs/guide/tutorial/quick-start.md)
+[**<- Previous Step: Trigger Middlewares (Interceptors)**](./trigger-interceptors.md) | [**Back to the Quick Start Guide ->**](./quick-start.md)

@@ -84,7 +84,10 @@ set_log_batch_size(512);
 service_daemon::core::logging::init_logging();
 ```
 
-> **Warning**: Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`. The `log_service` handles all console output - adding `fmt::layer()` causes duplicate lines.
+> [!WARNING]
+> Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`.
+> 1. **Duplication**: The `log_service` already handles console output — adding `fmt::layer()` will cause every log line to appear twice.
+> 2. **Performance (Blocking)**: `fmt::layer()` is synchronous and can block the async runtime under heavy load. `DaemonLayer` is fully asynchronous, offloading output to the managed `log_service` with internal batching to ensure zero-latency logging even during bursts.
 
 ## 2. What to Look For
 

@@ -133,7 +133,7 @@ INFO counter_service: Count is: 3
 To the user, it looks like an automatic update. To the developer, it's a clean state migration.
 
 > [!NOTE]
-> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](docs/guide/state-management.md) design document.
+> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](../state-management.md) design document.
 
 ## 3. Why this matters? (The Provider Update)
 
@@ -196,4 +196,4 @@ This pattern enables **Reactive Architecture**: your services automatically adap
 
 ---
 
-[**<- Previous Step: Reactive Triggers**](docs/guide/tutorial/reactive-triggers.md) | [**Next Step: DIY Providers ->**](docs/guide/tutorial/diy-providers.md)
+[**<- Previous Step: Reactive Triggers**](./reactive-triggers.md) | [**Next Step: DIY Providers ->**](./diy-providers.md)

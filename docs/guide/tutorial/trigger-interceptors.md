@@ -140,4 +140,4 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 
 ---
 
-[**<- Previous Step: Custom Trigger Implementation**](docs/guide/tutorial/tailor-made-triggers.md) | [**Next Step: Advanced Macro Usage ->**](docs/guide/tutorial/advanced-macros.md)
+[**<- Previous Step: Custom Trigger Implementation**](./tailor-made-triggers.md) | [**Next Step: Advanced Macro Usage ->**](./advanced-macros.md)
