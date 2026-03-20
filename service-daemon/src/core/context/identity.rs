@@ -8,8 +8,8 @@
 
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 

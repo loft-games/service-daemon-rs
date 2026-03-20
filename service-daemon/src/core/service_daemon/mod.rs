@@ -582,7 +582,7 @@ impl ServiceDaemonBuilder {
             services,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
-            cancellation_token: process_token().clone(),
+            cancellation_token: process_token().child_token(),
             external_cancel_token: self.external_cancel_token,
             resources,
         }

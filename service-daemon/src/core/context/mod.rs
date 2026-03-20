@@ -17,10 +17,10 @@ pub mod simulation;
 
 // Identity types (used by runner.rs, service_daemon, macros)
 // These re-exports are used by tests and by simulation_tests
+pub(crate) use identity::process_token;
 #[cfg(test)]
 pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
-pub(crate) use identity::process_token;
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{

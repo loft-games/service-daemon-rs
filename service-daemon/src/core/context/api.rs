@@ -260,9 +260,8 @@ pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
 
     // Must capture tokens here (not inside the async block) because
     // task_local is only accessible in the caller's task context.
-    let tokens = CURRENT_SERVICE.try_with(|id| {
-        (id.cancellation_token.clone(), id.reload_token.clone())
-    });
+    let tokens =
+        CURRENT_SERVICE.try_with(|id| (id.cancellation_token.clone(), id.reload_token.clone()));
     let process_cancel = super::identity::process_token().clone();
 
     async move {
@@ -277,7 +276,6 @@ pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
         }
     }
 }
-
 
 /// An interruptible sleep that returns early if a shutdown or reload signal is received.
 /// Returns `true` if the sleep completed normally, `false` if interrupted.
