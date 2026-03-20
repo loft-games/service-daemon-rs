@@ -246,19 +246,38 @@ pub fn is_shutdown() -> bool {
 }
 
 /// Waits until the service is notified to stop or reload.
-/// This future completes when the service's cancellation or reload token is triggered.
 ///
-/// **Note**: If the service is still in a "Starting" phase, this function will
-/// implicitly transition it to `Healthy` status.
-pub async fn wait_shutdown() {
+/// **Spawn-safe**: captures lifecycle tokens at call-site so the returned
+/// future works even when polled from a `tokio::spawn`'d task (e.g.
+/// `axum::serve().with_graceful_shutdown(wait_shutdown())`) where
+/// `task_local!` context is unavailable.
+///
+/// Outside a `#[service]` scope, falls back to process-level shutdown only
+/// (skips `reload_token` — an externally spawned task has no concept of
+/// individual service reloads).
+pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
     implicit_handshake();
-    if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
-        tokio::select! {
-            _ = id.cancellation_token.cancelled() => {}
-            _ = id.reload_token.cancelled() => {}
+
+    // Must capture tokens here (not inside the async block) because
+    // task_local is only accessible in the caller's task context.
+    let tokens = CURRENT_SERVICE.try_with(|id| {
+        (id.cancellation_token.clone(), id.reload_token.clone())
+    });
+    let process_cancel = super::identity::process_token().clone();
+
+    async move {
+        match tokens {
+            Ok((cancel, reload)) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = reload.cancelled() => {}
+                }
+            }
+            Err(_) => process_cancel.cancelled().await,
         }
     }
 }
+
 
 /// An interruptible sleep that returns early if a shutdown or reload signal is received.
 /// Returns `true` if the sleep completed normally, `false` if interrupted.

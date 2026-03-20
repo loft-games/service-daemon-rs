@@ -20,6 +20,7 @@ pub mod simulation;
 #[cfg(test)]
 pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
+pub(crate) use identity::process_token;
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{

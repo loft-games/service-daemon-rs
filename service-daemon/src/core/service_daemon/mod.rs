@@ -24,7 +24,7 @@ use petgraph::graph::DiGraph;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::core::context::DaemonResources;
+use crate::core::context::{DaemonResources, process_token};
 use crate::models::{
     Registry, Result as ServiceResult, ServiceDescription, ServiceId, ServiceStatus,
 };
@@ -582,7 +582,7 @@ impl ServiceDaemonBuilder {
             services,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
-            cancellation_token: CancellationToken::new(),
+            cancellation_token: process_token().clone(),
             external_cancel_token: self.external_cancel_token,
             resources,
         }
