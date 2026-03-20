@@ -1,5 +1,5 @@
 #![deny(unsafe_code)]
-//! A sophisticated Rust framework for automatic service management, event-driven triggers,
+//! A declarative Rust framework for automatic service management, event-driven triggers,
 //! and type-based dependency injection.
 //!
 //! ## Quick Start
@@ -42,7 +42,7 @@
 //!
 //! For the full guide and advanced patterns, visit our components on GitHub:
 //!
-//! - [**The Grand Tour**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/grand-tour.md) - Complete step-by-step tutorial.
+//! - [**Quick Start Guide**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) - Complete step-by-step tutorial.
 //! - [**Architecture Overview**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) - Deep dive into DI and Registry.
 
 extern crate self as service_daemon;

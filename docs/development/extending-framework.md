@@ -103,6 +103,6 @@ The framework uses `linkme` for distributed registration and `ServiceId` for ide
 2. **Context**: Use `current_service_id()` from `service-daemon/src/models/trigger.rs` to retrieve the ID of the running service.
 3. **Macro Generation**: Shared logic resides in `service-daemon-macro/src/common.rs`.
     - **`decompose_type`**: This utility is key to the DI system. It recursively inspects AST types to identify wrappers like `Arc`, `RwLock`, and `Mutex`, stripping the outer layers to reach the inner `T`.
-    - **`ParamIntent`**: Parameters are categorized as either `Payload` or `Dependency`. This allows a single function to mix event data with DI-resolved resources seamlessly.
+    - **`ParamIntent`**: Parameters are categorized as either `Payload` or `Dependency`. This allows a single function to mix event data with DI-resolved resources automatedly.
 
 [Back to README](../../README.md)

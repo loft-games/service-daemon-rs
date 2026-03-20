@@ -14,7 +14,7 @@ This central hub explains the architectural "why" behind common behaviors and tr
 
 ## 1. Registry & Discovery
 
-### The "Invisible Service" Trap (Linkme)
+### The "Registered Service" Trap (Linkme)
 **Problem**: You annotated a function with `#[service]`, but it doesn't start.
 **Cause**: Rust's linker-based discovery (`linkme`) only finds code that is **explicitly included in the compilation tree**.
 **The Fix**: Ensure the module containing your service is reachable from `main.rs` via `mod my_module;`.

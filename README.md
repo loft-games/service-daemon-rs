@@ -2,7 +2,7 @@
 
 [![Rust CI](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml)
 
-`service-daemon-rs` is a sophisticated Rust framework for automatic service management and type-based dependency injection. Inspired by decorator-based registration in other languages, it brings seamless orchestration to the Tokio ecosystem.
+`service-daemon-rs` is a declarative Rust framework for automatic service management and type-based dependency injection. Inspired by decorator-based registration in other languages, it brings automated orchestration to the Tokio ecosystem.
 
 ## Key Features
 
@@ -55,13 +55,13 @@ async fn main() -> anyhow::Result<()> {
 
 ## Get Started
 
-Looking to build your first reliable background system? Follow our **[Grand Tour](docs/guide/tutorial/grand-tour.md)** tutorial series!
+Looking to build your first reliable background system? Follow our **[Quick Start Guide](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md)** tutorial series!
 
-1. [**Hello, Heartbeat!**](docs/guide/tutorial/hello-heartbeat.md) - Your first background service. 
-2. [**Reactive Triggers**](docs/guide/tutorial/reactive-triggers.md) - Events and automation.
-3. [**The Art of Recovery**](docs/guide/tutorial/art-of-recovery.md) - State management and resilience.
-4. [**Waves of Orchestration**](docs/guide/tutorial/orchestration-waves.md) - Startup and shutdown order.
-5. ...and much more in the **[Full Tutorial](docs/guide/tutorial/grand-tour.md)**.
+1. [**Hello, Heartbeat!**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/hello-heartbeat.md) - Your first background service. 
+2. [**Reactive Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md) - Events and automation.
+3. [**State Management & Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/state-recovery.md) - Persistence and resilience.
+4. [**Sequential Startup & Shutdown**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/priority-orchestration.md) - Priority-based orchestration.
+5. ...and much more in the **[Full Guide](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md)**.
 
 ---
 
@@ -88,20 +88,20 @@ Our documentation is split by audience to ensure you find exactly what you need 
 ### User Guides (Framework Users)
 *Everything you need to build and run your application.*
 
-- [State Management](docs/guide/state-management.md): Providers, Mutability, and zero-copy snapshots.
-- [Event Triggers](docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
-- [Resilience & Lifecycle](docs/guide/resilience.md): Restarts, jitter, and wave-based orchestration.
-- [Diagnostics & Logs](docs/guide/diagnostics.md): Using the `DaemonLayer` for real-time visibility.
-- [Testing & Troubleshooting](docs/guide/testing-troubleshooting.md): Framework patterns, Mocking, and FAQ.
+- [State Management](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/state-management.md): Providers, Mutability, and zero-copy snapshots.
+- [Event Triggers](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/triggers.md): Cron, Queues, and Reactive Watchers.
+- [Resilience & Lifecycle](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/resilience.md): Restarts, jitter, and wave-based orchestration.
+- [Diagnostics & Logs](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/diagnostics.md): Using the `DaemonLayer` for real-time visibility.
+- [Testing & Troubleshooting](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/testing-troubleshooting.md): Framework patterns, Mocking, and FAQ.
 
 ### Architecture & Internals (Core Developers)
 *Deep dives into the technical "Why" and "How" of the engine.*
 
-- [Internal Overview](docs/architecture/internal-overview.md): Registry design, linkme segments, and DI resolution.
-- [The Ripple Model](docs/architecture/causal-tracing.md): Our unique philosophy for asynchronous causal tracing.
-- [Lifecycle Deep Dive](docs/architecture/lifecycle-management.md): Reactive signal paths and supervisor internals.
-- [Macros Mechanics](docs/architecture/macros-deep-dive.md): The magic behind attribute stripping and AST transformation.
-- [Extending the Framework](docs/development/extending-framework.md): Guide for adding new trigger types or providers.
+- [Internal Overview](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md): Registry design, linkme segments, and DI resolution.
+- [The Ripple Model](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/causal-tracing.md): Our unique philosophy for asynchronous causal tracing.
+- [Lifecycle Deep Dive](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md): Reactive signal paths and supervisor internals.
+- [Macros Mechanics](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macros-deep-dive.md): The magic behind attribute stripping and AST transformation.
+- [Extending the Framework](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/extending-framework.md): Guide for adding new trigger types or providers.
 
 ---
 
@@ -109,7 +109,7 @@ Our documentation is split by audience to ensure you find exactly what you need 
 
 Licensed under either of
 
-- [MIT license](LICENSE-MIT)
-- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT license](https://github.com/loft-games/service-daemon-rs/blob/master/LICENSE-MIT)
+- [Apache License, Version 2.0](https://github.com/loft-games/service-daemon-rs/blob/master/LICENSE-APACHE)
 
 at your option.

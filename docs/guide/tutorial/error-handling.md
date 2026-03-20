@@ -1,8 +1,8 @@
-# Resilience Kung-Fu
+# Error Handling & Retries
 
 A background daemon's primary job is to keep your services alive. But "alive" doesn't mean "restarting in a tight loop forever". 
 
-In this chapter, we'll learn how to tune the engine's resilience.
+In this chapter, we'll learn how to tune the engine's error handling and retry logic.
 
 ---
 
@@ -105,8 +105,8 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 *   `wave_stop_timeout`: Maximum time to wait for a service to exit before forcefully killing it.
 
 > [!NOTE]
-> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/resilience.md) design document.
+> **Deep Dive**: To understand the internal watchdog mechanism and the mathematical models behind our restart policies, see the [Resilience & Monitoring](docs/guide/resilience.md) design document.
 
 ---
 
-[**<- Previous Step: DIY Providers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/diy-providers.md) | [**Next Step: Waves of Orchestration ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/orchestration-waves.md)
+[**<- Previous Step: DIY Providers**](docs/guide/tutorial/diy-providers.md) | [**Next Step: Sequential Startup & Shutdown ->**](docs/guide/tutorial/priority-orchestration.md)

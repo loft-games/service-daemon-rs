@@ -51,7 +51,7 @@ pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Resu
 You'll notice we use `tracing::info!` instead of `println!`. In `service-daemon-rs`, logs are handled by a dedicated, non-blocking **LogService**. This ensures that printing to the console never slows down your service's real work.
 
 ### Why `is_shutdown()` and `sleep()`?
-*   `is_shutdown()`: Returns `true` when the user presses Ctrl+C or the system is stopping. This is a non-blocking check, perfect for loop conditions.
+*   `is_shutdown()`: Returns `true` when the user presses Ctrl+C or the system is stopping. This is a non-blocking check, suitable for loop conditions.
 *   `service_daemon::sleep()`: Unlike standard `tokio::time::sleep`, this version is **cancellation-aware**. It wakes up immediately if a shutdown signal is detected. No more waiting for a long sleep to finish during shutdown!
 
 ## 3. The Grand Finale: running the Daemon
@@ -87,4 +87,4 @@ async fn main() -> anyhow::Result<()> {
 
 ---
 
-[**Next Step: Reactive Triggers ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md)
+[**Next Step: Reactive Triggers ->**](docs/guide/tutorial/reactive-triggers.md)

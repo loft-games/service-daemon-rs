@@ -42,7 +42,7 @@ pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Resu
 
 ### The Mutability Pattern (Zero-Copy CoW)
 Declare a dependency as `Arc<RwLock<T>>` or `Arc<Mutex<T>>` to gain write access.
-- **Automatic Promotion**: The system seamlessly upgrades the provider to a `TrackedRwLock` upon the first lock request.
+- **Automatic Promotion**: The system automatedly upgrades the provider to a `TrackedRwLock` upon the first lock request.
 - **Zero-Copy Publishing**: Use `guard.publish(Arc<T>)` to replace the entire state with a new pointer. This is the **highest performance path** for large types.
 
 > [!NOTE]

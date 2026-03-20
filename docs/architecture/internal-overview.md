@@ -120,7 +120,7 @@ graph LR
     end
 ```
 
-For practical usage and sandbox setup, see the **[Simulation Tutorial](../guide/tutorial/playing-god.md)**.
+For practical usage and sandbox setup, see the **[Simulation Tutorial](../guide/tutorial/unit-testing.md)**.
 
 ## 7. Avoiding Service Interference
 

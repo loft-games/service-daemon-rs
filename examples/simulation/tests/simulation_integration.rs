@@ -47,12 +47,12 @@ async fn test_real_service_reads_pre_filled_shelf() {
     );
 }
 
-/// E2E: God Hand dynamically injects shelf data while a real `#[service]` is running.
+/// E2E: SimulationHandle dynamically injects shelf data while a real `#[service]` is running.
 ///
 /// Flow:
 /// 1. Sandbox starts with empty shelf
 /// 2. Service runs and polls for "dynamic_key" (initially absent)
-/// 3. God Hand injects "dynamic_key" mid-flight
+/// 3. SimulationHandle injects "dynamic_key" mid-flight
 /// 4. Service observes the mutation on its next poll
 #[tokio::test]
 async fn test_god_hand_shelf_mutation_with_real_service() {
@@ -74,7 +74,7 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
     // Wait for the service to start
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // -- God Hand: inject shelf data mid-flight --
+    // -- SimulationHandle: inject shelf data mid-flight --
     handle.set_shelf::<String>(
         "shelf_reader_service",
         "dynamic_key",
@@ -88,19 +88,19 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
     assert_eq!(
         handle.get_shelf::<String>("shelf_reader_service", "dynamic_result"),
         Some("injected_mid_flight".to_string()),
-        "Real service should have observed the God Hand's dynamic shelf injection"
+        "Real service should have observed the SimulationHandle's dynamic shelf injection"
     );
 
     cancel.cancel();
     daemon_task.await.ok();
 }
 
-/// E2E: Two-phase God Hand -- pre-fill then mutate, observed by a real service.
+/// E2E: Two-phase SimulationHandle -- pre-fill then mutate, observed by a real service.
 ///
 /// This test proves the full lifecycle of simulation:
 /// 1. MockContext pre-fills shelf data (Phase 1)
 /// 2. Service reads pre-filled data
-/// 3. God Hand overwrites shelf data mid-flight (Phase 2)
+/// 3. SimulationHandle overwrites shelf data mid-flight (Phase 2)
 /// 4. Service observes the mutation on its next poll
 #[tokio::test]
 async fn test_two_phase_god_hand_with_real_service() {
@@ -131,7 +131,7 @@ async fn test_two_phase_god_hand_with_real_service() {
         "Phase 1: Service should have read the pre-filled 'phase1_value'"
     );
 
-    // -- Phase 2: God Hand overwrites shelf data mid-flight --
+    // -- Phase 2: SimulationHandle overwrites shelf data mid-flight --
     handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "phase2_value".into());
 
     // Wait for service to observe Phase 2
@@ -141,17 +141,17 @@ async fn test_two_phase_god_hand_with_real_service() {
     assert_eq!(
         handle.get_shelf::<String>("shelf_reader_service", "dynamic_result"),
         Some("phase2_value".to_string()),
-        "Phase 2: Service should have observed the God Hand's 'phase2_value'"
+        "Phase 2: Service should have observed the SimulationHandle's 'phase2_value'"
     );
 
     cancel.cancel();
     daemon_task.await.ok();
 }
 
-/// E2E: God Hand flips status while a real `#[service]` is running.
+/// E2E: SimulationHandle flips status while a real `#[service]` is running.
 ///
 /// Uses `service_ids()` to dynamically discover the `ServiceId`
-/// assigned by `Registry`, then flips the status via the God Hand.
+/// assigned by `Registry`, then flips the status via the SimulationHandle.
 #[tokio::test]
 async fn test_god_hand_status_flip_with_real_service() {
     let _ = service_daemon::core::logging::try_init_logging();
@@ -189,7 +189,7 @@ async fn test_god_hand_status_flip_with_real_service() {
         .find(|id| handle.get_status(*id).is_some())
         .expect("status_watcher_service should be registered");
 
-    // -- God Hand: flip status to Healthy --
+    // -- SimulationHandle: flip status to Healthy --
     handle.set_status(svc_id, ServiceStatus::Healthy);
 
     // Wait for service to observe the new status via state()
@@ -199,7 +199,7 @@ async fn test_god_hand_status_flip_with_real_service() {
     assert_eq!(
         handle.get_shelf::<String>("status_watcher_service", "observed_status"),
         Some("Healthy".to_string()),
-        "Real service should have observed the God Hand's status flip to Healthy"
+        "Real service should have observed the SimulationHandle's status flip to Healthy"
     );
 
     // Graceful shutdown

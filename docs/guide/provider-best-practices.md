@@ -51,7 +51,7 @@ pub async fn mqtt_provider() -> MqttBus {
 
 ## 3. When is it a "Magic Provider"?
 
-"Magic" refers to hardcoded templates inside the `#[provider]` macro. These templates generate specialized boilerplate that would be tedious to write manually.
+"Magic" specifically refers to hardcoded templates inside the `#[provider]` macro. These templates generate specialized boilerplate that would be tedious to write manually.
 
 | Template | Alias | Logic |
 | :--- | :--- | :--- |

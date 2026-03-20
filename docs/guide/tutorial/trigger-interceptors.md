@@ -1,6 +1,6 @@
-# The Interceptor Gauntlet
+# Trigger Middlewares (Interceptors)
 
-You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. But have you ever wondered *where* that magic lives? And more importantly -- can you add your own magic?
+You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. But have you ever wondered *where* that implementation lives? And more importantly -- can you add your own logic?
 
 The answer is **interceptors**: composable middleware layers that wrap the trigger dispatch pipeline.
 
@@ -140,4 +140,4 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 
 ---
 
-[**<- Previous Step: Tailor-Made Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/tailor-made-triggers.md) | [**Next Step: Macro Magic Unleashed ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/macro-magic.md)
+[**<- Previous Step: Custom Trigger Implementation**](docs/guide/tutorial/tailor-made-triggers.md) | [**Next Step: Advanced Macro Usage ->**](docs/guide/tutorial/advanced-macros.md)

@@ -82,8 +82,8 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 *   **Fail Gracefully**: Prefer `ProviderError::Retryable` for network resources to make your application resilient to startup order issues (e.g., in Docker Compose or K8s).
 
 > [!TIP]
-> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/provider-best-practices.md) guide.
+> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](docs/guide/provider-best-practices.md) guide.
 
 ---
 
-[**<- Previous Step: The Art of Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/art-of-recovery.md) | [**Next Step: Resilience Kung-Fu ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/resilience-kung-fu.md)
+[**<- Previous Step: State Management & Recovery**](docs/guide/tutorial/state-recovery.md) | [**Next Step: Error Handling & Retries ->**](docs/guide/tutorial/error-handling.md)

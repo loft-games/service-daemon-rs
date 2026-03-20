@@ -1,6 +1,6 @@
 # Lifecycle Management & Status Plane
 
-The `ServiceDaemon` uses a sophisticated orchestration system to manage service generations, crashes, and reloads.
+The `ServiceDaemon` uses a structured orchestration system to manage service generations, crashes, and reloads.
 
 ## 1. Unified Status Plane
 
@@ -17,7 +17,7 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 | (Any) | `Terminated` | `ServiceError::Fatal` encountered |
 
 > [!NOTE]
-> **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining perfect responsiveness to reload and shutdown signals.
+> **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining consistent responsiveness to reload and shutdown signals.
 
 ### 1.1. The Signal Path (Reactive Update Flow)
 How a state change is propagated through the system to trigger a reload:

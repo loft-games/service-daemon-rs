@@ -343,7 +343,7 @@ mod simulation_tests {
         // Initially empty
         assert!(handle.resources().shelf.get("svc").is_none());
 
-        // Dynamic injection via God Hand
+        // Dynamic injection via SimulationHandle
         handle.set_shelf::<i32>("svc", "counter", 99);
 
         // Now visible
@@ -371,7 +371,7 @@ mod simulation_tests {
             ServiceStatus::Initializing
         );
 
-        // Phase 2: God Hand flips status
+        // Phase 2: SimulationHandle flips status
         handle.set_status(svc_id, ServiceStatus::NeedReload);
 
         assert_eq!(

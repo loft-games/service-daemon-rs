@@ -1,8 +1,8 @@
-# Playing God: Simulator
+# Unit Testing & Simulation
 
 Testing background services is notoriously difficult. How do you test what happens when a database fails mid-flight? Or how your service reacts when its configuration is swapped at 2 AM?
 
-The `simulation` feature (God-mode) gives you total control over the environment. For the core architectural sandbox model and God-hand interaction logic, see **[Architecture Overview](../../architecture/internal-overview.md)**.
+The `simulation` feature provides total control over the environment. For the core architectural sandbox model and interaction logic, see **[Architecture Overview](../../architecture/internal-overview.md)**.
 
 ---
 
@@ -85,7 +85,7 @@ mod tests {
         let result: Option<String> = handle.get_shelf("shelf_reader_service", "read_result");
         assert_eq!(result, Some("initial_val".into()));
 
-        // Phase 2: Mid-flight Intervention (The God Hand)
+        // Phase 2: Mid-flight Intervention (SimulationHandle)
         handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "mid_flight_val".into());
 
         // Verify Phase 2: service observed the dynamic mutation
@@ -102,7 +102,7 @@ mod tests {
 }
 ```
 
-## 3. The "God Hand" (`SimulationHandle`)
+## 3. The `SimulationHandle`
 
 The `SimulationHandle` allows you to reach into the running sandbox and change things while the services are active. It provides a **Safe Read API** specifically designed to prevent deadlocks in tests.
 
@@ -136,8 +136,8 @@ handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 *   **Status Flipping**: Force services into `NeedReload`, `Recovering`, or `ShuttingDown` to test their reaction logic.
 
 > [!NOTE]
-> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/testing-troubleshooting.md).
+> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](docs/guide/testing-troubleshooting.md).
 
 ---
 
-[**-- Previous Step: Waves of Orchestration**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/orchestration-waves.md) | [**Next Step: Under the Hood --**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/under-the-hood.md)
+[**-- Previous Step: Sequential Startup & Shutdown**](docs/guide/tutorial/priority-orchestration.md) | [**Next Step: Under the Hood --**](docs/guide/tutorial/under-the-hood.md)

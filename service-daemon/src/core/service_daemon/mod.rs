@@ -203,7 +203,7 @@ impl ServiceDaemon {
 
     /// **[Simulation Only]** Returns a clone of the daemon's internal resources.
     ///
-    /// This is used by `SimulationHandle` to perform dynamic injection ("God Hand")
+    /// This is used by `SimulationHandle` to perform dynamic injection ("SimulationHandle")
     /// during a running simulation. Since `DaemonResources` uses `Arc` internally,
     /// modifications through the returned clone are immediately visible to all services.
     ///
