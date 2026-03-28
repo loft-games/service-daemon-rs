@@ -261,9 +261,7 @@ mod tests {
         let resources = create_test_resources();
 
         // Register two different types
-        let sp = ScalingPolicy::builder()
-            .initial_concurrency(4)
-            .build();
+        let sp = ScalingPolicy::builder().initial_concurrency(4).build();
         let custom = MyCustomConfig { rate_limit: 100 };
         resources
             .trigger_configs
@@ -275,8 +273,7 @@ mod tests {
         let identity = create_test_identity("tc_multi");
 
         in_scope(identity, resources, || async {
-            let sp = trigger_config::<ScalingPolicy>()
-                .expect("ScalingPolicy should be present");
+            let sp = trigger_config::<ScalingPolicy>().expect("ScalingPolicy should be present");
             assert_eq!(sp.initial_concurrency, 4);
 
             let custom =

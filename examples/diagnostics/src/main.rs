@@ -1,7 +1,4 @@
-use service_daemon::{
-    provider, service, trigger, ServiceDaemon, TT::*,
-};
-use std::sync::Arc;
+use service_daemon::{ServiceDaemon, TT::*, provider, service, trigger};
 use std::time::Duration;
 use tracing::info;
 

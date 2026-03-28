@@ -107,15 +107,18 @@ impl std::str::FromStr for InstanceId {
     fn from_str(s: &str) -> anyhow::Result<Self> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
-            return Err(anyhow::anyhow!("invalid instance_id format: '{}' (expected svc#N:SEQ)", s));
+            return Err(anyhow::anyhow!(
+                "invalid instance_id format: '{}' (expected svc#N:SEQ)",
+                s
+            ));
         }
 
-        let service_id = parts[0].parse::<ServiceId>().map_err(|e| {
-            anyhow::anyhow!("failed to parse service_id component: {}", e)
-        })?;
-        let seq = parts[1].parse::<u64>().map_err(|e| {
-            anyhow::anyhow!("failed to parse sequence component: {}", e)
-        })?;
+        let service_id = parts[0]
+            .parse::<ServiceId>()
+            .map_err(|e| anyhow::anyhow!("failed to parse service_id component: {}", e))?;
+        let seq = parts[1]
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("failed to parse sequence component: {}", e))?;
 
         Ok(Self::new(service_id, seq))
     }

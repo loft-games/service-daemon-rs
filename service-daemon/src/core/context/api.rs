@@ -348,9 +348,7 @@ where
     let identity = CURRENT_SERVICE.with(|id| id.clone());
     let resources = CURRENT_RESOURCES.with(|r| r.clone());
 
-    tokio::spawn(async move {
-        __run_service_scope(identity, resources, || fut).await
-    })
+    tokio::spawn(async move { __run_service_scope(identity, resources, || fut).await })
 }
 
 /// Returns the `ServiceId` of the calling service.

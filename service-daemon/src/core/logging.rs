@@ -584,7 +584,8 @@ where
         let error_chain = collector.take_error();
 
         // Walk the Span chain to extract service/trigger IDs
-        let (service_id, source_service_id, message_id, instance_id) = extract_span_ids(&ctx, event);
+        let (service_id, source_service_id, message_id, instance_id) =
+            extract_span_ids(&ctx, event);
 
         let log_event = Arc::new(LogEvent {
             timestamp: Utc::now(),
@@ -1027,7 +1028,15 @@ mod tests {
 
     #[test]
     fn render_error_level_contains_red_ansi_code() {
-        let event = make_event(LogLevel::Error, "something broke", None, None, None, None, None);
+        let event = make_event(
+            LogLevel::Error,
+            "something broke",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let output = render_to_string(&event);
         // Red foreground: \x1b[31m
         assert!(
@@ -1051,7 +1060,15 @@ mod tests {
 
     #[test]
     fn render_debug_level_contains_cyan_ansi_code() {
-        let event = make_event(LogLevel::Debug, "verbose detail", None, None, None, None, None);
+        let event = make_event(
+            LogLevel::Debug,
+            "verbose detail",
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let output = render_to_string(&event);
         assert!(
             output.contains("\x1b[36m"),
@@ -1066,7 +1083,15 @@ mod tests {
 
     #[test]
     fn render_includes_service_id_when_present() {
-        let event = make_event(LogLevel::Info, "msg", Some(ServiceId::new(123)), None, None, None, None);
+        let event = make_event(
+            LogLevel::Info,
+            "msg",
+            Some(ServiceId::new(123)),
+            None,
+            None,
+            None,
+            None,
+        );
         let output = render_to_string(&event);
         assert!(
             output.contains("service_id=svc#123"),

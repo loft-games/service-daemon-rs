@@ -102,10 +102,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         body,
     );
 
-    let wrapper_fn = crate::common::generate_wrapper_fn(
-        &wrapper_name,
-        &event_loop_call,
-    );
+    let wrapper_fn = crate::common::generate_wrapper_fn(&wrapper_name, &event_loop_call);
 
     let registry_entry = crate::common::generate_static_registry_entry(
         &entry_name,

@@ -533,7 +533,8 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// here until a running handler finishes, providing natural backpressure.
     async fn dispatch(&self, payload: P, identity: Option<(uuid::Uuid, ServiceId)>) {
         let seq = self.instance_counter.fetch_add(1, Ordering::Relaxed);
-        let (message_id, source_id) = identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
+        let (message_id, source_id) =
+            identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
 
         // Acquire a concurrency permit (backpressure point)
         let permit = self
@@ -678,10 +679,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
 /// Log the failure, record it in the backoff controller, and wait for the
 /// computed delay. Returns `Err` if shutdown interrupts the wait, allowing
 /// the caller to propagate the original error upward.
-async fn record_retry_failure(
-    backoff: &mut BackoffController,
-    error: Error,
-) -> Result<()> {
+async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> Result<()> {
     warn!(
         attempt = backoff.attempt_count() + 1,
         error = %error,
