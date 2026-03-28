@@ -1,4 +1,4 @@
-# Diagnostics & The DaemonLayer
+# Visual Observability & The DaemonLayer
 
 To manage complex asynchronous systems, visibility is paramount. `service-daemon-rs` provides a high-fidelity diagnostic layer built on top of `tracing`. For the underlying high-performance design philosophy (Zero-allocation, context extraction), see **[Architecture Overview](../architecture/internal-overview.md)**.
 

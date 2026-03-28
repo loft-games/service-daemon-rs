@@ -2,7 +2,7 @@
 
 Welcome to the `service-daemon-rs` tutorial! If you've ever felt like building a reliable, event-driven background system is a challenge due to race conditions, thread locks, and complex lifecycle management, you're in the right place.
 
-`service-daemon-rs` is designed for **zero-boilerplate**. It handles service orchestration, dependency injection, and recovery, so you can focus on writing your business logic.
+`service-daemon-rs` is designed for **Boilerplate-free Orchestration**. It handles service management, dependency injection, and recovery, so you can focus on writing your business logic.
 
 ---
 

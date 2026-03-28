@@ -2,23 +2,17 @@
 
 [![Rust CI](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/loft-games/service-daemon-rs/actions/workflows/rust.yml)
 
-`service-daemon-rs` is a declarative Rust framework for automatic service management and type-based dependency injection. Inspired by decorator-based registration in other languages, it brings automated orchestration to the Tokio ecosystem.
+**The Declarative Engine for Resilient, Type-Safe Rust Microservices.**
 
-## Key Features
+`service-daemon-rs` is a lightweight framework that automates the orchestration of background services and event-driven triggers. By using compile-time registration, it eliminates boilerplate and ensures your system is resilient by design.
 
-- **Declarative Services**: Mark functions as managed tasks with `#[service]`.
-- **Event-Driven Triggers**: Use `#[trigger]` for Cron, Queues, and State Watchers.
-- **Type-Safe DI**: Dependency injection resolved at compile-time with zero boilerplate.
-- **Eager Initialization**: Opt-in non-lazy startup via `eager = true` for all provider types (Struct, Fn, Templates).
-- **Resilient Lifecycle**: Exponential backoff, jitter, wave-based startup/shutdown, and structured **`ProviderError` handling** (Retryable vs Fatal).
-- **Early-Binding Listeners**: Use `#[provider(Listen("addr"))]` to bind ports at system-init, ensuring K8s/Knative readiness probes pass even while other services are still starting.
-- **Smart State**: Transparent change tracking and zero-copy state snapshots.
-- **Unified Params**: Consistent `env` and `capacity` support across all built-in template providers.
-- **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
-- **Tag-based Registry**: Filter services by tags for selective loading (`#[service(tags = ["infra"])]`).
-- **Behavioral Topology**: Real-time causal relationship discovery and Mermaid diagram export (`diagnostics` feature).
-- **UUID v7 Causal Tracing**: Allocation-free causal tracking using time-ordered UUIDs for event-driven flows.
-- **Zero-Allocation Diagnostics**: High-performance numeric identifier extraction for trigger instances.
+## Why choose service-daemon?
+
+*   **Boilerplate-free Orchestration**: Define services and triggers with simple attributes like `#[service]` or `#[trigger(Cron("0 * * * *"))]`. No more manual wiring in `main`.
+*   **Built-in Resilience**: production-ready patterns — such as exponential backoff, jittered retries, and early-binding listeners for K8s readiness — are baked in.
+*   **Type-Safe Dependency Injection**: Resolve dependencies through Rust's type system. No runtime scanning, no reflection, and zero-cost abstraction via linker-level discovery (`linkme`).
+*   **Visual Observability**: Automatically generate **Mermaid diagrams** of your service topology and track causal relationships across services with zero-allocation tracing.
+*   **Testable by Design**: Includes a feature-gated `MockContext` that allows you to simulate complex async behaviors and state changes in a controlled sandbox.
 
 ## Quick Start
 
