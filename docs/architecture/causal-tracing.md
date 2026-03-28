@@ -9,16 +9,20 @@ Imagine a stone thrown into a still pond. The stone creates ripples that spread 
 - **The Ripples**: Trigger handlers executing in response.
 - **The Secondary Stones**: New events published by those handlers.
 
-## 2. The Mechanics of Causality
+## 2. The Mechanics of Causality: The 4-Tuple Identity
 
-Every event in the framework carries a `TriggerContext` composed of:
+Every event in the framework carries a causal context that uniquely identifies its position in the ripple chain. This is represented by a 4-tuple of identity, conceptually grouped into three levels:
 
-1.  **MessageId**: A globally unique **UUID v7** (time-ordered). This ensures high-performance causal tracking with zero collision risk and natural temporal sorting.
-2.  **SourceId**: The `ServiceId` of the service instance that **originally** published the event.
-3.  **InstanceId**: A stack-allocated numeric composite (`ServiceId` + `u64` sequence). This identifies the specific trigger invocation without requiring heap-allocated strings.
+1.  **MessageId** (`Uuid` v7): A time-ordered, globally unique ID for the event itself.
+2.  **SourceId** (`ServiceId` / `usize`): The ID of the service that **originally** published the event (the initiator).
+3.  **Instance Identity**:
+    - **ServiceId**: The ID of the current service handling the event.
+    - **InstanceSeq** (`u64`): A monotonic sequence number for the current trigger invocation.
+
+Together, the `ServiceId` and `InstanceSeq` form the **InstanceId**, a 16-byte stack-allocated composite that identifies the specific execution instance without requiring heap-allocated strings.
 
 ### Forward Propagation
-When a service runs, the `ServiceSupervisor` creates a `tracing::Span` carrying the service's name. When a trigger handler fires, the `TriggerRunner` creates a nested Span carrying `message_id` (UUID) and the numeric `instance_id` components. Any log message emitted within these Spans is automatically decorated with these IDs by the `DaemonLayer`.
+When a service runs, the `ServiceSupervisor` creates a `tracing::Span` carrying the service's identity. When a trigger handler fires, the `TriggerRunner` creates a nested Span carrying the `message_id` (UUID) and the current `instance_seq`. Any log message emitted within these Spans is automatically decorated with the full 4-tuple by the `DaemonLayer`.
 
 ### Causal Linking
 If Handler B publishes a new Event Y in response to Event X, Event Y **inherits** the `SourceId` of the original initiator (the stone), but gets its own unique UUID v7 `message_id`. This allows the **Topology Collector** to trace an entire cascade of events back to a single root cause, even if they cross multiple service boundaries and logical "waves".

@@ -76,8 +76,8 @@ The framework is organized into specialized submodules to ensure maintainability
   - `policy.rs`: Resilience configuration (backoff, jitter).
   - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
 - **`core/logging.rs`**: High-performance, zero-allocation logging infrastructure.
-  - **`DaemonLayer`**: Captured via a non-blocking broadcast pipeline. It extracts multi-level causal context (Service ID, Message ID, Instance ID) to facilitate asynchronous tracing.
-  - **Zero-Allocation Design**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata to eliminate per-event heap overhead.
+  - **DaemonLayer**: Captured via a non-blocking broadcast pipeline. It extracts multi-level causal context (UUID v7 Message ID, numeric Service ID, and Instance ID) to facilitate asynchronous tracing.
+  - **Zero-Allocation Design**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs (UUIDs and numeric IDs) are handled via stack-allocated types to eliminate per-event heap overhead.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
 - **`core/trigger_runner.rs`**: Event loop driver and interceptor pipeline.
   - **Instance Reuse**: Hosts maintain internal state across iterations.
@@ -135,9 +135,10 @@ Because of the automatic service discovery, testing a subsystem in a large proje
 
 The system uses a unified messaging layer for all cross-service events:
 
-- **TriggerMessage**: Encapsulates the payload with a `TriggerContext` (Source ID, Instance ID, Message ID).
-- **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI injection.
-- **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context.
+- **TriggerMessage**: Encapsulates the payload with a **UUID v7** `message_id` and a `source_id` (the publishing service).
+- **TriggerContext**: Provides execution-specific identity, including the current `service_id` and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`.
+- **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI resolution.
+- **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context (Source, Message, and Instance).
 - **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). User-defined interceptors can be added for rate limiting, authentication, metrics, etc.
 
 [Back to README](../../README.md)
