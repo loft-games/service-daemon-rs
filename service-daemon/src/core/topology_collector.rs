@@ -11,10 +11,9 @@
 //! of service interactions. Each edge represents "service A triggered
 //! service B".
 //!
-//! Unlike the previous version, this collector is **stateless**: it no longer
-//! maintains a `pending_sources` cache. Instead, it relies on the causal
-//! identity (`source_service_id`) injected by the `TriggerRunner` and
-//! propagated through the logging pipeline.
+//! This collector is **stateless**: it relies on the causal identity
+//! (`source_service_id`) injected by the `TriggerRunner` and propagated
+//! through the logging pipeline.
 //!
 //! # Data Flow
 //!

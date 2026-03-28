@@ -670,7 +670,6 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
                 name = %ctx.trigger_name,
                 service_id_num = ctx.service_id.value(),
                 source_service_id = ctx.source_id.value(),
-                instance_svc_id = ctx.service_id.value(),
                 instance_seq = ctx.instance_seq,
                 message_id = %ctx.message_id,
                 mid_hi = (mid_val >> 64) as u64,

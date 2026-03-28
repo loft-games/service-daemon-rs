@@ -689,13 +689,11 @@ where
     let mut instance_svc_id = None;
     let mut instance_seq = None;
 
-    // `event_scope()` returns an iterator over Span references from innermost
-    // to outermost. We scan for known field names stored in Span extensions.
     if let Some(scope) = ctx.event_scope(event) {
         for span in scope {
             let extensions = span.extensions();
 
-            // 1. Priority path: Native type extensions (Zero Allocation)
+            // 1. Critical Path: Native type extensions (Zero Allocation)
             if service_id.is_none() {
                 if let Some(sid) = extensions.get::<crate::models::ServiceId>() {
                     service_id = Some(*sid);
@@ -712,35 +710,24 @@ where
                 }
             }
 
-            // 2. Fallback path: Extracted from span attributes via SpanFields
+            // 2. Numeric Path: Extracted from span attributes via SpanFields
             if let Some(fields) = extensions.get::<SpanFields>() {
-                // ServiceId
                 if service_id.is_none() {
                     if let Some(n) = fields.service_id_num {
                         service_id = Some(crate::models::ServiceId::new(n));
-                    } else if let Some(ref s) = fields.service_id {
-                        if let Ok(id) = crate::models::ServiceId::from_str(s) {
-                            service_id = Some(id);
-                        }
                     }
                 }
 
-                // SourceServiceId
                 if source_service_id.is_none() {
                     if let Some(n) = fields.source_service_id {
                         source_service_id = Some(crate::models::ServiceId::new(n));
                     }
                 }
 
-                // MessageId (Uuid)
                 if message_id.is_none() {
                     if let (Some(hi), Some(lo)) = (fields.mid_hi, fields.mid_lo) {
                         let val = ((hi as u128) << 64) | (lo as u128);
                         message_id = Some(uuid::Uuid::from_u128(val));
-                    } else if let Some(ref s) = fields.message_id {
-                        if let Ok(id) = uuid::Uuid::parse_str(s) {
-                            message_id = Some(id);
-                        }
                     }
                 }
 
@@ -750,16 +737,32 @@ where
                 if instance_seq.is_none() {
                     instance_seq = fields.instance_seq;
                 }
-            }
 
-            // Early exit NOT used here because different Spans might provide different IDs.
-            // Innermost-first is guaranteed by the `if id.is_none()` pattern.
+                // 3. Fallback Path: legacy string IDs (kept for macro-less spans)
+                if service_id.is_none() {
+                    if let Some(ref s) = fields.service_id {
+                        if let Ok(id) = crate::models::ServiceId::from_str(s) {
+                            service_id = Some(id);
+                        }
+                    }
+                }
+                if message_id.is_none() {
+                    if let Some(ref s) = fields.message_id {
+                        if let Ok(id) = uuid::Uuid::parse_str(s) {
+                            message_id = Some(id);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    // Reconstruct InstanceId if not found in extensions
+    // Reconstruction with cross-field fallback
     if instance_id.is_none() {
-        instance_id = match (instance_svc_id, instance_seq) {
+        // Fallback: Use service_id_num if instance_svc_id is missing (common for triggers)
+        let svc_part = instance_svc_id.or(service_id.map(|id| id.value()));
+        
+        instance_id = match (svc_part, instance_seq) {
             (Some(svc), Some(seq)) => Some(InstanceId::new(ServiceId::new(svc), seq)),
             _ => None,
         };

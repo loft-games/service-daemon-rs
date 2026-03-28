@@ -323,6 +323,19 @@ impl<T: Clone> DerefMut for TrackedMutexGuard<'_, T> {
 }
 
 // ===========================================================================
+// Internal: Identity capture helper
+// ===========================================================================
+
+/// Generates a new UUID v7 message ID and captures the current service ID.
+/// Used by `TrackedNotify` and `TrackedSender` to maintain causal identity.
+#[inline]
+fn capture_message_identity() -> (Uuid, crate::models::ServiceId) {
+    let msg_id = Uuid::now_v7();
+    let src_id = crate::core::context::api::current_service_id();
+    (msg_id, src_id)
+}
+
+// ===========================================================================
 // TrackedNotify -- Notify wrapper with automatic message_id injection
 // ===========================================================================
 
@@ -360,8 +373,7 @@ impl TrackedNotify {
     /// The generated identity can be retrieved via [`last_id()`](Self::last_id)
     /// by the trigger host after `notified()` returns.
     pub fn notify_waiters(&self) {
-        let msg_id = Uuid::now_v7();
-        let src_id = crate::core::context::api::current_service_id();
+        let (msg_id, src_id) = capture_message_identity();
         *self.last_id.write().expect("TrackedNotify lock poisoned") = Some((msg_id, src_id));
         self.inner.notify_waiters();
     }
@@ -369,8 +381,7 @@ impl TrackedNotify {
     /// Notifies a single waiting task, generating a new UUID v7 message ID
     /// and capturing the current service's ID.
     pub fn notify_one(&self) {
-        let msg_id = Uuid::now_v7();
-        let src_id = crate::core::context::api::current_service_id();
+        let (msg_id, src_id) = capture_message_identity();
         *self.last_id.write().expect("TrackedNotify lock poisoned") = Some((msg_id, src_id));
         self.inner.notify_one();
     }
@@ -451,8 +462,7 @@ impl<P: Clone> TrackedSender<P> {
     ///
     /// The generated identity can be retrieved via [`last_id()`](Self::last_id).
     pub fn send(&self, value: P) -> Result<usize, tokio::sync::broadcast::error::SendError<P>> {
-        let msg_id = Uuid::now_v7();
-        let src_id = crate::core::context::api::current_service_id();
+        let (msg_id, src_id) = capture_message_identity();
         *self.last_id.write().expect("TrackedSender lock poisoned") = Some((msg_id, src_id));
         self.inner.send(value)
     }
