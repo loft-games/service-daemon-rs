@@ -119,48 +119,42 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
     let inner_vis = scope_inner_visibility(vis);
+    let user_scope = crate::common::generate_user_scope_mod(
+        &scope_mod,
+        &inner_vis,
+        &clean_sig,
+        &cleaned_attrs,
+        body,
+    );
+
+    let wrapper_fn = crate::common::generate_wrapper_fn(
+        &wrapper_name,
+        &quote! {
+            #(#resolve_tokens)*
+            #call_expr
+        },
+    );
+
+    let registry_entry = crate::common::generate_static_registry_entry(
+        &entry_name,
+        &fn_name_str,
+        &param_entries,
+        &wrapper_name,
+        &watcher_ptr,
+        &priority_tokens,
+        &tags_tokens,
+    );
 
     let expanded = quote! {
-        mod #scope_mod {
-            #[allow(unused_imports)]
-            use super::*;
-
-            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
-            #[allow(unused_imports)]
-            use service_daemon::core::managed_state::{RwLock, Mutex};
-
-            #(#cleaned_attrs)*
-            #inner_vis #clean_sig {
-                #body
-            }
-        }
+        #user_scope
 
         #vis use #scope_mod::#fn_name;
 
-        /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
-        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async move {
-                #(#resolve_tokens)*
-                #call_expr
-            })
-        }
+        #wrapper_fn
 
         #watcher_fn
 
-        /// Auto-generated static registry entry - collected by linkme at link time
-        #[allow(unsafe_code)] // linkme uses #[link_section] internally
-        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
-            name: #fn_name_str,
-            module: module_path!(),
-            params: &[#(#param_entries),*],
-            wrapper: #wrapper_name,
-            watcher: #watcher_ptr,
-            priority: #priority_tokens,
-            tags: #tags_tokens,
-        };
-
+        #registry_entry
     };
 
     TokenStream::from(expanded)

@@ -36,8 +36,6 @@ use tokio::time::Instant;
 use tracing::{Instrument, info, warn};
 
 use crate::core::context;
-use crate::core::context::api;
-use crate::core::context::identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 use crate::models::policy::{BackoffController, RestartPolicy, ScalingPolicy};
 use crate::models::service::ServiceId;
 use crate::models::trigger::{
@@ -560,19 +558,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let chain = self.build_chain();
         let trigger_name = self.name;
 
-        // Capture current context from the event loop task to propagate to the dispatch task
-        let identity = CURRENT_SERVICE.with(|id| id.clone());
-        let resources = CURRENT_RESOURCES.with(|r| r.clone());
-
-        // Spawn the dispatch as an independent task so the event loop
-        // can immediately return to handle_step for the next event.
-        tokio::spawn(async move {
-            let result = api::__run_service_scope(identity, resources, || async move {
-                chain(ctx).await
-            })
-            .await;
-
-            if let Err(e) = result {
+        // Use the context-aware spawn to propagate identity and resources automatically
+        context::spawn_with_context(async move {
+            if let Err(e) = chain(ctx).await {
                 warn!(
                     trigger = %trigger_name,
                     error = %e,

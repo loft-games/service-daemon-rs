@@ -324,6 +324,35 @@ pub fn trigger_config<T: Any + Clone + Send + Sync>() -> Option<T> {
         .ok()
         .flatten()
 }
+
+/// Spawns a new asynchronous task that inherits the current service identity and resources.
+///
+/// This is a convenience wrapper around `tokio::spawn` that automatically
+/// captures `CURRENT_SERVICE` and `CURRENT_RESOURCES` from the caller's task
+/// and applies them to the new task.
+///
+/// # Example
+/// ```rust,ignore
+/// use service_daemon::spawn_with_context;
+///
+/// spawn_with_context(async move {
+///     // This task has access to the same shelve/state as the parent service
+///     service_daemon::shelve("spawned", true).await;
+/// });
+/// ```
+pub fn spawn_with_context<Fut>(fut: Fut) -> tokio::task::JoinHandle<Fut::Output>
+where
+    Fut: Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let identity = CURRENT_SERVICE.with(|id| id.clone());
+    let resources = CURRENT_RESOURCES.with(|r| r.clone());
+
+    tokio::spawn(async move {
+        __run_service_scope(identity, resources, || fut).await
+    })
+}
+
 /// Returns the `ServiceId` of the calling service.
 ///
 /// Falls back to `ServiceId(0)` if called outside of a managed service scope

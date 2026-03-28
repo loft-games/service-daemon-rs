@@ -93,10 +93,31 @@ pub struct InstanceId {
 }
 
 impl InstanceId {
-    /// Construct a new `InstanceId`.
     #[inline]
     pub const fn new(service_id: ServiceId, seq: u64) -> Self {
         Self { service_id, seq }
+    }
+}
+
+impl std::str::FromStr for InstanceId {
+    type Err = anyhow::Error;
+
+    /// Parses an `InstanceId` from a string like "svc#1:42".
+    /// Support both with and without "svc#" prefix on the service component.
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!("invalid instance_id format: '{}' (expected svc#N:SEQ)", s));
+        }
+
+        let service_id = parts[0].parse::<ServiceId>().map_err(|e| {
+            anyhow::anyhow!("failed to parse service_id component: {}", e)
+        })?;
+        let seq = parts[1].parse::<u64>().map_err(|e| {
+            anyhow::anyhow!("failed to parse sequence component: {}", e)
+        })?;
+
+        Ok(Self::new(service_id, seq))
     }
 }
 

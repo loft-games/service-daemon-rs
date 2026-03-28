@@ -73,50 +73,6 @@ impl fmt::Display for LogLevel {
     }
 }
 
-/// Serializes `Option<InstanceId>` as a string (e.g., `"svc#1:42"`) for
-/// backward-compatible JSON log output.
-#[cfg(feature = "file-logging")]
-fn serialize_instance_id<S>(value: &Option<InstanceId>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match value {
-        Some(id) => serializer.serialize_str(&id.to_string()),
-        None => serializer.serialize_none(),
-    }
-}
-
-/// Deserializes `Option<InstanceId>` from a string (e.g., `"svc#1:42"`) in
-/// JSON log files.
-#[cfg(feature = "file-logging")]
-fn deserialize_instance_id<'de, D>(deserializer: D) -> Result<Option<InstanceId>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    let opt: Option<String> = Option::deserialize(deserializer)?;
-    match opt {
-        Some(s) => {
-            // Parse "svc#N:SEQ" format
-            let s = s.strip_prefix("svc#").unwrap_or(&s);
-            let parts: Vec<&str> = s.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                let svc_id = parts[0]
-                    .parse::<usize>()
-                    .map_err(serde::de::Error::custom)?;
-                let seq = parts[1].parse::<u64>().map_err(serde::de::Error::custom)?;
-                Ok(Some(InstanceId::new(ServiceId::new(svc_id), seq)))
-            } else {
-                Err(serde::de::Error::custom(format!(
-                    "invalid instance_id format: {}",
-                    s
-                )))
-            }
-        }
-        None => Ok(None),
-    }
-}
-
 /// Represents a captured log event with structured metadata.
 ///
 /// This is the canonical log event format used throughout the daemon.
@@ -162,11 +118,7 @@ pub struct LogEvent {
     /// number. Extracted from numeric fields or native InstanceId extension.
     #[cfg_attr(
         feature = "file-logging",
-        serde(
-            skip_serializing_if = "Option::is_none",
-            serialize_with = "serialize_instance_id",
-            deserialize_with = "deserialize_instance_id"
-        )
+        serde(skip_serializing_if = "Option::is_none")
     )]
     pub instance_id: Option<InstanceId>,
     /// Structured error chain captured via `record_error`.
@@ -686,8 +638,6 @@ where
     let mut source_service_id = None;
     let mut message_id = None;
     let mut instance_id = None;
-    let mut instance_svc_id = None;
-    let mut instance_seq = None;
 
     if let Some(scope) = ctx.event_scope(event) {
         for span in scope {
@@ -710,40 +660,18 @@ where
                 }
             }
 
-            // 2. Numeric Path: Extracted from span attributes via SpanFields
+            // 2. Fallback Path: legacy string IDs (kept for macro-less spans)
             if let Some(fields) = extensions.get::<SpanFields>() {
-                if service_id.is_none() {
-                    if let Some(n) = fields.service_id_num {
-                        service_id = Some(crate::models::ServiceId::new(n));
-                    }
-                }
-
-                if source_service_id.is_none() {
-                    if let Some(n) = fields.source_service_id {
-                        source_service_id = Some(crate::models::ServiceId::new(n));
-                    }
-                }
-
-                if message_id.is_none() {
-                    if let (Some(hi), Some(lo)) = (fields.mid_hi, fields.mid_lo) {
-                        let val = ((hi as u128) << 64) | (lo as u128);
-                        message_id = Some(uuid::Uuid::from_u128(val));
-                    }
-                }
-
-                if instance_svc_id.is_none() {
-                    instance_svc_id = fields.instance_svc_id;
-                }
-                if instance_seq.is_none() {
-                    instance_seq = fields.instance_seq;
-                }
-
-                // 3. Fallback Path: legacy string IDs (kept for macro-less spans)
                 if service_id.is_none() {
                     if let Some(ref s) = fields.service_id {
                         if let Ok(id) = crate::models::ServiceId::from_str(s) {
                             service_id = Some(id);
                         }
+                    }
+                }
+                if source_service_id.is_none() {
+                    if let Some(n) = fields.source_service_id {
+                        source_service_id = Some(crate::models::ServiceId::new(n));
                     }
                 }
                 if message_id.is_none() {
@@ -753,19 +681,19 @@ where
                         }
                     }
                 }
+
+                // Numeric Instance ID fallback (required for legacy/test compatibility)
+                if instance_id.is_none() {
+                    let svc_part = fields.instance_svc_id.or(fields.service_id_num);
+                    if let (Some(svc), Some(seq)) = (svc_part, fields.instance_seq) {
+                        instance_id = Some(crate::models::service::InstanceId::new(
+                            crate::models::ServiceId::new(svc),
+                            seq,
+                        ));
+                    }
+                }
             }
         }
-    }
-
-    // Reconstruction with cross-field fallback
-    if instance_id.is_none() {
-        // Fallback: Use service_id_num if instance_svc_id is missing (common for triggers)
-        let svc_part = instance_svc_id.or(service_id.map(|id| id.value()));
-        
-        instance_id = match (svc_part, instance_seq) {
-            (Some(svc), Some(seq)) => Some(InstanceId::new(ServiceId::new(svc), seq)),
-            _ => None,
-        };
     }
 
     (service_id, source_service_id, message_id, instance_id)

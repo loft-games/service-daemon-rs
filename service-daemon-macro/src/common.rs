@@ -618,6 +618,82 @@ impl TagsList {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Componentized Codegen Helpers (Unified Service/Trigger logic)
+// -----------------------------------------------------------------------------
+
+/// Generates the "Macro Illusion" user scope module.
+///
+/// Wraps the user function in a private module to provide hygiene and
+/// redirect certain types (like RwLock/Mutex) to their tracked versions.
+pub fn generate_user_scope_mod(
+    scope_mod_name: &syn::Ident,
+    inner_vis: &proc_macro2::TokenStream,
+    clean_sig: &syn::Signature,
+    cleaned_attrs: &[Attribute],
+    body: &syn::Block,
+) -> proc_macro2::TokenStream {
+    quote! {
+        mod #scope_mod_name {
+            #[allow(unused_imports)]
+            use super::*;
+
+            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
+            #[allow(unused_imports)]
+            use service_daemon::core::managed_state::{RwLock, Mutex};
+
+            #(#cleaned_attrs)*
+            #inner_vis #clean_sig {
+                #body
+            }
+        }
+    }
+}
+
+/// Generates the static registry entry for a service or trigger.
+pub fn generate_static_registry_entry(
+    entry_name: &syn::Ident,
+    fn_name_str: &str,
+    param_entries: &[proc_macro2::TokenStream],
+    wrapper_name: &syn::Ident,
+    watcher_ptr: &proc_macro2::TokenStream,
+    priority: &proc_macro2::TokenStream,
+    tags: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        /// Auto-generated static registry entry - collected by linkme at link time
+        #[allow(unsafe_code)] // linkme uses #[link_section] internally
+        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
+        #[linkme(crate = service_daemon::linkme)]
+        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
+            name: #fn_name_str,
+            module: module_path!(),
+            params: &[#(#param_entries),*],
+            wrapper: #wrapper_name,
+            watcher: #watcher_ptr,
+            priority: #priority,
+            tags: #tags,
+        };
+    }
+}
+
+/// Generates a standard asynchronous wrapper function.
+pub fn generate_wrapper_fn(
+    wrapper_name: &syn::Ident,
+    content: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        /// Auto-generated wrapper - resolves dependencies and executes logic
+        pub fn #wrapper_name(
+            token: service_daemon::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            Box::pin(async move {
+                #content
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::scope_inner_visibility;
