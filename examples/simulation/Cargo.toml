@@ -7,7 +7,6 @@ description = "Simulation example: demonstrates MockContext for unit testing ser
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
-    "macros",
     "simulation",
 ] }
 tokio = { version = "1.43", features = ["full"] }

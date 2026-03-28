@@ -55,6 +55,7 @@ pub use core::context::{
     done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config, unshelve, wait_shutdown,
 };
 pub use core::di::{ManagedProvided, Provided, WatchableProvided};
+pub use core::managed_state::{TrackedNotify, TrackedSender};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
 };
@@ -84,11 +85,14 @@ pub use core::logging::set_log_batch_size;
 #[cfg(feature = "file-logging")]
 pub use core::logging::{FileLogConfig, RotationPolicy, enable_file_logging};
 
+// Re-export diagnostics API (Behavioral Topology)
+#[cfg(feature = "diagnostics")]
+pub use core::topology_collector::{export_mermaid, reset_topology, start_topology_collector};
+
 // Conditionally re-export dependencies based on features
 #[cfg(feature = "cron")]
 pub use tokio_cron_scheduler;
 
-#[cfg(feature = "uuid-trigger-ids")]
 pub use uuid;
 
 // Re-export macros for unified user experience

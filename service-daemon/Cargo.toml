@@ -11,17 +11,17 @@ categories = ["asynchronous", "rust-patterns"]
 readme = "../README.md"
 
 [features]
-default = ["cron", "uuid-trigger-ids"]
-macros = []
+default = ["cron"]
 # Enable cron-based triggers (uses tokio-cron-scheduler)
 cron = ["dep:tokio-cron-scheduler"]
-# Enable UUID-based trigger IDs (uses uuid crate)
-uuid-trigger-ids = ["dep:uuid"]
 # Enable simulation/testing support (MockContext, SimulationOverlay, log drain).
 # This feature gates all debugging utilities to guarantee zero overhead in production.
 simulation = []
 # Enable file-based log persistence with rotation (uses tracing-appender)
 file-logging = ["dep:tracing-appender", "dep:serde_json"]
+# Enable runtime behavioral topology collection and visualization.
+# Gates the topology collector service; message_id generation is always-on.
+diagnostics = []
 
 [dependencies]
 service-daemon-macro = { version = "0.1.0-alpha.2", path = "../service-daemon-macro" }
@@ -33,7 +33,7 @@ anyhow = "1.0"
 thiserror = "2.0"
 futures = "0.3"
 linkme = "0.3"
-uuid = { version = "1.12", features = ["v7"], optional = true }
+uuid = { version = "1.12", features = ["v7", "serde"] }
 tokio-util = "0.7"
 rand = "0.10"
 dashmap = "6.1"

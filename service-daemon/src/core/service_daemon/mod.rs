@@ -248,6 +248,9 @@ impl ServiceDaemon {
         )
         .await;
 
+        #[cfg(feature = "diagnostics")]
+        crate::core::topology_collector::start_topology_collector();
+
         info!(
             "ServiceDaemon running with {} service(s).",
             self.services.len()
@@ -347,6 +350,14 @@ impl ServiceDaemon {
             self.restart_policy.wave_stop_timeout,
         )
         .await;
+
+        #[cfg(feature = "diagnostics")]
+        if let Some(mermaid) = crate::core::topology_collector::export_mermaid() {
+            println!("\n=== BEHAVIORAL TOPOLOGY (MERMAID) ===\n");
+            println!("{}\n", mermaid);
+            println!("====================================\n");
+        }
+
         info!("ServiceDaemon stopped.");
     }
 

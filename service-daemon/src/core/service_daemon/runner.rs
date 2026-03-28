@@ -10,12 +10,15 @@
 //!      +------------+-----------+-- Terminated <---------+
 //! ```
 
+use anyhow::{Error, Result};
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
@@ -41,7 +44,7 @@ enum SupervisorState {
     /// The service future is actively executing; monitor for completion or signals.
     Running,
     /// The service has exited; analyse the result and decide whether to restart.
-    Outcome(Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>),
+    Outcome(Result<Result<(), Error>, Box<dyn Any + Send>>),
     /// Wait for the backoff delay before looping back to `Starting`.
     Backoff,
     /// Terminal state -- exit the supervision loop.
@@ -104,7 +107,7 @@ impl ServiceSupervisor {
                     let reload_signal = res
                         .reload_signals
                         .entry(sid)
-                        .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                        .or_insert_with(|| Arc::new(Notify::new()))
                         .clone();
 
                     tokio::select! {
@@ -196,7 +199,7 @@ impl ServiceSupervisor {
             .resources
             .reload_signals
             .entry(self.service_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
         warn!(
@@ -252,7 +255,7 @@ impl ServiceSupervisor {
         self.resources.status_changed.notify_waiters();
 
         // Record generation context for downstream state handlers
-        self.generation_start = Some(std::time::Instant::now());
+        self.generation_start = Some(Instant::now());
         self.reload_token = Some(CancellationToken::new());
 
         SupervisorState::Running
@@ -267,6 +270,7 @@ impl ServiceSupervisor {
             "service",
             name = %self.name,
             service_id = %self.service_id,
+            service_id_num = self.service_id.value(),
         );
 
         // Get or create reload signal
@@ -297,7 +301,7 @@ impl ServiceSupervisor {
 
         let result = __run_service_scope(identity, resources_clone, || async move {
             let service_future =
-                std::panic::AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
+                AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
 
             // Integrated signal handling -- replaces the bridge_task
             tokio::select! {
@@ -321,7 +325,7 @@ impl ServiceSupervisor {
     /// permanently (--> `Terminated`).
     async fn on_outcome(
         &mut self,
-        result: Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>,
+        result: Result<Result<(), Error>, Box<dyn Any + Send>>,
     ) -> SupervisorState {
         // Fast path: If shutdown was requested while the service was running,
         // skip outcome processing entirely -- no error logging, no restart.

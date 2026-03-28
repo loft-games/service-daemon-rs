@@ -10,7 +10,7 @@ description = "Memory overhead analysis: measures per-service RSS delta and stru
 memory-analysis = []
 
 [dependencies]
-service-daemon = { path = "../../service-daemon", features = ["macros"] }
+service-daemon = { path = "../../service-daemon" }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

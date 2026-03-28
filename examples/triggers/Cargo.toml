@@ -7,9 +7,7 @@ description = "Triggers example: demonstrates all trigger types (Cron, Queue, Si
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
-    "macros",
     "cron",
-    "uuid-trigger-ids",
 ] }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"

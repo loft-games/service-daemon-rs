@@ -10,5 +10,6 @@ members = [
     "examples/macro-tests",
     "examples/stress",
     "examples/memory-analysis",
+    "examples/diagnostics",
 ]
 resolver = "2"

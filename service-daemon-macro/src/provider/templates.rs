@@ -122,18 +122,18 @@ pub fn generate_notify_template(
     let expanded = quote! {
         #(#attrs)*
         #clone_derive
-        #vis struct #struct_name(pub std::sync::Arc<tokio::sync::Notify>);
+        #vis struct #struct_name(pub std::sync::Arc<::service_daemon::core::managed_state::TrackedNotify>);
 
         impl Default for #struct_name {
             fn default() -> Self {
-                Self(std::sync::Arc::new(tokio::sync::Notify::new()))
+                Self(std::sync::Arc::new(::service_daemon::core::managed_state::TrackedNotify::new()))
             }
         }
 
-        impl std::ops::Deref for #struct_name {
-            type Target = tokio::sync::Notify;
-            fn deref(&self) -> &tokio::sync::Notify {
-                &self.0
+        impl ::std::ops::Deref for #struct_name {
+            type Target = ::service_daemon::core::managed_state::TrackedNotify;
+            fn deref(&self) -> &::service_daemon::core::managed_state::TrackedNotify {
+                &*self.0
             }
         }
 
@@ -141,6 +141,7 @@ pub fn generate_notify_template(
 
         impl #struct_name {
             /// Trigger this signal, waking all subscribed triggers.
+            /// Automatically generates a UUID v7 message ID for causal tracing.
             pub fn notify(&self) {
                 self.0.notify_waiters();
             }
@@ -178,19 +179,20 @@ pub fn generate_broadcast_queue_template(
         #(#attrs)*
         #clone_derive
         #vis struct #struct_name {
-            pub tx: tokio::sync::broadcast::Sender<#item_type>,
+            pub tx: service_daemon::core::managed_state::TrackedSender<#item_type>,
         }
 
         impl Default for #struct_name {
             fn default() -> Self {
-                let (tx, _) = tokio::sync::broadcast::channel(#capacity);
-                Self { tx }
+                Self {
+                    tx: service_daemon::core::managed_state::TrackedSender::new(#capacity),
+                }
             }
         }
 
         impl std::ops::Deref for #struct_name {
-            type Target = tokio::sync::broadcast::Sender<#item_type>;
-            fn deref(&self) -> &tokio::sync::broadcast::Sender<#item_type> {
+            type Target = service_daemon::core::managed_state::TrackedSender<#item_type>;
+            fn deref(&self) -> &service_daemon::core::managed_state::TrackedSender<#item_type> {
                 &self.tx
             }
         }
@@ -199,6 +201,7 @@ pub fn generate_broadcast_queue_template(
 
         impl #struct_name {
             /// Push an item to this queue.
+            /// Automatically generates a UUID v7 message ID for causal tracing.
             pub fn push(&self, item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
                 self.tx.send(item)
             }

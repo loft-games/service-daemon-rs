@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::models::{ServiceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
-// Process-Level Cancellation Token — shared by ALL ServiceDaemon instances
+// Process-Level Cancellation Token -- shared by ALL ServiceDaemon instances
 // ---------------------------------------------------------------------------
 
 /// Process-wide shutdown token shared by all `ServiceDaemon` instances.

@@ -253,7 +253,7 @@ pub fn is_shutdown() -> bool {
 /// `task_local!` context is unavailable.
 ///
 /// Outside a `#[service]` scope, falls back to process-level shutdown only
-/// (skips `reload_token` — an externally spawned task has no concept of
+/// (skips `reload_token` -- an externally spawned task has no concept of
 /// individual service reloads).
 pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
     implicit_handshake();
@@ -308,7 +308,7 @@ pub async fn sleep(duration: Duration) -> bool {
 ///
 /// This function is typically called from the default `run_as_service`
 /// implementation in [`TriggerHost`](crate::models::trigger::TriggerHost) to check for user overrides before
-/// falling back to the template's self-declared [`ScalingPolicy`](crate::models::policy::ScalingPolicy).
+/// falling back to the template's self-declared [`ScalingPolicy`].
 ///
 /// # Panics
 ///
@@ -323,4 +323,13 @@ pub fn trigger_config<T: Any + Clone + Send + Sync>() -> Option<T> {
         })
         .ok()
         .flatten()
+}
+/// Returns the `ServiceId` of the calling service.
+///
+/// Falls back to `ServiceId(0)` if called outside of a managed service scope
+/// (e.g., in a background task spawned via `tokio::spawn` without context propagation).
+pub fn current_service_id() -> crate::models::ServiceId {
+    CURRENT_SERVICE
+        .try_with(|identity| identity.service_id)
+        .unwrap_or_default()
 }

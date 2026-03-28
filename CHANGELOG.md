@@ -41,5 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MockContext` simulation support (feature-gated).
 - `#![deny(unsafe_code)]` across the entire crate.
 
-[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.1...HEAD
+[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.2...HEAD
+[0.1.0-alpha.2]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.1

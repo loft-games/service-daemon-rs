@@ -1,6 +1,7 @@
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
+use std::fmt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -18,6 +19,7 @@ pub type ServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<
 /// The human-readable `name` field on `ServiceDescription` is retained only
 /// for logging / tracing purposes ("weak identity").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub struct ServiceId(pub(crate) usize);
 
 impl ServiceId {
@@ -38,9 +40,69 @@ impl ServiceId {
     }
 }
 
-impl std::fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Default for ServiceId {
+    /// Returns ServiceId(0), which is the default for system/background tasks.
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+impl std::str::FromStr for ServiceId {
+    type Err = std::num::ParseIntError;
+
+    /// Parses a ServiceId from a string like "svc#1" or "1".
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let numeric_part = s.strip_prefix("svc#").unwrap_or(s);
+        numeric_part.parse::<usize>().map(Self::new)
+    }
+}
+
+impl fmt::Display for ServiceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "svc#{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InstanceId: Zero-allocation trigger instance identifier.
+// Combines ServiceId + monotonic sequence for unique instance identification.
+// ---------------------------------------------------------------------------
+
+/// A unique identifier for a specific trigger invocation within a service.
+///
+/// Combines the owning service's [`ServiceId`] with a monotonically increasing
+/// sequence number to produce a globally unique, human-readable instance tag.
+///
+/// # Performance
+///
+/// `InstanceId` is 16 bytes, stack-allocated, and implements `Copy`. It
+/// replaces the previous `format!("{}:{}", service_id, seq)` pattern that
+/// required a heap allocation on every trigger dispatch cycle.
+///
+/// # Display Format
+///
+/// Formats as `svc#N:SEQ` (e.g. `svc#1:42`), matching the legacy string
+/// format for backward compatibility in log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub struct InstanceId {
+    /// The service that owns this trigger instance.
+    pub service_id: ServiceId,
+    /// Monotonically increasing sequence within this service's lifetime.
+    pub seq: u64,
+}
+
+impl InstanceId {
+    /// Construct a new `InstanceId`.
+    #[inline]
+    pub const fn new(service_id: ServiceId, seq: u64) -> Self {
+        Self { service_id, seq }
+    }
+}
+
+impl fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.service_id, self.seq)
     }
 }
 

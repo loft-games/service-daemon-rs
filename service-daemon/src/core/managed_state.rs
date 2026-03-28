@@ -1,9 +1,11 @@
+use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{
-    OnceCell, RwLock as TokioRwLock, RwLockReadGuard as TokioRwLockReadGuard,
-    RwLockWriteGuard as TokioRwLockWriteGuard, watch,
+    Notify as TokioNotify, OnceCell, RwLock as TokioRwLock,
+    RwLockReadGuard as TokioRwLockReadGuard, RwLockWriteGuard as TokioRwLockWriteGuard, watch,
 };
+use uuid::Uuid;
 
 /// Manages intelligent promotion and synchronization for shared state.
 ///
@@ -18,7 +20,7 @@ pub struct StateManager<T: 'static + Send + Sync + Clone> {
     lock: OnceCell<Arc<TrackedRwLock<T>>>,
     snapshot_cache: OnceCell<Arc<T>>,
     watch_rx: OnceCell<watch::Receiver<Arc<T>>>,
-    change_notify: OnceCell<Arc<tokio::sync::Notify>>,
+    change_notify: OnceCell<Arc<TokioNotify>>,
 }
 
 impl<T: 'static + Send + Sync + Clone> Default for StateManager<T> {
@@ -46,9 +48,9 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     }
 
     /// Internal helper to get or initialize the shared notification handle.
-    async fn get_notify(&self) -> Arc<tokio::sync::Notify> {
+    async fn get_notify(&self) -> Arc<TokioNotify> {
         self.change_notify
-            .get_or_init(|| async { Arc::new(tokio::sync::Notify::new()) })
+            .get_or_init(|| async { Arc::new(TokioNotify::new()) })
             .await
             .clone()
     }
@@ -57,7 +59,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub async fn resolve_rwlock<F, Fut>(&self, init: F) -> Arc<TrackedRwLock<T>>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Arc<T>> + Send,
+        Fut: Future<Output = Arc<T>> + Send,
     {
         self.lock
             .get_or_init(|| async {
@@ -89,7 +91,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub async fn resolve_mutex<F, Fut>(&self, init: F) -> Arc<TrackedMutex<T>>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Arc<T>> + Send,
+        Fut: Future<Output = Arc<T>> + Send,
     {
         let lock = self.resolve_rwlock(init).await;
         Arc::new(TrackedMutex { inner: lock })
@@ -100,7 +102,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Arc<T>> + Send,
+        Fut: Future<Output = Arc<T>> + Send,
     {
         // 1. Dynamic Check: If lock is already initialized, we MUST use the managed path
         if let Some(rx) = self.watch_rx.get() {
@@ -166,7 +168,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 #[doc(alias = "tokio::sync::RwLock")]
 pub struct TrackedRwLock<T: Clone> {
     inner: TokioRwLock<Arc<T>>,
-    notify: Arc<tokio::sync::Notify>,
+    notify: Arc<TokioNotify>,
     watch_tx: watch::Sender<Arc<T>>,
 }
 
@@ -220,7 +222,7 @@ impl<T: Clone> Deref for TrackedReadGuard<'_, T> {
 /// spurious wakeups and unnecessary clones.
 pub struct TrackedWriteGuard<'a, T: Clone> {
     inner: TokioRwLockWriteGuard<'a, Arc<T>>,
-    notify: Arc<tokio::sync::Notify>,
+    notify: Arc<TokioNotify>,
     watch_tx: &'a watch::Sender<Arc<T>>,
     is_committed: bool,
     is_dirty: bool,
@@ -320,8 +322,181 @@ impl<T: Clone> DerefMut for TrackedMutexGuard<'_, T> {
     }
 }
 
+// ===========================================================================
+// TrackedNotify -- Notify wrapper with automatic message_id injection
+// ===========================================================================
+
+/// A tracked version of [`tokio::sync::Notify`] that automatically generates
+/// a UUID v7 message ID on every `notify_waiters()` / `notify_one()` call.
+///
+/// This is the core primitive for the "Macro Illusion" pattern: macro-generated
+/// provider code uses `Notify` (which is aliased to this type), so signal
+/// emissions transparently produce causal trace IDs without user code changes.
+///
+/// # Thread Safety
+///
+/// The internal ID slot uses `std::sync::RwLock` (not tokio) because the
+/// critical section is a single `Uuid` copy (~16 bytes). This avoids async
+/// overhead while remaining safe across threads.
+pub struct TrackedNotify {
+    inner: TokioNotify,
+    /// The most recently generated message ID and the emitting service's ID.
+    /// Protected by a std::sync::RwLock for minimal overhead (no async needed).
+    last_id: std::sync::RwLock<Option<(Uuid, crate::models::ServiceId)>>,
+}
+
+impl TrackedNotify {
+    /// Creates a new `TrackedNotify` with no pending message ID.
+    pub fn new() -> Self {
+        Self {
+            inner: TokioNotify::new(),
+            last_id: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Notifies all waiting tasks, generating a new UUID v7 message ID
+    /// and capturing the current service's ID.
+    ///
+    /// The generated identity can be retrieved via [`last_id()`](Self::last_id)
+    /// by the trigger host after `notified()` returns.
+    pub fn notify_waiters(&self) {
+        let msg_id = Uuid::now_v7();
+        let src_id = crate::core::context::api::current_service_id();
+        *self.last_id.write().expect("TrackedNotify lock poisoned") = Some((msg_id, src_id));
+        self.inner.notify_waiters();
+    }
+
+    /// Notifies a single waiting task, generating a new UUID v7 message ID
+    /// and capturing the current service's ID.
+    pub fn notify_one(&self) {
+        let msg_id = Uuid::now_v7();
+        let src_id = crate::core::context::api::current_service_id();
+        *self.last_id.write().expect("TrackedNotify lock poisoned") = Some((msg_id, src_id));
+        self.inner.notify_one();
+    }
+
+    /// Wait for a notification. Delegates to the inner `Notify`.
+    pub fn notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.inner.notified()
+    }
+
+    /// Retrieves and clears the most recently generated message identity.
+    ///
+    /// Returns `Some((Uuid, ServiceId))` if a signal was emitted since the last call,
+    /// `None` otherwise. The ID is cleared after reading to prevent reuse.
+    pub fn last_id(&self) -> Option<(Uuid, crate::models::ServiceId)> {
+        self.last_id
+            .write()
+            .expect("TrackedNotify lock poisoned")
+            .take()
+    }
+}
+
+impl Default for TrackedNotify {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for TrackedNotify {
+    /// Clones the inner `Notify` handle (via a new instance) and resets the
+    /// last message ID. Each clone gets its own independent ID slot.
+    fn clone(&self) -> Self {
+        Self {
+            inner: TokioNotify::new(),
+            last_id: std::sync::RwLock::new(
+                *self.last_id.read().expect("TrackedNotify lock poisoned"),
+            ),
+        }
+    }
+}
+
+// ===========================================================================
+// TrackedSender -- broadcast::Sender wrapper with automatic message_id injection
+// ===========================================================================
+
+/// A tracked version of [`tokio::sync::broadcast::Sender<P>`] that automatically
+/// generates a UUID v7 message ID on every `send()` call.
+///
+/// Follows the same "Macro Illusion" pattern as [`TrackedNotify`]: queue-based
+/// providers use this type transparently via macro-generated code, so every
+/// message emission produces a causal trace ID.
+pub struct TrackedSender<P> {
+    inner: tokio::sync::broadcast::Sender<P>,
+    /// The most recently generated message ID and emitting service's ID.
+    last_id: std::sync::RwLock<Option<(Uuid, crate::models::ServiceId)>>,
+}
+
+impl<P: Clone> TrackedSender<P> {
+    /// Creates a new `TrackedSender` wrapping a broadcast channel with the
+    /// given capacity.
+    pub fn new(capacity: usize) -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(capacity);
+        Self {
+            inner: tx,
+            last_id: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Wraps an existing `broadcast::Sender<P>` into a tracked sender.
+    pub fn from_sender(sender: tokio::sync::broadcast::Sender<P>) -> Self {
+        Self {
+            inner: sender,
+            last_id: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Sends a value to all active receivers, generating a new UUID v7 message ID
+    /// and capturing the current service's ID.
+    ///
+    /// The generated identity can be retrieved via [`last_id()`](Self::last_id).
+    pub fn send(&self, value: P) -> Result<usize, tokio::sync::broadcast::error::SendError<P>> {
+        let msg_id = Uuid::now_v7();
+        let src_id = crate::core::context::api::current_service_id();
+        *self.last_id.write().expect("TrackedSender lock poisoned") = Some((msg_id, src_id));
+        self.inner.send(value)
+    }
+
+    /// Creates a new `broadcast::Receiver` for this channel.
+    ///
+    /// Required by `TopicHost::setup()` to establish the receive end.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<P> {
+        self.inner.subscribe()
+    }
+
+    /// Returns the number of active receivers.
+    pub fn receiver_count(&self) -> usize {
+        self.inner.receiver_count()
+    }
+
+    /// Retrieves and clears the most recently generated message identity.
+    ///
+    /// Returns `Some((Uuid, ServiceId))` if a message was sent since the last call,
+    /// `None` otherwise. The ID is cleared after reading to prevent reuse.
+    pub fn last_id(&self) -> Option<(Uuid, crate::models::ServiceId)> {
+        self.last_id
+            .write()
+            .expect("TrackedSender lock poisoned")
+            .take()
+    }
+}
+
+impl<P: Clone> Clone for TrackedSender<P> {
+    /// Clones the inner `broadcast::Sender` (cheap, reference-counted) and
+    /// copies the current last_id state.
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            last_id: std::sync::RwLock::new(
+                *self.last_id.read().expect("TrackedSender lock poisoned"),
+            ),
+        }
+    }
+}
+
 // Aliases for the macro "illusion"
 pub use TrackedMutex as Mutex;
+pub use TrackedNotify as Notify;
 pub use TrackedRwLock as RwLock;
 
 #[cfg(test)]

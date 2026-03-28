@@ -2,17 +2,22 @@ use chrono::{DateTime, Utc};
 #[cfg(feature = "file-logging")]
 use serde::{Deserialize, Serialize};
 
-use std::borrow::Cow;
-use std::cell::Cell;
-use std::fmt::Write as _;
-use std::io::{Write as _, stderr};
-use std::sync::{Arc, OnceLock};
-
 use tokio::sync::broadcast;
-use tracing::{Event, Subscriber};
+use tracing::{Event, Level, Subscriber, field};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
+use uuid::Uuid;
+
+use std::borrow::Cow;
+use std::cell::Cell;
+use std::fmt::{self, Write as _};
+use std::io::{Write as _, stderr};
+use std::str::FromStr;
+use std::sync::{Arc, OnceLock};
+
+use crate::models::ServiceId;
+use crate::models::service::InstanceId;
 
 /// Log severity level with zero heap allocation.
 ///
@@ -29,13 +34,13 @@ pub enum LogLevel {
 
 impl LogLevel {
     /// Converts from tracing's `Level` type. Zero allocation.
-    pub fn from_tracing(level: &tracing::Level) -> Self {
+    pub fn from_tracing(level: &Level) -> Self {
         match *level {
-            tracing::Level::ERROR => Self::Error,
-            tracing::Level::WARN => Self::Warn,
-            tracing::Level::INFO => Self::Info,
-            tracing::Level::DEBUG => Self::Debug,
-            tracing::Level::TRACE => Self::Trace,
+            Level::ERROR => Self::Error,
+            Level::WARN => Self::Warn,
+            Level::INFO => Self::Info,
+            Level::DEBUG => Self::Debug,
+            Level::TRACE => Self::Trace,
         }
     }
 
@@ -62,9 +67,53 @@ impl LogLevel {
     }
 }
 
-impl std::fmt::Display for LogLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Serializes `Option<InstanceId>` as a string (e.g., `"svc#1:42"`) for
+/// backward-compatible JSON log output.
+#[cfg(feature = "file-logging")]
+fn serialize_instance_id<S>(value: &Option<InstanceId>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(id) => serializer.serialize_str(&id.to_string()),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// Deserializes `Option<InstanceId>` from a string (e.g., `"svc#1:42"`) in
+/// JSON log files.
+#[cfg(feature = "file-logging")]
+fn deserialize_instance_id<'de, D>(deserializer: D) -> Result<Option<InstanceId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    match opt {
+        Some(s) => {
+            // Parse "svc#N:SEQ" format
+            let s = s.strip_prefix("svc#").unwrap_or(&s);
+            let parts: Vec<&str> = s.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                let svc_id = parts[0]
+                    .parse::<usize>()
+                    .map_err(serde::de::Error::custom)?;
+                let seq = parts[1].parse::<u64>().map_err(serde::de::Error::custom)?;
+                Ok(Some(InstanceId::new(ServiceId::new(svc_id), seq)))
+            } else {
+                Err(serde::de::Error::custom(format!(
+                    "invalid instance_id format: {}",
+                    s
+                )))
+            }
+        }
+        None => Ok(None),
     }
 }
 
@@ -76,7 +125,7 @@ impl std::fmt::Display for LogLevel {
 ///
 /// # ID Fields
 ///
-/// The `service_id`, `message_id`, and `source_id` fields are automatically
+/// The `service_id`, `message_id`, and `instance_id` fields are automatically
 /// extracted from the current `tracing::Span` context by `DaemonLayer`. They
 /// are `None` for log events that occur outside a service or trigger Span
 /// (e.g., during daemon initialization).
@@ -90,32 +139,37 @@ pub struct LogEvent {
     pub module_path: Option<Cow<'static, str>>,
     pub file: Option<Cow<'static, str>>,
     pub line: Option<u32>,
-    /// The `ServiceId` of the service that produced this event, extracted from
-    /// the enclosing `tracing::Span` created by `ServiceSupervisor` or
-    /// `TracingInterceptor`. `None` when outside a service context.
+    /// The `ServiceId` of the service that produced this event.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub service_id: Option<String>,
-    /// The globally unique message ID for trigger events, extracted from the
-    /// `TracingInterceptor` Span. `None` for non-trigger log events.
+    pub service_id: Option<ServiceId>,
+    /// The `ServiceId` of the service that originally emitted the event.
+    /// Used for causal topology correlation.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub message_id: Option<String>,
-    /// The `ServiceId` of the service that originally published the trigger
-    /// event. Extracted from the trigger Span context. `None` for non-trigger
-    /// log events.
+    pub source_service_id: Option<ServiceId>,
+    /// Message ID for causal tracing.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub source_id: Option<String>,
-    /// Structured error chain captured via `record_error`. Contains the full
-    /// `Debug` representation of the error, including any backtrace information
-    /// from `anyhow` or `std::backtrace`.
+    pub message_id: Option<Uuid>,
+    /// The trigger instance identifier, combining `ServiceId` and sequence
+    /// number. Extracted from numeric fields or native InstanceId extension.
+    #[cfg_attr(
+        feature = "file-logging",
+        serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_instance_id",
+            deserialize_with = "deserialize_instance_id"
+        )
+    )]
+    pub instance_id: Option<InstanceId>,
+    /// Structured error chain captured via `record_error`.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
@@ -194,7 +248,7 @@ impl Default for LogQueue {
 static LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
 
 /// Gets the log queue, initializing it on first call.
-fn get_log_queue() -> &'static LogQueue {
+pub(crate) fn get_log_queue() -> &'static LogQueue {
     LOG_QUEUE.get_or_init(LogQueue::default)
 }
 
@@ -486,14 +540,17 @@ fn render_to_buf(event: &LogEvent, buf: &mut String) {
     );
 
     // Append IDs when present (inside a service/trigger Span)
-    if let Some(ref sid) = event.service_id {
+    if let Some(sid) = event.service_id {
         let _ = write!(buf, " service_id={}", sid);
     }
-    if let Some(ref mid) = event.message_id {
+    if let Some(src_sid) = event.source_service_id {
+        let _ = write!(buf, " source_service_id={}", src_sid);
+    }
+    if let Some(mid) = event.message_id {
         let _ = write!(buf, " message_id={}", mid);
     }
-    if let Some(ref src) = event.source_id {
-        let _ = write!(buf, " source_id={}", src);
+    if let Some(ref iid) = event.instance_id {
+        let _ = write!(buf, " instance_id={}", iid);
     }
     if let Some(ref err) = event.error_chain {
         let _ = write!(buf, " error={}", err);
@@ -533,7 +590,7 @@ fn render_to_stderr(event: &LogEvent) {
 /// # Span Context Extraction
 ///
 /// `DaemonLayer` requires `LookupSpan` on the subscriber so it can walk the
-/// current Span chain and extract `service_id`, `message_id`, and `source_id`
+/// current Span chain and extract `service_id`, `message_id`, and `instance_id`
 /// fields that were injected by `ServiceSupervisor::on_running` and
 /// `TracingInterceptor`. Events outside any Span will have `None` for these IDs.
 pub struct DaemonLayer;
@@ -558,7 +615,7 @@ where
             // Only store if at least one known field was found
             if visitor.fields.service_id.is_some()
                 || visitor.fields.message_id.is_some()
-                || visitor.fields.source_id.is_some()
+                || visitor.fields.instance_svc_id.is_some()
             {
                 span.extensions_mut().insert(visitor.fields);
             }
@@ -575,7 +632,7 @@ where
         let error_chain = collector.take_error();
 
         // Walk the Span chain to extract service/trigger IDs
-        let (service_id, message_id, source_id) = extract_span_ids(&ctx, event);
+        let (service_id, source_service_id, message_id, instance_id) = extract_span_ids(&ctx, event);
 
         let log_event = Arc::new(LogEvent {
             timestamp: Utc::now(),
@@ -586,8 +643,9 @@ where
             file: metadata.file().map(Cow::Borrowed),
             line: metadata.line(),
             service_id,
+            source_service_id,
             message_id,
-            source_id,
+            instance_id,
             error_chain,
         });
 
@@ -604,7 +662,7 @@ where
 }
 
 /// Walks the current Span scope to extract `service_id`, `message_id`, and
-/// `source_id` fields from ancestor Spans.
+/// `instance_id` fields from ancestor Spans.
 ///
 /// These fields are injected by:
 /// - `ServiceSupervisor::on_running` - creates `info_span!("service", service_id = ...)`
@@ -615,38 +673,99 @@ where
 fn extract_span_ids<S>(
     ctx: &Context<'_, S>,
     event: &Event<'_>,
-) -> (Option<String>, Option<String>, Option<String>)
+) -> (
+    Option<crate::models::ServiceId>,
+    Option<crate::models::ServiceId>,
+    Option<uuid::Uuid>,
+    Option<crate::models::service::InstanceId>,
+)
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     let mut service_id = None;
+    let mut source_service_id = None;
     let mut message_id = None;
-    let mut source_id = None;
+    let mut instance_id = None;
+    let mut instance_svc_id = None;
+    let mut instance_seq = None;
 
     // `event_scope()` returns an iterator over Span references from innermost
     // to outermost. We scan for known field names stored in Span extensions.
     if let Some(scope) = ctx.event_scope(event) {
         for span in scope {
             let extensions = span.extensions();
+
+            // 1. Priority path: Native type extensions (Zero Allocation)
+            if service_id.is_none() {
+                if let Some(sid) = extensions.get::<crate::models::ServiceId>() {
+                    service_id = Some(*sid);
+                }
+            }
+            if message_id.is_none() {
+                if let Some(mid) = extensions.get::<uuid::Uuid>() {
+                    message_id = Some(*mid);
+                }
+            }
+            if instance_id.is_none() {
+                if let Some(iid) = extensions.get::<crate::models::service::InstanceId>() {
+                    instance_id = Some(*iid);
+                }
+            }
+
+            // 2. Fallback path: Extracted from span attributes via SpanFields
             if let Some(fields) = extensions.get::<SpanFields>() {
+                // ServiceId
                 if service_id.is_none() {
-                    service_id.clone_from(&fields.service_id);
+                    if let Some(n) = fields.service_id_num {
+                        service_id = Some(crate::models::ServiceId::new(n));
+                    } else if let Some(ref s) = fields.service_id {
+                        if let Ok(id) = crate::models::ServiceId::from_str(s) {
+                            service_id = Some(id);
+                        }
+                    }
                 }
+
+                // SourceServiceId
+                if source_service_id.is_none() {
+                    if let Some(n) = fields.source_service_id {
+                        source_service_id = Some(crate::models::ServiceId::new(n));
+                    }
+                }
+
+                // MessageId (Uuid)
                 if message_id.is_none() {
-                    message_id.clone_from(&fields.message_id);
+                    if let (Some(hi), Some(lo)) = (fields.mid_hi, fields.mid_lo) {
+                        let val = ((hi as u128) << 64) | (lo as u128);
+                        message_id = Some(uuid::Uuid::from_u128(val));
+                    } else if let Some(ref s) = fields.message_id {
+                        if let Ok(id) = uuid::Uuid::parse_str(s) {
+                            message_id = Some(id);
+                        }
+                    }
                 }
-                if source_id.is_none() {
-                    source_id.clone_from(&fields.source_id);
+
+                if instance_svc_id.is_none() {
+                    instance_svc_id = fields.instance_svc_id;
+                }
+                if instance_seq.is_none() {
+                    instance_seq = fields.instance_seq;
                 }
             }
-            // Early exit if all IDs are found
-            if service_id.is_some() && message_id.is_some() && source_id.is_some() {
-                break;
-            }
+
+            // Early exit NOT used here because different Spans might provide different IDs.
+            // Innermost-first is guaranteed by the `if id.is_none()` pattern.
         }
     }
 
-    (service_id, message_id, source_id)
+    // Reconstruct InstanceId if not found in extensions
+    if instance_id.is_none() {
+        instance_id = match (instance_svc_id, instance_seq) {
+            (Some(svc), Some(seq)) => Some(InstanceId::new(ServiceId::new(svc), seq)),
+            _ => None,
+        };
+    }
+
+    (service_id, source_service_id, message_id, instance_id)
 }
 
 /// Storage for extracted span field values, attached to each Span via extensions.
@@ -659,7 +778,18 @@ where
 struct SpanFields {
     service_id: Option<String>,
     message_id: Option<String>,
-    source_id: Option<String>,
+    /// Numeric `ServiceId` for zero-allocation capture.
+    service_id_num: Option<usize>,
+    /// The `ServiceId` of the source service.
+    source_service_id: Option<usize>,
+    /// High 64 bits of `message_id` (Uuid).
+    mid_hi: Option<u64>,
+    /// Low 64 bits of `message_id` (Uuid).
+    mid_lo: Option<u64>,
+    /// Numeric service ID component of the trigger instance identifier.
+    instance_svc_id: Option<usize>,
+    /// Numeric sequence component of the trigger instance identifier.
+    instance_seq: Option<u64>,
 }
 
 /// Visitor that extracts known ID fields from Span attributes during creation.
@@ -667,30 +797,41 @@ struct SpanFields {
 /// Recognizes:
 /// - `service_id` - from `ServiceSupervisor::on_running` and `TracingInterceptor`
 /// - `message_id` - from `TracingInterceptor` (trigger dispatch)
-/// - `instance_id` - from `TracingInterceptor`, mapped to `source_id`
+/// - `instance_svc_id` / `instance_seq` - numeric fields from `TracingInterceptor`
 ///
-/// All other fields are ignored. Values are captured via `Display` formatting.
+/// All other fields are ignored. String values are captured via `Display`
+/// formatting; numeric values are captured via `record_u64`.
 #[derive(Debug, Default)]
 struct SpanFieldVisitor {
     fields: SpanFields,
 }
 
-impl tracing::field::Visit for SpanFieldVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+impl field::Visit for SpanFieldVisitor {
+    fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
         let formatted = format!("{:?}", value);
         match field.name() {
             "service_id" => self.fields.service_id = Some(formatted),
             "message_id" => self.fields.message_id = Some(formatted),
-            "instance_id" => self.fields.source_id = Some(formatted),
             _ => {} // Ignore unknown fields
         }
     }
 
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+    fn record_str(&mut self, field: &field::Field, value: &str) {
         match field.name() {
             "service_id" => self.fields.service_id = Some(value.to_string()),
             "message_id" => self.fields.message_id = Some(value.to_string()),
-            "instance_id" => self.fields.source_id = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &field::Field, value: u64) {
+        match field.name() {
+            "service_id_num" => self.fields.service_id_num = Some(value as usize),
+            "source_service_id" => self.fields.source_service_id = Some(value as usize),
+            "mid_hi" => self.fields.mid_hi = Some(value),
+            "mid_lo" => self.fields.mid_lo = Some(value),
+            "instance_svc_id" => self.fields.instance_svc_id = Some(value as usize),
+            "instance_seq" => self.fields.instance_seq = Some(value),
             _ => {}
         }
     }
@@ -910,9 +1051,10 @@ mod tests {
     fn make_event(
         level: LogLevel,
         message: &str,
-        service_id: Option<&str>,
-        message_id: Option<&str>,
-        source_id: Option<&str>,
+        service_id: Option<ServiceId>,
+        source_service_id: Option<ServiceId>,
+        message_id: Option<uuid::Uuid>,
+        instance_id: Option<crate::models::service::InstanceId>,
         error_chain: Option<&str>,
     ) -> LogEvent {
         LogEvent {
@@ -923,9 +1065,10 @@ mod tests {
             module_path: None,
             file: None,
             line: None,
-            service_id: service_id.map(|s| s.to_string()),
-            message_id: message_id.map(|s| s.to_string()),
-            source_id: source_id.map(|s| s.to_string()),
+            service_id,
+            source_service_id,
+            message_id,
+            instance_id,
             error_chain: error_chain.map(|s| s.to_string()),
         }
     }
@@ -936,7 +1079,7 @@ mod tests {
 
     #[test]
     fn render_info_level_contains_green_ansi_code() {
-        let event = make_event(LogLevel::Info, "hello world", None, None, None, None);
+        let event = make_event(LogLevel::Info, "hello world", None, None, None, None, None);
         let output = render_to_string(&event);
         // Green foreground: \x1b[32m
         assert!(
@@ -953,7 +1096,7 @@ mod tests {
 
     #[test]
     fn render_error_level_contains_red_ansi_code() {
-        let event = make_event(LogLevel::Error, "something broke", None, None, None, None);
+        let event = make_event(LogLevel::Error, "something broke", None, None, None, None, None);
         let output = render_to_string(&event);
         // Red foreground: \x1b[31m
         assert!(
@@ -965,7 +1108,7 @@ mod tests {
 
     #[test]
     fn render_warn_level_contains_yellow_ansi_code() {
-        let event = make_event(LogLevel::Warn, "caution", None, None, None, None);
+        let event = make_event(LogLevel::Warn, "caution", None, None, None, None, None);
         let output = render_to_string(&event);
         // Yellow foreground: \x1b[33m
         assert!(
@@ -977,7 +1120,7 @@ mod tests {
 
     #[test]
     fn render_debug_level_contains_cyan_ansi_code() {
-        let event = make_event(LogLevel::Debug, "verbose detail", None, None, None, None);
+        let event = make_event(LogLevel::Debug, "verbose detail", None, None, None, None, None);
         let output = render_to_string(&event);
         assert!(
             output.contains("\x1b[36m"),
@@ -992,10 +1135,10 @@ mod tests {
 
     #[test]
     fn render_includes_service_id_when_present() {
-        let event = make_event(LogLevel::Info, "msg", Some("svc-abc-123"), None, None, None);
+        let event = make_event(LogLevel::Info, "msg", Some(ServiceId::new(123)), None, None, None, None);
         let output = render_to_string(&event);
         assert!(
-            output.contains("service_id=svc-abc-123"),
+            output.contains("service_id=svc#123"),
             "output should contain service_id, got: {}",
             output
         );
@@ -1003,18 +1146,28 @@ mod tests {
 
     #[test]
     fn render_includes_all_ids_when_present() {
+        let test_iid = crate::models::service::InstanceId::new(crate::models::ServiceId::new(3), 0);
+        let msg_id = uuid::Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
         let event = make_event(
             LogLevel::Info,
             "triggered",
-            Some("svc-001"),
-            Some("msg-002"),
-            Some("src-003"),
+            Some(ServiceId::new(1)),
+            None,
+            Some(msg_id),
+            Some(test_iid),
             None,
         );
         let output = render_to_string(&event);
-        assert!(output.contains("service_id=svc-001"), "missing service_id");
-        assert!(output.contains("message_id=msg-002"), "missing message_id");
-        assert!(output.contains("source_id=src-003"), "missing source_id");
+        assert!(output.contains("service_id=svc#1"), "missing service_id");
+        assert!(
+            output.contains("message_id=0195e342-8874-7065-a86d-3e6a457b0195"),
+            "missing message_id"
+        );
+        assert!(
+            output.contains("instance_id=svc#3:0"),
+            "missing instance_id, got: {}",
+            output
+        );
     }
 
     #[test]
@@ -1022,6 +1175,7 @@ mod tests {
         let event = make_event(
             LogLevel::Error,
             "operation failed",
+            None,
             None,
             None,
             None,
@@ -1037,7 +1191,7 @@ mod tests {
 
     #[test]
     fn render_omits_ids_when_none() {
-        let event = make_event(LogLevel::Info, "init phase", None, None, None, None);
+        let event = make_event(LogLevel::Info, "init phase", None, None, None, None, None);
         let output = render_to_string(&event);
         assert!(
             !output.contains("service_id="),
@@ -1048,8 +1202,8 @@ mod tests {
             "should not contain message_id when None"
         );
         assert!(
-            !output.contains("source_id="),
-            "should not contain source_id when None"
+            !output.contains("instance_id="),
+            "should not contain instance_id when None"
         );
         assert!(
             !output.contains("error="),
@@ -1087,7 +1241,7 @@ mod tests {
     #[test]
     fn daemon_layer_captures_service_id_from_span() {
         let events = collect_events_with_daemon_layer(|| {
-            let span = tracing::info_span!("service", service_id = "test-svc-42",);
+            let span = tracing::info_span!("service", service_id = "svc#42",);
             let _enter = span.enter();
             tracing::info!("svc_id_test_marker");
         });
@@ -1098,23 +1252,27 @@ mod tests {
             .expect("should have captured the event");
 
         assert_eq!(
-            event.service_id.as_deref(),
-            Some("test-svc-42"),
+            event.service_id,
+            Some(crate::models::ServiceId::new(42)),
             "service_id should be extracted from Span"
         );
     }
 
     #[test]
     fn daemon_layer_captures_message_id_from_nested_span() {
+        let msg_id_str = "0195e342-8874-7065-a86d-3e6a457b0195";
+        let msg_id = uuid::Uuid::parse_str(msg_id_str).unwrap();
+
         let events = collect_events_with_daemon_layer(|| {
-            let service_span = tracing::info_span!("service", service_id = "parent-svc",);
+            let service_span = tracing::info_span!("service", service_id = "svc#1",);
             let _svc_enter = service_span.enter();
 
             let trigger_span = tracing::info_span!(
                 "trigger",
-                service_id = "trigger-svc",
-                message_id = "msg-xyz-789",
-                instance_id = "source-abc",
+                service_id = "svc#2",
+                message_id = msg_id_str,
+                instance_svc_id = 3u64,
+                instance_seq = 7u64,
             );
             let _trig_enter = trigger_span.enter();
             tracing::info!("nested_span_test_marker");
@@ -1126,19 +1284,21 @@ mod tests {
             .expect("should have captured the event");
 
         assert_eq!(
-            event.service_id.as_deref(),
-            Some("trigger-svc"),
+            event.service_id,
+            Some(crate::models::ServiceId::new(2)),
             "service_id should come from innermost span"
         );
         assert_eq!(
-            event.message_id.as_deref(),
-            Some("msg-xyz-789"),
+            event.message_id,
+            Some(msg_id),
             "message_id should be extracted from trigger span"
         );
+        let expected_iid =
+            crate::models::service::InstanceId::new(crate::models::ServiceId::new(3), 7);
         assert_eq!(
-            event.source_id.as_deref(),
-            Some("source-abc"),
-            "source_id should be mapped from instance_id"
+            event.instance_id,
+            Some(expected_iid),
+            "instance_id should be reconstructed from numeric fields"
         );
     }
 
@@ -1162,8 +1322,8 @@ mod tests {
             "message_id should be None outside span"
         );
         assert!(
-            event.source_id.is_none(),
-            "source_id should be None outside span"
+            event.instance_id.is_none(),
+            "instance_id should be None outside span"
         );
     }
 

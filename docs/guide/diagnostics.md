@@ -8,8 +8,9 @@ The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracin
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
+- **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
-Both consumers use a **fill-the-valley** batch strategy with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
+Both logging consumers use a **fill-the-valley** batch strategy with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
 
 ### Enabling Diagnostics
 
@@ -84,12 +85,32 @@ set_log_batch_size(512);
 service_daemon::core::logging::init_logging();
 ```
 
+## 2. Behavioral Topology (`diagnostics` feature)
+
+When the `diagnostics` feature is enabled, you can activate the background topology collector. It observes message correlation across the system to build a live map of service interactions.
+
+```rust
+use service_daemon::{start_topology_collector, export_mermaid};
+
+// 1. Start the background collector
+start_topology_collector();
+
+// ... run your daemon ...
+
+// 2. Export the collected topology as a Mermaid diagram
+if let Some(mermaid) = export_mermaid() {
+    println!("System Topology:\n{}", mermaid);
+}
+```
+
+This is particularly useful for debugging complex "cascading" triggers where one event leads to a chain of reactions.
+
+## 3. What to Look For
+
 > [!WARNING]
 > Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`.
 > 1. **Duplication**: The `log_service` already handles console output — adding `fmt::layer()` will cause every log line to appear twice.
 > 2. **Performance (Blocking)**: `fmt::layer()` is synchronous and can block the async runtime under heavy load. `DaemonLayer` is fully asynchronous, offloading output to the managed `log_service` with internal batching to ensure zero-latency logging even during bursts.
-
-## 2. What to Look For
 
 Once enabled, you will see structured diagnostic signals in your logs:
 
@@ -107,9 +128,9 @@ For triggers with elastic scaling, `DaemonLayer` reports:
 
 ### Causal Correlation IDs
 Every log event inside a service or trigger Span is automatically tagged with:
-- **`service_id`**: The `ServiceId` of the service that produced the event.
-- **`message_id`**: The globally unique ID of the triggering event (trigger context only).
-- **`source_id`**: The `ServiceId` of the service that originally published the trigger event.
+- **`service_id`**: The name of the service that produced the event (e.g., `"my-service"`).
+- **`message_id`**: The globally unique **UUID v7** (time-ordered) of the event that triggered this handler.
+- **`instance_id`**: A numeric composite identifier (e.g., `svc#1:42`) that uniquely identifies this trigger invocation generation.
 
 These IDs are `None` for log events outside a service context (e.g., daemon initialization).
 

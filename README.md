@@ -16,6 +16,9 @@
 - **Unified Params**: Consistent `env` and `capacity` support across all built-in template providers.
 - **Isolated Unit Testing**: Feature-gated `MockContext` for injecting shadow Providers, Shelf, and Status with zero production overhead.
 - **Tag-based Registry**: Filter services by tags for selective loading (`#[service(tags = ["infra"])]`).
+- **Behavioral Topology**: Real-time causal relationship discovery and Mermaid diagram export (`diagnostics` feature).
+- **UUID v7 Causal Tracing**: Allocation-free causal tracking using time-ordered UUIDs for event-driven flows.
+- **Zero-Allocation Diagnostics**: High-performance numeric identifier extraction for trigger instances.
 
 ## Quick Start
 
@@ -75,6 +78,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **complete** | `state()` lifecycle -- recovery, reload, priorities | `cargo run -p example-complete` |
 | **triggers** | Decoupled event-driven handlers (Cron, Queue, Watch) | `cargo run -p example-triggers` |
 | **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
+| **diagnostics** | Behavioral Topology and Mermaid export (`diagnostics` feature) | `cargo run -p example-diagnostics` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
 > **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
