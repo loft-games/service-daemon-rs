@@ -568,6 +568,8 @@ where
             if visitor.fields.service_id.is_some()
                 || visitor.fields.message_id.is_some()
                 || visitor.fields.instance_svc_id.is_some()
+                || visitor.fields.service_id_num.is_some()
+                || visitor.fields.source_service_id.is_some()
             {
                 span.extensions_mut().insert(visitor.fields);
             }
@@ -668,6 +670,8 @@ where
                         if let Ok(id) = crate::models::ServiceId::from_str(s) {
                             service_id = Some(id);
                         }
+                    } else if let Some(n) = fields.service_id_num {
+                        service_id = Some(crate::models::ServiceId::new(n));
                     }
                 }
                 if source_service_id.is_none() {
@@ -814,6 +818,10 @@ pub async fn log_service() -> anyhow::Result<()> {
 
     while !service_daemon::is_shutdown() {
         tokio::select! {
+            biased;
+            _ = service_daemon::wait_shutdown() => {
+                break;
+            }
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -846,9 +854,6 @@ pub async fn log_service() -> anyhow::Result<()> {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
-            }
-            _ = service_daemon::wait_shutdown() => {
-                break;
             }
         }
     }
@@ -923,6 +928,10 @@ pub async fn file_log_service() -> anyhow::Result<()> {
 
     while !service_daemon::is_shutdown() {
         tokio::select! {
+            biased;
+            _ = service_daemon::wait_shutdown() => {
+                break;
+            }
             result = rx.recv() => {
                 match result {
                     Ok(event) => {
@@ -951,9 +960,6 @@ pub async fn file_log_service() -> anyhow::Result<()> {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
-            }
-            _ = service_daemon::wait_shutdown() => {
-                break;
             }
         }
     }

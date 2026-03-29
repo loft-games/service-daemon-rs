@@ -342,6 +342,9 @@ impl ServiceDaemon {
 
     /// Internal helper: perform the actual graceful shutdown sequence.
     async fn do_shutdown(&self) {
+        // Signal global process-level cancellation
+        crate::core::context::process_token().cancel();
+
         runner::stop_all_services(
             &self.services,
             self.running_tasks.clone(),
