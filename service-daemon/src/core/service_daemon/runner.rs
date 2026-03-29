@@ -10,16 +10,20 @@
 //!      +------------+-----------+-- Terminated <---------+
 //! ```
 
+use anyhow::{Error, Result};
 use futures::FutureExt;
 use futures::future::BoxFuture;
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::Mutex;
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
+use crate::ServiceScheduling;
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
 use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
@@ -41,7 +45,7 @@ enum SupervisorState {
     /// The service future is actively executing; monitor for completion or signals.
     Running,
     /// The service has exited; analyse the result and decide whether to restart.
-    Outcome(Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>),
+    Outcome(Result<Result<(), Error>, Box<dyn Any + Send>>),
     /// Wait for the backoff delay before looping back to `Starting`.
     Backoff,
     /// Terminal state -- exit the supervision loop.
@@ -104,7 +108,7 @@ impl ServiceSupervisor {
                     let reload_signal = res
                         .reload_signals
                         .entry(sid)
-                        .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+                        .or_insert_with(|| Arc::new(Notify::new()))
                         .clone();
 
                     tokio::select! {
@@ -196,7 +200,7 @@ impl ServiceSupervisor {
             .resources
             .reload_signals
             .entry(self.service_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
         warn!(
@@ -252,7 +256,7 @@ impl ServiceSupervisor {
         self.resources.status_changed.notify_waiters();
 
         // Record generation context for downstream state handlers
-        self.generation_start = Some(std::time::Instant::now());
+        self.generation_start = Some(Instant::now());
         self.reload_token = Some(CancellationToken::new());
 
         SupervisorState::Running
@@ -267,6 +271,7 @@ impl ServiceSupervisor {
             "service",
             name = %self.name,
             service_id = %self.service_id,
+            service_id_num = self.service_id.value(),
         );
 
         // Get or create reload signal
@@ -297,7 +302,7 @@ impl ServiceSupervisor {
 
         let result = __run_service_scope(identity, resources_clone, || async move {
             let service_future =
-                std::panic::AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
+                AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
 
             // Integrated signal handling -- replaces the bridge_task
             tokio::select! {
@@ -321,7 +326,7 @@ impl ServiceSupervisor {
     /// permanently (--> `Terminated`).
     async fn on_outcome(
         &mut self,
-        result: Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>,
+        result: Result<Result<(), Error>, Box<dyn Any + Send>>,
     ) -> SupervisorState {
         // Fast path: If shutdown was requested while the service was running,
         // skip outcome processing entirely -- no error logging, no restart.
@@ -441,8 +446,7 @@ impl<'a> ServiceWave<'a> {
         daemon_token: &CancellationToken,
     ) {
         let start = std::time::Instant::now();
-        let mut all_healthy = false;
-        while !all_healthy && start.elapsed() < timeout {
+        while start.elapsed() < timeout {
             // Early exit if daemon shutdown was requested
             if daemon_token.is_cancelled() {
                 info!(
@@ -452,7 +456,10 @@ impl<'a> ServiceWave<'a> {
                 return;
             }
 
-            all_healthy = true;
+            // Create notification future BEFORE checking the status to avoid lost notifications
+            let notification = resources.status_changed.notified();
+
+            let mut all_healthy = true;
             for service in &self.services {
                 let status = resources
                     .status_plane
@@ -463,27 +470,29 @@ impl<'a> ServiceWave<'a> {
                     break;
                 }
             }
-            if !all_healthy {
-                tokio::select! {
-                    _ = resources.status_changed.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    _ = daemon_token.cancelled() => {
-                        info!(
-                            "Wave priority {} startup interrupted by shutdown signal",
-                            self.priority
-                        );
-                        return;
-                    }
+
+            if all_healthy {
+                return;
+            }
+
+            // Wait for any status change, or a short periodic wake-up (defense in depth)
+            tokio::select! {
+                _ = notification => {}
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                _ = daemon_token.cancelled() => {
+                    info!(
+                        "Wave priority {} startup interrupted by shutdown signal",
+                        self.priority
+                    );
+                    return;
                 }
             }
         }
 
-        if !all_healthy {
-            warn!(
-                "Wave priority {} did not reach 'Healthy' status within {:?}, proceeding anyway",
-                self.priority, timeout
-            );
-        }
+        warn!(
+            "Wave priority {} did not reach 'Healthy' status within {:?}, proceeding anyway",
+            self.priority, timeout
+        );
     }
 }
 
@@ -495,6 +504,7 @@ pub async fn spawn_service(
     run: ServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
     policy: RestartPolicy,
+    scheduling: ServiceScheduling,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
@@ -509,7 +519,33 @@ pub async fn spawn_service(
         cancellation_token,
     );
 
-    let handle = tokio::spawn(supervisor.run_loop());
+    let handle = match scheduling {
+        ServiceScheduling::Isolated => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let thread_name = format!("svc-{}", name);
+
+            // Spawn a dedicated OS thread for this service
+            std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create isolated tokio runtime");
+
+                    rt.block_on(supervisor.run_loop());
+                    let _ = tx.send(());
+                })
+                .expect("Failed to spawn isolated service thread");
+
+            // Wrap the thread completion in a tokio task so we can return a JoinHandle
+            tokio::spawn(async move {
+                let _ = rx.await;
+            })
+        }
+        _ => tokio::spawn(supervisor.run_loop()),
+    };
+
     running_tasks.lock().await.insert(service_id, handle);
 }
 
@@ -553,6 +589,7 @@ pub async fn spawn_all_services(
                 service.entry.wrapper,
                 service.entry.watcher,
                 restart_policy,
+                service.entry.scheduling,
                 running_tasks.clone(),
                 resources.clone(),
                 service.cancellation_token.clone(),

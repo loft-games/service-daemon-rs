@@ -246,16 +246,33 @@ pub fn is_shutdown() -> bool {
 }
 
 /// Waits until the service is notified to stop or reload.
-/// This future completes when the service's cancellation or reload token is triggered.
 ///
-/// **Note**: If the service is still in a "Starting" phase, this function will
-/// implicitly transition it to `Healthy` status.
-pub async fn wait_shutdown() {
+/// **Spawn-safe**: captures lifecycle tokens at call-site so the returned
+/// future works even when polled from a `tokio::spawn`'d task (e.g.
+/// `axum::serve().with_graceful_shutdown(wait_shutdown())`) where
+/// `task_local!` context is unavailable.
+///
+/// Outside a `#[service]` scope, falls back to process-level shutdown only
+/// (skips `reload_token` -- an externally spawned task has no concept of
+/// individual service reloads).
+pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
     implicit_handshake();
-    if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
-        tokio::select! {
-            _ = id.cancellation_token.cancelled() => {}
-            _ = id.reload_token.cancelled() => {}
+
+    // Must capture tokens here (not inside the async block) because
+    // task_local is only accessible in the caller's task context.
+    let tokens =
+        CURRENT_SERVICE.try_with(|id| (id.cancellation_token.clone(), id.reload_token.clone()));
+    let process_cancel = super::identity::process_token().clone();
+
+    async move {
+        match tokens {
+            Ok((cancel, reload)) => {
+                tokio::select! {
+                    _ = cancel.cancelled() => {}
+                    _ = reload.cancelled() => {}
+                }
+            }
+            Err(_) => process_cancel.cancelled().await,
         }
     }
 }
@@ -291,7 +308,7 @@ pub async fn sleep(duration: Duration) -> bool {
 ///
 /// This function is typically called from the default `run_as_service`
 /// implementation in [`TriggerHost`](crate::models::trigger::TriggerHost) to check for user overrides before
-/// falling back to the template's self-declared [`ScalingPolicy`](crate::models::policy::ScalingPolicy).
+/// falling back to the template's self-declared [`ScalingPolicy`].
 ///
 /// # Panics
 ///
@@ -306,4 +323,40 @@ pub fn trigger_config<T: Any + Clone + Send + Sync>() -> Option<T> {
         })
         .ok()
         .flatten()
+}
+
+/// Spawns a new asynchronous task that inherits the current service identity and resources.
+///
+/// This is a convenience wrapper around `tokio::spawn` that automatically
+/// captures `CURRENT_SERVICE` and `CURRENT_RESOURCES` from the caller's task
+/// and applies them to the new task.
+///
+/// # Example
+/// ```rust,ignore
+/// use service_daemon::spawn_with_context;
+///
+/// spawn_with_context(async move {
+///     // This task has access to the same shelve/state as the parent service
+///     service_daemon::shelve("spawned", true).await;
+/// });
+/// ```
+pub fn spawn_with_context<Fut>(fut: Fut) -> tokio::task::JoinHandle<Fut::Output>
+where
+    Fut: Future + Send + 'static,
+    Fut::Output: Send + 'static,
+{
+    let identity = CURRENT_SERVICE.with(|id| id.clone());
+    let resources = CURRENT_RESOURCES.with(|r| r.clone());
+
+    tokio::spawn(async move { __run_service_scope(identity, resources, || fut).await })
+}
+
+/// Returns the `ServiceId` of the calling service.
+///
+/// Falls back to `ServiceId(0)` if called outside of a managed service scope
+/// (e.g., in a background task spawned via `tokio::spawn` without context propagation).
+pub fn current_service_id() -> crate::models::ServiceId {
+    CURRENT_SERVICE
+        .try_with(|identity| identity.service_id)
+        .unwrap_or_default()
 }

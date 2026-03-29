@@ -7,9 +7,7 @@ description = "Complete example: full lifecycle management with state(), shelve/
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
-    "macros",
     "cron",
-    "uuid-trigger-ids",
 ] }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"

@@ -1,6 +1,6 @@
-# The Interceptor Gauntlet
+# Trigger Middlewares (Interceptors)
 
-You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. But have you ever wondered *where* that magic lives? And more importantly -- can you add your own magic?
+You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. But have you ever wondered *where* that implementation lives? And more importantly -- can you add your own logic?
 
 The answer is **interceptors**: composable middleware layers that wrap the trigger dispatch pipeline.
 
@@ -12,10 +12,10 @@ Every time a trigger fires, the event payload passes through a chain of intercep
 
 ```text
 dispatch(payload)
-  +-- TracingInterceptor         ← creates the tracing span
-        +-- RetryInterceptor     ← retries on failure
+  +-- TracingInterceptor         <- creates the tracing span
+        +-- RetryInterceptor     <- retries on failure
               +-- [your interceptors here]
-                    +-- handler  ← your business logic
+                    +-- handler  <- your business logic
 ```
 
 Each layer decides **if, when, and how many times** to call the next one.
@@ -136,8 +136,8 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 ---
 
 > [!NOTE]
-> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically — and safe cross-task sharing for async dispatch.
+> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically - and safe cross-task sharing for async dispatch.
 
 ---
 
-[**<- Previous Step: Tailor-Made Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/tailor-made-triggers.md) | [**Next Step: Macro Magic Unleashed ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/macro-magic.md)
+[**<- Previous Step: Custom Trigger Implementation**](./tailor-made-triggers.md) | [**Next Step: Advanced Macro Usage ->**](./advanced-macros.md)

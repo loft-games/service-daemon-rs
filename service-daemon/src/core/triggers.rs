@@ -14,13 +14,17 @@
 //! 3. Implement `handle_step` using `&mut self` to access them.
 //! 4. Done! The engine takes care of the rest.
 
+use anyhow::{Error, Result};
 use futures::future::BoxFuture;
 use std::any::Any;
+use std::ops::Deref;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify, broadcast};
 use tracing::{info, warn};
 
 use crate::core::di::{Provided, WatchableProvided};
+use crate::core::managed_state::{TrackedNotify, TrackedSender};
+use crate::models::policy::ScalingPolicy;
 use crate::models::trigger::{TriggerHost, TriggerTransition};
 
 // ===========================================================================
@@ -38,11 +42,11 @@ pub struct SignalHost;
 
 impl<T> TriggerHost<T> for SignalHost
 where
-    T: Provided + std::ops::Deref<Target = tokio::sync::Notify> + Send + Sync + 'static,
+    T: Provided + Deref<Target = TrackedNotify> + Send + Sync + 'static,
 {
     type Payload = ();
 
-    fn setup(_target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+    fn setup(_target: Arc<T>) -> BoxFuture<'static, Result<Self>> {
         Box::pin(async { Ok(SignalHost) })
     }
 
@@ -52,7 +56,9 @@ where
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async move {
             target.notified().await;
-            TriggerTransition::Next(())
+            // Read the pre-generated (message_id, source_id) from notify_waiters()
+            let identity = target.last_id();
+            TriggerTransition::Next((), identity)
         })
     }
 }
@@ -78,19 +84,14 @@ pub struct TopicHost {
 
 impl<T, P> TriggerHost<T> for TopicHost
 where
-    T: Provided
-        + std::ops::Deref<Target = tokio::sync::broadcast::Sender<P>>
-        + Send
-        + Sync
-        + 'static,
+    T: Provided + Deref<Target = TrackedSender<P>> + Send + Sync + 'static,
     P: Clone + Send + Sync + 'static,
 {
     type Payload = P;
 
-    fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+    fn setup(target: Arc<T>) -> BoxFuture<'static, Result<Self>> {
         Box::pin(async move {
-            let rx: Arc<Mutex<tokio::sync::broadcast::Receiver<P>>> =
-                Arc::new(Mutex::new(target.subscribe()));
+            let rx: Arc<Mutex<broadcast::Receiver<P>>> = Arc::new(Mutex::new(target.subscribe()));
             Ok(TopicHost {
                 receiver: Box::new(rx),
             })
@@ -99,23 +100,27 @@ where
 
     fn handle_step<'a>(
         &'a mut self,
-        _target: &'a Arc<T>,
+        target: &'a Arc<T>,
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async move {
             // Recover the concrete receiver type from the type-erased field.
-            let rx_bridge: &Arc<Mutex<tokio::sync::broadcast::Receiver<P>>> = self
+            let rx_bridge: &Arc<Mutex<broadcast::Receiver<P>>> = self
                 .receiver
                 .downcast_ref()
                 .expect("TopicHost receiver type mismatch (internal bug)");
 
             let result = rx_bridge.lock().await.recv().await;
             match result {
-                Ok(value) => TriggerTransition::Next(value),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                Ok(value) => {
+                    // Read the pre-generated (message_id, source_id) from the TrackedSender
+                    let identity = target.last_id();
+                    TriggerTransition::Next(value, identity)
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
                     warn!("Queue trigger lagged by {} messages", n);
                     TriggerTransition::Stop
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                Err(broadcast::error::RecvError::Closed) => {
                     warn!("Queue trigger channel closed");
                     TriggerTransition::Stop
                 }
@@ -124,8 +129,8 @@ where
     }
 
     /// TopicHost is a streaming event source -- declare elastic scaling.
-    fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
-        Some(crate::models::policy::ScalingPolicy::default())
+    fn scaling_policy() -> Option<ScalingPolicy> {
+        Some(ScalingPolicy::default())
     }
 }
 
@@ -133,6 +138,8 @@ where
 // CronHost -- Cron Trigger Host
 // ===========================================================================
 
+#[cfg(feature = "cron")]
+use tokio::sync::OnceCell;
 /// Cron-based scheduled trigger host.
 ///
 /// Registers a job with the shared `tokio-cron-scheduler` and fires the
@@ -144,9 +151,12 @@ where
 /// # Aliases
 /// `TT::Cron`.
 #[cfg(feature = "cron")]
+use tokio_cron_scheduler::{Job, JobScheduler};
+
+#[cfg(feature = "cron")]
 pub struct CronHost {
     /// Bridge between the cron callback and our event loop.
-    bridge: Arc<tokio::sync::Notify>,
+    bridge: Arc<Notify>,
 }
 
 /// Process-wide cron scheduler shared by all trigger hosts.
@@ -154,16 +164,15 @@ pub struct CronHost {
 /// The daemon owns the process, so a single `OnceCell` scheduler is fine.
 /// Multiple `ServiceDaemon` instances (rare) will share this scheduler.
 #[cfg(feature = "cron")]
-static SHARED_SCHEDULER: tokio::sync::OnceCell<tokio_cron_scheduler::JobScheduler> =
-    tokio::sync::OnceCell::const_new();
+static SHARED_SCHEDULER: OnceCell<JobScheduler> = OnceCell::const_new();
 
 #[cfg(feature = "cron")]
-async fn get_shared_scheduler() -> anyhow::Result<tokio_cron_scheduler::JobScheduler> {
+async fn get_shared_scheduler() -> Result<JobScheduler> {
     SHARED_SCHEDULER
         .get_or_try_init(|| async {
-            let sched = tokio_cron_scheduler::JobScheduler::new().await?;
+            let sched = JobScheduler::new().await?;
             sched.start().await?;
-            Ok::<_, anyhow::Error>(sched)
+            Ok::<_, Error>(sched)
         })
         .await
         .cloned()
@@ -172,19 +181,19 @@ async fn get_shared_scheduler() -> anyhow::Result<tokio_cron_scheduler::JobSched
 #[cfg(feature = "cron")]
 impl<T> TriggerHost<T> for CronHost
 where
-    T: Provided + std::ops::Deref<Target = String> + Send + Sync + 'static,
+    T: Provided + Deref<Target = String> + Send + Sync + 'static,
 {
     type Payload = ();
 
-    fn setup(target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+    fn setup(target: Arc<T>) -> BoxFuture<'static, Result<Self>> {
         Box::pin(async move {
-            let notify = Arc::new(tokio::sync::Notify::new());
+            let notify = Arc::new(Notify::new());
             let notify_for_job = notify.clone();
             let schedule = target.to_string();
 
             let sched = get_shared_scheduler().await?;
 
-            let job = tokio_cron_scheduler::Job::new_async(&schedule, move |_uuid, _lock| {
+            let job = Job::new_async(&schedule, move |_uuid, _lock| {
                 let n = notify_for_job.clone();
                 Box::pin(async move {
                     n.notify_waiters();
@@ -204,7 +213,7 @@ where
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async move {
             self.bridge.notified().await;
-            TriggerTransition::Next(())
+            TriggerTransition::Next((), None)
         })
     }
 }
@@ -229,7 +238,7 @@ where
 {
     type Payload = ();
 
-    fn setup(_target: Arc<T>) -> BoxFuture<'static, anyhow::Result<Self>> {
+    fn setup(_target: Arc<T>) -> BoxFuture<'static, Result<Self>> {
         Box::pin(async { Ok(WatchHost) })
     }
 
@@ -239,7 +248,7 @@ where
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async {
             // Fire once, then tell the engine to idle until reload.
-            TriggerTransition::Reload(())
+            TriggerTransition::Reload((), None)
         })
     }
 }

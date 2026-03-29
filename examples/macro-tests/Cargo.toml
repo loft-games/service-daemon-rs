@@ -7,10 +7,8 @@ description = "Compile-time macro verification: trybuild pass/fail tests for #[s
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
-    "macros",
     "cron",
     "simulation",
-    "uuid-trigger-ids",
 ] }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"

@@ -1,4 +1,4 @@
-# Waves of Orchestration
+# Sequential Startup & Shutdown
 
 In a large system, order matters. You can't start your API Gateway before your Database is ready, and you shouldn't shut down your metrics logger until everything else has finished reporting.
 
@@ -30,7 +30,7 @@ async fn business_logic() { ... }
 async fn web_api() { ... }
 ```
 
-### The Magic Number
+### The Priority Value
 Under the hood, `priority` is a simple **`u8`** value. You are not limited to the pre-defined constants! Feel free to use any number between `0` and `255` to fine-tune your startup waves.
 
 ## 2. Startup: High to Low
@@ -55,4 +55,4 @@ When you stop the system (Ctrl+C), the process reverses. We want to stop the "ou
 
 ---
 
-[**<- Previous Step: Resilience Kung-Fu**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/resilience-kung-fu.md) | [**Next Step: Playing God: Simulator ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/playing-god.md)
+[**<- Previous Step: Error Handling & Retries**](./error-handling.md) | [**Next Step: Unit Testing & Simulation ->**](./unit-testing.md)

@@ -1,6 +1,6 @@
-# Macro Magic Unleashed
+# Advanced Macro Usage
 
-The `#[service]` and `#[trigger]` macros are the soul of the framework's "Invisible" design. But they are not just for basic registration--they are highly extensible.
+The `#[service]` and `#[trigger]` macros are the core of the framework's declarative design. But they are not just for basic registration--they are highly extensible.
 
 ---
 
@@ -58,8 +58,8 @@ You *could* build a `ServiceDescription` manually and pass it to the daemon. But
 
 ## Congratulations!
 
-You've completed the Grand Tour. You've gone from a simple heartbeat to understanding the deep internals and extensibility of `service-daemon-rs`.
+You've completed the Quick Start Guide. You've gone from a simple heartbeat to understanding the deep internals and extensibility of `service-daemon-rs`.
 
 Now, go forth and build something reliable!
 
-[**<- Previous Step: The Interceptor Gauntlet**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/interceptor-gauntlet.md) | [**Back to the Grand Tour ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/grand-tour.md)
+[**<- Previous Step: Trigger Middlewares (Interceptors)**](./trigger-interceptors.md) | [**Back to the Quick Start Guide ->**](./quick-start.md)

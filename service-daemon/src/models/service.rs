@@ -1,6 +1,7 @@
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
+use std::fmt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -18,6 +19,7 @@ pub type ServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<
 /// The human-readable `name` field on `ServiceDescription` is retained only
 /// for logging / tracing purposes ("weak identity").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub struct ServiceId(pub(crate) usize);
 
 impl ServiceId {
@@ -38,9 +40,93 @@ impl ServiceId {
     }
 }
 
-impl std::fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Default for ServiceId {
+    /// Returns ServiceId(0), which is the default for system/background tasks.
+    fn default() -> Self {
+        Self(0)
+    }
+}
+
+impl std::str::FromStr for ServiceId {
+    type Err = std::num::ParseIntError;
+
+    /// Parses a ServiceId from a string like "svc#1" or "1".
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let numeric_part = s.strip_prefix("svc#").unwrap_or(s);
+        numeric_part.parse::<usize>().map(Self::new)
+    }
+}
+
+impl fmt::Display for ServiceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "svc#{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// InstanceId: Zero-allocation trigger instance identifier.
+// Combines ServiceId + monotonic sequence for unique instance identification.
+// ---------------------------------------------------------------------------
+
+/// A unique identifier for a specific trigger invocation within a service.
+///
+/// Combines the owning service's [`ServiceId`] with a monotonically increasing
+/// sequence number to produce a globally unique, human-readable instance tag.
+///
+/// # Performance
+///
+/// `InstanceId` is 16 bytes, stack-allocated, and implements `Copy`. It
+/// replaces the previous `format!("{}:{}", service_id, seq)` pattern that
+/// required a heap allocation on every trigger dispatch cycle.
+///
+/// # Display Format
+///
+/// Formats as `svc#N:SEQ` (e.g. `svc#1:42`), matching the legacy string
+/// format for backward compatibility in log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub struct InstanceId {
+    /// The service that owns this trigger instance.
+    pub service_id: ServiceId,
+    /// Monotonically increasing sequence within this service's lifetime.
+    pub seq: u64,
+}
+
+impl InstanceId {
+    #[inline]
+    pub const fn new(service_id: ServiceId, seq: u64) -> Self {
+        Self { service_id, seq }
+    }
+}
+
+impl std::str::FromStr for InstanceId {
+    type Err = anyhow::Error;
+
+    /// Parses an `InstanceId` from a string like "svc#1:42".
+    /// Support both with and without "svc#" prefix on the service component.
+    fn from_str(s: &str) -> anyhow::Result<Self> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!(
+                "invalid instance_id format: '{}' (expected svc#N:SEQ)",
+                s
+            ));
+        }
+
+        let service_id = parts[0]
+            .parse::<ServiceId>()
+            .map_err(|e| anyhow::anyhow!("failed to parse service_id component: {}", e))?;
+        let seq = parts[1]
+            .parse::<u64>()
+            .map_err(|e| anyhow::anyhow!("failed to parse sequence component: {}", e))?;
+
+        Ok(Self::new(service_id, seq))
+    }
+}
+
+impl fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}", self.service_id, self.seq)
     }
 }
 
@@ -80,6 +166,28 @@ impl ServicePriority {
 }
 
 // ---------------------------------------------------------------------------
+// ServiceScheduling: Execution and isolation policy
+// ---------------------------------------------------------------------------
+
+/// Defines how a service should be scheduled and isolated.
+///
+/// This policy determines whether the service shares the global multi-threaded
+/// `tokio` runtime or receives a dedicated OS thread for isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub enum ServiceScheduling {
+    /// The default: scheduled on the shared multi-threaded `tokio` runtime.
+    /// Best for most services that don't have strict latency requirements.
+    #[default]
+    Standard,
+    /// High priority: hints the system to minimize latency (reserved for future use).
+    HighPriority,
+    /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
+    /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
+    Isolated,
+}
+
+// ---------------------------------------------------------------------------
 // ServiceEntry (static, compile-time) -- now includes `tags`
 // ---------------------------------------------------------------------------
 
@@ -94,6 +202,8 @@ pub struct ServiceEntry {
     pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub priority: u8,
+    /// Execution scheduling and isolation policy.
+    pub scheduling: ServiceScheduling,
     /// Compile-time tags assigned via `#[service(tags = ["core", "infra"])]`.
     /// Defaults to an empty slice when no tags are specified.
     pub tags: &'static [&'static str],
@@ -145,6 +255,12 @@ impl ServiceDescription {
         self.entry.params
     }
 
+    /// Execution scheduling and isolation policy.
+    #[inline]
+    pub fn scheduling(&self) -> ServiceScheduling {
+        self.entry.scheduling
+    }
+
     /// Module path where the service is defined.
     #[inline]
     pub fn module(&self) -> &'static str {
@@ -189,7 +305,7 @@ pub static SERVICE_REGISTRY: [ServiceEntry];
 /// The global provider registry -- providers register themselves here via `#[provider]` macro.
 ///
 /// Each entry records the provider's type identity and its dependency parameters,
-/// enabling full dependency graph construction (including Provider→Provider edges)
+/// enabling full dependency graph construction (including Provider->Provider edges)
 /// at startup for cycle detection.
 // Same: `linkme` `#[link_section]` in edition 2024.
 #[allow(unsafe_code)]
@@ -375,5 +491,30 @@ impl RegistryBuilder {
         }
 
         Registry { services }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_service_scheduling_default() {
+        assert_eq!(ServiceScheduling::default(), ServiceScheduling::Standard);
+    }
+
+    #[test]
+    fn test_service_entry_with_scheduling() {
+        let entry = ServiceEntry {
+            name: "test",
+            module: "test_mod",
+            params: &[],
+            wrapper: |_| Box::pin(async { Ok(()) }),
+            watcher: None,
+            priority: 50,
+            scheduling: ServiceScheduling::Isolated,
+            tags: &[],
+        };
+        assert_eq!(entry.scheduling, ServiceScheduling::Isolated);
     }
 }

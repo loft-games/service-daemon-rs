@@ -4,5 +4,7 @@ pub mod logging;
 pub mod managed_state;
 pub mod provider_init;
 pub mod service_daemon;
+#[cfg(feature = "diagnostics")]
+pub mod topology_collector;
 pub mod trigger_runner;
 pub mod triggers;

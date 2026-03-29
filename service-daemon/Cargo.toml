@@ -1,9 +1,9 @@
 [package]
 name = "service-daemon"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 rust-version = "1.85"
-description = "A sophisticated Rust framework for automatic service management, event-driven triggers, and compile-time dependency injection."
+description = "A declarative Rust framework for automatic service management, event-driven triggers, and compile-time dependency injection."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/loft-games/service-daemon-rs"
 keywords = ["daemon", "service", "dependency-injection", "tokio"]
@@ -11,29 +11,29 @@ categories = ["asynchronous", "rust-patterns"]
 readme = "../README.md"
 
 [features]
-default = ["cron", "uuid-trigger-ids"]
-macros = []
+default = ["cron"]
 # Enable cron-based triggers (uses tokio-cron-scheduler)
 cron = ["dep:tokio-cron-scheduler"]
-# Enable UUID-based trigger IDs (uses uuid crate)
-uuid-trigger-ids = ["dep:uuid"]
 # Enable simulation/testing support (MockContext, SimulationOverlay, log drain).
 # This feature gates all debugging utilities to guarantee zero overhead in production.
 simulation = []
 # Enable file-based log persistence with rotation (uses tracing-appender)
 file-logging = ["dep:tracing-appender", "dep:serde_json"]
+# Enable runtime behavioral topology collection and visualization.
+# Gates the topology collector service; message_id generation is always-on.
+diagnostics = []
 
 [dependencies]
-service-daemon-macro = { version = "0.1.0-alpha.2", path = "../service-daemon-macro" }
-tokio = { version = "1.43", features = ["full", "tracing"] }
+service-daemon-macro = { version = "0.1.0-alpha.3", path = "../service-daemon-macro" }
+tokio = { version = "1.50", features = ["full", "tracing"] }
 tokio-cron-scheduler = { version = "0.15", optional = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "2.0"
 futures = "0.3"
 linkme = "0.3"
-uuid = { version = "1.12", features = ["v7"], optional = true }
+uuid = { version = "1.23", features = ["v7", "serde"] }
 tokio-util = "0.7"
 rand = "0.10"
 dashmap = "6.1"

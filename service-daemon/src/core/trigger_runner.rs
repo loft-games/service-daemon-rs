@@ -20,16 +20,19 @@
 //! Each interceptor receives a [`DispatchContext`] by value and a `next`
 //! callback. The interceptor decides **if, when, and how many times** to
 //! call `next`, enabling patterns like retry, tracing spans, rate limiting,
-//! and circuit breaking — all as composable, user-extensible layers.
+//! and circuit breaking - all as composable, user-extensible layers.
 //!
 //! The `TriggerRunner` owns the `select!` + shutdown logic, so that trigger
 //! hosts only need to implement `handle_step` and get a clean, flat event loop.
 
+use anyhow::{Error, Result};
 use chrono::Utc;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 use tracing::{Instrument, info, warn};
 
 use crate::core::context;
@@ -38,6 +41,7 @@ use crate::models::service::ServiceId;
 use crate::models::trigger::{
     TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, TriggerTransition,
 };
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -45,23 +49,13 @@ use crate::models::trigger::{
 
 /// Generates a globally unique, time-ordered message ID for each trigger event.
 ///
-/// When the `uuid-trigger-ids` feature is enabled, this produces a UUID v7
-/// string whose high bits encode a millisecond-precision timestamp, guaranteeing
-/// lexicographic (dictionary) ordering that mirrors chronological ordering.
-/// This is beneficial for database indexing and ordered event replay.
+/// Produces a UUID v7 whose high bits encode a millisecond-precision timestamp,
+/// guaranteeing lexicographic ordering that mirrors chronological ordering.
+/// Returns the `Uuid` value directly (16 bytes, Copy, zero heap allocation).
 ///
 /// This is also called by the public `context::generate_message_id()` API.
-pub(crate) fn generate_message_id() -> String {
-    #[cfg(feature = "uuid-trigger-ids")]
-    {
-        uuid::Uuid::now_v7().to_string()
-    }
-    #[cfg(not(feature = "uuid-trigger-ids"))]
-    {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        format!("msg-{}", id)
-    }
+pub(crate) fn generate_message_id() -> Uuid {
+    Uuid::now_v7()
 }
 
 // ---------------------------------------------------------------------------
@@ -83,10 +77,12 @@ pub(crate) fn generate_message_id() -> String {
 pub struct DispatchContext<P> {
     /// The `ServiceId` of the trigger service.
     pub service_id: ServiceId,
+    /// The `ServiceId` of the service that originally emitted the event.
+    pub source_id: ServiceId,
     /// Monotonically increasing sequence number within this trigger service.
     pub instance_seq: u64,
-    /// Globally unique identifier for this event instance.
-    pub message_id: String,
+    /// Globally unique identifier for this event instance (UUID v7, time-ordered).
+    pub message_id: uuid::Uuid,
     /// Human-readable name of this trigger service (for logging/tracing).
     pub trigger_name: &'static str,
     /// The business payload, wrapped in `Arc` for cheap cloning across retries.
@@ -239,8 +235,8 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// 1 permit (serial dispatch, no elastic scaling).
     ///
     /// The default interceptor order is:
-    /// 1. `TracingInterceptor` — wraps everything in a tracing span
-    /// 2. `RetryInterceptor` — retries the inner chain on failure
+    /// 1. `TracingInterceptor` - wraps everything in a tracing span
+    /// 2. `RetryInterceptor` - retries the inner chain on failure
     /// 3. (user interceptors added via `with_interceptor`)
     /// 4. Terminal handler node (implicit)
     pub fn new(
@@ -339,12 +335,12 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// Returns `true` to continue the event loop, `false` to break out.
     async fn handle_transition(&self, transition: TriggerTransition<P>) -> bool {
         match transition {
-            TriggerTransition::Next(payload) => {
-                self.dispatch(payload).await;
+            TriggerTransition::Next(payload, pre_id) => {
+                self.dispatch(payload, pre_id).await;
                 true
             }
-            TriggerTransition::Reload(payload) => {
-                self.dispatch(payload).await;
+            TriggerTransition::Reload(payload, pre_id) => {
+                self.dispatch(payload, pre_id).await;
                 info!("Trigger '{}' entering reload-wait state", self.name);
                 context::wait_shutdown().await;
                 false
@@ -396,18 +392,17 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
         tokio::spawn(async move {
             // Track how long the queue has been idle (all permits available)
-            let mut idle_since: Option<tokio::time::Instant> = None;
+            let mut idle_since: Option<Instant> = None;
 
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
 
                 let limit = current_limit.load(Ordering::Relaxed);
                 let available = semaphore.available_permits();
                 let in_flight = limit.saturating_sub(available);
 
-                // --- Path A: Queue is idle (all permits available) ---
                 if in_flight == 0 {
-                    idle_since.get_or_insert_with(tokio::time::Instant::now);
+                    idle_since.get_or_insert_with(Instant::now);
                     Self::try_scale_down(
                         &semaphore,
                         &current_limit,
@@ -447,7 +442,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         scaling: &ScalingPolicy,
         trigger_name: &str,
         limit: usize,
-        idle_since: &mut Option<tokio::time::Instant>,
+        idle_since: &mut Option<Instant>,
     ) {
         let Some(since) = *idle_since else { return };
         if since.elapsed() < scaling.scale_cooldown || limit <= scaling.initial_concurrency {
@@ -536,9 +531,10 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     ///
     /// If the semaphore has no available permits, the event loop will wait
     /// here until a running handler finishes, providing natural backpressure.
-    async fn dispatch(&self, payload: P) {
+    async fn dispatch(&self, payload: P, identity: Option<(uuid::Uuid, ServiceId)>) {
         let seq = self.instance_counter.fetch_add(1, Ordering::Relaxed);
-        let message_id = generate_message_id();
+        let (message_id, source_id) =
+            identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
 
         // Acquire a concurrency permit (backpressure point)
         let permit = self
@@ -550,6 +546,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
         let ctx = DispatchContext {
             service_id: self.service_id,
+            source_id,
             instance_seq: seq,
             message_id,
             trigger_name: self.name,
@@ -562,12 +559,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let chain = self.build_chain();
         let trigger_name = self.name;
 
-        // Spawn the dispatch as an independent task so the event loop
-        // can immediately return to handle_step for the next event.
-        tokio::spawn(async move {
-            let result = chain(ctx).await;
-
-            if let Err(e) = result {
+        // Use the context-aware spawn to propagate identity and resources automatically
+        context::spawn_with_context(async move {
+            if let Err(e) = chain(ctx).await {
                 warn!(
                     trigger = %trigger_name,
                     error = %e,
@@ -601,7 +595,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     instance_seq: ctx.instance_seq,
                     message: TriggerMessage {
                         message_id: ctx.message_id,
-                        source_id: ctx.service_id,
+                        source_id: ctx.source_id,
                         timestamp: Utc::now(),
                         payload: ctx.payload,
                     },
@@ -641,13 +635,14 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 /// # Span Fields
 ///
 /// - `name`: The trigger service name.
-/// - `instance_id`: `{service_id}:{sequence}` for correlating invocations.
+/// - `instance_svc_id`: Numeric `ServiceId` value for zero-allocation capture.
+/// - `instance_seq`: Monotonic sequence number within the service.
 /// - `message_id`: The globally unique event identifier.
 ///
 /// # Log Output
 ///
 /// ```text
-/// INFO trigger{name="my_trigger" instance_id="svc#1:0" message_id="msg-0"}: Trigger fired
+/// INFO trigger{name="my_trigger" instance_id=svc#1:0 message_id="msg-0"}: Trigger fired
 /// ```
 pub(crate) struct TracingInterceptor;
 
@@ -658,11 +653,16 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
         next: Next<'a, P>,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
+            let mid_val = ctx.message_id.as_u128();
             let span = tracing::info_span!(
                 "trigger",
                 name = %ctx.trigger_name,
-                instance_id = %format!("{}:{}", ctx.service_id, ctx.instance_seq),
+                service_id_num = ctx.service_id.value(),
+                source_service_id = ctx.source_id.value(),
+                instance_seq = ctx.instance_seq,
                 message_id = %ctx.message_id,
+                mid_hi = (mid_val >> 64) as u64,
+                mid_lo = mid_val as u64,
             );
 
             info!(parent: &span, "Trigger fired");
@@ -679,10 +679,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
 /// Log the failure, record it in the backoff controller, and wait for the
 /// computed delay. Returns `Err` if shutdown interrupts the wait, allowing
 /// the caller to propagate the original error upward.
-async fn record_retry_failure(
-    backoff: &mut BackoffController,
-    error: anyhow::Error,
-) -> anyhow::Result<()> {
+async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> Result<()> {
     warn!(
         attempt = backoff.attempt_count() + 1,
         error = %error,
@@ -741,6 +738,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
 
             // Preserve shared fields for reconstruction across retries
             let service_id = ctx.service_id;
+            let source_id = ctx.source_id;
             let instance_seq = ctx.instance_seq;
             let message_id = ctx.message_id;
             let trigger_name = ctx.trigger_name;
@@ -751,8 +749,9 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
             // interceptor chain below us)
             let first_ctx = DispatchContext {
                 service_id,
+                source_id,
                 instance_seq,
-                message_id: message_id.clone(),
+                message_id,
                 trigger_name,
                 payload: payload.clone(),
                 handler: handler.clone(),
@@ -792,8 +791,8 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                     service_id,
                     instance_seq,
                     message: TriggerMessage {
-                        message_id: message_id.clone(),
-                        source_id: service_id,
+                        message_id,
+                        source_id,
                         timestamp: Utc::now(),
                         payload: payload.clone(),
                     },
@@ -945,7 +944,7 @@ mod tests {
         );
     }
 
-    /// Verifies that a full scale-down → scale-up roundtrip works correctly:
+    /// Verifies that a full scale-down -> scale-up roundtrip works correctly:
     /// permits are physically revoked during scale-down and physically restored
     /// during scale-up.
     #[tokio::test]
@@ -962,7 +961,7 @@ mod tests {
         let semaphore = Arc::new(Semaphore::new(4));
         let current_limit = Arc::new(AtomicUsize::new(4));
 
-        // --- Phase 1: Scale down from 4 → 2 ---
+        // --- Phase 1: Scale down from 4 -> 2 ---
         tokio::time::sleep(Duration::from_millis(20)).await;
         let mut idle_since = Some(tokio::time::Instant::now() - Duration::from_millis(50));
 
@@ -978,7 +977,7 @@ mod tests {
         assert_eq!(current_limit.load(Ordering::Relaxed), 2);
         assert_eq!(semaphore.available_permits(), 2);
 
-        // --- Phase 2: Scale up from 2 → 4 ---
+        // --- Phase 2: Scale up from 2 -> 4 ---
         // Simulate pressure: acquire both permits so in_flight = 2
         let _p1 = semaphore.clone().try_acquire_owned().unwrap();
         let _p2 = semaphore.clone().try_acquire_owned().unwrap();
@@ -1004,7 +1003,7 @@ mod tests {
         // With threshold=5, pressure_limit = limit * 5 / 6
         let threshold: usize = 5;
 
-        // Case 1: limit=1 → pressure_limit = 0 → any in_flight triggers scale
+        // Case 1: limit=1 -> pressure_limit = 0 -> any in_flight triggers scale
         let limit: usize = 1;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 0);
@@ -1013,14 +1012,14 @@ mod tests {
             "Single in-flight should trigger scale-up"
         );
 
-        // Case 2: limit=6 → pressure_limit = 5 → need 5+ in_flight to trigger
+        // Case 2: limit=6 -> pressure_limit = 5 -> need 5+ in_flight to trigger
         let limit: usize = 6;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 5);
         assert!(5 >= pressure_limit, "5 of 6 should trigger scale-up");
         assert!(4 < pressure_limit, "4 of 6 should NOT trigger scale-up");
 
-        // Case 3: limit=12 → pressure_limit = 10
+        // Case 3: limit=12 -> pressure_limit = 10
         let limit: usize = 12;
         let pressure_limit = limit * threshold / (threshold + 1);
         assert_eq!(pressure_limit, 10);
@@ -1129,14 +1128,13 @@ mod tests {
     // UUID v7 monotonic ordering test
     // -----------------------------------------------------------------------
 
-    /// Verifies that `generate_message_id` produces lexicographically ordered
-    /// IDs when the `uuid-trigger-ids` feature is enabled (UUID v7).
+    /// Verifies that `generate_message_id` produces monotonically ordered
+    /// UUID v7 values.
     ///
     /// UUID v7 encodes a millisecond-precision timestamp in its high bits,
     /// so consecutive calls should yield IDs that sort in chronological order.
     /// This property is critical for database index locality and ordered
     /// event replay.
-    #[cfg(feature = "uuid-trigger-ids")]
     #[test]
     fn test_message_id_monotonic_ordering() {
         let mut previous = generate_message_id();
@@ -1145,7 +1143,9 @@ mod tests {
             assert!(
                 current >= previous,
                 "UUID v7 IDs must be monotonically non-decreasing: \
-                 previous={previous}, current={current}"
+                 previous={}, current={}",
+                previous,
+                current
             );
             previous = current;
         }

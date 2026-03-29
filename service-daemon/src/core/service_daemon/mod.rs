@@ -24,7 +24,7 @@ use petgraph::graph::DiGraph;
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::core::context::DaemonResources;
+use crate::core::context::{DaemonResources, process_token};
 use crate::models::{
     Registry, Result as ServiceResult, ServiceDescription, ServiceId, ServiceStatus,
 };
@@ -203,7 +203,7 @@ impl ServiceDaemon {
 
     /// **[Simulation Only]** Returns a clone of the daemon's internal resources.
     ///
-    /// This is used by `SimulationHandle` to perform dynamic injection ("God Hand")
+    /// This is used by `SimulationHandle` to perform dynamic injection ("SimulationHandle")
     /// during a running simulation. Since `DaemonResources` uses `Arc` internally,
     /// modifications through the returned clone are immediately visible to all services.
     ///
@@ -247,6 +247,9 @@ impl ServiceDaemon {
             &self.cancellation_token,
         )
         .await;
+
+        #[cfg(feature = "diagnostics")]
+        crate::core::topology_collector::start_topology_collector();
 
         info!(
             "ServiceDaemon running with {} service(s).",
@@ -347,6 +350,14 @@ impl ServiceDaemon {
             self.restart_policy.wave_stop_timeout,
         )
         .await;
+
+        #[cfg(feature = "diagnostics")]
+        if let Some(mermaid) = crate::core::topology_collector::export_mermaid() {
+            println!("\n=== BEHAVIORAL TOPOLOGY (MERMAID) ===\n");
+            println!("{}\n", mermaid);
+            println!("====================================\n");
+        }
+
         info!("ServiceDaemon stopped.");
     }
 
@@ -373,6 +384,7 @@ impl ServiceDaemon {
                 service.entry.wrapper,
                 service.entry.watcher,
                 test_policy,
+                service.entry.scheduling,
                 self.running_tasks.clone(),
                 self.resources.clone(),
                 service.cancellation_token.clone(),
@@ -582,7 +594,7 @@ impl ServiceDaemonBuilder {
             services,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
-            cancellation_token: CancellationToken::new(),
+            cancellation_token: process_token().child_token(),
             external_cancel_token: self.external_cancel_token,
             resources,
         }
@@ -611,7 +623,7 @@ impl ServiceDaemonBuilder {
         // TypeId -> NodeIndex (provider types as nodes)
         let mut type_nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
 
-        // Phase 1: Service → Provider edges (from ServiceDescription::params).
+        // Phase 1: Service -> Provider edges (from ServiceDescription::params).
         for service in services {
             let svc_node = *service_nodes
                 .entry(service.name())
@@ -627,7 +639,7 @@ impl ServiceDaemonBuilder {
             }
         }
 
-        // Phase 2: Provider → Provider edges (from PROVIDER_REGISTRY).
+        // Phase 2: Provider -> Provider edges (from PROVIDER_REGISTRY).
         //
         // This completes the DAG by adding edges between provider types,
         // enabling detection of circular provider dependencies (e.g.,
@@ -647,7 +659,7 @@ impl ServiceDaemonBuilder {
             }
         }
 
-        // Phase 3: Topological sort — Err means a cycle exists.
+        // Phase 3: Topological sort - Err means a cycle exists.
         match toposort(&graph, None) {
             Ok(_order) => {
                 // Graph is acyclic. Log the dependency summary.
@@ -678,7 +690,7 @@ impl ServiceDaemonBuilder {
                     total_providers = crate::models::PROVIDER_REGISTRY.len(),
                     total_graph_nodes = graph.node_count(),
                     total_graph_edges = graph.edge_count(),
-                    "Dependency graph validated — no cycles detected"
+                    "Dependency graph validated - no cycles detected"
                 );
             }
             Err(cycle_node) => {

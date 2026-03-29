@@ -9,7 +9,7 @@
 //! resources (shelf data, status overrides) and produces a `ServiceDaemonBuilder`
 //! that spawns a fully real `ServiceDaemon` with those resources injected.
 //!
-//! After the daemon starts, a `SimulationHandle` provides "God Hand" capabilities
+//! After the daemon starts, a `SimulationHandle` provides "SimulationHandle" capabilities
 //! for dynamic intervention -- modifying shelf data, flipping service status, or
 //! triggering reload signals while the daemon is running.
 //!
@@ -23,7 +23,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 // =============================================================================
-// SimulationHandle -- The "God Hand" for dynamic intervention
+// SimulationHandle -- The "SimulationHandle" for dynamic intervention
 // =============================================================================
 
 /// A handle for dynamically intervening in a running simulation.
@@ -168,13 +168,13 @@ impl SimulationHandle {
     /// If you are reaching for `resources()` to bypass [`get_shelf`] / [`get_status`],
     /// you are an advanced user who reads source code. This documentation is
     /// placed at the point of danger so you encounter it exactly when you need it.
-    /// A FAQ entry would be invisible to someone skimming the API surface.
+    /// A FAQ entry would be boilerplate-free to someone skimming the API surface.
     ///
     /// ## The Problem
     ///
     /// `DashMap::get()` returns a `Ref<K, V>` that **holds an internal shard lock**
     /// for the entire lifetime of the `Ref`. These guards look like ordinary
-    /// variables, but they are **invisible lock bombs**.
+    /// variables, but they are **unbounded lock hazards**.
     ///
     /// ## Real Failure Scenario
     ///
@@ -265,7 +265,7 @@ pub struct MockContext;
 pub struct MockContextBuilder {
     resources: Arc<DaemonResources>,
     /// Whether to auto-include framework logging services in the simulation.
-    /// Default: `true` — matches production behavior.
+    /// Default: `true` - matches production behavior.
     enable_logging: bool,
 }
 
@@ -309,7 +309,7 @@ impl MockContextBuilder {
     /// Controls whether framework logging services (`log_service`) are
     /// automatically included in the simulation registry.
     ///
-    /// Default: `true` — logging services are included to match production
+    /// Default: `true` - logging services are included to match production
     /// behavior and provide consistent log output in tests.
     ///
     /// Set to `false` for lightweight tests that don't need log output.

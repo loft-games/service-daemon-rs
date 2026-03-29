@@ -2,75 +2,21 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::parse::Parse;
-use syn::{ItemFn, Token, parse_macro_input};
+use syn::{ItemFn, parse_macro_input};
 
-use crate::common::{ExtractedParams, TagsList, extract_sync_handler_flag};
+use crate::common::{ExtractedParams, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
 
-// -----------------------------------------------------------------------------
-// Structured attribute parser (replaces the old string-based parse_service_attr)
-// -----------------------------------------------------------------------------
+mod parser;
 
-/// Parsed result of `#[service(...)]` attributes.
-///
-/// Supports the following syntax:
-/// ```ignore
-/// #[service]                                        // all defaults
-/// #[service(priority = 80)]                         // priority only
-/// #[service(tags = ["infra", "core"])]              // tags only
-/// #[service(priority = 80, tags = ["infra"])]       // both
-/// ```
-struct ServiceAttr {
-    priority: proc_macro2::TokenStream,
-    tags: proc_macro2::TokenStream,
-}
-
-impl Parse for ServiceAttr {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut priority: proc_macro2::TokenStream = quote!(50);
-        let mut tags: proc_macro2::TokenStream = quote!(&[]);
-
-        // Parse comma-separated key=value pairs
-        while !input.is_empty() {
-            let key: syn::Ident = input.parse()?;
-            input.parse::<Token![=]>()?;
-
-            match key.to_string().as_str() {
-                "priority" => {
-                    let value: syn::Expr = input.parse()?;
-                    priority = quote!(#value);
-                }
-                "tags" => {
-                    let tag_list: TagsList = input.parse()?;
-                    tags = tag_list.to_tokens();
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!(
-                            "Unknown service attribute '{}'. Supported: priority, tags",
-                            other
-                        ),
-                    ));
-                }
-            }
-
-            // Consume optional trailing comma
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            }
-        }
-
-        Ok(ServiceAttr { priority, tags })
-    }
-}
+use parser::ServiceAttr;
 
 /// Implementation of the `#[service]` attribute macro.
 pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse attributes using syn-based structured parsing
     let args = parse_macro_input!(attr as ServiceAttr);
     let priority_tokens = args.priority;
+    let scheduling_tokens = args.scheduling;
     let tags_tokens = args.tags;
 
     let input = parse_macro_input!(item as ItemFn);
@@ -118,52 +64,45 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);
 
-    let inner_vis = match vis {
-        syn::Visibility::Public(_) => quote!(pub),
-        _ => quote!(pub(crate)),
-    };
+    let inner_vis = scope_inner_visibility(vis);
+    let user_scope = crate::common::generate_user_scope_mod(
+        &scope_mod,
+        &inner_vis,
+        &clean_sig,
+        &cleaned_attrs,
+        body,
+    );
+
+    let wrapper_fn = crate::common::generate_wrapper_fn(
+        &wrapper_name,
+        &quote! {
+            #(#resolve_tokens)*
+            #call_expr
+        },
+    );
+
+    let registry_entry =
+        crate::common::generate_static_registry_entry(crate::common::RegistryEntryInput {
+            entry_name: &entry_name,
+            fn_name_str: &fn_name_str,
+            param_entries: &param_entries,
+            wrapper_name: &wrapper_name,
+            watcher_ptr: &watcher_ptr,
+            priority: &priority_tokens,
+            scheduling: &scheduling_tokens,
+            tags: &tags_tokens,
+        });
 
     let expanded = quote! {
-        mod #scope_mod {
-            #[allow(unused_imports)]
-            use super::*;
-
-            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
-            #[allow(unused_imports)]
-            use service_daemon::core::managed_state::{RwLock, Mutex};
-
-            #(#cleaned_attrs)*
-            #inner_vis #clean_sig {
-                #body
-            }
-        }
+        #user_scope
 
         #vis use #scope_mod::#fn_name;
 
-        /// Auto-generated wrapper for the service - resolves dependencies via Type-Based DI
-        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async move {
-                #(#resolve_tokens)*
-                #call_expr
-            })
-        }
+        #wrapper_fn
 
         #watcher_fn
 
-        /// Auto-generated static registry entry - collected by linkme at link time
-        #[allow(unsafe_code)] // linkme uses #[link_section] internally
-        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
-            name: #fn_name_str,
-            module: module_path!(),
-            params: &[#(#param_entries),*],
-            wrapper: #wrapper_name,
-            watcher: #watcher_ptr,
-            priority: #priority_tokens,
-            tags: #tags_tokens,
-        };
-
+        #registry_entry
     };
 
     TokenStream::from(expanded)

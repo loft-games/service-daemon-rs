@@ -17,14 +17,15 @@ pub mod simulation;
 
 // Identity types (used by runner.rs, service_daemon, macros)
 // These re-exports are used by tests and by simulation_tests
+pub(crate) use identity::process_token;
 #[cfg(test)]
 pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{
-    __run_service_scope, done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config,
-    unshelve, wait_shutdown,
+    __run_service_scope, current_service_id, done, is_shutdown, shelve, shelve_clone, sleep,
+    spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
 };
 
 #[cfg(feature = "simulation")]
@@ -36,7 +37,7 @@ pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ServiceId, ServiceStatus};
+    use crate::models::{ScalingPolicy, ServiceId, ServiceStatus};
     use std::any::TypeId;
     use std::future::Future;
     use std::sync::Arc;
@@ -218,7 +219,7 @@ mod tests {
         let identity = create_test_identity("tc_empty");
 
         let result = in_scope(identity, resources, || async {
-            trigger_config::<crate::models::ScalingPolicy>()
+            trigger_config::<ScalingPolicy>()
         })
         .await;
 
@@ -229,18 +230,18 @@ mod tests {
     #[tokio::test]
     async fn test_trigger_config_returns_registered_value() {
         let resources = create_test_resources();
-        let sp = crate::models::ScalingPolicy::builder()
+        let sp = ScalingPolicy::builder()
             .initial_concurrency(8)
             .max_concurrency(32)
             .build();
         resources
             .trigger_configs
-            .insert(TypeId::of::<crate::models::ScalingPolicy>(), Box::new(sp));
+            .insert(TypeId::of::<ScalingPolicy>(), Box::new(sp));
 
         let identity = create_test_identity("tc_registered");
 
         let result = in_scope(identity, resources, || async {
-            trigger_config::<crate::models::ScalingPolicy>()
+            trigger_config::<ScalingPolicy>()
         })
         .await;
 
@@ -260,13 +261,11 @@ mod tests {
         let resources = create_test_resources();
 
         // Register two different types
-        let sp = crate::models::ScalingPolicy::builder()
-            .initial_concurrency(4)
-            .build();
+        let sp = ScalingPolicy::builder().initial_concurrency(4).build();
         let custom = MyCustomConfig { rate_limit: 100 };
         resources
             .trigger_configs
-            .insert(TypeId::of::<crate::models::ScalingPolicy>(), Box::new(sp));
+            .insert(TypeId::of::<ScalingPolicy>(), Box::new(sp));
         resources
             .trigger_configs
             .insert(TypeId::of::<MyCustomConfig>(), Box::new(custom));
@@ -274,8 +273,7 @@ mod tests {
         let identity = create_test_identity("tc_multi");
 
         in_scope(identity, resources, || async {
-            let sp = trigger_config::<crate::models::ScalingPolicy>()
-                .expect("ScalingPolicy should be present");
+            let sp = trigger_config::<ScalingPolicy>().expect("ScalingPolicy should be present");
             assert_eq!(sp.initial_concurrency, 4);
 
             let custom =
@@ -292,7 +290,7 @@ mod tests {
     /// Verify that trigger_config returns None outside a service scope.
     #[tokio::test]
     async fn test_trigger_config_outside_scope_returns_none() {
-        let result = trigger_config::<crate::models::ScalingPolicy>();
+        let result = trigger_config::<ScalingPolicy>();
         assert!(result.is_none());
     }
 }
@@ -343,7 +341,7 @@ mod simulation_tests {
         // Initially empty
         assert!(handle.resources().shelf.get("svc").is_none());
 
-        // Dynamic injection via God Hand
+        // Dynamic injection via SimulationHandle
         handle.set_shelf::<i32>("svc", "counter", 99);
 
         // Now visible
@@ -371,7 +369,7 @@ mod simulation_tests {
             ServiceStatus::Initializing
         );
 
-        // Phase 2: God Hand flips status
+        // Phase 2: SimulationHandle flips status
         handle.set_status(svc_id, ServiceStatus::NeedReload);
 
         assert_eq!(

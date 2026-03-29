@@ -47,8 +47,11 @@ use futures::future::BoxFuture;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use super::service::ServiceId;
+use super::policy::{RestartPolicy, ScalingPolicy};
+use super::service::{InstanceId, ServiceId};
 use crate::core::context;
+use crate::core::trigger_runner::TriggerRunner;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Payload extraction helper (used by macro-generated code)
@@ -101,8 +104,8 @@ pub fn trigger_clone_payload<T: Clone>(arc_payload: &T) -> T {
 /// invocation you can answer "which stone caused this ripple?".
 #[derive(Debug, Clone)]
 pub struct TriggerMessage<P> {
-    /// Globally unique identifier for this event instance.
-    pub message_id: String,
+    /// Globally unique identifier for this event instance (UUID v7, time-ordered).
+    pub message_id: Uuid,
     /// The `ServiceId` of the service that published this message.
     pub source_id: ServiceId,
     /// Timestamp when the message was created.
@@ -143,8 +146,11 @@ impl<P> TriggerContext<P> {
     ///
     /// This links the handler invocation to a specific trigger service and
     /// a specific sequence number within that service's lifetime.
-    pub fn trigger_instance_id(&self) -> String {
-        format!("{}:{}", self.service_id, self.instance_seq)
+    ///
+    /// Returns a stack-allocated [`InstanceId`] (16 bytes, `Copy`) instead
+    /// of a heap-allocated `String`.
+    pub fn trigger_instance_id(&self) -> InstanceId {
+        InstanceId::new(self.service_id, self.instance_seq)
     }
 }
 
@@ -176,18 +182,18 @@ pub type TriggerHandler<P> = Arc<
 ///   existing service reload mechanism).
 /// - [`Stop`](TriggerTransition::Stop): Exit the event loop cleanly.
 pub enum TriggerTransition<P> {
-    /// Deliver the payload and continue the event loop.
-    ///
-    /// Used by streaming triggers (Signal, Queue) that process
-    /// a continuous flow of events within a single service lifetime.
-    Next(P),
+    /// The optional `(Uuid, ServiceId)` carries a pre-generated message ID and
+    /// source service ID from a tracked primitive (e.g., `TrackedNotify`).
+    /// When `None`, the `TriggerRunner` will generate a new ID automatically.
+    Next(P, Option<(Uuid, ServiceId)>),
 
     /// Deliver the payload, then idle until the framework restarts us.
     ///
     /// Used by state-watch triggers: fire once with the current snapshot,
     /// then wait. When the target provider changes, the `ServiceWatcher`
     /// will abort this instance and spawn a fresh one with updated state.
-    Reload(P),
+    /// The optional `(Uuid, ServiceId)` carries a pre-generated message identity.
+    Reload(P, Option<(Uuid, ServiceId)>),
 
     /// Exit the event loop without dispatching. The trigger stops entirely.
     Stop,
@@ -319,16 +325,10 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
 
             // Priority chain: user override > template declaration > None
             let scaling =
-                crate::core::context::trigger_config::<crate::models::policy::ScalingPolicy>()
-                    .or_else(|| Self::scaling_policy());
+                context::trigger_config::<ScalingPolicy>().or_else(|| Self::scaling_policy());
 
-            let runner = crate::core::trigger_runner::TriggerRunner::new(
-                name,
-                service_id,
-                handler,
-                crate::models::policy::RestartPolicy::default(),
-                scaling,
-            );
+            let runner =
+                TriggerRunner::new(name, service_id, handler, RestartPolicy::default(), scaling);
 
             runner.run_with_host::<T, Self>(&mut host, target).await
         })

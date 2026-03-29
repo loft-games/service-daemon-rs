@@ -28,7 +28,7 @@ One of the most powerful features is how the framework handles shared state with
 The macros perform a "replacement" of standard types:
 - `Arc<RwLock<T>>` is transparently redirected to a tracked version that reports changes to `Watch` triggers.
 - **Span Preservation**: By using `quote_spanned!`, the macro attaches the original source code's "span" to the generated code.
-- **Intellisense Friendly**: Because of span preservation, `rust-analyzer` still sees your original types, allowing "Jump to Definition" and documentation hints to work perfectly.
+- **Intellisense Friendly**: Because of span preservation, `rust-analyzer` still sees your original types, allowing "Jump to Definition" and documentation hints to work reliably.
 
 ### Qualified Path Support
 The macros are robust enough to handle various import styles:

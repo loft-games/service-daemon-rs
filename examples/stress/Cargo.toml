@@ -22,7 +22,7 @@ s900 = ["s800"]
 s1000 = ["s900"]
 
 [dependencies]
-service-daemon = { path = "../../service-daemon", features = ["macros"] }
+service-daemon = { path = "../../service-daemon" }
 tokio = { version = "1.43", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

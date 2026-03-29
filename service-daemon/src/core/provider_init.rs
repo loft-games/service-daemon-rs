@@ -2,6 +2,7 @@ use crate::models::{BackoffController, ProviderError, RestartPolicy};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -78,7 +79,7 @@ where
 
 async fn wait_or_cancel_or_timeout(dur: Duration, cancel: &CancellationToken) -> bool {
     tokio::select! {
-        _ = tokio::time::sleep(dur) => true,
+        _ = sleep(dur) => true,
         _ = cancel.cancelled() => false,
     }
 }
@@ -86,6 +87,7 @@ async fn wait_or_cancel_or_timeout(dur: Duration, cancel: &CancellationToken) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     #[tokio::test]
     async fn init_fallible_retries_then_succeeds() {
@@ -102,13 +104,13 @@ mod tests {
         };
 
         let cancel = CancellationToken::new();
-        let attempts = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let attempts = Arc::new(AtomicU32::new(0));
         let attempts2 = attempts.clone();
 
         let v = init_fallible(policy, cancel, move || {
             let attempts = attempts2.clone();
             async move {
-                let n = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let n = attempts.fetch_add(1, Ordering::SeqCst);
                 if n < 2 {
                     Err(ProviderError::Retryable("not yet".to_owned()))
                 } else {
@@ -119,7 +121,7 @@ mod tests {
         .await;
 
         assert_eq!(*v, 42);
-        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert!(attempts.load(Ordering::SeqCst) >= 3);
     }
 
     #[tokio::test]

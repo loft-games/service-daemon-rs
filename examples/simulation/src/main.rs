@@ -2,7 +2,7 @@
 //!
 //! This example demonstrates the `simulation` feature with **real `#[service]`** functions:
 //! - `MockContext::builder()` for creating isolated simulation environments
-//! - `SimulationHandle` for dynamic "God Hand" intervention
+//! - `SimulationHandle` for dynamic "SimulationHandle" intervention
 //! - Real `#[service]`-annotated services running inside a sandbox `ServiceDaemon`
 //!
 //! The `simulation` feature is compile-time gated: all simulation types are

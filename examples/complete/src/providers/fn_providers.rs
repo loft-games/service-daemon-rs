@@ -11,7 +11,7 @@ use super::typed_providers::{DbUrl, Port};
 /// A composite connection string assembled from `Port` and `DbUrl` providers.
 ///
 /// This provider demonstrates the async fn dependency injection chain:
-/// `Port` + `DbUrl` → `ConnectionString` (via async fn with Arc params).
+/// `Port` + `DbUrl` -> `ConnectionString` (via async fn with Arc params).
 #[derive(Clone)]
 pub struct ConnectionString(pub String);
 

@@ -156,7 +156,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let mut param_entries = Vec::new();
 
     for arg in fn_inputs {
-        // Reject `self` / `&self` / `&mut self` — providers must be free functions.
+        // Reject `self` / `&self` / `&mut self` - providers must be free functions.
         if let syn::FnArg::Receiver(_) = arg {
             abort!(
                 arg,

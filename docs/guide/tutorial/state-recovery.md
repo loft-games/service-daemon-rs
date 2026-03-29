@@ -1,4 +1,4 @@
-# The Art of Recovery
+# State Management & Recovery
 
 Systems fail. Networks drop, databases crash, and someone might change a configuration value while your service is running. 
 
@@ -130,10 +130,10 @@ INFO counter_service: Restored count: 2
 INFO counter_service: Count is: 3
 ```
 
-To the user, it looks like a seamless update. To the developer, it's a clean state migration.
+To the user, it looks like an automatic update. To the developer, it's a clean state migration.
 
 > [!NOTE]
-> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/state-management.md) design document.
+> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](../state-management.md) design document.
 
 ## 3. Why this matters? (The Provider Update)
 
@@ -196,4 +196,4 @@ This pattern enables **Reactive Architecture**: your services automatically adap
 
 ---
 
-[**<- Previous Step: Reactive Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md) | [**Next Step: DIY Providers ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/diy-providers.md)
+[**<- Previous Step: Reactive Triggers**](./reactive-triggers.md) | [**Next Step: DIY Providers ->**](./diy-providers.md)

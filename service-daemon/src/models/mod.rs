@@ -10,9 +10,9 @@ pub use policy::{
 };
 pub use provider_error::ProviderError;
 pub use service::{
-    PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
+    InstanceId, PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
     ServiceDescription, ServiceEntry, ServiceFn, ServiceId, ServiceParam, ServicePriority,
-    ServiceStatus,
+    ServiceScheduling, ServiceStatus,
 };
 pub use trigger::{
     TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,

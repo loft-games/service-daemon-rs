@@ -96,13 +96,17 @@ pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()
 2. **Explicit Payload**: Any parameter marked with `#[payload]` is the payload (allows `Arc<Payload>`).
 3. **DI Resources**: All other `Arc<T>` parameters are resolved via the DI system.
 
-## 4. Event Flow
+## 4. Event Flow: Causal Tracing
 
-Services and triggers emit events by calling provider instance methods directly (e.g.
-`notifier.notify()`, `queue.push(...)`) after resolving the provider via DI.
-The framework's `TriggerRunner` automatically
-assigns a unique `message_id` and `source_id` to each dispatched event,
-enabling structured log correlation without manual intervention.
+Services and triggers emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI. 
+
+The framework's `TriggerRunner` automatically manages the **Causal Identity** for every dispatched event:
+1.  **Message ID** (UUID v7): A time-ordered, globally unique ID for the event.
+2.  **Source ID**: The `ServiceId` of the service that originally fired the event.
+3.  **Service ID**: The `ServiceId` of the current trigger handler.
+4.  **Instance Seq**: A monotonic sequence number for the current invocation.
+
+This 4-tuple identity enables structured log correlation and automated topology mapping without manual intervention.
 
 ## 5. Resilience: Automatic Handler Retries
 

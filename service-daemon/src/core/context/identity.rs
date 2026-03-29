@@ -8,12 +8,27 @@
 
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
 use crate::models::{ServiceId, ServiceStatus};
+
+// ---------------------------------------------------------------------------
+// Process-Level Cancellation Token -- shared by ALL ServiceDaemon instances
+// ---------------------------------------------------------------------------
+
+/// Process-wide shutdown token shared by all `ServiceDaemon` instances.
+///
+/// A single token avoids redundant signal monitoring when multiple daemons
+/// coexist (e.g. tag-filtered groups). Also serves as the `wait_shutdown()`
+/// fallback when `tokio::task_local` context is unavailable.
+static PROCESS_TOKEN: OnceLock<CancellationToken> = OnceLock::new();
+
+pub(crate) fn process_token() -> &'static CancellationToken {
+    PROCESS_TOKEN.get_or_init(CancellationToken::new)
+}
 
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;

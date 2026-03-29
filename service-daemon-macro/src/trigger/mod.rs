@@ -11,7 +11,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{ItemFn, parse_macro_input};
 
-use crate::common::{ExtractedParams, extract_sync_handler_flag};
+use crate::common::{ExtractedParams, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
 use codegen::generate_event_loop_call;
 use parser::TriggerArgs;
@@ -33,12 +33,13 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
     // Parse attributes using syn-based structured parsing.
-    // The host path is now a real Rust path — no keyword validation needed.
+    // The host path is now a real Rust path - no keyword validation needed.
     let args = parse_macro_input!(attr as TriggerArgs);
     let host_path = &args.host_path;
     let target_type = args.target;
     let is_watch_host = args.is_watch_host;
     let priority_tokens = args.priority;
+    let scheduling_tokens = args.scheduling;
     let tags_tokens = args.tags;
 
     // `extract_params(..., true)` uses the shared parser in trigger mode.
@@ -93,52 +94,39 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         fn_name.to_string().to_uppercase()
     );
 
-    let inner_vis = match vis {
-        syn::Visibility::Public(_) => quote!(pub),
-        _ => quote!(pub(crate)),
-    };
+    let inner_vis = scope_inner_visibility(vis);
+    let user_scope = crate::common::generate_user_scope_mod(
+        &scope_mod,
+        &inner_vis,
+        &clean_sig,
+        &cleaned_attrs,
+        body,
+    );
+
+    let wrapper_fn = crate::common::generate_wrapper_fn(&wrapper_name, &event_loop_call);
+
+    let registry_entry =
+        crate::common::generate_static_registry_entry(crate::common::RegistryEntryInput {
+            entry_name: &entry_name,
+            fn_name_str: &fn_name_str,
+            param_entries: &param_entries,
+            wrapper_name: &wrapper_name,
+            watcher_ptr: &watcher_ptr,
+            priority: &priority_tokens,
+            scheduling: &scheduling_tokens,
+            tags: &tags_tokens,
+        });
 
     let expanded = quote! {
-        mod #scope_mod {
-            #[allow(unused_imports)]
-            use super::*;
-
-            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
-            #[allow(unused_imports)]
-            use service_daemon::core::managed_state::{RwLock, Mutex};
-
-            #(#cleaned_attrs)*
-            #inner_vis #clean_sig {
-                #body
-            }
-        }
+        #user_scope
 
         #vis use #scope_mod::#fn_name;
 
-        /// Auto-generated trigger wrapper - acts as an event-loop "Call Host"
-        /// This is registered as a Service, so it benefits from ServiceDaemon's lifecycle management.
-        pub fn #wrapper_name(token: service_daemon::tokio_util::sync::CancellationToken) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
-            Box::pin(async move {
-                #event_loop_call
-            })
-        }
+        #wrapper_fn
 
         #watcher_fn
 
-        /// Auto-generated static registry entry - triggers are specialized services
-        #[allow(unsafe_code)] // linkme uses #[link_section] internally
-        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
-            name: #fn_name_str,
-            module: module_path!(),
-            params: &[#(#param_entries),*],
-            wrapper: #wrapper_name,
-            watcher: #watcher_ptr,
-            priority: #priority_tokens,
-            tags: #tags_tokens,
-        };
-
+        #registry_entry
     };
 
     TokenStream::from(expanded)

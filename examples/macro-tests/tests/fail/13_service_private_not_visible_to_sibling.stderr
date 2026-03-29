@@ -1,0 +1,17 @@
+error[E0603]: function import `private_service` is private
+  --> tests/fail/13_service_private_not_visible_to_sibling.rs:20:31
+   |
+20 |             let _ = super::a::private_service;
+   |                               ^^^^^^^^^^^^^^^ private function import
+   |
+note: the function import `private_service` is defined here...
+  --> tests/fail/13_service_private_not_visible_to_sibling.rs:11:9
+   |
+11 |         #[service]
+   |         ^^^^^^^^^^
+note: ...and refers to the function `private_service` which is defined here
+  --> tests/fail/13_service_private_not_visible_to_sibling.rs:11:9
+   |
+11 |         #[service]
+   |         ^^^^^^^^^^
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)

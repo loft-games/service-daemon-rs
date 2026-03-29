@@ -3,7 +3,7 @@
 The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State).
 
 > [!NOTE]
-> `Watch(T)` requires the target type to implement `WatchableProvided`.
+> `Watch(T)` requires the target type to implement `WatchableProvided`. (Note: This is automatically handled by the `#[provider]` macro.)
 
 But world-class systems often need more--like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
 
@@ -26,7 +26,7 @@ The framework wraps every payload in `Arc<P>` internally so that retries only cl
 > [!TIP]
 > **What if my data isn't `Clone`?**
 > If your payload is large or cannot implement `Clone`, wrap it in an `Arc`: `type Payload = Arc<MyData>`, and declare your handler parameter as `Arc<Arc<MyData>>` or simply use `#[payload] data: Arc<MyData>`.
-> Since `Arc` itself is always `Clone`, the retry mechanism will work perfectly without touching the underlying data.
+> Since `Arc` itself is always `Clone`, the retry mechanism will work as expected without touching the underlying data.
 
 This decoupled design means you spend zero time on boilerplate and focus entirely on the event-waiting logic.
 
@@ -154,4 +154,4 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 
 ---
 
-[**<- Previous Step: Under the Hood**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/under-the-hood.md) | [**Next Step: The Interceptor Gauntlet ->**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/interceptor-gauntlet.md)
+[**<- Previous Step: Under the Hood**](./under-the-hood.md) | [**Next Step: Trigger Middlewares (Interceptors) ->**](./trigger-interceptors.md)

@@ -6,10 +6,10 @@ controlled environment to ensure reproducibility.
 
 ## Executive Summary
 
-- **Predictable Scalability**: Uses a fixed-cost model with near-perfect linear memory growth, ensuring the system remains stable even when managing over 1,000 active services.
+- **Predictable Scalability**: Uses a fixed-cost model with consistent linear memory growth, ensuring the system remains stable even when managing over 1,000 active services.
 - **Resource Efficiency**: Each service adds only ~3.5 KB of memory overhead -- a negligible cost even for memory-constrained edge devices.
 - **Ready-to-Use Features**: This tiny memory cost gives you a professional-grade toolkit out of the box: automatic dependency injection, unified logging, and reliable graceful shutdown.
-- **Grows with You**: Start with a simple **`is_shutdown()` polling loop** (just like a standard thread), and seamlessly migrate to **event-driven triggers and causal tracing** as your requirements grow -- all within the same unified architecture.
+- **Grows with You**: Start with a simple **`is_shutdown()` polling loop** (just like a standard thread), and efficiently migrate to **event-driven triggers and causal tracing** as your requirements grow -- all within the same unified architecture.
 
 ## Test Environment
 
@@ -239,7 +239,7 @@ the shared knowledge of the Rust open-source community. Special gratitude is ext
 
 - **[task-supervisor](https://github.com/akhercha/task-supervisor)**: For providing a 
   highly transparent, robust, and lightweight reference implementation. Watching its 
-  elegant handling of Tokio tasks set the benchmark for our own scalability goals. 
+  efficient handling of Tokio tasks set the benchmark for our own scalability goals. 
   It remains the gold standard for "minimalist task supervision" in the ecosystem.
 - **The Tokio Team**: For building the asynchronous runtime that makes such linear 
   scalability possible in Rust.

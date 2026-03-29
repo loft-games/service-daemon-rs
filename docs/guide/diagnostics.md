@@ -1,15 +1,16 @@
-# Diagnostics & The DaemonLayer
+# Visual Observability & The DaemonLayer
 
 To manage complex asynchronous systems, visibility is paramount. `service-daemon-rs` provides a high-fidelity diagnostic layer built on top of `tracing`. For the underlying high-performance design philosophy (Zero-allocation, context extraction), see **[Architecture Overview](../architecture/internal-overview.md)**.
 
 ## 1. Entering the Matrix: `DaemonLayer`
 
-The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size × 4` (default: 128 × 4 = 512 slots; configurable via `set_log_batch_size()`). Two independent SYSTEM-priority consumers process this queue:
+The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
+- **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
-Both consumers use a **fill-the-valley** batch strategy with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers — failure in one does not affect the other.
+Both logging consumers use a **fill-the-valley** batch strategy with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
 
 ### Enabling Diagnostics
 
@@ -27,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-**Test environments** — use `try_init_logging()` to handle parallel test races:
+**Test environments** - use `try_init_logging()` to handle parallel test races:
 
 ```rust
 #[tokio::test]
@@ -37,7 +38,7 @@ async fn my_test() {
 }
 ```
 
-**Custom subscriber stacks** (Sentry, OpenTelemetry, etc.) — use `DaemonLayer` directly:
+**Custom subscriber stacks** (Sentry, OpenTelemetry, etc.) - use `DaemonLayer` directly:
 
 ```rust
 use service_daemon::core::logging::DaemonLayer;
@@ -50,7 +51,7 @@ tracing_subscriber::registry()
     .init();
 ```
 
-**File logging** — configured independently:
+**File logging** - configured independently:
 
 ```rust
 use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
@@ -72,21 +73,44 @@ let config = FileLogConfig {
 enable_file_logging(config);
 ```
 
-**Log batch size** — controls both drain cycle size and queue capacity:
+**Log batch size** - controls both drain cycle size and queue capacity:
 
 ```rust
 use service_daemon::set_log_batch_size;
 
 // Reduce batch size for a lightweight embedded daemon
-// Queue capacity will be 512 × 4 = 2,048 slots
+// Queue capacity will be 512 * 4 = 2,048 slots
 set_log_batch_size(512);
 // Must be called BEFORE init_logging()
 service_daemon::core::logging::init_logging();
 ```
 
-> **Warning**: Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`. The `log_service` handles all console output — adding `fmt::layer()` causes duplicate lines.
+## 2. Behavioral Topology (`diagnostics` feature)
 
-## 2. What to Look For
+When the `diagnostics` feature is enabled, you can activate the background topology collector. It observes message correlation across the system to build a live map of service interactions.
+
+```rust
+use service_daemon::{start_topology_collector, export_mermaid};
+
+// 1. Start the background collector
+start_topology_collector();
+
+// ... run your daemon ...
+
+// 2. Export the collected topology as a Mermaid diagram
+if let Some(mermaid) = export_mermaid() {
+    println!("System Topology:\n{}", mermaid);
+}
+```
+
+This is particularly useful for debugging complex "cascading" triggers where one event leads to a chain of reactions.
+
+## 3. What to Look For
+
+> [!WARNING]
+> Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`.
+> 1. **Duplication**: The `log_service` already handles console output -- adding `fmt::layer()` will cause every log line to appear twice.
+> 2. **Performance (Blocking)**: `fmt::layer()` is synchronous and can block the async runtime under heavy load. `DaemonLayer` is fully asynchronous, offloading output to the managed `log_service` with internal batching to ensure zero-latency logging even during bursts.
 
 Once enabled, you will see structured diagnostic signals in your logs:
 
@@ -104,9 +128,9 @@ For triggers with elastic scaling, `DaemonLayer` reports:
 
 ### Causal Correlation IDs
 Every log event inside a service or trigger Span is automatically tagged with:
-- **`service_id`**: The `ServiceId` of the service that produced the event.
-- **`message_id`**: The globally unique ID of the triggering event (trigger context only).
-- **`source_id`**: The `ServiceId` of the service that originally published the trigger event.
+- **`service_id`**: The name of the service that produced the event (e.g., `"my-service"`).
+- **`message_id`**: The globally unique **UUID v7** (time-ordered) of the event that triggered this handler.
+- **`instance_id`**: A numeric composite identifier (e.g., `svc#1:42`) that uniquely identifies this trigger invocation generation.
 
 These IDs are `None` for log events outside a service context (e.g., daemon initialization).
 

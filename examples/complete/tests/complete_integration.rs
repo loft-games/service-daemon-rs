@@ -8,16 +8,15 @@
 //! are used for state observation since test assertions run outside the
 //! service context.
 
-use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
-use service_daemon::Provided;
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
+use service_daemon::{Provided, Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
 
 // ===========================================================================
 // Test services for: test_ordered_startup
 // ===========================================================================
-
-use std::sync::Mutex as StdMutex;
 
 /// Shared start sequence for ordered startup tests.
 static STARTUP_SEQ: std::sync::LazyLock<StdMutex<Vec<u8>>> =
@@ -274,7 +273,7 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
     let cancel = daemon.cancel_token();
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     cancel.cancel();
     daemon.wait().await.unwrap();
 
@@ -347,13 +346,13 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 /// This test is a **regression guard** for P1 (async fn provider parameter injection).
 /// It exercises the full dependency chain at runtime:
 ///
-///   `Port(8080)` + `DbUrl("mysql://localhost")` → `ConnectionString("mysql://localhost:8080")`
+///   `Port(8080)` + `DbUrl("mysql://localhost")` -> `ConnectionString("mysql://localhost:8080")`
 ///
 /// If the macro fails to generate DI resolution code for function parameters,
 /// this test will fail with a type error or incorrect output.
 #[tokio::test]
 async fn test_fn_provider_dependency_chain() {
-    // Resolve the async fn provider — this triggers the full dependency chain.
+    // Resolve the async fn provider - this triggers the full dependency chain.
     let conn_str = ConnectionString::resolve().await;
 
     // The connection string should be assembled from Port(8080) + DbUrl("mysql://localhost")

@@ -29,17 +29,17 @@ pub async fn shelf_reader_service() -> anyhow::Result<()> {
         shelve("read_result", val).await;
     }
 
-    // Keep running until shutdown, periodically checking for God Hand mutations.
+    // Keep running until shutdown, periodically checking for SimulationHandle mutations.
     loop {
         if service_daemon::is_shutdown() {
             break;
         }
 
-        // Check for dynamically injected values (God Hand phase 2)
+        // Check for dynamically injected values (SimulationHandle phase 2)
         let dynamic_val: Option<String> = unshelve("dynamic_key").await;
         if let Some(val) = dynamic_val {
             tracing::info!(
-                "shelf_reader_service: God Hand injected dynamic_key = {:?}",
+                "shelf_reader_service: SimulationHandle injected dynamic_key = {:?}",
                 val
             );
             shelve("dynamic_result", val).await;

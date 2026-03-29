@@ -14,7 +14,7 @@ This central hub explains the architectural "why" behind common behaviors and tr
 
 ## 1. Registry & Discovery
 
-### The "Invisible Service" Trap (Linkme)
+### The "Registered Service" Trap (Linkme)
 **Problem**: You annotated a function with `#[service]`, but it doesn't start.
 **Cause**: Rust's linker-based discovery (`linkme`) only finds code that is **explicitly included in the compilation tree**.
 **The Fix**: Ensure the module containing your service is reachable from `main.rs` via `mod my_module;`.
@@ -47,9 +47,12 @@ This central hub explains the architectural "why" behind common behaviors and tr
 
 ## 3. Providers & State
 
-### State vs. Shelf: Which to use?
-*   **State (Provider)**: Global, shared, often permanent (e.g., DB Pools).
-*   **Shelf**: Service-local, persistent across restarts (e.g., retry counters).
+### Providers vs. Shelf: Which to use?
+*   **Providers (Shared Objects)**: Use for managed singletons that multiple services need to access (e.g., DB Pools, shared configuration). Injected via `Arc<T>`.
+*   **Shelf (Local Persistence)**: Use for data that belongs uniquely to one service and must survive service reloads or crashes (e.g., a current operation ID, a retry counter). This is a private, ephemeral key-value store.
+
+> [!NOTE]
+> Neither of these is a permanent database. Both are cleared when the entire process stops. For persistence across process restarts, use a real database (injected via a Provider).
 
 ### The "Magic Provider" Misconception
 **Problem**: Trying to modify the macro system to add a new "default" type (like MQTT).

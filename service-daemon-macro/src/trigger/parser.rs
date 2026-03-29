@@ -4,7 +4,7 @@
 //!   `#[trigger(Watch(MetricsData), priority = 80)]`
 //!
 //! The first argument is always a template call in the form `Template(Target)`.
-//! `Template` is any type path that implements `TriggerHost<Target>` — no
+//! `Template` is any type path that implements `TriggerHost<Target>` - no
 //! keyword validation is performed here; the compiler will catch invalid types.
 //! Optional named arguments like `priority = N` follow after a comma.
 
@@ -31,6 +31,8 @@ pub struct TriggerArgs {
     pub target: TokenStream,
     /// Optional priority value (defaults to 50 if not specified).
     pub priority: TokenStream,
+    /// Optional scheduling policy (defaults to Standard).
+    pub scheduling: TokenStream,
     /// Optional tags for registry filtering (defaults to empty).
     pub tags: TokenStream,
 }
@@ -43,7 +45,7 @@ pub struct TriggerArgs {
 /// Where `HostPath` is any valid Rust type path (e.g., `Watch`, `TT::Queue`,
 /// `service_daemon::TT::Cron`) and `TargetType` is any valid Rust type path.
 ///
-/// No compile-time validation of the host path is performed — if the path
+/// No compile-time validation of the host path is performed - if the path
 /// does not refer to a type implementing `TriggerHost<Target>`, the Rust
 /// compiler will emit a clear error at the call site.
 impl Parse for TriggerArgs {
@@ -65,6 +67,7 @@ impl Parse for TriggerArgs {
 
         // Step 3: Parse optional trailing named arguments.
         let mut priority: TokenStream = quote!(50);
+        let mut scheduling: TokenStream = quote!(service_daemon::ServiceScheduling::Standard);
         let mut tags: TokenStream = quote!(&[]);
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -82,6 +85,10 @@ impl Parse for TriggerArgs {
                     let value: syn::Expr = input.parse()?;
                     priority = quote!(#value);
                 }
+                "scheduling" => {
+                    let ident: syn::Ident = input.parse()?;
+                    scheduling = crate::common::parse_scheduling_policy(&ident)?;
+                }
                 "tags" => {
                     let tag_list: TagsList = input.parse()?;
                     tags = tag_list.to_tokens();
@@ -90,7 +97,7 @@ impl Parse for TriggerArgs {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "Unknown trigger attribute '{}'. Supported: priority, tags",
+                            "Unknown trigger attribute '{}'. Supported: priority, scheduling, tags",
                             other
                         ),
                     ));
@@ -103,6 +110,7 @@ impl Parse for TriggerArgs {
             is_watch_host,
             target,
             priority,
+            scheduling,
             tags,
         })
     }
