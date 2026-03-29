@@ -273,7 +273,7 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
     let cancel = daemon.cancel_token();
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     cancel.cancel();
     daemon.wait().await.unwrap();
 

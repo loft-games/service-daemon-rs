@@ -446,8 +446,7 @@ impl<'a> ServiceWave<'a> {
         daemon_token: &CancellationToken,
     ) {
         let start = std::time::Instant::now();
-        let mut all_healthy = false;
-        while !all_healthy && start.elapsed() < timeout {
+        while start.elapsed() < timeout {
             // Early exit if daemon shutdown was requested
             if daemon_token.is_cancelled() {
                 info!(
@@ -457,7 +456,10 @@ impl<'a> ServiceWave<'a> {
                 return;
             }
 
-            all_healthy = true;
+            // Create notification future BEFORE checking the status to avoid lost notifications
+            let notification = resources.status_changed.notified();
+
+            let mut all_healthy = true;
             for service in &self.services {
                 let status = resources
                     .status_plane
@@ -468,27 +470,29 @@ impl<'a> ServiceWave<'a> {
                     break;
                 }
             }
-            if !all_healthy {
-                tokio::select! {
-                    _ = resources.status_changed.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                    _ = daemon_token.cancelled() => {
-                        info!(
-                            "Wave priority {} startup interrupted by shutdown signal",
-                            self.priority
-                        );
-                        return;
-                    }
+
+            if all_healthy {
+                return;
+            }
+
+            // Wait for any status change, or a short periodic wake-up (defense in depth)
+            tokio::select! {
+                _ = notification => {}
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                _ = daemon_token.cancelled() => {
+                    info!(
+                        "Wave priority {} startup interrupted by shutdown signal",
+                        self.priority
+                    );
+                    return;
                 }
             }
         }
 
-        if !all_healthy {
-            warn!(
-                "Wave priority {} did not reach 'Healthy' status within {:?}, proceeding anyway",
-                self.priority, timeout
-            );
-        }
+        warn!(
+            "Wave priority {} did not reach 'Healthy' status within {:?}, proceeding anyway",
+            self.priority, timeout
+        );
     }
 }
 

@@ -4,9 +4,9 @@
 //! even when the LogQueue is being flooded by a "noisy" service. It validates the
 //! `biased;` prioritized selection fix in the logging layer.
 
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 use std::time::Duration;
 use tokio::time::timeout;
-use service_daemon::{ServiceDaemon, Registry, RestartPolicy};
 
 /// A "noisy" service that generates logs as fast as possible.
 /// It intentionally ignores `is_shutdown()` to simulate a non-cooperative service.
@@ -46,7 +46,7 @@ async fn test_livelock_shutdown_responsiveness() -> anyhow::Result<()> {
         .build();
 
     let cancel = daemon.cancel_token();
-    
+
     // 2. Run the daemon
     daemon.run().await;
 
