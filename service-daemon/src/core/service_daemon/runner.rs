@@ -23,6 +23,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
+use crate::ServiceScheduling;
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
 use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
@@ -499,6 +500,7 @@ pub async fn spawn_service(
     run: ServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
     policy: RestartPolicy,
+    scheduling: ServiceScheduling,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
@@ -513,7 +515,33 @@ pub async fn spawn_service(
         cancellation_token,
     );
 
-    let handle = tokio::spawn(supervisor.run_loop());
+    let handle = match scheduling {
+        ServiceScheduling::Isolated => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let thread_name = format!("svc-{}", name);
+
+            // Spawn a dedicated OS thread for this service
+            std::thread::Builder::new()
+                .name(thread_name)
+                .spawn(move || {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("Failed to create isolated tokio runtime");
+
+                    rt.block_on(supervisor.run_loop());
+                    let _ = tx.send(());
+                })
+                .expect("Failed to spawn isolated service thread");
+
+            // Wrap the thread completion in a tokio task so we can return a JoinHandle
+            tokio::spawn(async move {
+                let _ = rx.await;
+            })
+        }
+        _ => tokio::spawn(supervisor.run_loop()),
+    };
+
     running_tasks.lock().await.insert(service_id, handle);
 }
 
@@ -557,6 +585,7 @@ pub async fn spawn_all_services(
                 service.entry.wrapper,
                 service.entry.watcher,
                 restart_policy,
+                service.entry.scheduling,
                 running_tasks.clone(),
                 resources.clone(),
                 service.cancellation_token.clone(),

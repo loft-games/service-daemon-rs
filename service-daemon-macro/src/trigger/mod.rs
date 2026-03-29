@@ -39,6 +39,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let target_type = args.target;
     let is_watch_host = args.is_watch_host;
     let priority_tokens = args.priority;
+    let scheduling_tokens = args.scheduling;
     let tags_tokens = args.tags;
 
     // `extract_params(..., true)` uses the shared parser in trigger mode.
@@ -104,15 +105,17 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let wrapper_fn = crate::common::generate_wrapper_fn(&wrapper_name, &event_loop_call);
 
-    let registry_entry = crate::common::generate_static_registry_entry(
-        &entry_name,
-        &fn_name_str,
-        &param_entries,
-        &wrapper_name,
-        &watcher_ptr,
-        &priority_tokens,
-        &tags_tokens,
-    );
+    let registry_entry =
+        crate::common::generate_static_registry_entry(crate::common::RegistryEntryInput {
+            entry_name: &entry_name,
+            fn_name_str: &fn_name_str,
+            param_entries: &param_entries,
+            wrapper_name: &wrapper_name,
+            watcher_ptr: &watcher_ptr,
+            priority: &priority_tokens,
+            scheduling: &scheduling_tokens,
+            tags: &tags_tokens,
+        });
 
     let expanded = quote! {
         #user_scope

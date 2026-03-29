@@ -59,7 +59,7 @@ pub use core::managed_state::{TrackedNotify, TrackedSender};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
 };
-pub use models::service::ServicePriority;
+pub use models::service::{ServicePriority, ServiceScheduling};
 pub use models::{
     BackoffController, PROVIDER_REGISTRY, ProviderEntry, ProviderError, Registry, RegistryBuilder,
     Result, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder, ServiceDescription,
@@ -108,6 +108,7 @@ pub mod prelude {
     };
     pub use crate::core::di::{ManagedProvided, Provided, WatchableProvided};
     pub use crate::models::service::ServicePriority;
+    pub use crate::models::service::ServiceScheduling;
     pub use crate::models::service::ServiceStatus;
     pub use crate::models::trigger::TT;
     pub use crate::models::trigger::TT::*;

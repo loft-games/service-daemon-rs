@@ -166,6 +166,28 @@ impl ServicePriority {
 }
 
 // ---------------------------------------------------------------------------
+// ServiceScheduling: Execution and isolation policy
+// ---------------------------------------------------------------------------
+
+/// Defines how a service should be scheduled and isolated.
+///
+/// This policy determines whether the service shares the global multi-threaded
+/// `tokio` runtime or receives a dedicated OS thread for isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub enum ServiceScheduling {
+    /// The default: scheduled on the shared multi-threaded `tokio` runtime.
+    /// Best for most services that don't have strict latency requirements.
+    #[default]
+    Standard,
+    /// High priority: hints the system to minimize latency (reserved for future use).
+    HighPriority,
+    /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
+    /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
+    Isolated,
+}
+
+// ---------------------------------------------------------------------------
 // ServiceEntry (static, compile-time) -- now includes `tags`
 // ---------------------------------------------------------------------------
 
@@ -180,6 +202,8 @@ pub struct ServiceEntry {
     pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub priority: u8,
+    /// Execution scheduling and isolation policy.
+    pub scheduling: ServiceScheduling,
     /// Compile-time tags assigned via `#[service(tags = ["core", "infra"])]`.
     /// Defaults to an empty slice when no tags are specified.
     pub tags: &'static [&'static str],
@@ -229,6 +253,12 @@ impl ServiceDescription {
     #[inline]
     pub fn params(&self) -> &'static [ServiceParam] {
         self.entry.params
+    }
+
+    /// Execution scheduling and isolation policy.
+    #[inline]
+    pub fn scheduling(&self) -> ServiceScheduling {
+        self.entry.scheduling
     }
 
     /// Module path where the service is defined.
@@ -461,5 +491,30 @@ impl RegistryBuilder {
         }
 
         Registry { services }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_service_scheduling_default() {
+        assert_eq!(ServiceScheduling::default(), ServiceScheduling::Standard);
+    }
+
+    #[test]
+    fn test_service_entry_with_scheduling() {
+        let entry = ServiceEntry {
+            name: "test",
+            module: "test_mod",
+            params: &[],
+            wrapper: |_| Box::pin(async { Ok(()) }),
+            watcher: None,
+            priority: 50,
+            scheduling: ServiceScheduling::Isolated,
+            tags: &[],
+        };
+        assert_eq!(entry.scheduling, ServiceScheduling::Isolated);
     }
 }

@@ -9,7 +9,7 @@
 ## Why choose service-daemon?
 
 *   **Boilerplate-free Orchestration**: Define services and triggers with simple attributes like `#[service]` or `#[trigger(Cron("0 * * * *"))]`. No more manual wiring in `main`.
-*   **Built-in Resilience**: production-ready patterns — such as exponential backoff, jittered retries, and early-binding listeners for K8s readiness — are baked in.
+*   **Built-in Resilience**: production-ready patterns -- such as exponential backoff, jittered retries, and early-binding listeners for K8s readiness -- are baked in.
 *   **Type-Safe Dependency Injection**: Resolve dependencies through Rust's type system. No runtime scanning, no reflection, and minimal-overhead discovery via linker-level integration (`linkme`).
 *   **Visual Observability**: Automatically generate **Mermaid diagrams** of your service topology and track causal relationships across services with zero-allocation tracing.
 *   **Testable by Design**: Includes a feature-gated `MockContext` that allows you to simulate complex async behaviors and state changes in a controlled sandbox.

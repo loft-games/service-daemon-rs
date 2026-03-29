@@ -1,0 +1,5 @@
+error: Unknown scheduling policy 'Unknown'. Supported: Standard, HighPriority, Isolated
+ --> tests/fail/14_service_invalid_scheduling.rs:3:24
+  |
+3 | #[service(scheduling = Unknown)] // This should fail
+  |                        ^^^^^^^

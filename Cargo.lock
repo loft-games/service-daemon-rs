@@ -355,6 +355,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "examples-scheduling"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "service-daemon",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

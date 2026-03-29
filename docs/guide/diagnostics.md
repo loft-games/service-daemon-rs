@@ -109,7 +109,7 @@ This is particularly useful for debugging complex "cascading" triggers where one
 
 > [!WARNING]
 > Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`.
-> 1. **Duplication**: The `log_service` already handles console output — adding `fmt::layer()` will cause every log line to appear twice.
+> 1. **Duplication**: The `log_service` already handles console output -- adding `fmt::layer()` will cause every log line to appear twice.
 > 2. **Performance (Blocking)**: `fmt::layer()` is synchronous and can block the async runtime under heavy load. `DaemonLayer` is fully asynchronous, offloading output to the managed `log_service` with internal batching to ensure zero-latency logging even during bursts.
 
 Once enabled, you will see structured diagnostic signals in your logs:

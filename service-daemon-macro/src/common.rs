@@ -622,6 +622,27 @@ impl TagsList {
 // Componentized Codegen Helpers (Unified Service/Trigger logic)
 // -----------------------------------------------------------------------------
 
+/// Shared parser for the `scheduling = ...` attribute.
+///
+/// Maps the provided identifier (Standard, HighPriority, Isolated) to the
+/// fully-qualified `ServiceScheduling` enum path.
+pub fn parse_scheduling_policy(ident: &syn::Ident) -> syn::Result<proc_macro2::TokenStream> {
+    match ident.to_string().as_str() {
+        "Standard" => Ok(quote::quote!(service_daemon::ServiceScheduling::Standard)),
+        "HighPriority" => Ok(quote::quote!(
+            service_daemon::ServiceScheduling::HighPriority
+        )),
+        "Isolated" => Ok(quote::quote!(service_daemon::ServiceScheduling::Isolated)),
+        other => Err(syn::Error::new(
+            ident.span(),
+            format!(
+                "Unknown scheduling policy '{}'. Supported: Standard, HighPriority, Isolated",
+                other
+            ),
+        )),
+    }
+}
+
 /// Generates the "Macro Illusion" user scope module.
 ///
 /// Wraps the user function in a private module to provide hygiene and
@@ -650,16 +671,29 @@ pub fn generate_user_scope_mod(
     }
 }
 
+/// Inputs for generating a static registry entry.
+pub struct RegistryEntryInput<'a> {
+    pub entry_name: &'a syn::Ident,
+    pub fn_name_str: &'a str,
+    pub param_entries: &'a [proc_macro2::TokenStream],
+    pub wrapper_name: &'a syn::Ident,
+    pub watcher_ptr: &'a proc_macro2::TokenStream,
+    pub priority: &'a proc_macro2::TokenStream,
+    pub scheduling: &'a proc_macro2::TokenStream,
+    pub tags: &'a proc_macro2::TokenStream,
+}
+
 /// Generates the static registry entry for a service or trigger.
-pub fn generate_static_registry_entry(
-    entry_name: &syn::Ident,
-    fn_name_str: &str,
-    param_entries: &[proc_macro2::TokenStream],
-    wrapper_name: &syn::Ident,
-    watcher_ptr: &proc_macro2::TokenStream,
-    priority: &proc_macro2::TokenStream,
-    tags: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
+pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2::TokenStream {
+    let entry_name = input.entry_name;
+    let fn_name_str = input.fn_name_str;
+    let param_entries = input.param_entries;
+    let wrapper_name = input.wrapper_name;
+    let watcher_ptr = input.watcher_ptr;
+    let priority = input.priority;
+    let scheduling = input.scheduling;
+    let tags = input.tags;
+
     quote! {
         /// Auto-generated static registry entry - collected by linkme at link time
         #[allow(unsafe_code)] // linkme uses #[link_section] internally
@@ -672,6 +706,7 @@ pub fn generate_static_registry_entry(
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,
             priority: #priority,
+            scheduling: #scheduling,
             tags: #tags,
         };
     }

@@ -384,6 +384,7 @@ impl ServiceDaemon {
                 service.entry.wrapper,
                 service.entry.watcher,
                 test_policy,
+                service.entry.scheduling,
                 self.running_tasks.clone(),
                 self.resources.clone(),
                 service.cancellation_token.clone(),
