@@ -90,6 +90,7 @@ impl<'a> TemplateContext<'a> {
             &[],
             eager,
             &init_fn,
+            false,
         );
 
         Self {
@@ -312,6 +313,7 @@ pub fn generate_listen_template(
         &[],
         eager,
         &init_fn,
+        true,
     );
 
     let expanded = quote! {

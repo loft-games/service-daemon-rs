@@ -19,6 +19,7 @@ use uuid::Uuid;
 pub struct StateManager<T: 'static + Send + Sync + Clone> {
     lock: OnceCell<Arc<TrackedRwLock<T>>>,
     snapshot_cache: OnceCell<Arc<T>>,
+    fallible_cache: OnceCell<std::result::Result<Arc<T>, crate::ProviderError>>,
     watch_rx: OnceCell<watch::Receiver<Arc<T>>>,
     change_notify: OnceCell<Arc<TokioNotify>>,
 }
@@ -34,6 +35,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         Self {
             lock: OnceCell::const_new(),
             snapshot_cache: OnceCell::const_new(),
+            fallible_cache: OnceCell::const_new(),
             watch_rx: OnceCell::const_new(),
             change_notify: OnceCell::const_new(),
         }
@@ -43,7 +45,8 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
     pub fn with_value(val: T) -> Self {
         let manager = Self::new();
         let arc = Arc::new(val);
-        manager.snapshot_cache.set(arc).ok();
+        manager.snapshot_cache.set(arc.clone()).ok();
+        manager.fallible_cache.set(Ok(arc)).ok();
         manager
     }
 
@@ -112,7 +115,6 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         // 2. Fast Path: Plain immutable singleton
         self.snapshot_cache.get_or_init(init).await.clone()
     }
-
     /// Resolves as the raw initialization result.
     pub async fn resolve_managed<F, Fut>(
         &self,
@@ -127,8 +129,18 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             return Ok(rx.borrow().clone());
         }
 
-        // 2. Fallible Logic
-        init().await
+        // 2. Fallible Logic with Caching
+        let res = self.fallible_cache.get_or_init(init).await;
+
+        // 3. Side Effect: If successful, populate the infallible cache too
+        if let Ok(arc) = res {
+            let _ = self.snapshot_cache.get_or_init(|| {
+                let arc = arc.clone();
+                async move { arc }
+            }).await;
+        }
+
+        res.clone()
     }
 
     /// Convenience method to get a snapshot. Panics if not initialized.

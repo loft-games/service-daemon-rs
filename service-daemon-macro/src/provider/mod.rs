@@ -283,6 +283,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         &param_entries,
         eager,
         &init_fn,
+        is_fallible,
     );
 
     let expanded = quote! {

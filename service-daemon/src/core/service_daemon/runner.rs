@@ -155,16 +155,29 @@ impl ServiceSupervisor {
             }
             Ok(Err(e)) => {
                 // Check for fatal error
-                if let Some(svc_err) = e.downcast_ref::<ServiceError>()
-                    && matches!(svc_err, ServiceError::Fatal(_))
-                {
-                    error!(
-                        "Service {} encountered fatal error: {:?}",
-                        self.name, svc_err
-                    );
-                    should_restart = false;
-                    return (ServiceStatus::Terminated, should_restart);
+                if let Some(svc_err) = e.downcast_ref::<ServiceError>() {
+                    if matches!(svc_err, ServiceError::Fatal(_)) {
+                        error!(
+                            "Service {} encountered fatal error: {:?}",
+                            self.name, svc_err
+                        );
+                        should_restart = false;
+                        return (ServiceStatus::Terminated, should_restart);
+                    }
                 }
+
+                // Check for fatal provider error
+                if let Some(prov_err) = e.downcast_ref::<crate::models::ProviderError>() {
+                    if matches!(prov_err, crate::models::ProviderError::Fatal(_)) {
+                        error!(
+                            "Service {} failed due to fatal provider error: {:?}",
+                            self.name, prov_err
+                        );
+                        should_restart = false;
+                        return (ServiceStatus::Terminated, should_restart);
+                    }
+                }
+
                 error!("Service {} failed: {:?}", self.name, e);
                 ServiceStatus::Recovering(format!("{:?}", e))
             }

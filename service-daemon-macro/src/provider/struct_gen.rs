@@ -166,6 +166,7 @@ pub(super) fn generate_provided_impl(
     param_entries: &[proc_macro2::TokenStream],
     eager: bool,
     init_fn: &proc_macro2::TokenStream,
+    is_fallible: bool,
 ) -> proc_macro2::TokenStream {
     // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
     // the compiler error points to the user's struct definition or fn return
@@ -201,6 +202,24 @@ pub(super) fn generate_provided_impl(
             .replace(|c: char| !c.is_alphanumeric(), "_")
     );
 
+    // Build the internal resolution logic based on fallibility
+    let (infallible_resolver, managed_resolver) = if is_fallible {
+        (
+            quote! {
+                match { #init_fn } {
+                    ::std::result::Result::Ok(arc) => arc,
+                    ::std::result::Result::Err(e) => panic!("Infallible resolution failed for provider '{}': {:?}", #type_name_str, e),
+                }
+            },
+            quote! { { #init_fn } },
+        )
+    } else {
+        (
+            quote! { { #init_fn } },
+            quote! { ::std::result::Result::Ok({ #init_fn }) },
+        )
+    };
+
     quote! {
         #bounds_assertion
 
@@ -211,7 +230,8 @@ pub(super) fn generate_provided_impl(
                 #singleton_name.resolve_snapshot(|| async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    #init_fn
+                    let arc: std::sync::Arc<Self> = #infallible_resolver;
+                    arc
                 }).await
             }
         }
@@ -221,7 +241,8 @@ pub(super) fn generate_provided_impl(
                 #singleton_name.resolve_rwlock(|| async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    #init_fn
+                    let arc: std::sync::Arc<Self> = #infallible_resolver;
+                    arc
                 }).await
             }
 
@@ -229,7 +250,8 @@ pub(super) fn generate_provided_impl(
                 #singleton_name.resolve_mutex(|| async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    #init_fn
+                    let arc: std::sync::Arc<Self> = #infallible_resolver;
+                    arc
                 }).await
             }
 
@@ -237,7 +259,8 @@ pub(super) fn generate_provided_impl(
                 #singleton_name.resolve_managed(|| async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    Ok({ #init_fn })
+                    let res: std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> = #managed_resolver;
+                    res
                 }).await
             }
         }
@@ -268,7 +291,8 @@ pub(super) fn generate_provided_impl(
             Box::pin(async move {
                 let _ = #singleton_name
                     .resolve_snapshot(|| async {
-                        #init_fn
+                        let arc: std::sync::Arc<#type_tokens> = #infallible_resolver;
+                        arc
                     })
                     .await;
             })
@@ -372,6 +396,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         &param_entries,
         eager,
         &init_fn,
+        false,
     );
 
     let expanded = quote! {

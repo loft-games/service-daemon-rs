@@ -10,19 +10,15 @@ use tracing::{error, info, warn};
 ///
 /// This is used internally by the orchestration engine to ensure the current
 /// initialization task fails fast when an unrecoverable error (e.g., config error) occurs.
-fn provider_init_exit(_code: i32, msg: &str) -> ! {
-    panic!("{}", msg);
-}
-
 /// Initialize a fallible provider with backoff + timeout.
 ///
-/// This helper does **not** return errors to user code.
-/// On fatal errors or timeout, it terminates the process.
+/// Returns `Err(ProviderError::Fatal)` on unrecoverable errors, allowing the
+/// caller (usually a macro-generated wrapper) to decide how to handle it.
 pub async fn init_fallible<T, Init, Fut>(
     policy: RestartPolicy,
     cancel: CancellationToken,
     mut init: Init,
-) -> Arc<T>
+) -> Result<Arc<T>, ProviderError>
 where
     T: Send + Sync + 'static,
     Init: FnMut() -> Fut,
@@ -36,22 +32,19 @@ where
     loop {
         match init().await {
             Ok(v) => {
-                return Arc::new(v);
+                return Ok(Arc::new(v));
             }
             Err(ProviderError::Fatal(msg)) => {
                 error!("Provider init fatal: {msg}");
-                provider_init_exit(1, &format!("FATAL: provider init failed: {msg}"));
+                return Err(ProviderError::Fatal(msg));
             }
             Err(ProviderError::Retryable(msg)) => {
                 let now = Instant::now();
                 if now >= deadline {
-                    provider_init_exit(
-                        1,
-                        &format!(
-                            "FATAL: provider init timed out after {:?}: {msg}",
-                            policy.provider_init_timeout
-                        ),
-                    );
+                    return Err(ProviderError::Fatal(format!(
+                        "provider init timed out after {:?}: {}",
+                        policy.provider_init_timeout, msg
+                    )));
                 }
 
                 warn!(
@@ -68,7 +61,7 @@ where
                 let proceed = wait_or_cancel_or_timeout(sleep_for, &cancel).await;
                 if !proceed {
                     info!("Provider init cancelled during backoff wait");
-                    provider_init_exit(1, "FATAL: provider init cancelled");
+                    return Err(ProviderError::Fatal("provider init cancelled".into()));
                 }
 
                 backoff.record_failure();
@@ -120,12 +113,12 @@ mod tests {
         })
         .await;
 
-        assert_eq!(*v, 42);
+        assert_eq!(*v.unwrap(), 42);
         assert!(attempts.load(Ordering::SeqCst) >= 3);
     }
 
     #[tokio::test]
-    async fn init_fallible_times_out_panics_in_tests() {
+    async fn init_fallible_times_out_returns_fatal() {
         let policy = RestartPolicy {
             initial_delay: Duration::from_millis(1),
             max_delay: Duration::from_millis(5),
@@ -140,16 +133,18 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
-        let handle = tokio::spawn(async move {
-            let _ = init_fallible::<u32, _, _>(policy, cancel, || async {
-                Err::<u32, _>(ProviderError::Retryable("still broken".to_owned()))
-            })
-            .await;
-        });
+        let res = init_fallible::<u32, _, _>(policy, cancel, || async {
+            Err::<u32, _>(ProviderError::Retryable("still broken".to_owned()))
+        })
+        .await;
 
-        let res = handle.await;
-        assert!(res.is_err(), "expected JoinError due to panic");
+        assert!(res.is_err());
         let err = res.unwrap_err();
-        assert!(err.is_panic());
+        match err {
+            ProviderError::Fatal(msg) => {
+                assert!(msg.contains("timed out"));
+            }
+            _ => panic!("expected Fatal error on timeout, got {:?}", err),
+        }
     }
 }
