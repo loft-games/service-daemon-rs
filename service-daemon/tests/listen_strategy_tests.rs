@@ -1,4 +1,4 @@
-use service_daemon::ManagedProvided;
+use service_daemon::{ManagedProvided, ProviderError};
 use service_daemon_macro::provider;
 
 #[derive(Debug)]
@@ -8,7 +8,7 @@ pub struct ConflictListener;
 #[tokio::test]
 async fn test_listen_addr_resolution() {
     // Direct test: resolve the provider and check success.
-    // By using a free high port, we ensure no FATAL panic is triggered.
+    // By using a free high port, we ensure no fatal provider error is returned.
     let result = <ConflictListener as ManagedProvided>::resolve_managed().await;
 
     assert!(
@@ -30,15 +30,10 @@ async fn test_listen_permission_denied_fatal() {
         return;
     }
 
-    // With the exit-to-panic refactor, provider_init_exit now panics.
-    // Spawn in a separate task to catch the panic via JoinHandle.
-    let handle = tokio::spawn(async {
-        let _ = <RootListener as ManagedProvided>::resolve_managed().await;
-    });
-
-    let result = handle.await;
+    let result = <RootListener as ManagedProvided>::resolve_managed().await;
     assert!(
-        result.is_err(),
-        "Expected Fatal panic on privileged port 80, but the provider succeeded"
+        matches!(result, Err(ProviderError::Fatal(_))),
+        "Expected fatal provider error on privileged port 80, got {:?}",
+        result
     );
 }

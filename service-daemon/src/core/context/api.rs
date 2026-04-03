@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::models::ServiceStatus;
+use crate::models::{ServiceId, ServiceStatus};
 
 /// Runs a future within the context of a service.
 ///
@@ -355,7 +355,7 @@ where
 ///
 /// Falls back to `ServiceId(0)` if called outside of a managed service scope
 /// (e.g., in a background task spawned via `tokio::spawn` without context propagation).
-pub fn current_service_id() -> crate::models::ServiceId {
+pub fn current_service_id() -> ServiceId {
     CURRENT_SERVICE
         .try_with(|identity| identity.service_id)
         .unwrap_or_default()

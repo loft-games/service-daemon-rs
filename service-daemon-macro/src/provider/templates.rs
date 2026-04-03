@@ -10,7 +10,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 
-use super::struct_gen::generate_provided_impl;
+use super::struct_gen::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 
 /// Checks whether any attribute in the list already contains `derive(Clone)`.
 ///
@@ -62,6 +62,7 @@ impl<'a> TemplateContext<'a> {
         vis: &'a syn::Visibility,
         attrs: &'a [syn::Attribute],
         eager: bool,
+        generate_infallible_helpers: bool,
     ) -> Self {
         let singleton_name = format_ident!(
             "__PROVIDER_SINGLETON_{}",
@@ -74,23 +75,32 @@ impl<'a> TemplateContext<'a> {
             quote! { #[derive(Clone)] }
         };
 
-        let constructor = quote! { std::sync::Arc::new(#struct_name::default()) };
-
         let type_tokens = quote! { #struct_name };
-        let init_fn = quote! {
+        let framework_init_fn = quote! {
             let _ = policy;
             let _ = cancel;
-            #constructor
+            Ok(std::sync::Arc::new(#struct_name::default()))
+        };
+        let managed_init_fn = quote! {
+            let _ = policy;
+            let _ = cancel;
+            Ok(std::sync::Arc::new(#struct_name::default()))
         };
 
-        let provided_impl = generate_provided_impl(
-            &type_tokens,
-            &singleton_name,
-            struct_name.span(),
-            &[],
+        let provided_impl = generate_provided_impl(ProvidedImplConfig {
+            type_tokens: &type_tokens,
+            singleton_name: &singleton_name,
+            user_span: struct_name.span(),
+            param_entries: &[],
             eager,
-            &init_fn,
-        );
+            framework_init_fn: &framework_init_fn,
+            managed_init_fn: &managed_init_fn,
+            helper_style: if generate_infallible_helpers {
+                HelperStyle::Infallible
+            } else {
+                HelperStyle::Fallible
+            },
+        });
 
         Self {
             struct_name,
@@ -109,7 +119,7 @@ pub fn generate_notify_template(
     attrs: &[syn::Attribute],
     eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs, eager);
+    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, true);
     let TemplateContext {
         struct_name,
         vis,
@@ -165,7 +175,7 @@ pub fn generate_broadcast_queue_template(
     capacity: usize,
     eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs, eager);
+    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, true);
     let TemplateContext {
         struct_name,
         vis,
@@ -270,13 +280,13 @@ pub fn generate_listen_template(
     );
 
     let type_tokens = quote! { #struct_name };
-    let init_fn = quote! {
-        let addr = #addr_expr;
+    let framework_init_fn = quote! {
         service_daemon::core::provider_init::init_fallible(
+            #struct_name_str,
             policy,
             cancel,
             move || {
-                let addr = addr.clone();
+                let addr = #addr_expr;
                 async move {
                     let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
                         let msg = format!(
@@ -304,15 +314,41 @@ pub fn generate_listen_template(
         )
         .await
     };
+    let managed_init_fn = quote! {
+        let addr = #addr_expr;
+        let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
+            let msg = format!(
+                "Provider '{}' failed to bind TCP port '{}': {}",
+                #struct_name_str, addr, e
+            );
+            match e.kind() {
+                std::io::ErrorKind::AddrInUse
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::TimedOut => {
+                    service_daemon::ProviderError::Retryable(msg)
+                }
+                _ => service_daemon::ProviderError::Fatal(msg),
+            }
+        })?;
+        listener.set_nonblocking(true).map_err(|e| {
+            service_daemon::ProviderError::Fatal(format!(
+                "Provider '{}' failed to set nonblocking for '{}': {}",
+                #struct_name_str, addr, e
+            ))
+        })?;
+        Ok(std::sync::Arc::new(#struct_name(std::sync::Arc::new(listener))))
+    };
 
-    let provided_impl = generate_provided_impl(
-        &type_tokens,
-        &singleton_name,
-        struct_name.span(),
-        &[],
+    let provided_impl = generate_provided_impl(ProvidedImplConfig {
+        type_tokens: &type_tokens,
+        singleton_name: &singleton_name,
+        user_span: struct_name.span(),
+        param_entries: &[],
         eager,
-        &init_fn,
-    );
+        framework_init_fn: &framework_init_fn,
+        managed_init_fn: &managed_init_fn,
+        helper_style: HelperStyle::Fallible,
+    });
 
     let expanded = quote! {
         #(#attrs)*

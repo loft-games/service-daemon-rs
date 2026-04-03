@@ -4,7 +4,7 @@
 //! signal firing, and watch state changes through the public API.
 
 use example_triggers::providers::{ExternalStatus, UserNotifier};
-use service_daemon::{Provided, Registry, RestartPolicy, ServiceDaemon};
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 
 /// Helper: Create an isolated registry that filters out all auto-registered services.
 fn isolated_registry() -> Registry {
@@ -27,7 +27,7 @@ async fn test_trigger_registration() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     Ok(())
 }
@@ -50,7 +50,7 @@ async fn test_signal_trigger_fires() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
     Ok(())
 }
 
@@ -79,6 +79,6 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
     Ok(())
 }

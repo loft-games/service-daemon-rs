@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time;
 use tracing::info;
 
-/// Simulates a standard HTTP administration service running in the shared thread pool.
+/// Simulates a standard HTTP administration service running on the shared standard runtime.
 #[service(priority = ServicePriority::STORAGE)]
 pub async fn admin_service() -> Result<()> {
     let thread = thread::current();
@@ -13,7 +13,7 @@ pub async fn admin_service() -> Result<()> {
     let thread_name = thread.name().unwrap_or("unnamed").to_string();
 
     info!(
-        "[Standard] Admin service running on thread {:?} ({})",
+        "[Standard] Admin service running on the shared standard runtime on thread {:?} ({})",
         thread_id, thread_name
     );
 

@@ -14,12 +14,16 @@
 //! 3. Implement `handle_step` using `&mut self` to access them.
 //! 4. Done! The engine takes care of the rest.
 
-use anyhow::{Error, Result};
+#[cfg(feature = "cron")]
+use anyhow::Error;
+use anyhow::Result;
 use futures::future::BoxFuture;
 use std::any::Any;
 use std::ops::Deref;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, broadcast};
+#[cfg(feature = "cron")]
+use tokio::sync::Notify;
+use tokio::sync::{Mutex, broadcast};
 use tracing::{info, warn};
 
 use crate::core::di::{Provided, WatchableProvided};

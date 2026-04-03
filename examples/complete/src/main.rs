@@ -29,8 +29,8 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let mut daemon = ServiceDaemon::builder().with_restart_policy(policy).build();
+
     daemon.run().await;
     daemon.wait().await?;
-
     Ok(())
 }

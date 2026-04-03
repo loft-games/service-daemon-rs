@@ -37,9 +37,12 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 | Layer | Retry Behavior | How to Stop |
 | :--- | :--- | :--- |
 | **Service** | Always retries forever | Return `ServiceError::Fatal` from the service function |
+| **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
 | **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
 
 **Why the difference?** Services are long-running background tasks - they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
+
+Lazy providers are different: they may initialize after startup, inside a running service. In that case, a `ProviderError::Fatal` is promoted to a daemon-wide shutdown request by the service runner, so the process can stop cleanly instead of continuing in a partially initialized state.
 
 Trigger handlers, on the other hand, process individual messages. A single poison message should not block the entire queue forever. `trigger_max_retries` acts as a safety valve to skip messages that consistently fail.
 

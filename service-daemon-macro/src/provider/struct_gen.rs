@@ -11,6 +11,7 @@ use super::parser::{ProviderArgs, ProviderKind, TemplateArg};
 use super::templates::{
     generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
 };
+use crate::common::{WrapperKind, decompose_type};
 
 /// Attempts to generate a template-based provider if the args specify a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
@@ -147,26 +148,38 @@ impl TupleStructInfo {
     }
 }
 
+/// Controls which inherent helper surface is generated for a provider.
+pub(super) enum HelperStyle {
+    Infallible,
+    Fallible,
+}
+
+/// Input bundle for generating provider capability impls and helper methods.
+pub(super) struct ProvidedImplConfig<'a> {
+    pub type_tokens: &'a proc_macro2::TokenStream,
+    pub singleton_name: &'a syn::Ident,
+    pub user_span: proc_macro2::Span,
+    pub param_entries: &'a [proc_macro2::TokenStream],
+    pub eager: bool,
+    pub framework_init_fn: &'a proc_macro2::TokenStream,
+    pub managed_init_fn: &'a proc_macro2::TokenStream,
+    pub helper_style: HelperStyle,
+}
+
 /// Generates the provider capability trait impls and convenience methods
 /// for a provider type, and registers a `ProviderEntry` in the
 /// `PROVIDER_REGISTRY` for dependency graph analysis.
-///
-/// # Arguments
-/// * `type_tokens` - The type that implements provider traits (as a token stream).
-/// * `singleton_name` - The unique static `StateManager` identifier.
-/// * `constructor` - The expression to create `Arc<Self>` on first resolution.
-/// * `user_span`  - The span of the user's type definition (struct name or fn
-///   return type). Used for `quote_spanned!` so that missing trait bound errors
-///   (e.g., `Clone`) point to the user's code, not the macro output.
-/// * `param_entries` - Dependency metadata tokens for `PROVIDER_REGISTRY` registration.
-pub(super) fn generate_provided_impl(
-    type_tokens: &proc_macro2::TokenStream,
-    singleton_name: &syn::Ident,
-    user_span: proc_macro2::Span,
-    param_entries: &[proc_macro2::TokenStream],
-    eager: bool,
-    init_fn: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
+pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_macro2::TokenStream {
+    let ProvidedImplConfig {
+        type_tokens,
+        singleton_name,
+        user_span,
+        param_entries,
+        eager,
+        framework_init_fn,
+        managed_init_fn,
+        helper_style,
+    } = config;
     // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
     // the compiler error points to the user's struct definition or fn return
     // type rather than an opaque macro expansion site.
@@ -201,76 +214,134 @@ pub(super) fn generate_provided_impl(
             .replace(|c: char| !c.is_alphanumeric(), "_")
     );
 
+    let helper_impl = if matches!(helper_style, HelperStyle::Infallible) {
+        let resolve_msg = format!(
+            "Infallible provider convenience resolve() unexpectedly failed for '{}'. Use the explicit fallible provider path if this provider can fail.",
+            type_name_str
+        );
+        let resolve_rwlock_msg = format!(
+            "Infallible provider convenience resolve_rwlock() unexpectedly failed for '{}'. Use the explicit fallible provider path if this provider can fail.",
+            type_name_str
+        );
+        let resolve_mutex_msg = format!(
+            "Infallible provider convenience resolve_mutex() unexpectedly failed for '{}'. Use the explicit fallible provider path if this provider can fail.",
+            type_name_str
+        );
+        quote! {
+            impl #type_tokens {
+                /// Resolves an immutable snapshot for this provider.
+                pub async fn resolve() -> std::sync::Arc<Self> {
+                    <Self as service_daemon::Provided>::resolve()
+                        .await
+                        .expect(#resolve_msg)
+                }
+
+                /// Resolves a tracked RwLock for this provider.
+                pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+                    <Self as service_daemon::ManagedProvided>::resolve_rwlock()
+                        .await
+                        .expect(#resolve_rwlock_msg)
+                }
+
+                /// Resolves a tracked Mutex for this provider.
+                pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+                    <Self as service_daemon::ManagedProvided>::resolve_mutex()
+                        .await
+                        .expect(#resolve_mutex_msg)
+                }
+
+                /// Resolves the raw managed result for this provider.
+                pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                    <Self as service_daemon::ManagedProvided>::resolve_managed().await
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl #type_tokens {
+                /// Resolves an immutable snapshot for this provider.
+                pub async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
+                    <Self as service_daemon::Provided>::resolve().await
+                }
+
+                /// Resolves a tracked RwLock for this provider.
+                pub async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>>, service_daemon::ProviderInitError> {
+                    <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
+                }
+
+                /// Resolves a tracked Mutex for this provider.
+                pub async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>>, service_daemon::ProviderInitError> {
+                    <Self as service_daemon::ManagedProvided>::resolve_mutex().await
+                }
+
+                /// Resolves the raw managed result for this provider.
+                pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                    <Self as service_daemon::ManagedProvided>::resolve_managed().await
+                }
+            }
+        }
+    };
+
     quote! {
         #bounds_assertion
 
         static #singleton_name: service_daemon::core::managed_state::StateManager<#type_tokens> = service_daemon::core::managed_state::StateManager::new();
 
         impl service_daemon::Provided for #type_tokens {
-            async fn resolve() -> std::sync::Arc<Self> {
-                #singleton_name.resolve_snapshot(|| async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    #init_fn
-                }).await
+            async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
+                #singleton_name
+                    .resolve_snapshot_result(|| async {
+                        let policy = service_daemon::RestartPolicy::default();
+                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        #framework_init_fn
+                    })
+                    .await
             }
         }
 
         impl service_daemon::ManagedProvided for #type_tokens {
-            async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
-                #singleton_name.resolve_rwlock(|| async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    #init_fn
-                }).await
+            async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>>, service_daemon::ProviderInitError> {
+                #singleton_name
+                    .resolve_rwlock_result(|| async {
+                        let policy = service_daemon::RestartPolicy::default();
+                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        #framework_init_fn
+                    })
+                    .await
             }
 
-            async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
-                #singleton_name.resolve_mutex(|| async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    #init_fn
-                }).await
+            async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>>, service_daemon::ProviderInitError> {
+                #singleton_name
+                    .resolve_mutex_result(|| async {
+                        let policy = service_daemon::RestartPolicy::default();
+                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        #framework_init_fn
+                    })
+                    .await
             }
 
             async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
-                #singleton_name.resolve_managed(|| async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
-                    Ok({ #init_fn })
-                }).await
+                #singleton_name
+                    .resolve_managed_result(|| async {
+                        let policy = service_daemon::RestartPolicy::default();
+                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        #managed_init_fn
+                    })
+                    .await
             }
         }
 
         #watchable_impl
 
-        impl #type_tokens {
-            /// Resolves a tracked RwLock for this provider.
-            pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
-                <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
-            }
-
-            /// Resolves a tracked Mutex for this provider.
-            pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
-                <Self as service_daemon::ManagedProvided>::resolve_mutex().await
-            }
-
-            /// Resolves the raw managed result for this provider.
-            pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
-                <Self as service_daemon::ManagedProvided>::resolve_managed().await
-            }
-        }
+        #helper_impl
 
         fn #init_fn_name(
             policy: service_daemon::RestartPolicy,
             cancel: service_daemon::tokio_util::sync::CancellationToken,
-        ) -> service_daemon::futures::future::BoxFuture<'static, ()> {
+        ) -> service_daemon::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                let _ = #singleton_name
-                    .resolve_snapshot(|| async {
-                        #init_fn
-                    })
-                    .await;
+                #framework_init_fn?;
+                Ok(())
             })
         }
 
@@ -315,8 +386,9 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     // Generate Default impl for single-element tuple structs
     let default_impl = generate_default_impl(&tuple_info, &args, struct_name);
 
-    // Generate constructor based on field type (async for named structs with Arc deps)
-    let constructor = generate_constructor(struct_name, fields);
+    // Generate constructors for both framework-level and raw managed resolution.
+    let framework_init_fn = generate_constructor(struct_name, fields, false);
+    let managed_init_fn = generate_constructor(struct_name, fields, true);
 
     // Collect dependency metadata from struct fields for PROVIDER_REGISTRY.
     // Only named fields with Arc-wrapped types are injectable dependencies.
@@ -326,7 +398,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
             .iter()
             .filter_map(|field| {
                 let field_name = field.ident.as_ref()?;
-                let (inner_type, wrapper) = crate::common::decompose_type(&field.ty);
+                let (inner_type, wrapper) = decompose_type(&field.ty);
                 // Only Arc-wrapped fields are DI dependencies
                 wrapper.map(|_| {
                     let field_name_str = field_name.to_string();
@@ -359,20 +431,16 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     let type_tokens = quote! { #struct_name };
     let eager = args.eager;
 
-    let init_fn = quote! {
-        let _ = policy;
-        let _ = cancel;
-        #constructor
-    };
-
-    let provided_impl = generate_provided_impl(
-        &type_tokens,
-        &singleton_name,
-        struct_name.span(),
-        &param_entries,
+    let provided_impl = generate_provided_impl(ProvidedImplConfig {
+        type_tokens: &type_tokens,
+        singleton_name: &singleton_name,
+        user_span: struct_name.span(),
+        param_entries: &param_entries,
         eager,
-        &init_fn,
-    );
+        framework_init_fn: &framework_init_fn,
+        managed_init_fn: &managed_init_fn,
+        helper_style: HelperStyle::Infallible,
+    });
 
     let expanded = quote! {
         #struct_def
@@ -574,6 +642,7 @@ fn generate_default_impl(
 fn generate_constructor(
     struct_name: &syn::Ident,
     fields: &syn::Fields,
+    managed_errors: bool,
 ) -> proc_macro2::TokenStream {
     match fields {
         syn::Fields::Named(named_fields) => {
@@ -585,22 +654,44 @@ fn generate_constructor(
                     let field_type = &field.ty;
 
                     // Use the shared type decomposition from common.rs
-                    let (inner_type, wrapper) = crate::common::decompose_type(field_type);
+                    let (inner_type, wrapper) = decompose_type(field_type);
 
                     match wrapper {
-                        Some(crate::common::WrapperKind::ArcRwLock(_, _)) => {
-                            quote! {
-                                #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await
+                        Some(WrapperKind::ArcRwLock(_, _)) => {
+                            if managed_errors {
+                                quote! {
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
+                                        .await
+                                        .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
+                                }
+                            } else {
+                                quote! {
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?
+                                }
                             }
                         }
-                        Some(crate::common::WrapperKind::ArcMutex(_, _)) => {
-                            quote! {
-                                #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await
+                        Some(WrapperKind::ArcMutex(_, _)) => {
+                            if managed_errors {
+                                quote! {
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
+                                        .await
+                                        .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
+                                }
+                            } else {
+                                quote! {
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?
+                                }
                             }
                         }
-                        Some(crate::common::WrapperKind::Arc(_)) => {
-                            quote! {
-                                #field_name: <#inner_type as service_daemon::Provided>::resolve().await
+                        Some(WrapperKind::Arc(_)) => {
+                            if managed_errors {
+                                quote! {
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_managed().await?
+                                }
+                            } else {
+                                quote! {
+                                    #field_name: <#inner_type as service_daemon::Provided>::resolve().await?
+                                }
                             }
                         }
                         None => {
@@ -622,15 +713,15 @@ fn generate_constructor(
                 .collect();
 
             quote! {
-                std::sync::Arc::new(#struct_name {
+                Ok(std::sync::Arc::new(#struct_name {
                     #(#field_inits),*
-                })
+                }))
             }
         }
         syn::Fields::Unnamed(_) | syn::Fields::Unit => {
             // Tuple struct or unit struct - use Default (sync init is fine here)
             quote! {
-                std::sync::Arc::new(#struct_name::default())
+                Ok(std::sync::Arc::new(#struct_name::default()))
             }
         }
     }

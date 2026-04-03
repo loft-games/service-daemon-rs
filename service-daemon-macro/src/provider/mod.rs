@@ -15,7 +15,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{ItemFn, parse_macro_input};
 
-use crate::common::extract_sync_handler_flag;
+use crate::common::{WrapperKind, decompose_type, extract_sync_handler_flag};
 pub use parser::ProviderArgs;
 use struct_gen::generate_struct_provider;
 
@@ -151,7 +151,8 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&item_fn.attrs);
 
     // Process function parameters for DI resolution
-    let mut resolve_tokens = Vec::new();
+    let mut framework_resolve_tokens = Vec::new();
+    let mut managed_resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
 
@@ -169,22 +170,35 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
             && let syn::Pat::Ident(pat_ident) = &**pat
         {
             let arg_name = &pat_ident.ident;
-            let (inner_type, wrapper) = crate::common::decompose_type(ty);
+            let (inner_type, wrapper) = decompose_type(ty);
 
             match wrapper {
-                Some(crate::common::WrapperKind::ArcRwLock(_, _)) => {
-                    resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await;
+                Some(WrapperKind::ArcRwLock(_, _)) => {
+                    framework_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
+                    });
+                    managed_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
+                            .await
+                            .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?;
                     });
                 }
-                Some(crate::common::WrapperKind::ArcMutex(_, _)) => {
-                    resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await;
+                Some(WrapperKind::ArcMutex(_, _)) => {
+                    framework_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
+                    });
+                    managed_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
+                            .await
+                            .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?;
                     });
                 }
-                Some(crate::common::WrapperKind::Arc(_)) => {
-                    resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                Some(WrapperKind::Arc(_)) => {
+                    framework_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
+                    });
+                    managed_resolve_tokens.push(quote! {
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_managed().await?;
                     });
                 }
                 None => {
@@ -232,33 +246,11 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         fn_name.to_string().to_uppercase()
     );
 
-    // Constructor resolves dependencies then calls the function
-    let constructor = if is_fallible {
+    let framework_init_fn = if is_fallible {
         quote! {
-            #(#resolve_tokens)*
+            #(#framework_resolve_tokens)*
             service_daemon::core::provider_init::init_fallible(
-                service_daemon::RestartPolicy::default(),
-                service_daemon::tokio_util::sync::CancellationToken::new(),
-                move || {
-                    #(let #call_args = #call_args.clone();)*
-                    async move { #fn_call_with_args }
-                },
-            )
-            .await
-        }
-    } else {
-        quote! {
-            #(#resolve_tokens)*
-            std::sync::Arc::new(#fn_call_with_args)
-        }
-    };
-
-    // Use the shared Provided impl generator
-    let type_tokens = quote! { #provided_type };
-    let init_fn = if is_fallible {
-        quote! {
-            #(#resolve_tokens)*
-            service_daemon::core::provider_init::init_fallible(
+                #fn_name_str,
                 policy,
                 cancel,
                 move || {
@@ -270,20 +262,42 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     } else {
         quote! {
+            #(#framework_resolve_tokens)*
             let _ = policy;
             let _ = cancel;
-            #constructor
+            Ok(std::sync::Arc::new(#fn_call_with_args))
         }
     };
 
-    let provided_impl = struct_gen::generate_provided_impl(
-        &type_tokens,
-        &singleton_name,
-        return_type.span(),
-        &param_entries,
+    let managed_init_fn = if is_fallible {
+        quote! {
+            #(#managed_resolve_tokens)*
+            let value = #fn_call_with_args?;
+            Ok(std::sync::Arc::new(value))
+        }
+    } else {
+        quote! {
+            #(#managed_resolve_tokens)*
+            Ok(std::sync::Arc::new(#fn_call_with_args))
+        }
+    };
+
+    // Use the shared Provided impl generator
+    let type_tokens = quote! { #provided_type };
+    let provided_impl = struct_gen::generate_provided_impl(struct_gen::ProvidedImplConfig {
+        type_tokens: &type_tokens,
+        singleton_name: &singleton_name,
+        user_span: return_type.span(),
+        param_entries: &param_entries,
         eager,
-        &init_fn,
-    );
+        framework_init_fn: &framework_init_fn,
+        managed_init_fn: &managed_init_fn,
+        helper_style: if is_fallible {
+            struct_gen::HelperStyle::Fallible
+        } else {
+            struct_gen::HelperStyle::Infallible
+        },
+    });
 
     let expanded = quote! {
         // Keep the original function with its full signature and attributes preserved

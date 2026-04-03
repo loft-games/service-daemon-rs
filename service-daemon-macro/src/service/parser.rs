@@ -4,7 +4,7 @@ use quote::quote;
 use syn::Token;
 use syn::parse::Parse;
 
-use crate::common::TagsList;
+use crate::common::{TagsList, parse_scheduling_policy};
 
 /// Parsed result of `#[service(...)]` attributes.
 ///
@@ -41,7 +41,7 @@ impl Parse for ServiceAttr {
                 }
                 "scheduling" => {
                     let ident: syn::Ident = input.parse()?;
-                    scheduling = crate::common::parse_scheduling_policy(&ident)?;
+                    scheduling = parse_scheduling_policy(&ident)?;
                 }
                 "tags" => {
                     let tag_list: TagsList = input.parse()?;
@@ -100,6 +100,15 @@ mod tests {
         assert_eq!(
             attr.scheduling.to_string(),
             "service_daemon :: ServiceScheduling :: Isolated"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_high_priority() {
+        let attr: ServiceAttr = parse_str("scheduling = HighPriority").unwrap();
+        assert_eq!(
+            attr.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: HighPriority"
         );
     }
 

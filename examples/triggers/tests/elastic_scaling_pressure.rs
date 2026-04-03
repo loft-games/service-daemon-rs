@@ -20,7 +20,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use service_daemon::Provided;
 use service_daemon::ServiceDaemon;
 use service_daemon::TT::*;
 use service_daemon::provider;
@@ -105,7 +104,7 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     // -- Producer: flood the queue with messages --
     // 100ms between sends at 200ms handler time -> queue builds up fast.
     // With initial_concurrency=1, the semaphore is 100% utilized.
-    let producer = tokio::spawn(async {
+    let producer = tokio::spawn(async move {
         for i in 0..50 {
             // push() may block momentarily if the broadcaster is full
             let _ = PressureQueue::resolve().await.push(format!("msg-{}", i));

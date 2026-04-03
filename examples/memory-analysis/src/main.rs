@@ -19,6 +19,7 @@
 //! cargo run --release -p example-memory-analysis
 //! ```
 
+#[cfg(target_os = "linux")]
 use std::io::Read;
 use std::sync::Arc;
 

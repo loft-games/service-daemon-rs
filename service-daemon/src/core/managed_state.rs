@@ -7,6 +7,8 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
+use crate::{ProviderError, models::ServiceId};
+
 /// Manages intelligent promotion and synchronization for shared state.
 ///
 /// `StateManager` handles the transition between immutable singletons and
@@ -97,6 +99,51 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         Arc::new(TrackedMutex { inner: lock })
     }
 
+    /// Resolves as a tracked RwLock while allowing initialization to fail.
+    pub async fn resolve_rwlock_result<F, Fut, E>(
+        &self,
+        init: F,
+    ) -> Result<Arc<TrackedRwLock<T>>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<T>, E>> + Send,
+    {
+        self.lock
+            .get_or_try_init(|| async {
+                let initial_arc = if let Some(sn) = self.snapshot_cache.get() {
+                    sn.clone()
+                } else {
+                    init().await?
+                };
+
+                let val = initial_arc.clone();
+                let notify = self.get_notify().await;
+                let (tx, rx) = watch::channel(initial_arc);
+
+                // Ensure watch_rx is also populated
+                let _ = self.watch_rx.set(rx);
+
+                Ok(Arc::new(TrackedRwLock {
+                    inner: TokioRwLock::new(val),
+                    notify,
+                    watch_tx: tx,
+                }))
+            })
+            .await
+            .map(Clone::clone)
+    }
+
+    /// Resolves as a tracked Mutex while allowing initialization to fail.
+    pub async fn resolve_mutex_result<F, Fut, E>(&self, init: F) -> Result<Arc<TrackedMutex<T>>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<T>, E>> + Send,
+    {
+        self.resolve_rwlock_result(init)
+            .await
+            .map(|lock| Arc::new(TrackedMutex { inner: lock }))
+    }
+
     /// Resolves as a snapshot `Arc<T>`.
     /// Provides "Zero Lockdown" reads - never blocks even if a writer is holding the lock.
     pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
@@ -113,14 +160,34 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         self.snapshot_cache.get_or_init(init).await.clone()
     }
 
-    /// Resolves as the raw initialization result.
-    pub async fn resolve_managed<F, Fut>(
-        &self,
-        init: F,
-    ) -> std::result::Result<Arc<T>, crate::ProviderError>
+    /// Resolves as a snapshot while allowing initialization to fail.
+    pub async fn resolve_snapshot_result<F, Fut, E>(&self, init: F) -> Result<Arc<T>, E>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<Arc<T>, crate::ProviderError>> + Send,
+        Fut: Future<Output = Result<Arc<T>, E>> + Send,
+    {
+        if let Some(rx) = self.watch_rx.get() {
+            return Ok(rx.borrow().clone());
+        }
+
+        if let Some(snapshot) = self.snapshot_cache.get() {
+            return Ok(snapshot.clone());
+        }
+
+        self.snapshot_cache
+            .get_or_try_init(init)
+            .await
+            .map(Clone::clone)
+    }
+
+    /// Resolves as the raw initialization result.
+    pub async fn resolve_managed_result<F, Fut>(
+        &self,
+        init: F,
+    ) -> std::result::Result<Arc<T>, ProviderError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<Arc<T>, ProviderError>> + Send,
     {
         // 1. Dynamic Check: If lock is already initialized, we return the latest snapshot
         if let Some(rx) = self.watch_rx.get() {
@@ -329,9 +396,9 @@ impl<T: Clone> DerefMut for TrackedMutexGuard<'_, T> {
 /// Generates a new UUID v7 message ID and captures the current service ID.
 /// Used by `TrackedNotify` and `TrackedSender` to maintain causal identity.
 #[inline]
-fn capture_message_identity() -> (Uuid, crate::models::ServiceId) {
+fn capture_message_identity() -> (Uuid, ServiceId) {
     let msg_id = Uuid::now_v7();
-    let src_id = crate::core::context::api::current_service_id();
+    let src_id = super::context::api::current_service_id();
     (msg_id, src_id)
 }
 
@@ -355,7 +422,7 @@ pub struct TrackedNotify {
     inner: TokioNotify,
     /// The most recently generated message ID and the emitting service's ID.
     /// Protected by a std::sync::RwLock for minimal overhead (no async needed).
-    last_id: std::sync::RwLock<Option<(Uuid, crate::models::ServiceId)>>,
+    last_id: std::sync::RwLock<Option<(Uuid, ServiceId)>>,
 }
 
 impl TrackedNotify {
@@ -395,7 +462,7 @@ impl TrackedNotify {
     ///
     /// Returns `Some((Uuid, ServiceId))` if a signal was emitted since the last call,
     /// `None` otherwise. The ID is cleared after reading to prevent reuse.
-    pub fn last_id(&self) -> Option<(Uuid, crate::models::ServiceId)> {
+    pub fn last_id(&self) -> Option<(Uuid, ServiceId)> {
         self.last_id
             .write()
             .expect("TrackedNotify lock poisoned")
@@ -435,7 +502,7 @@ impl Clone for TrackedNotify {
 pub struct TrackedSender<P> {
     inner: tokio::sync::broadcast::Sender<P>,
     /// The most recently generated message ID and emitting service's ID.
-    last_id: std::sync::RwLock<Option<(Uuid, crate::models::ServiceId)>>,
+    last_id: std::sync::RwLock<Option<(Uuid, ServiceId)>>,
 }
 
 impl<P: Clone> TrackedSender<P> {
@@ -483,7 +550,7 @@ impl<P: Clone> TrackedSender<P> {
     ///
     /// Returns `Some((Uuid, ServiceId))` if a message was sent since the last call,
     /// `None` otherwise. The ID is cleared after reading to prevent reuse.
-    pub fn last_id(&self) -> Option<(Uuid, crate::models::ServiceId)> {
+    pub fn last_id(&self) -> Option<(Uuid, ServiceId)> {
         self.last_id
             .write()
             .expect("TrackedSender lock poisoned")

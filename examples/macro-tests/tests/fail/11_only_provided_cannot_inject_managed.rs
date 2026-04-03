@@ -6,8 +6,8 @@ use std::sync::Arc;
 struct SnapshotOnly;
 
 impl Provided for SnapshotOnly {
-    async fn resolve() -> Arc<Self> {
-        Arc::new(Self)
+    async fn resolve() -> std::result::Result<Arc<Self>, service_daemon::ProviderInitError> {
+        Ok(Arc::new(Self))
     }
 }
 

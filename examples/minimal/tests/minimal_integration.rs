@@ -20,7 +20,7 @@ async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
 
     // Trigger graceful shutdown
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     Ok(())
 }
@@ -66,7 +66,7 @@ async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
     );
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     assert!(
         SHUTDOWN_EXITED.load(Ordering::SeqCst),

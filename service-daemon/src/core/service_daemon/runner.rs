@@ -18,17 +18,20 @@ use std::collections::{BTreeMap, HashMap};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::runtime::Handle;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
+use crate::ProviderInitError;
 use crate::ServiceScheduling;
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
 use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
 };
 
+use super::parts::{ServiceSupervisorParts, SpawnServiceParts};
 use super::policy::RestartPolicy;
 
 // ---------------------------------------------------------------------------
@@ -64,24 +67,28 @@ struct ServiceSupervisor {
     backoff: BackoffController,
     resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
+    daemon_token: CancellationToken,
 
     // -- Per-generation mutable context (set during `on_starting`) --
     /// Tracks how long the current generation has been running.
-    generation_start: Option<std::time::Instant>,
+    generation_start: Option<Instant>,
     /// Per-generation token used to detect reload vs. normal exit.
     reload_token: Option<CancellationToken>,
 }
 
 impl ServiceSupervisor {
-    fn new(
-        service_id: ServiceId,
-        name: &'static str,
-        run: ServiceFn,
-        watcher: Option<fn() -> BoxFuture<'static, ()>>,
-        policy: RestartPolicy,
-        resources: Arc<DaemonResources>,
-        cancellation_token: CancellationToken,
-    ) -> Self {
+    fn new(parts: ServiceSupervisorParts) -> Self {
+        let ServiceSupervisorParts {
+            service_id,
+            name,
+            run,
+            watcher,
+            policy,
+            resources,
+            cancellation_token,
+            daemon_token,
+        } = parts;
+
         Self {
             service_id,
             name,
@@ -90,6 +97,7 @@ impl ServiceSupervisor {
             backoff: BackoffController::new(policy),
             resources,
             cancellation_token,
+            daemon_token,
             generation_start: None,
             reload_token: None,
         }
@@ -143,10 +151,11 @@ impl ServiceSupervisor {
     /// Returns `true` if the service should be restarted, `false` if it should stop permanently.
     fn handle_outcome(
         &self,
-        result: Result<Result<(), anyhow::Error>, Box<dyn std::any::Any + Send>>,
+        result: Result<Result<(), Error>, Box<dyn Any + Send>>,
         reload_token: &CancellationToken,
-    ) -> (ServiceStatus, bool) {
+    ) -> (ServiceStatus, bool, bool) {
         let mut should_restart = true;
+        let mut should_shutdown_daemon = false;
 
         let next_status = match result {
             Ok(Ok(_)) => {
@@ -163,7 +172,21 @@ impl ServiceSupervisor {
                         self.name, svc_err
                     );
                     should_restart = false;
-                    return (ServiceStatus::Terminated, should_restart);
+                    return (ServiceStatus::Terminated, should_restart, false);
+                }
+                if let Some(provider_init_err) = e.downcast_ref::<ProviderInitError>() {
+                    error!(
+                        "Service {} encountered provider init error: {}",
+                        self.name, provider_init_err
+                    );
+                    should_restart = false;
+                    should_shutdown_daemon = true;
+                    self.daemon_token.cancel();
+                    return (
+                        ServiceStatus::Terminated,
+                        should_restart,
+                        should_shutdown_daemon,
+                    );
                 }
                 error!("Service {} failed: {:?}", self.name, e);
                 ServiceStatus::Recovering(format!("{:?}", e))
@@ -187,10 +210,10 @@ impl ServiceSupervisor {
                 "Supervisor: Service {} exited after reload signal",
                 self.name
             );
-            return (ServiceStatus::Restoring, true);
+            return (ServiceStatus::Restoring, true, false);
         }
 
-        (next_status, should_restart)
+        (next_status, should_restart, should_shutdown_daemon)
     }
 
     /// Waits for the restart delay, allowing early exit on reload or cancellation.
@@ -279,7 +302,7 @@ impl ServiceSupervisor {
             .resources
             .reload_signals
             .entry(self.service_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
         let reload_token = self
@@ -343,7 +366,12 @@ impl ServiceSupervisor {
             .as_ref()
             .expect("reload_token must be set by on_starting");
 
-        let (next_status, should_restart) = self.handle_outcome(result, reload_token);
+        let (next_status, should_restart, should_shutdown_daemon) =
+            self.handle_outcome(result, reload_token);
+
+        if should_shutdown_daemon {
+            self.daemon_token.cancel();
+        }
 
         if !should_restart {
             info!("Service {} marked as fatal, not restarting", self.name);
@@ -445,7 +473,7 @@ impl<'a> ServiceWave<'a> {
         timeout: Duration,
         daemon_token: &CancellationToken,
     ) {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         while start.elapsed() < timeout {
             // Early exit if daemon shutdown was requested
             if daemon_token.is_cancelled() {
@@ -497,19 +525,22 @@ impl<'a> ServiceWave<'a> {
 }
 
 /// Spawn a single service with the given restart policy.
-#[allow(clippy::too_many_arguments)]
-pub async fn spawn_service(
-    service_id: ServiceId,
-    name: &'static str,
-    run: ServiceFn,
-    watcher: Option<fn() -> BoxFuture<'static, ()>>,
-    policy: RestartPolicy,
-    scheduling: ServiceScheduling,
-    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: Arc<DaemonResources>,
-    cancellation_token: CancellationToken,
-) {
-    let supervisor = ServiceSupervisor::new(
+pub async fn spawn_service(parts: SpawnServiceParts) {
+    let SpawnServiceParts {
+        service_id,
+        name,
+        run,
+        watcher,
+        policy,
+        scheduling,
+        running_tasks,
+        resources,
+        cancellation_token,
+        daemon_token,
+        runtime,
+    } = parts;
+
+    let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
         service_id,
         name,
         run,
@@ -517,9 +548,12 @@ pub async fn spawn_service(
         policy,
         resources,
         cancellation_token,
-    );
+        daemon_token,
+    });
 
     let handle = match scheduling {
+        ServiceScheduling::Standard => tokio::spawn(supervisor.run_loop()),
+        ServiceScheduling::HighPriority => runtime.spawn(supervisor.run_loop()),
         ServiceScheduling::Isolated => {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let thread_name = format!("svc-{}", name);
@@ -543,7 +577,6 @@ pub async fn spawn_service(
                 let _ = rx.await;
             })
         }
-        _ => tokio::spawn(supervisor.run_loop()),
     };
 
     running_tasks.lock().await.insert(service_id, handle);
@@ -562,6 +595,7 @@ pub async fn spawn_all_services(
     restart_policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
+    runtime: Handle,
     daemon_token: &CancellationToken,
 ) {
     info!("Beginning wave-based startup sequence...");
@@ -583,17 +617,19 @@ pub async fn spawn_all_services(
         );
 
         for service in &wave.services {
-            spawn_service(
-                service.id,
-                service.name(),
-                service.entry.wrapper,
-                service.entry.watcher,
-                restart_policy,
-                service.entry.scheduling,
-                running_tasks.clone(),
-                resources.clone(),
-                service.cancellation_token.clone(),
-            )
+            spawn_service(SpawnServiceParts {
+                service_id: service.id,
+                name: service.name(),
+                run: service.entry.wrapper,
+                watcher: service.entry.watcher,
+                policy: restart_policy,
+                scheduling: service.entry.scheduling,
+                running_tasks: running_tasks.clone(),
+                resources: resources.clone(),
+                cancellation_token: service.cancellation_token.clone(),
+                daemon_token: daemon_token.clone(),
+                runtime: runtime.clone(),
+            })
             .await;
         }
 

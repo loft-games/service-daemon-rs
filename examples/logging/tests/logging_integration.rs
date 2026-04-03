@@ -24,7 +24,7 @@ async fn test_file_logging_initialization() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     // Cleanup
     let _ = std::fs::remove_dir_all(&temp_dir);

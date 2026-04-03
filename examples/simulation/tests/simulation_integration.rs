@@ -168,7 +168,9 @@ async fn test_god_hand_status_flip_with_real_service() {
     // inline because it blocks the test thread waiting for OS signals.
     let daemon_task = tokio::spawn(async move {
         daemon.run().await;
-        daemon.wait().await.unwrap();
+        if let Err(err) = daemon.wait().await {
+            panic!("daemon.wait() failed: {err}");
+        }
     });
 
     // Wait for the runner to spawn the service and write initial status

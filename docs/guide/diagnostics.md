@@ -24,7 +24,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-    daemon.wait().await
+    daemon.wait().await?;
+
+    Ok(())
 }
 ```
 

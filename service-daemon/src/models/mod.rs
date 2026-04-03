@@ -4,7 +4,7 @@ pub mod provider_error;
 pub mod service;
 pub mod trigger;
 
-pub use error::{Result, ServiceError};
+pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{
     BackoffController, RestartPolicy, RestartPolicyBuilder, ScalingPolicy, ScalingPolicyBuilder,
 };

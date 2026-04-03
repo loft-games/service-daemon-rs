@@ -44,7 +44,7 @@ pub fn generate_event_loop_call(
     // DI dependencies are resolved ONCE here (outside the closure),
     // then cloned into the per-event closure via shadow bindings.
     quote! {
-        let target = <#target_type as service_daemon::Provided>::resolve().await;
+        let target = <#target_type as service_daemon::Provided>::resolve().await?;
         #(#di_resolve_tokens)*
         <#host_path as service_daemon::TriggerHost<#target_type>>::run_as_service(
             #fn_name_str,

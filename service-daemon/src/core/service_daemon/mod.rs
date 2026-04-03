@@ -4,29 +4,37 @@
 //! - `policy`: Restart policy configuration.
 //! - `runner`: Service spawning and lifecycle management.
 
+mod parts;
 mod policy;
 mod runner;
 
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::pending;
 use std::sync::Arc;
 #[cfg(feature = "simulation")]
 use std::time::Duration;
+#[cfg(all(feature = "simulation", test))]
+use std::time::Instant;
+use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use petgraph::algo::toposort;
-use petgraph::graph::DiGraph;
+use petgraph::{
+    algo::toposort,
+    graph::{DiGraph, NodeIndex},
+};
 
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::{DaemonResources, process_token};
 use crate::models::{
-    Registry, Result as ServiceResult, ServiceDescription, ServiceId, ServiceStatus,
+    PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
+    ServiceDescription, ServiceError, ServiceId, ServiceStatus,
 };
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -85,11 +93,19 @@ pub struct ServiceDaemon {
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
+    /// Shared runtime used by HighPriority services.
+    high_priority_runtime: Option<Runtime>,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: Arc<DaemonResources>,
+}
+
+impl Drop for ServiceDaemon {
+    fn drop(&mut self) {
+        self.shutdown_high_priority_runtime_detached();
+    }
 }
 
 impl ServiceDaemon {
@@ -99,10 +115,9 @@ impl ServiceDaemon {
         ServiceDaemonBuilder::new()
     }
 
-    async fn eager_init_reachable_providers(&self) {
-        let mut providers_by_id: HashMap<TypeId, &'static crate::models::ProviderEntry> =
-            HashMap::new();
-        for entry in crate::models::PROVIDER_REGISTRY.iter() {
+    async fn eager_init_reachable_providers(&self) -> Result<(), ProviderInitError> {
+        let mut providers_by_id: HashMap<TypeId, &'static ProviderEntry> = HashMap::new();
+        for entry in PROVIDER_REGISTRY.iter() {
             providers_by_id.insert(entry.type_id, entry);
         }
 
@@ -130,20 +145,20 @@ impl ServiceDaemon {
         }
 
         // 3) Filter eager targets.
-        let eager_targets: Vec<&'static crate::models::ProviderEntry> = reachable
+        let eager_targets: Vec<&'static ProviderEntry> = reachable
             .iter()
             .filter_map(|tid| providers_by_id.get(tid).copied())
             .filter(|p| p.eager)
             .collect();
 
         if eager_targets.is_empty() {
-            return;
+            return Ok(());
         }
 
         // 4) Toposort reachable provider DAG to get a deterministic init order.
         // Nodes are provider TypeIds; edges are dep -> provider.
         let mut graph = DiGraph::<TypeId, ()>::new();
-        let mut nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
+        let mut nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
 
         for tid in reachable.iter().copied() {
             if providers_by_id.contains_key(&tid) {
@@ -185,8 +200,10 @@ impl ServiceDaemon {
                 .get(&tid)
                 .copied()
                 .expect("provider must exist in providers_by_id");
-            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await;
+            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await?;
         }
+
+        Ok(())
     }
 
     /// Get the cancellation token for this daemon.
@@ -236,7 +253,11 @@ impl ServiceDaemon {
         // Eager-initialize reachable providers before spawning services.
         //
         // This is opt-in (providers must specify `eager = true`).
-        self.eager_init_reachable_providers().await;
+        if let Err(err) = self.eager_init_reachable_providers().await {
+            tracing::error!(error = %err, "ServiceDaemon eager provider initialization failed");
+            self.shutdown();
+            return self;
+        }
 
         // Spawn all services in the background
         runner::spawn_all_services(
@@ -244,12 +265,17 @@ impl ServiceDaemon {
             self.restart_policy,
             self.running_tasks.clone(),
             self.resources.clone(),
+            self.high_priority_runtime
+                .as_ref()
+                .expect("high_priority_runtime must exist while daemon is running")
+                .handle()
+                .clone(),
             &self.cancellation_token,
         )
         .await;
 
         #[cfg(feature = "diagnostics")]
-        crate::core::topology_collector::start_topology_collector();
+        super::topology_collector::start_topology_collector();
 
         info!(
             "ServiceDaemon running with {} service(s).",
@@ -270,22 +296,27 @@ impl ServiceDaemon {
     /// After the trigger event, this method performs a graceful shutdown
     /// of all services using wave-based priorities.
     ///
+    /// # Errors
+    /// - `ServiceError::InternalError(...)` if the daemon cannot register a
+    ///   shutdown signal listener (for example, `SIGINT` / `SIGTERM` on Unix,
+    ///   or `Ctrl+C` on non-Unix platforms).
+    ///
+    /// Runtime service/provider failures are handled by the runner and
+    /// shutdown path rather than being returned from `wait()`.
+    ///
     /// # Signal Guard (Layer 1 Defense)
-    /// If signal handler registration fails (e.g. restricted container environment),
-    /// this method returns `Err` immediately to prevent an uncontrollable daemon.
+    /// If signal handler registration fails, this method returns `Err`
+    /// immediately to prevent an uncontrollable daemon.
     #[instrument(skip(self))]
     pub async fn wait(&mut self) -> ServiceResult<()> {
         // Wait for shutdown signal (Ctrl+C, SIGTERM, or token cancellation)
         #[cfg(unix)]
         {
             let mut sigint = signal(SignalKind::interrupt()).map_err(|e| {
-                crate::models::ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
+                ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
             })?;
             let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
-                crate::models::ServiceError::InternalError(format!(
-                    "Failed to setup SIGTERM: {}",
-                    e
-                ))
+                ServiceError::InternalError(format!("Failed to setup SIGTERM: {}", e))
             })?;
 
             tokio::select! {
@@ -341,7 +372,7 @@ impl ServiceDaemon {
     }
 
     /// Internal helper: perform the actual graceful shutdown sequence.
-    async fn do_shutdown(&self) {
+    async fn do_shutdown(&mut self) {
         runner::stop_all_services(
             &self.services,
             self.running_tasks.clone(),
@@ -351,8 +382,10 @@ impl ServiceDaemon {
         )
         .await;
 
+        self.shutdown_high_priority_runtime();
+
         #[cfg(feature = "diagnostics")]
-        if let Some(mermaid) = crate::core::topology_collector::export_mermaid() {
+        if let Some(mermaid) = super::topology_collector::export_mermaid() {
             println!("\n=== BEHAVIORAL TOPOLOGY (MERMAID) ===\n");
             println!("{}\n", mermaid);
             println!("====================================\n");
@@ -361,34 +394,55 @@ impl ServiceDaemon {
         info!("ServiceDaemon stopped.");
     }
 
+    fn shutdown_high_priority_runtime(&mut self) {
+        if let Some(runtime) = self.high_priority_runtime.take() {
+            std::thread::spawn(move || drop(runtime))
+                .join()
+                .expect("failed to shut down high-priority runtime");
+        }
+    }
+
+    fn shutdown_high_priority_runtime_detached(&mut self) {
+        if let Some(runtime) = self.high_priority_runtime.take() {
+            let _ = std::thread::spawn(move || drop(runtime));
+        }
+    }
+
     /// Internal helper: wait on an external CancellationToken if present.
     /// If no external token was provided, this future never resolves.
     async fn wait_external_token(token: &Option<CancellationToken>) {
         match token {
             Some(t) => t.cancelled().await,
-            None => std::future::pending().await,
+            None => pending().await,
         }
     }
 
     /// Run for a limited duration (for testing).
     #[cfg(feature = "simulation")]
     #[instrument(skip(self))]
-    pub async fn run_for_duration(self, duration: Duration) -> ServiceResult<()> {
+    pub async fn run_for_duration(mut self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
+        let daemon_token = self.cancellation_token.clone();
 
         for service in &self.services {
-            runner::spawn_service(
-                service.id,
-                service.name(),
-                service.entry.wrapper,
-                service.entry.watcher,
-                test_policy,
-                service.entry.scheduling,
-                self.running_tasks.clone(),
-                self.resources.clone(),
-                service.cancellation_token.clone(),
-            )
+            runner::spawn_service(parts::SpawnServiceParts {
+                service_id: service.id,
+                name: service.name(),
+                run: service.entry.wrapper,
+                watcher: service.entry.watcher,
+                policy: test_policy,
+                scheduling: service.entry.scheduling,
+                running_tasks: self.running_tasks.clone(),
+                resources: self.resources.clone(),
+                cancellation_token: service.cancellation_token.clone(),
+                daemon_token: daemon_token.clone(),
+                runtime: self.high_priority_runtime
+                    .as_ref()
+                    .expect("high_priority_runtime must exist while daemon is running")
+                    .handle()
+                    .clone(),
+            })
             .await;
         }
 
@@ -402,6 +456,8 @@ impl ServiceDaemon {
             test_policy.wave_stop_timeout,
         )
         .await;
+
+        self.shutdown_high_priority_runtime_detached();
 
         Ok(())
     }
@@ -451,7 +507,7 @@ impl ServiceDaemonBuilder {
     pub(crate) fn new_isolated() -> Self {
         Self {
             registry: Some(
-                crate::models::Registry::builder()
+                Registry::builder()
                     .with_tag("__simulation_isolation__")
                     .build(),
             ),
@@ -595,6 +651,13 @@ impl ServiceDaemonBuilder {
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
+            high_priority_runtime: Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("svc-high-priority")
+                    .build()
+                    .expect("Failed to create high-priority tokio runtime"),
+            ),
             external_cancel_token: self.external_cancel_token,
             resources,
         }
@@ -619,9 +682,9 @@ impl ServiceDaemonBuilder {
 
         // Maps to avoid duplicate node creation.
         // service_name -> NodeIndex
-        let mut service_nodes: HashMap<&str, petgraph::graph::NodeIndex> = HashMap::new();
+        let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
         // TypeId -> NodeIndex (provider types as nodes)
-        let mut type_nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
+        let mut type_nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
 
         // Phase 1: Service -> Provider edges (from ServiceDescription::params).
         for service in services {
@@ -644,7 +707,7 @@ impl ServiceDaemonBuilder {
         // This completes the DAG by adding edges between provider types,
         // enabling detection of circular provider dependencies (e.g.,
         // ProviderA depends on ProviderB which depends on ProviderA).
-        for provider in crate::models::PROVIDER_REGISTRY.iter() {
+        for provider in PROVIDER_REGISTRY.iter() {
             let prov_node = *type_nodes
                 .entry(provider.type_id)
                 .or_insert_with(|| graph.add_node(provider.name));
@@ -674,7 +737,7 @@ impl ServiceDaemonBuilder {
                         );
                     }
                 }
-                for provider in crate::models::PROVIDER_REGISTRY.iter() {
+                for provider in PROVIDER_REGISTRY.iter() {
                     if !provider.params.is_empty() {
                         let dep_names: Vec<&str> =
                             provider.params.iter().map(|p| p.type_name).collect();
@@ -687,7 +750,7 @@ impl ServiceDaemonBuilder {
                 }
                 info!(
                     total_services = services.len(),
-                    total_providers = crate::models::PROVIDER_REGISTRY.len(),
+                    total_providers = PROVIDER_REGISTRY.len(),
                     total_graph_nodes = graph.node_count(),
                     total_graph_edges = graph.edge_count(),
                     "Dependency graph validated - no cycles detected"
@@ -816,7 +879,7 @@ mod tests {
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         daemon
             .run_for_duration(Duration::from_millis(500))
             .await

@@ -1,4 +1,5 @@
 use crate::core::managed_state::{Mutex, RwLock};
+use crate::{ProviderError, ProviderInitError};
 use std::sync::Arc;
 
 /// A trait for types that can be resolved by the DI system as read-only snapshots.
@@ -20,7 +21,8 @@ pub trait Provided: 'static + Send + Sync + Clone + Sized {
     /// If the provider has been promoted to managed state, this returns the
     /// latest published snapshot. Otherwise, it returns the global immutable
     /// singleton value.
-    fn resolve() -> impl std::future::Future<Output = Arc<Self>> + Send;
+    fn resolve()
+    -> impl std::future::Future<Output = std::result::Result<Arc<Self>, ProviderInitError>> + Send;
 }
 
 /// A trait for provider types that support managed mutable state.
@@ -39,14 +41,17 @@ pub trait Provided: 'static + Send + Sync + Clone + Sized {
 )]
 pub trait ManagedProvided: Provided {
     /// Resolves a live tracked `RwLock` for this type.
-    fn resolve_rwlock() -> impl std::future::Future<Output = Arc<RwLock<Self>>> + Send;
+    fn resolve_rwlock()
+    -> impl std::future::Future<Output = std::result::Result<Arc<RwLock<Self>>, ProviderInitError>>
+    + Send;
 
     /// Resolves a live tracked `Mutex` for this type.
-    fn resolve_mutex() -> impl std::future::Future<Output = Arc<Mutex<Self>>> + Send;
+    fn resolve_mutex()
+    -> impl std::future::Future<Output = std::result::Result<Arc<Mutex<Self>>, ProviderInitError>> + Send;
 
     /// Resolves the raw initialization result for this provider.
     fn resolve_managed()
-    -> impl std::future::Future<Output = std::result::Result<Arc<Self>, crate::ProviderError>> + Send;
+    -> impl std::future::Future<Output = std::result::Result<Arc<Self>, ProviderError>> + Send;
 }
 
 /// A trait for managed provider types that also support change notifications.

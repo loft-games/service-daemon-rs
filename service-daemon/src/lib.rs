@@ -61,10 +61,11 @@ pub use core::service_daemon::{
 };
 pub use models::service::{ServicePriority, ServiceScheduling};
 pub use models::{
-    BackoffController, PROVIDER_REGISTRY, ProviderEntry, ProviderError, Registry, RegistryBuilder,
-    Result, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder, ServiceDescription,
-    ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT,
-    TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
+    BackoffController, PROVIDER_REGISTRY, ProviderEntry, ProviderError, ProviderInitError,
+    Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder,
+    ServiceDescription, ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam,
+    ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage,
+    trigger_clone_payload,
 };
 pub use std::sync::Arc;
 

@@ -12,7 +12,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
-use service_daemon::{Provided, Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
 
 // ===========================================================================
 // Test services for: test_ordered_startup
@@ -74,7 +74,7 @@ async fn test_ordered_startup() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     let final_seq = STARTUP_SEQ.lock().unwrap().clone();
     assert_eq!(
@@ -149,7 +149,7 @@ async fn test_ordered_shutdown() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     let final_seq = SHUTDOWN_SEQ.lock().unwrap().clone();
     assert_eq!(
@@ -214,7 +214,7 @@ async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     let value = RECOVERED_VALUE.lock().unwrap().take();
     assert_eq!(value, Some(42), "Shelf data did not survive the crash!");
@@ -275,7 +275,7 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
 
     tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     let log = HANDSHAKE_LOG.lock().unwrap();
     let high_done = log.iter().find(|(s, _)| *s == "high_done");
@@ -351,7 +351,7 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 /// If the macro fails to generate DI resolution code for function parameters,
 /// this test will fail with a type error or incorrect output.
 #[tokio::test]
-async fn test_fn_provider_dependency_chain() {
+async fn test_fn_provider_dependency_chain() -> anyhow::Result<()> {
     // Resolve the async fn provider - this triggers the full dependency chain.
     let conn_str = ConnectionString::resolve().await;
 
@@ -363,4 +363,6 @@ async fn test_fn_provider_dependency_chain() {
          got '{}'",
         conn_str.0
     );
+
+    Ok(())
 }

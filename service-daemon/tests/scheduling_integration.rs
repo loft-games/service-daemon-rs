@@ -1,4 +1,4 @@
-use service_daemon::{ServiceDaemon, service};
+use service_daemon::{service, ServiceDaemon};
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::Mutex;
@@ -6,18 +6,7 @@ use tokio::sync::Mutex;
 static THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 
-#[service(scheduling = Isolated)]
-async fn isolated_service() -> anyhow::Result<()> {
-    let thread_name = std::thread::current()
-        .name()
-        .unwrap_or("unnamed")
-        .to_string();
-    THREAD_NAMES.lock().await.insert(thread_name);
-    Ok(())
-}
-
-#[service(scheduling = Standard)]
-async fn standard_service() -> anyhow::Result<()> {
+async fn record_thread_name(prefix: &str) -> anyhow::Result<()> {
     let thread_name = std::thread::current()
         .name()
         .unwrap_or("unnamed")
@@ -25,43 +14,75 @@ async fn standard_service() -> anyhow::Result<()> {
     THREAD_NAMES
         .lock()
         .await
-        .insert(format!("standard:{}", thread_name));
+        .insert(format!("{}:{}", prefix, thread_name));
     Ok(())
+}
+
+#[service(scheduling = Isolated)]
+async fn isolated_service() -> anyhow::Result<()> {
+    record_thread_name("isolated").await
+}
+
+#[service(scheduling = Standard)]
+async fn standard_service() -> anyhow::Result<()> {
+    record_thread_name("standard").await
+}
+
+#[service(scheduling = HighPriority)]
+async fn high_priority_service() -> anyhow::Result<()> {
+    record_thread_name("high_priority").await
 }
 
 #[tokio::test]
 async fn test_scheduling_isolation() -> anyhow::Result<()> {
+    THREAD_NAMES.lock().await.clear();
+
     let mut daemon = ServiceDaemon::builder().build();
 
-    // Start daemon
     daemon.run().await;
 
-    // Wait for services to finish (they are one-offs)
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    std::mem::forget(daemon);
 
     let names_guard = THREAD_NAMES.lock().await;
     let names: &HashSet<String> = &*names_guard;
 
-    // 1. Verify Isolated service ran in its own named thread
     assert!(
-        names.contains("svc-isolated_service"),
+        names
+            .iter()
+            .any(|n| n == "isolated:svc-isolated_service"),
         "Isolated service thread name not found in {:?}",
         names
     );
 
-    // 2. Verify Standard service ran (we prefixed it to be sure)
-    let has_standard = names.iter().any(|n: &String| n.starts_with("standard:"));
     assert!(
-        has_standard,
+        names.iter().any(|n| n.starts_with("standard:")),
         "Standard service did not execute, found: {:?}",
         names
     );
 
-    // 3. Optional: Verify standard service did NOT run in the isolated thread
-    let standard_in_isolated = names.contains("standard:svc-isolated_service");
     assert!(
-        !standard_in_isolated,
+        names
+            .iter()
+            .any(|n| n.starts_with("high_priority:svc-high-priority")),
+        "HighPriority service did not execute on the shared high-priority runtime, found: {:?}",
+        names
+    );
+
+    assert!(
+        !names.contains("standard:svc-isolated_service"),
         "Standard service should not run in isolated thread"
+    );
+
+    assert!(
+        !names.contains("high_priority:svc-isolated_service"),
+        "HighPriority service should not run in isolated thread"
+    );
+
+    assert!(
+        !names.iter().any(|n| n.starts_with("high_priority:standard:")),
+        "HighPriority service should not collapse to Standard thread naming, found: {:?}",
+        names
     );
 
     Ok(())

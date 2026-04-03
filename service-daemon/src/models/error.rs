@@ -1,3 +1,4 @@
+use std::time::Duration;
 use thiserror::Error;
 
 /// Core error type for the Service Daemon framework.
@@ -45,6 +46,27 @@ pub enum ServiceError {
         /// The target state that was rejected.
         to: String,
     },
+}
+
+/// Internal provider initialization error used while orchestrating eager startup.
+#[doc(hidden)]
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ProviderInitError {
+    /// A provider reported an unrecoverable initialization failure.
+    #[error("Provider '{provider}' failed to initialize: {message}")]
+    Fatal { provider: String, message: String },
+
+    /// A provider kept returning retryable failures until the init timeout elapsed.
+    #[error("Provider '{provider}' initialization timed out after {timeout:?}: {last_error}")]
+    Timeout {
+        provider: String,
+        timeout: Duration,
+        last_error: String,
+    },
+
+    /// Provider initialization was cancelled while waiting for the next retry window.
+    #[error("Provider '{provider}' initialization was cancelled")]
+    Cancelled { provider: String },
 }
 
 /// A specialized Result type for Service Daemon operations.

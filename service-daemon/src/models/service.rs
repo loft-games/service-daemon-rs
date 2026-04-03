@@ -1,3 +1,4 @@
+use crate::models::ProviderInitError;
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
@@ -180,7 +181,8 @@ pub enum ServiceScheduling {
     /// Best for most services that don't have strict latency requirements.
     #[default]
     Standard,
-    /// High priority: hints the system to minimize latency (reserved for future use).
+    /// High priority: runs on the daemon's shared high-priority runtime.
+    /// Use this for latency-sensitive work that should stay off the standard lane.
     HighPriority,
     /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
     /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
@@ -341,7 +343,7 @@ pub struct ProviderEntry {
     pub init: fn(
         crate::models::RestartPolicy,
         tokio_util::sync::CancellationToken,
-    ) -> futures::future::BoxFuture<'static, ()>,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
 }
 
 // ---------------------------------------------------------------------------

@@ -75,7 +75,9 @@ mod tests {
         let daemon_task = tokio::spawn(async move {
             let mut daemon = daemon;
             daemon.run().await;
-            daemon.wait().await.unwrap();
+            if let Err(err) = daemon.wait().await {
+                panic!("daemon.wait() failed: {err}");
+            }
         });
 
         // Verify Phase 1: service initialized and read pre-filled value

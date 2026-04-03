@@ -95,7 +95,9 @@ async fn license_watcher() -> anyhow::Result<()> {
 }
 ```
 
-When a `Fatal` error occurs, the daemon transitions that service to `Terminated` and stops trying. The rest of the system keeps running normally.
+When a `Fatal` error occurs during service execution, the daemon transitions that service to `Terminated` and stops trying. The rest of the system keeps running normally.
+
+For lazy providers, a `ProviderError::Fatal` raised during runtime initialization is treated differently: the service runner treats it as a daemon-wide shutdown signal and stops the `ServiceDaemon` cleanly.
 
 ## 4. Wave Timeouts
 

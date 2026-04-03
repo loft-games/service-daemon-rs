@@ -1,15 +1,7 @@
-error[E0046]: not all trait items implemented, missing: `resolve_managed`
-  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:17:1
-   |
-17 | impl service_daemon::ManagedProvided for NotWatchable {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `resolve_managed` in implementation
-   |
-   = help: implement the missing item: `fn resolve_managed() -> impl std::future::Future<Output = Result<Arc<Self>, ProviderError>> + std::marker::Send { todo!() }`
-
 error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
-  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:33:1
    |
-27 | #[trigger(Watch(NotWatchable))]
+33 | #[trigger(Watch(NotWatchable))]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
    |
 help: the trait `WatchableProvided` is not implemented for `NotWatchable`
@@ -29,9 +21,9 @@ help: the trait `TriggerHost<T>` is implemented for `State`
    = note: this error originates in the attribute macro `trigger` (in Nightly builds, run with -Z macro-backtrace for more info)
 
 error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
-  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:17
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:33:17
    |
-27 | #[trigger(Watch(NotWatchable))]
+33 | #[trigger(Watch(NotWatchable))]
    |                 ^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
    |
 help: the trait `WatchableProvided` is not implemented for `NotWatchable`
@@ -42,9 +34,9 @@ help: the trait `WatchableProvided` is not implemented for `NotWatchable`
    = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `NotWatchable`.
 
 error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
-  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:27:1
+  --> tests/fail/12_non_watchable_provider_cannot_watch.rs:33:1
    |
-27 | #[trigger(Watch(NotWatchable))]
+33 | #[trigger(Watch(NotWatchable))]
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
    |
 help: the trait `WatchableProvided` is not implemented for `NotWatchable`

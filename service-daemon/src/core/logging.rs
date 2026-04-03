@@ -16,8 +16,7 @@ use std::io::{Write as _, stderr};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
-use crate::models::ServiceId;
-use crate::models::service::InstanceId;
+use crate::models::{ServiceId, service::InstanceId};
 
 /// Log severity level with zero heap allocation.
 ///
@@ -629,10 +628,10 @@ fn extract_span_ids<S>(
     ctx: &Context<'_, S>,
     event: &Event<'_>,
 ) -> (
-    Option<crate::models::ServiceId>,
-    Option<crate::models::ServiceId>,
-    Option<uuid::Uuid>,
-    Option<crate::models::service::InstanceId>,
+    Option<ServiceId>,
+    Option<ServiceId>,
+    Option<Uuid>,
+    Option<InstanceId>,
 )
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -648,17 +647,17 @@ where
 
             // 1. Critical Path: Native type extensions (Zero Allocation)
             if service_id.is_none() {
-                if let Some(sid) = extensions.get::<crate::models::ServiceId>() {
+                if let Some(sid) = extensions.get::<ServiceId>() {
                     service_id = Some(*sid);
                 }
             }
             if message_id.is_none() {
-                if let Some(mid) = extensions.get::<uuid::Uuid>() {
+                if let Some(mid) = extensions.get::<Uuid>() {
                     message_id = Some(*mid);
                 }
             }
             if instance_id.is_none() {
-                if let Some(iid) = extensions.get::<crate::models::service::InstanceId>() {
+                if let Some(iid) = extensions.get::<InstanceId>() {
                     instance_id = Some(*iid);
                 }
             }
@@ -667,21 +666,21 @@ where
             if let Some(fields) = extensions.get::<SpanFields>() {
                 if service_id.is_none() {
                     if let Some(ref s) = fields.service_id {
-                        if let Ok(id) = crate::models::ServiceId::from_str(s) {
+                        if let Ok(id) = ServiceId::from_str(s) {
                             service_id = Some(id);
                         }
                     } else if let Some(n) = fields.service_id_num {
-                        service_id = Some(crate::models::ServiceId::new(n));
+                        service_id = Some(ServiceId::new(n));
                     }
                 }
                 if source_service_id.is_none() {
                     if let Some(n) = fields.source_service_id {
-                        source_service_id = Some(crate::models::ServiceId::new(n));
+                        source_service_id = Some(ServiceId::new(n));
                     }
                 }
                 if message_id.is_none() {
                     if let Some(ref s) = fields.message_id {
-                        if let Ok(id) = uuid::Uuid::parse_str(s) {
+                        if let Ok(id) = Uuid::parse_str(s) {
                             message_id = Some(id);
                         }
                     }
@@ -691,10 +690,7 @@ where
                 if instance_id.is_none() {
                     let svc_part = fields.instance_svc_id.or(fields.service_id_num);
                     if let (Some(svc), Some(seq)) = (svc_part, fields.instance_seq) {
-                        instance_id = Some(crate::models::service::InstanceId::new(
-                            crate::models::ServiceId::new(svc),
-                            seq,
-                        ));
+                        instance_id = Some(InstanceId::new(ServiceId::new(svc), seq));
                     }
                 }
             }
@@ -991,12 +987,12 @@ mod tests {
         message: &str,
         service_id: Option<ServiceId>,
         source_service_id: Option<ServiceId>,
-        message_id: Option<uuid::Uuid>,
-        instance_id: Option<crate::models::service::InstanceId>,
+        message_id: Option<Uuid>,
+        instance_id: Option<InstanceId>,
         error_chain: Option<&str>,
     ) -> LogEvent {
         LogEvent {
-            timestamp: chrono::Utc::now(),
+            timestamp: Utc::now(),
             level,
             target: Cow::Borrowed("test::target"),
             message: message.to_string(),
@@ -1108,8 +1104,8 @@ mod tests {
 
     #[test]
     fn render_includes_all_ids_when_present() {
-        let test_iid = crate::models::service::InstanceId::new(crate::models::ServiceId::new(3), 0);
-        let msg_id = uuid::Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
+        let test_iid = InstanceId::new(ServiceId::new(3), 0);
+        let msg_id = Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
         let event = make_event(
             LogLevel::Info,
             "triggered",
@@ -1215,7 +1211,7 @@ mod tests {
 
         assert_eq!(
             event.service_id,
-            Some(crate::models::ServiceId::new(42)),
+            Some(ServiceId::new(42)),
             "service_id should be extracted from Span"
         );
     }
@@ -1223,7 +1219,7 @@ mod tests {
     #[test]
     fn daemon_layer_captures_message_id_from_nested_span() {
         let msg_id_str = "0195e342-8874-7065-a86d-3e6a457b0195";
-        let msg_id = uuid::Uuid::parse_str(msg_id_str).unwrap();
+        let msg_id = Uuid::parse_str(msg_id_str).unwrap();
 
         let events = collect_events_with_daemon_layer(|| {
             let service_span = tracing::info_span!("service", service_id = "svc#1",);
@@ -1247,7 +1243,7 @@ mod tests {
 
         assert_eq!(
             event.service_id,
-            Some(crate::models::ServiceId::new(2)),
+            Some(ServiceId::new(2)),
             "service_id should come from innermost span"
         );
         assert_eq!(
@@ -1255,8 +1251,7 @@ mod tests {
             Some(msg_id),
             "message_id should be extracted from trigger span"
         );
-        let expected_iid =
-            crate::models::service::InstanceId::new(crate::models::ServiceId::new(3), 7);
+        let expected_iid = InstanceId::new(ServiceId::new(3), 7);
         assert_eq!(
             event.instance_id,
             Some(expected_iid),

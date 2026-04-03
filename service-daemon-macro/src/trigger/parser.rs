@@ -13,7 +13,7 @@ use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, Token, parenthesized};
 
-use crate::common::TagsList;
+use crate::common::{TagsList, parse_scheduling_policy};
 
 /// Parsed result of `#[trigger(...)]` attributes.
 ///
@@ -87,7 +87,7 @@ impl Parse for TriggerArgs {
                 }
                 "scheduling" => {
                     let ident: syn::Ident = input.parse()?;
-                    scheduling = crate::common::parse_scheduling_policy(&ident)?;
+                    scheduling = parse_scheduling_policy(&ident)?;
                 }
                 "tags" => {
                     let tag_list: TagsList = input.parse()?;
@@ -113,5 +113,47 @@ impl Parse for TriggerArgs {
             scheduling,
             tags,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_str;
+
+    #[test]
+    fn test_parse_scheduling_default() {
+        let args: TriggerArgs = parse_str("Notify(MySignal)").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: Standard"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_standard() {
+        let args: TriggerArgs = parse_str("Notify(MySignal), scheduling = Standard").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: Standard"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_high_priority() {
+        let args: TriggerArgs = parse_str("Notify(MySignal), scheduling = HighPriority").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: HighPriority"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_isolated() {
+        let args: TriggerArgs = parse_str("Notify(MySignal), scheduling = Isolated").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: Isolated"
+        );
     }
 }
