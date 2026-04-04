@@ -6,9 +6,11 @@
 //!
 //! ```rust,no_run
 //! use service_daemon::prelude::*;
+//! use std::sync::Arc;
+//! use std::time::Duration;
+//!
 //! use service_daemon::{ServiceDaemon, provider, service, sleep};
 //! use tracing::info;
-//! use std::sync::Arc;
 //!
 //! // 1. Define an injectable provider with a default value
 //! #[derive(Clone)]
@@ -21,7 +23,7 @@
 //!     while !is_shutdown() {
 //!         info!("Service is running on port {}", port);
 //!         // Interruptible sleep: returns false if shutdown is requested
-//!         if !sleep(std::time::Duration::from_secs(1)).await {
+//!         if !sleep(Duration::from_secs(1)).await {
 //!             break;
 //!         }
 //!     }

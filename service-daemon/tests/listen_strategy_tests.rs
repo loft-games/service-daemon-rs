@@ -1,5 +1,4 @@
-use service_daemon::{ManagedProvided, ProviderError};
-use service_daemon_macro::provider;
+use service_daemon::{ManagedProvided, ProviderError, provider};
 
 #[derive(Debug)]
 #[provider(Listen("127.0.0.1:28083"))]

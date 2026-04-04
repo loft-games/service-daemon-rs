@@ -5,7 +5,7 @@
 //! The FSM transitions through the following states:
 //!
 //! ```text
-//!   Starting --> Running --> Outcome --> Backoff --> Starting (loop)
+//!   Starting --> Running --> Outcome --> Restart --> Starting (loop)
 //!      |            |           |                        |
 //!      +------------+-----------+-- Terminated <---------+
 //! ```
@@ -49,10 +49,22 @@ enum SupervisorState {
     Running,
     /// The service has exited; analyse the result and decide whether to restart.
     Outcome(Result<Result<(), Error>, Box<dyn Any + Send>>),
-    /// Wait for the backoff delay before looping back to `Starting`.
-    Backoff,
+    /// Wait for the next restart window before looping back to `Starting`.
+    Restart(RestartDecision),
     /// Terminal state -- exit the supervision loop.
     Terminated,
+}
+
+#[derive(Clone, Copy)]
+enum RestartDecision {
+    Immediate,
+    WithBackoff,
+}
+
+impl RestartDecision {
+    fn should_record_failure(self) -> bool {
+        matches!(self, Self::WithBackoff)
+    }
 }
 
 /// Supervises a single service's lifecycle, including restarts and signal handling.
@@ -148,22 +160,22 @@ impl ServiceSupervisor {
     }
 
     /// Handles the outcome of a service execution.
-    /// Returns `true` if the service should be restarted, `false` if it should stop permanently.
+    /// Returns the next lifecycle status, whether a restart should happen,
+    /// whether the daemon should shut down, and what kind of restart policy to apply.
     fn handle_outcome(
         &self,
         result: Result<Result<(), Error>, Box<dyn Any + Send>>,
         reload_token: &CancellationToken,
-    ) -> (ServiceStatus, bool, bool) {
+    ) -> (ServiceStatus, bool, bool, RestartDecision) {
         let mut should_restart = true;
         let mut should_shutdown_daemon = false;
 
-        let next_status = match result {
+        let (next_status, restart_decision) = match result {
             Ok(Ok(_)) => {
                 warn!("Service {} exited normally", self.name);
-                ServiceStatus::Initializing
+                (ServiceStatus::Initializing, RestartDecision::Immediate)
             }
             Ok(Err(e)) => {
-                // Check for fatal error
                 if let Some(svc_err) = e.downcast_ref::<ServiceError>()
                     && matches!(svc_err, ServiceError::Fatal(_))
                 {
@@ -172,7 +184,12 @@ impl ServiceSupervisor {
                         self.name, svc_err
                     );
                     should_restart = false;
-                    return (ServiceStatus::Terminated, should_restart, false);
+                    return (
+                        ServiceStatus::Terminated,
+                        should_restart,
+                        false,
+                        RestartDecision::Immediate,
+                    );
                 }
                 if let Some(provider_init_err) = e.downcast_ref::<ProviderInitError>() {
                     error!(
@@ -186,10 +203,14 @@ impl ServiceSupervisor {
                         ServiceStatus::Terminated,
                         should_restart,
                         should_shutdown_daemon,
+                        RestartDecision::Immediate,
                     );
                 }
                 error!("Service {} failed: {:?}", self.name, e);
-                ServiceStatus::Recovering(format!("{:?}", e))
+                (
+                    ServiceStatus::Recovering(format!("{:?}", e)),
+                    RestartDecision::WithBackoff,
+                )
             }
             Err(panic) => {
                 let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
@@ -200,25 +221,46 @@ impl ServiceSupervisor {
                     "Unknown panic".to_string()
                 };
                 error!("Service {} panicked: {}", self.name, panic_msg);
-                ServiceStatus::Recovering(format!("Panic: {}", panic_msg))
+                (
+                    ServiceStatus::Recovering(format!("Panic: {}", panic_msg)),
+                    RestartDecision::WithBackoff,
+                )
             }
         };
 
-        // Check for explicit reload
         if reload_token.is_cancelled() {
             info!(
                 "Supervisor: Service {} exited after reload signal",
                 self.name
             );
-            return (ServiceStatus::Restoring, true, false);
+            return (
+                ServiceStatus::Restoring,
+                true,
+                false,
+                RestartDecision::Immediate,
+            );
         }
 
-        (next_status, should_restart, should_shutdown_daemon)
+        (
+            next_status,
+            should_restart,
+            should_shutdown_daemon,
+            restart_decision,
+        )
     }
 
     /// Waits for the restart delay, allowing early exit on reload or cancellation.
     /// Returns `true` if restart should proceed, `false` if shutdown was requested.
-    async fn wait_for_restart(&mut self) -> bool {
+    async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
+        if matches!(decision, RestartDecision::Immediate) {
+            if decision.should_record_failure() {
+                self.backoff.record_failure();
+            } else {
+                self.backoff.record_success();
+            }
+            return true;
+        }
+
         let reload_signal = self
             .resources
             .reload_signals
@@ -238,6 +280,7 @@ impl ServiceSupervisor {
                 info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
                 // Immediate reload -- reset backoff so we restart right away
                 self.backoff.record_success();
+                return true;
             }
             _ = self.cancellation_token.cancelled() => {
                 info!("Service {} received shutdown signal during restart delay", self.name);
@@ -247,8 +290,11 @@ impl ServiceSupervisor {
             }
         }
 
-        // Advance backoff for the next potential restart
-        self.backoff.record_failure();
+        if decision.should_record_failure() {
+            self.backoff.record_failure();
+        } else {
+            self.backoff.record_success();
+        }
         true
     }
 
@@ -324,17 +370,16 @@ impl ServiceSupervisor {
         let reload_token_clone = reload_token;
 
         let result = __run_service_scope(identity, resources_clone, || async move {
-            let service_future =
-                AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind();
+            let mut service_future =
+                Box::pin(AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind());
 
             // Integrated signal handling -- replaces the bridge_task
             tokio::select! {
-                res = service_future => res,
+                res = &mut service_future => res,
                 _ = reload_signal.notified() => {
                     reload_token_clone.cancel();
                     info!("Service reload signal received, waiting for service to exit...");
-                    // Return Ok to indicate clean reload, not an error
-                    Ok(Ok(()))
+                    service_future.await
                 }
             }
         })
@@ -345,7 +390,7 @@ impl ServiceSupervisor {
 
     /// **Outcome** -- analyse the service's exit result.
     ///
-    /// Decides whether the service should restart (--> `Backoff`) or stop
+    /// Decides whether the service should restart (--> `Restart`) or stop
     /// permanently (--> `Terminated`).
     async fn on_outcome(
         &mut self,
@@ -366,7 +411,7 @@ impl ServiceSupervisor {
             .as_ref()
             .expect("reload_token must be set by on_starting");
 
-        let (next_status, should_restart, should_shutdown_daemon) =
+        let (next_status, should_restart, should_shutdown_daemon, restart_decision) =
             self.handle_outcome(result, reload_token);
 
         if should_shutdown_daemon {
@@ -387,19 +432,20 @@ impl ServiceSupervisor {
             .insert(self.service_id, next_status);
         self.resources.status_changed.notify_waiters();
 
-        // Reset backoff if service ran successfully for long enough
-        if let Some(gen_start) = self.generation_start {
+        if matches!(restart_decision, RestartDecision::WithBackoff)
+            && let Some(gen_start) = self.generation_start
+        {
             self.backoff.maybe_reset(gen_start.elapsed());
         }
 
-        SupervisorState::Backoff
+        SupervisorState::Restart(restart_decision)
     }
 
-    /// **Backoff** -- wait for the restart delay before looping back to `Starting`.
+    /// **Restart** -- apply the chosen restart policy before looping back to `Starting`.
     ///
     /// Returns `Terminated` if shutdown is requested during the wait.
-    async fn on_backoff(&mut self) -> SupervisorState {
-        if self.wait_for_restart().await {
+    async fn on_restart(&mut self, decision: RestartDecision) -> SupervisorState {
+        if self.wait_for_restart(decision).await {
             SupervisorState::Starting
         } else {
             SupervisorState::Terminated
@@ -429,7 +475,7 @@ impl ServiceSupervisor {
                 SupervisorState::Starting => self.on_starting().await,
                 SupervisorState::Running => self.on_running().await,
                 SupervisorState::Outcome(result) => self.on_outcome(result).await,
-                SupervisorState::Backoff => self.on_backoff().await,
+                SupervisorState::Restart(decision) => self.on_restart(decision).await,
                 SupervisorState::Terminated => break,
             };
         }

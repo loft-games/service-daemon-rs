@@ -4,53 +4,55 @@
 //! handshake synchronization, and zero-lockdown reads.
 //!
 //! All test services use `#[service(tags = [...])]` with isolated tags
-//! to prevent cross-test interference. Global atomics and `std::sync::Mutex`
+//! to prevent cross-test interference. Global atomics and `Mutex`
 //! are used for state observation since test assertions run outside the
 //! service context.
 
+use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use example_complete::providers::{fn_providers::ConnectionString, typed_providers::GlobalStats};
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus};
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus, service};
 
 // ===========================================================================
 // Test services for: test_ordered_startup
 // ===========================================================================
 
 /// Shared start sequence for ordered startup tests.
-static STARTUP_SEQ: std::sync::LazyLock<StdMutex<Vec<u8>>> =
-    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+static STARTUP_SEQ: LazyLock<StdMutex<Vec<u8>>> = LazyLock::new(|| StdMutex::new(Vec::new()));
 
 /// High-priority test service (priority 100) for ordered startup.
-#[service_daemon::service(tags = ["__test_ordered_startup__"], priority = 100)]
+#[service(tags = ["__test_ordered_startup__"], priority = 100)]
 async fn startup_service_100() -> anyhow::Result<()> {
     STARTUP_SEQ.lock().unwrap().push(100);
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
 
 /// Mid-priority test service (priority 50) for ordered startup.
-#[service_daemon::service(tags = ["__test_ordered_startup__"], priority = 50)]
+#[service(tags = ["__test_ordered_startup__"], priority = 50)]
 async fn startup_service_50() -> anyhow::Result<()> {
     STARTUP_SEQ.lock().unwrap().push(50);
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
 
 /// Low-priority test service (priority 0) for ordered startup.
-#[service_daemon::service(tags = ["__test_ordered_startup__"], priority = 0)]
+#[service(tags = ["__test_ordered_startup__"], priority = 0)]
 async fn startup_service_0() -> anyhow::Result<()> {
     STARTUP_SEQ.lock().unwrap().push(0);
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
@@ -72,7 +74,7 @@ async fn test_ordered_startup() -> anyhow::Result<()> {
     let cancel = daemon.cancel_token();
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     cancel.cancel();
     daemon.wait().await?;
 
@@ -91,40 +93,39 @@ async fn test_ordered_startup() -> anyhow::Result<()> {
 // ===========================================================================
 
 /// Shared exit sequence for ordered shutdown tests.
-static SHUTDOWN_SEQ: std::sync::LazyLock<StdMutex<Vec<u8>>> =
-    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+static SHUTDOWN_SEQ: LazyLock<StdMutex<Vec<u8>>> = LazyLock::new(|| StdMutex::new(Vec::new()));
 
 /// Low-priority test service (priority 0) for ordered shutdown.
 /// Exits last (highest priority shuts down last -> lowest first).
-#[service_daemon::service(tags = ["__test_ordered_shutdown__"], priority = 0)]
+#[service(tags = ["__test_ordered_shutdown__"], priority = 0)]
 async fn shutdown_service_0() -> anyhow::Result<()> {
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     SHUTDOWN_SEQ.lock().unwrap().push(0);
     Ok(())
 }
 
 /// Mid-priority test service (priority 50) for ordered shutdown.
-#[service_daemon::service(tags = ["__test_ordered_shutdown__"], priority = 50)]
+#[service(tags = ["__test_ordered_shutdown__"], priority = 50)]
 async fn shutdown_service_50() -> anyhow::Result<()> {
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     SHUTDOWN_SEQ.lock().unwrap().push(50);
     Ok(())
 }
 
 /// High-priority test service (priority 100) for ordered shutdown.
-#[service_daemon::service(tags = ["__test_ordered_shutdown__"], priority = 100)]
+#[service(tags = ["__test_ordered_shutdown__"], priority = 100)]
 async fn shutdown_service_100() -> anyhow::Result<()> {
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     SHUTDOWN_SEQ.lock().unwrap().push(100);
     Ok(())
@@ -147,7 +148,7 @@ async fn test_ordered_shutdown() -> anyhow::Result<()> {
     let cancel = daemon.cancel_token();
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     cancel.cancel();
     daemon.wait().await?;
 
@@ -169,11 +170,10 @@ async fn test_ordered_shutdown() -> anyhow::Result<()> {
 static CRASH_GENERATION: AtomicU32 = AtomicU32::new(0);
 
 /// Recovered value from shelf after crash.
-static RECOVERED_VALUE: std::sync::LazyLock<StdMutex<Option<u32>>> =
-    std::sync::LazyLock::new(|| StdMutex::new(None));
+static RECOVERED_VALUE: LazyLock<StdMutex<Option<u32>>> = LazyLock::new(|| StdMutex::new(None));
 
 /// Test service that crashes on first generation, then recovers shelf data.
-#[service_daemon::service(tags = ["__test_crash_shelf__"], priority = 50)]
+#[service(tags = ["__test_crash_shelf__"], priority = 50)]
 async fn crash_test_service() -> anyhow::Result<()> {
     let generation = CRASH_GENERATION.fetch_add(1, Ordering::SeqCst);
     match service_daemon::state() {
@@ -192,7 +192,7 @@ async fn crash_test_service() -> anyhow::Result<()> {
         }
     }
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
@@ -212,7 +212,7 @@ async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
     let cancel = daemon.cancel_token();
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     cancel.cancel();
     daemon.wait().await?;
 
@@ -227,34 +227,34 @@ async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
 // ===========================================================================
 
 /// Shared log for handshake timing assertions.
-static HANDSHAKE_LOG: std::sync::LazyLock<StdMutex<Vec<(&'static str, std::time::Instant)>>> =
-    std::sync::LazyLock::new(|| StdMutex::new(Vec::new()));
+static HANDSHAKE_LOG: LazyLock<StdMutex<Vec<(&'static str, Instant)>>> =
+    LazyLock::new(|| StdMutex::new(Vec::new()));
 
 /// High-priority service that delays `done()` by 200ms.
-#[service_daemon::service(tags = ["__test_handshake__"], priority = 100)]
+#[service(tags = ["__test_handshake__"], priority = 100)]
 async fn handshake_high_prio() -> anyhow::Result<()> {
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     HANDSHAKE_LOG
         .lock()
         .unwrap()
-        .push(("high_done", std::time::Instant::now()));
+        .push(("high_done", Instant::now()));
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
 
 /// Low-priority service that starts after high-priority handshake.
-#[service_daemon::service(tags = ["__test_handshake__"], priority = 50)]
+#[service(tags = ["__test_handshake__"], priority = 50)]
 async fn handshake_low_prio() -> anyhow::Result<()> {
     HANDSHAKE_LOG
         .lock()
         .unwrap()
-        .push(("low_start", std::time::Instant::now()));
+        .push(("low_start", Instant::now()));
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(())
 }
@@ -273,7 +273,7 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
     let cancel = daemon.cancel_token();
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    tokio::time::sleep(Duration::from_millis(2000)).await;
     cancel.cancel();
     daemon.wait().await?;
 
@@ -304,7 +304,7 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
     let lock = GlobalStats::resolve_rwlock().await;
     let lock_clone = lock.clone();
 
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let barrier_clone = barrier.clone();
 
     // Spawn a writer that holds the write lock for 300ms
@@ -312,19 +312,19 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
         let mut guard = lock_clone.write().await;
         guard.last_status = "Locked".to_string();
         barrier_clone.wait().await;
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
     });
 
     // Wait for writer to acquire the lock
     barrier.wait().await;
 
     // Snapshot read MUST NOT block despite the held write lock
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     let snapshot = GlobalStats::resolve().await;
     let elapsed = start.elapsed();
 
     assert!(
-        elapsed < std::time::Duration::from_millis(50),
+        elapsed < Duration::from_millis(50),
         "resolve() blocked for {:?} -- expected non-blocking",
         elapsed
     );

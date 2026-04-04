@@ -9,6 +9,14 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use uuid::Uuid;
 
+#[cfg(feature = "file-logging")]
+use tracing_appender::non_blocking;
+#[cfg(feature = "file-logging")]
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+
+use crate::ServicePriority;
+use crate::service;
+
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt::{self, Write as _};
@@ -806,7 +814,7 @@ fn format_event_json(event: &LogEvent) -> String {
 /// 1. Block until at least one event arrives (`recv().await`).
 /// 2. Greedily drain all immediately available events via `try_recv()`.
 /// 3. Flush the entire batch in one pass with a single reentrancy guard.
-#[service_daemon::service(priority = service_daemon::ServicePriority::SYSTEM, tags = ["__log__"])]
+#[service(priority = ServicePriority::SYSTEM, tags = ["__log__"])]
 pub async fn log_service() -> anyhow::Result<()> {
     let mut rx = get_log_queue().tx.subscribe();
     let batch_size = effective_batch_size();
@@ -891,21 +899,26 @@ pub async fn log_service() -> anyhow::Result<()> {
 /// via `tracing-appender::rolling::daily`. File names follow the pattern:
 /// `{prefix}.YYYY-MM-DD`.
 #[cfg(feature = "file-logging")]
-#[service_daemon::service(priority = service_daemon::ServicePriority::SYSTEM, tags = ["__file_log__"])]
+#[service(priority = ServicePriority::SYSTEM, tags = ["__file_log__"])]
 pub async fn file_log_service() -> anyhow::Result<()> {
-    // Exit immediately if file logging was not configured
+    // If file logging is not configured, stay idle until shutdown instead of
+    // exiting immediately. Otherwise supervision treats the clean exit as a
+    // successful generation and hot-restarts this SYSTEM service forever.
     let config = match FILE_LOG_CONFIG.get() {
         Some(config) => config,
-        None => return Ok(()),
+        None => {
+            service_daemon::wait_shutdown().await;
+            return Ok(());
+        }
     };
 
     let rotation = match config.rotation {
-        RotationPolicy::Daily => tracing_appender::rolling::Rotation::DAILY,
-        RotationPolicy::Hourly => tracing_appender::rolling::Rotation::HOURLY,
-        RotationPolicy::Never => tracing_appender::rolling::Rotation::NEVER,
+        RotationPolicy::Daily => Rotation::DAILY,
+        RotationPolicy::Hourly => Rotation::HOURLY,
+        RotationPolicy::Never => Rotation::NEVER,
     };
 
-    let mut builder = tracing_appender::rolling::RollingFileAppender::builder()
+    let mut builder = RollingFileAppender::builder()
         .rotation(rotation)
         .filename_prefix(&config.file_prefix);
 
@@ -916,7 +929,7 @@ pub async fn file_log_service() -> anyhow::Result<()> {
     let file_appender = builder
         .build(&config.directory)
         .expect("Failed to initialize rolling file appender");
-    let (mut writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let (mut writer, _guard) = non_blocking(file_appender);
 
     let mut rx = get_log_queue().tx.subscribe();
     let batch_size = effective_batch_size();

@@ -4,7 +4,7 @@ This guide explains how `ServiceDaemon` ensures application stability through au
 
 ## 1. Automatic Restarts: Exponential Backoff & Jitter
 
-Services that fail (return `Err`) are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues.
+Services that fail (return `Err`) are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues. Clean `Ok(())` exits also start a new generation, but they restart immediately instead of being counted as another backoff failure.
 
 ```rust
 use service_daemon::{ServiceDaemon, RestartPolicy};
@@ -36,7 +36,7 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 
 | Layer | Retry Behavior | How to Stop |
 | :--- | :--- | :--- |
-| **Service** | Always retries forever | Return `ServiceError::Fatal` from the service function |
+| **Service** | Restarts forever; failures use backoff, clean exits restart immediately | Return `ServiceError::Fatal` from the service function |
 | **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
 | **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
 

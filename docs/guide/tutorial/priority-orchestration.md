@@ -43,9 +43,9 @@ Under the hood, `priority` is a simple **`u8`** value. You are not limited to th
 
 When the daemon starts, it groups services into waves based on their priority.
 
-1. **Wave 100** starts first. The daemon waits for all services in this wave to reach a `Healthy` state (by calling `done()` or hitting a loop).
-2. **Wave 80** starts only after Wave 100 is stable.
-3. ...and so on, down to **Wave 0**.
+1. **Wave 100** starts first. The daemon waits for services in this wave to reach `Healthy` (by calling `done()` or hitting a lifecycle helper).
+2. That wait is bounded by `wave_spawn_timeout`. If the timeout expires, the daemon logs a warning and still starts the next wave instead of blocking startup forever.
+3. **Wave 80** then starts, followed by lower waves down to **Wave 0**.
 
 ## 3. Shutdown: Low to High
 

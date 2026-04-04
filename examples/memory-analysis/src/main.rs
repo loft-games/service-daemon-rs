@@ -24,6 +24,7 @@ use std::io::Read;
 use std::sync::Arc;
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use futures::future::BoxFuture;
@@ -81,7 +82,7 @@ struct MockSupervisor {
     resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
     // -- Per-generation mutable context --
-    generation_start: Option<std::time::Instant>,
+    generation_start: Option<Instant>,
     reload_token: Option<CancellationToken>,
 }
 
@@ -306,11 +307,11 @@ async fn measure_tokio_task_spawn() -> Option<f64> {
     let before = read_rss_bytes()?;
     for _ in 0..ISOLATION_COUNT {
         handles.push(tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
         }));
     }
     // Allow scheduler to register all tasks.
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let after = read_rss_bytes()?;
 
     // Keep handles alive to prevent RSS from shrinking.
@@ -327,11 +328,11 @@ async fn measure_hashmap_join_handles() -> Option<f64> {
     let before = read_rss_bytes()?;
     for i in 0..ISOLATION_COUNT {
         let handle = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
         });
         map.insert(ServiceId::new(i), handle);
     }
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     let after = read_rss_bytes()?;
 
     std::hint::black_box(&map);
@@ -350,7 +351,7 @@ async fn run_e2e_test() -> Option<(u64, u64, f64)> {
     daemon.run().await;
 
     // Allow all services to fully initialize.
-    tokio::time::sleep(std::time::Duration::from_secs(SETTLE_DELAY_SECS)).await;
+    tokio::time::sleep(Duration::from_secs(SETTLE_DELAY_SECS)).await;
     let loaded = read_rss_bytes()?;
 
     let total_delta = loaded.saturating_sub(baseline);

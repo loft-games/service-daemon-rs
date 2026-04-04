@@ -579,6 +579,7 @@ pub use TrackedRwLock as RwLock;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::sync::Notify;
 
     #[tokio::test]
@@ -626,7 +627,7 @@ mod tests {
             drop(_guard);
             assert!(!tokio::select! {
                 _ = wait => true,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => false,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => false,
             });
         }
 
@@ -638,7 +639,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => false,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => true,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => true,
                 },
                 "Write lock without mutation should NOT notify"
             );
@@ -653,7 +654,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => true,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => false,
                 },
                 "Write lock with mutation should notify"
             );
@@ -705,7 +706,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => false,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => true,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => true,
                 },
                 "Mutex lock without mutation should NOT notify"
             );
@@ -720,7 +721,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => true,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => false,
                 },
                 "Mutex lock with mutation should notify"
             );

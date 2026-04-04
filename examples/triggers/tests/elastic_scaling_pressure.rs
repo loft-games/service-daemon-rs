@@ -20,10 +20,25 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use service_daemon::Registry;
 use service_daemon::ServiceDaemon;
-use service_daemon::TT::*;
 use service_daemon::provider;
 use service_daemon::trigger;
+
+fn isolated_registry() -> Registry {
+    Registry::builder()
+        .with_tag("__test_elastic_scaling_pressure__")
+        .build()
+}
+
+fn reset_counters() {
+    ACTIVE_COUNT.store(0, Ordering::SeqCst);
+    PEAK_COUNT.store(0, Ordering::SeqCst);
+    COMPLETED_COUNT.store(0, Ordering::SeqCst);
+}
+
+#[allow(unused_imports)]
+use service_daemon::TT::*;
 
 // ---------------------------------------------------------------------------
 // Concurrency tracking via statics
@@ -35,13 +50,6 @@ static ACTIVE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static PEAK_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Total number of completed handler invocations.
 static COMPLETED_COUNT: AtomicUsize = AtomicUsize::new(0);
-
-/// Reset all counters (call before each test run to avoid cross-pollution).
-fn reset_counters() {
-    ACTIVE_COUNT.store(0, Ordering::SeqCst);
-    PEAK_COUNT.store(0, Ordering::SeqCst);
-    COMPLETED_COUNT.store(0, Ordering::SeqCst);
-}
 
 // ---------------------------------------------------------------------------
 // Provider: Broadcast queue for pressure injection
@@ -60,7 +68,7 @@ pub struct PressureQueue;
 /// Uses static atomics to track the maximum number of concurrently
 /// running handler instances. Under `initial_concurrency=1`, the
 /// scale_monitor should detect saturation and expand capacity.
-#[trigger(Queue(PressureQueue))]
+#[trigger(Queue(PressureQueue), tags = ["__test_elastic_scaling_pressure__"])]
 pub async fn pressure_handler(_payload: String) -> anyhow::Result<()> {
     // Increment active count and update peak high-water mark
     let current = ACTIVE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
@@ -94,7 +102,9 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     // TopicHost (Queue template) declares ScalingPolicy::default() via
     // TriggerHost::scaling_policy(), which gives initial_concurrency=1,
     // max_concurrency=64, scale_factor=2, scale_threshold=5 (~83% utilization).
-    let mut daemon = ServiceDaemon::builder().build();
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(isolated_registry())
+        .build();
     let token = daemon.cancel_token();
     daemon.run().await;
 
@@ -121,10 +131,12 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     token.cancel();
 
     // Wait for producer to finish (it should be done by now)
-    let _ = producer.await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), producer).await;
 
-    // Give in-flight handlers a moment to drain
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::timeout(Duration::from_secs(5), daemon.wait())
+        .await
+        .expect("pressure test daemon did not shut down in time")
+        .expect("pressure test daemon shutdown failed");
 
     // -- Assert results --
     let peak = PEAK_COUNT.load(Ordering::SeqCst);

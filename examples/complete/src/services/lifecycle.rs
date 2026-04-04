@@ -13,6 +13,8 @@
 //! > independent control-flow paradigms. The framework does NOT test
 //! > or guarantee behavior when both are used together.
 
+use std::time::Duration;
+
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::prelude::*;
 use service_daemon::{done, service, shelve, sleep, state, unshelve};
@@ -40,7 +42,7 @@ pub async fn advanced_lifecycle_service() -> anyhow::Result<()> {
             }
             ServiceStatus::Healthy => {
                 info!("[Lifecycle] Working in Healthy state.");
-                if !sleep(std::time::Duration::from_secs(5)).await {
+                if !sleep(Duration::from_secs(5)).await {
                     continue; // Interrupted -- re-check state
                 }
             }
@@ -102,7 +104,7 @@ pub async fn recovery_service(port: Arc<Port>) -> anyhow::Result<()> {
                 //     panic!("Simulated crash on iteration 3!");
                 // }
 
-                if !sleep(std::time::Duration::from_secs(2)).await {
+                if !sleep(Duration::from_secs(2)).await {
                     continue;
                 }
             }
@@ -147,7 +149,7 @@ pub async fn stats_writer(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()>
                     info!("[Stats Writer] Updated: {}", guard.total_processed);
                 } // Guard dropped -- triggers any Watch triggers on GlobalStats
 
-                if !sleep(std::time::Duration::from_secs(5)).await {
+                if !sleep(Duration::from_secs(5)).await {
                     continue;
                 }
             }
@@ -187,7 +189,7 @@ pub async fn di_restart_demo(stats: Arc<GlobalStats>) -> anyhow::Result<()> {
             }
             ServiceStatus::Healthy => {
                 info!("[DI Restart] Active and watching for changes...");
-                if !sleep(std::time::Duration::from_secs(1)).await {
+                if !sleep(Duration::from_secs(1)).await {
                     continue;
                 }
             }
@@ -224,7 +226,7 @@ pub async fn reloading_counter_service(stats: Arc<GlobalStats>) -> anyhow::Resul
                     count, stats.total_processed
                 );
 
-                if !sleep(std::time::Duration::from_secs(3)).await {
+                if !sleep(Duration::from_secs(3)).await {
                     continue;
                 }
             }
@@ -259,7 +261,7 @@ pub async fn system_service() -> anyhow::Result<()> {
                 done();
             }
             ServiceStatus::Healthy => {
-                if !sleep(std::time::Duration::from_secs(1)).await {
+                if !sleep(Duration::from_secs(1)).await {
                     continue;
                 }
             }
@@ -286,7 +288,7 @@ pub async fn storage_service(db_url: Arc<DbUrl>) -> anyhow::Result<()> {
                 done();
             }
             ServiceStatus::Healthy => {
-                if !sleep(std::time::Duration::from_secs(1)).await {
+                if !sleep(Duration::from_secs(1)).await {
                     continue;
                 }
             }
@@ -314,7 +316,7 @@ pub async fn external_service(port: Arc<Port>) -> anyhow::Result<()> {
                 done();
             }
             ServiceStatus::Healthy => {
-                if !sleep(std::time::Duration::from_secs(1)).await {
+                if !sleep(Duration::from_secs(1)).await {
                     continue;
                 }
             }
@@ -358,7 +360,7 @@ pub async fn fatal_error_demo() -> anyhow::Result<()> {
                 done();
             }
             ServiceStatus::Healthy => {
-                if !sleep(std::time::Duration::from_secs(10)).await {
+                if !sleep(Duration::from_secs(10)).await {
                     continue;
                 }
                 info!("[Fatal] Heartbeat");
@@ -392,7 +394,7 @@ pub fn sync_service(port: Arc<Port>) -> anyhow::Result<()> {
     // Block the thread until the daemon signals shutdown.
     // `is_shutdown()` is checked periodically with a small sleep to avoid busy-wait.
     while !service_daemon::is_shutdown() {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     info!("[Sync] Sync service shutting down");

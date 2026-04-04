@@ -135,7 +135,7 @@ The Status Plane provides services with lifecycle awareness via the `ServiceStat
 | `Restoring` | Warm start with shelved data |
 | `Recovering(err)`| Crash recovery with error context |
 | `Healthy` | Normal operation |
-| `NeedReload` | Dependency changed, save state now |
+| `NeedReload` | The current generation's reload token fired; save state and exit this generation |
 | `ShuttingDown` | Shutdown in progress |
 | `Terminated` | Service has exited and is ready for collection |
 

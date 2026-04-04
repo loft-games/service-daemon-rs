@@ -1,6 +1,6 @@
-use service_daemon::{ProviderError, ServiceDaemon};
-use service_daemon_macro::provider;
+use service_daemon::{ProviderError, ServiceDaemon, provider, service};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 static EAGER_INIT_CALLED: AtomicBool = AtomicBool::new(false);
 static EAGER_FAILURE_INIT_CALLED: AtomicBool = AtomicBool::new(false);
@@ -14,8 +14,14 @@ async fn eager_provider() -> EagerToken {
     EagerToken("eager".to_string())
 }
 
-#[service_daemon::service(tags = ["stub_for_eager_test"])]
-async fn stub_service(_token: std::sync::Arc<EagerToken>) -> anyhow::Result<()> {
+#[service(tags = ["stub_for_eager_test"])]
+async fn stub_service(_token: Arc<EagerToken>) -> anyhow::Result<()> {
+    service_daemon::done();
+
+    while !service_daemon::is_shutdown() {
+        service_daemon::sleep(Duration::from_millis(10)).await;
+    }
+
     Ok(())
 }
 
@@ -30,8 +36,8 @@ async fn failing_eager_provider() -> std::result::Result<FailingEagerToken, Prov
     ))
 }
 
-#[service_daemon::service(tags = ["stub_for_eager_failure_test"])]
-async fn failing_stub_service(_token: std::sync::Arc<FailingEagerToken>) -> anyhow::Result<()> {
+#[service(tags = ["stub_for_eager_failure_test"])]
+async fn failing_stub_service(_token: Arc<FailingEagerToken>) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -52,9 +58,16 @@ async fn test_async_fn_eager_init() {
     assert!(!EAGER_INIT_CALLED.load(Ordering::SeqCst));
 
     // ServiceDaemon::run initializes eager providers before the event loop.
+    let cancel = daemon.cancel_token();
     daemon.run().await;
 
     assert!(EAGER_INIT_CALLED.load(Ordering::SeqCst));
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), daemon.wait())
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

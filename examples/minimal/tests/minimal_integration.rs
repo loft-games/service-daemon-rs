@@ -1,7 +1,9 @@
 //! Integration tests for the Minimal example.
 
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, service};
 
 /// Verifies that a minimal daemon can start and stop cleanly
 /// without any complex lifecycle management.
@@ -16,7 +18,7 @@ async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
     daemon.run().await;
 
     // Allow services to initialize
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Trigger graceful shutdown
     cancel.cancel();
@@ -33,11 +35,11 @@ async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
 static SHUTDOWN_EXITED: AtomicBool = AtomicBool::new(false);
 
 /// Test service that polls `is_shutdown()` and sets a global flag on exit.
-#[service_daemon::service(tags = ["__test_shutdown__"], priority = 50)]
+#[service(tags = ["__test_shutdown__"], priority = 50)]
 async fn shutdown_responsive_service() -> anyhow::Result<()> {
     service_daemon::done();
     while !service_daemon::is_shutdown() {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     SHUTDOWN_EXITED.store(true, Ordering::SeqCst);
     Ok(())
@@ -59,7 +61,7 @@ async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
     daemon.run().await;
 
     // Wait for service to reach Healthy
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
         !SHUTDOWN_EXITED.load(Ordering::SeqCst),
         "Service exited prematurely"

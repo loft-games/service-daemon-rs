@@ -437,7 +437,8 @@ impl ServiceDaemon {
                 resources: self.resources.clone(),
                 cancellation_token: service.cancellation_token.clone(),
                 daemon_token: daemon_token.clone(),
-                runtime: self.high_priority_runtime
+                runtime: self
+                    .high_priority_runtime
                     .as_ref()
                     .expect("high_priority_runtime must exist while daemon is running")
                     .handle()
@@ -787,6 +788,7 @@ impl ServiceDaemonBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tracing::debug;
@@ -861,7 +863,7 @@ mod tests {
     static SHORT_RUN_COUNT: AtomicU32 = AtomicU32::new(0);
 
     /// Test service that increments a global counter on each invocation.
-    #[service_daemon::service(tags = ["__test_short_run__"], priority = 50)]
+    #[service(tags = ["__test_short_run__"], priority = 50)]
     async fn counting_service() -> anyhow::Result<()> {
         SHORT_RUN_COUNT.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(100)).await;

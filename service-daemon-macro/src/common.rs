@@ -392,6 +392,10 @@ impl ParamProcessor {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
 
+        self.watcher_arms.push(quote! {
+            _ = <#inner_type as service_daemon::WatchableProvided>::changed() => {}
+        });
+
         match wrapper {
             WrapperKind::Arc(arc_span) => {
                 self.resolve_tokens.push(quote! {

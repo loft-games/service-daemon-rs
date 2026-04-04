@@ -117,19 +117,26 @@ This is particularly useful for debugging complex "cascading" triggers where one
 Once enabled, you will see structured diagnostic signals in your logs:
 
 ### Service Transitions
-Logs will include the exact millisecond a service moves between states:
+
+Logs will include the exact millisecond a service moves between states written through the shared lifecycle plane:
+
 - `Initializing -> Healthy`: Startup handshake successful.
-- `Healthy -> NeedReload`: Dependency change detected.
-- `NeedReload -> Terminated`: Service generation cleanup started.
+- `NeedReload -> Terminated`: The reloading generation acknowledged cleanup and exited.
+
+For reloads specifically, user code may observe `state() == NeedReload` as soon as the supervisor cancels the generation's reload token. That service-local observation can happen before a separate `Healthy -> NeedReload` write appears in the shared status map.
 
 ### Scaling & Pressure Metrics
+
 For triggers with elastic scaling, `DaemonLayer` reports:
+
 - **`current_limit`**: The current concurrency semaphore size.
 - **`pressure_ratio`**: A decimal representing how saturated the trigger is.
 - **`shadow_permits`**: When scaling down, this shows how many permits are currently ignored by the runner.
 
 ### Causal Correlation IDs
+
 Every log event inside a service or trigger Span is automatically tagged with:
+
 - **`service_id`**: The name of the service that produced the event (e.g., `"my-service"`).
 - **`message_id`**: The globally unique **UUID v7** (time-ordered) of the event that triggered this handler.
 - **`instance_id`**: A numeric composite identifier (e.g., `svc#1:42`) that uniquely identifies this trigger invocation generation.

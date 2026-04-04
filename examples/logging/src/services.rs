@@ -1,5 +1,7 @@
 //! A simple service that generates log output for the file logging demo.
 
+use std::time::Duration;
+
 use service_daemon::service;
 use tracing::{info, warn};
 
@@ -19,7 +21,7 @@ pub async fn log_generator() -> anyhow::Result<()> {
             info!("[LogGenerator] Heartbeat tick {}", tick);
         }
 
-        if !service_daemon::sleep(std::time::Duration::from_secs(3)).await {
+        if !service_daemon::sleep(Duration::from_secs(3)).await {
             break;
         }
     }

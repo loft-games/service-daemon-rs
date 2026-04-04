@@ -1,5 +1,7 @@
 //! Integration tests for the Logging example.
 
+use std::time::Duration;
+
 use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
 use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 
@@ -21,7 +23,7 @@ async fn test_file_logging_initialization() -> anyhow::Result<()> {
 
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     cancel.cancel();
     daemon.wait().await?;

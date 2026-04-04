@@ -25,6 +25,33 @@ help: the trait `ManagedProvided` is not implemented for `SnapshotOnly`
    = note: Add `#[provider]` to let the macro generate managed-state support, or implement `ManagedProvided` manually for `SnapshotOnly`.
    = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
 
+error[E0277]: Watchable Provider required: `SnapshotOnly` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:15:42
+   |
+15 | async fn needs_rwlock(_state: Arc<RwLock<SnapshotOnly>>) -> anyhow::Result<()> {
+   |                                          ^^^^^^^^^^^^ this trigger requires `SnapshotOnly: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `SnapshotOnly`
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:6:1
+   |
+ 6 | struct SnapshotOnly;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `SnapshotOnly`.
+
+error[E0277]: Watchable Provider required: `SnapshotOnly` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:14:1
+   |
+14 | #[service]
+   | ^^^^^^^^^^ this trigger requires `SnapshotOnly: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `SnapshotOnly`
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:6:1
+   |
+ 6 | struct SnapshotOnly;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `SnapshotOnly`.
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
 error[E0277]: Managed Provider required: `SnapshotOnly` cannot be injected as `Arc<RwLock<_>>` or `Arc<Mutex<_>>`.
   --> tests/fail/11_only_provided_cannot_inject_managed.rs:20:40
    |
@@ -50,4 +77,31 @@ help: the trait `ManagedProvided` is not implemented for `SnapshotOnly`
  6 | struct SnapshotOnly;
    | ^^^^^^^^^^^^^^^^^^^
    = note: Add `#[provider]` to let the macro generate managed-state support, or implement `ManagedProvided` manually for `SnapshotOnly`.
+   = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: Watchable Provider required: `SnapshotOnly` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:20:40
+   |
+20 | async fn needs_mutex(_state: Arc<Mutex<SnapshotOnly>>) -> anyhow::Result<()> {
+   |                                        ^^^^^^^^^^^^ this trigger requires `SnapshotOnly: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `SnapshotOnly`
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:6:1
+   |
+ 6 | struct SnapshotOnly;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `SnapshotOnly`.
+
+error[E0277]: Watchable Provider required: `SnapshotOnly` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:19:1
+   |
+19 | #[service]
+   | ^^^^^^^^^^ this trigger requires `SnapshotOnly: WatchableProvided`
+   |
+help: the trait `WatchableProvided` is not implemented for `SnapshotOnly`
+  --> tests/fail/11_only_provided_cannot_inject_managed.rs:6:1
+   |
+ 6 | struct SnapshotOnly;
+   | ^^^^^^^^^^^^^^^^^^^
+   = note: Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `SnapshotOnly`.
    = note: this error originates in the attribute macro `service` (in Nightly builds, run with -Z macro-backtrace for more info)

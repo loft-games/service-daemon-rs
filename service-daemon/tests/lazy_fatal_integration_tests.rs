@@ -1,5 +1,4 @@
-use service_daemon::{ProviderError, ServiceDaemon, ServiceId, ServiceStatus};
-use service_daemon_macro::provider;
+use service_daemon::{ProviderError, ServiceDaemon, ServiceId, ServiceStatus, provider, service};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -19,7 +18,7 @@ async fn lazy_fatal_config() -> std::result::Result<LazyFatalConfig, ProviderErr
     ))
 }
 
-#[service_daemon::service(priority = 100, tags = ["lazy_fatal_healthy"])]
+#[service(priority = 100, tags = ["lazy_fatal_healthy"])]
 async fn healthy_service() -> anyhow::Result<()> {
     LAZY_HEALTHY_STARTED.store(true, Ordering::SeqCst);
     service_daemon::done();
@@ -32,7 +31,7 @@ async fn healthy_service() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[service_daemon::service(priority = 0, tags = ["lazy_fatal_trigger"])]
+#[service(priority = 0, tags = ["lazy_fatal_trigger"])]
 async fn fatal_service(_config: Arc<LazyFatalConfig>) -> anyhow::Result<()> {
     Ok(())
 }
