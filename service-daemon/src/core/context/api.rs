@@ -277,6 +277,19 @@ pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
     }
 }
 
+/// Returns a cancellation token suitable for provider resolution in the current context.
+///
+/// Inside a `#[service]` / `#[trigger]` scope, this derives a child token from the
+/// current service cancellation token. Outside a managed service scope, it returns
+/// a fresh standalone token so framework-external `resolve()` calls are not bound
+/// to daemon/process lifecycle management.
+#[doc(hidden)]
+pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
+    CURRENT_SERVICE
+        .try_with(|id| id.cancellation_token.child_token())
+        .unwrap_or_else(|_| tokio_util::sync::CancellationToken::new())
+}
+
 /// An interruptible sleep that returns early if a shutdown or reload signal is received.
 /// Returns `true` if the sleep completed normally, `false` if interrupted.
 ///

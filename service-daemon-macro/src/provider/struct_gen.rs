@@ -292,7 +292,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 #singleton_name
                     .resolve_snapshot_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        let cancel = service_daemon::current_cancellation_token();
                         #framework_init_fn
                     })
                     .await
@@ -304,7 +304,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 #singleton_name
                     .resolve_rwlock_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        let cancel = service_daemon::current_cancellation_token();
                         #framework_init_fn
                     })
                     .await
@@ -314,7 +314,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 #singleton_name
                     .resolve_mutex_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        let cancel = service_daemon::current_cancellation_token();
                         #framework_init_fn
                     })
                     .await
@@ -324,7 +324,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 #singleton_name
                     .resolve_managed_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::tokio_util::sync::CancellationToken::new();
+                        let cancel = service_daemon::current_cancellation_token();
                         #managed_init_fn
                     })
                     .await

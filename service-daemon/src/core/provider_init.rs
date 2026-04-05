@@ -27,11 +27,47 @@ where
 {
     let start = Instant::now();
     let deadline = start + policy.provider_init_timeout;
+    let mut last_retryable_error: Option<String> = None;
 
     let mut backoff = BackoffController::new(policy);
 
     loop {
-        match init().await {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(ProviderInitError::Timeout {
+                provider: provider.to_owned(),
+                timeout: policy.provider_init_timeout,
+                last_error: last_retryable_error.clone().unwrap_or_else(|| {
+                    "provider initialization attempt did not complete before timeout".to_owned()
+                }),
+            });
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let init_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                info!(provider, "Provider init cancelled while attempt was running");
+                return Err(ProviderInitError::Cancelled {
+                    provider: provider.to_owned(),
+                });
+            }
+            res = tokio::time::timeout(remaining, init()) => {
+                match res {
+                    Ok(res) => res,
+                    Err(_) => {
+                        return Err(ProviderInitError::Timeout {
+                            provider: provider.to_owned(),
+                            timeout: policy.provider_init_timeout,
+                            last_error: last_retryable_error.clone().unwrap_or_else(|| {
+                                "provider initialization attempt did not complete before timeout".to_owned()
+                            }),
+                        });
+                    }
+                }
+            }
+        };
+
+        match init_result {
             Ok(v) => {
                 return Ok(Arc::new(v));
             }
@@ -43,6 +79,7 @@ where
                 });
             }
             Err(ProviderError::Retryable(message)) => {
+                last_retryable_error = Some(message.clone());
                 let now = Instant::now();
                 if now >= deadline {
                     return Err(ProviderInitError::Timeout {
@@ -211,6 +248,55 @@ mod tests {
             result,
             Err(ProviderInitError::Cancelled {
                 provider: "cancel_provider".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn init_fallible_returns_cancelled_error_while_attempt_is_running() {
+        let policy = test_policy(Duration::from_secs(1));
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancel_for_task.cancel();
+        });
+
+        let result =
+            init_fallible::<u32, _, _>("cancel_running_provider", policy, cancel, || async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok::<u32, ProviderError>(42)
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            Err(ProviderInitError::Cancelled {
+                provider: "cancel_running_provider".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn init_fallible_returns_timeout_error_while_attempt_is_running() {
+        let policy = test_policy(Duration::from_millis(20));
+        let cancel = CancellationToken::new();
+
+        let result =
+            init_fallible::<u32, _, _>("timeout_running_provider", policy, cancel, || async {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok::<u32, ProviderError>(42)
+            })
+            .await;
+
+        assert_eq!(
+            result,
+            Err(ProviderInitError::Timeout {
+                provider: "timeout_running_provider".to_owned(),
+                timeout: Duration::from_millis(20),
+                last_error: "provider initialization attempt did not complete before timeout"
+                    .to_owned(),
             })
         );
     }

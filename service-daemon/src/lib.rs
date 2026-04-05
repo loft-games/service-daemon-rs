@@ -54,7 +54,8 @@ pub mod models;
 
 // Re-export commonly used items
 pub use core::context::{
-    done, is_shutdown, shelve, shelve_clone, sleep, state, trigger_config, unshelve, wait_shutdown,
+    current_cancellation_token, done, is_shutdown, shelve, shelve_clone, sleep, state,
+    trigger_config, unshelve, wait_shutdown,
 };
 pub use core::di::{ManagedProvided, Provided, WatchableProvided};
 pub use core::managed_state::{TrackedNotify, TrackedSender};

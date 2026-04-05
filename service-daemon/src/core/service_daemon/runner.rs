@@ -251,6 +251,7 @@ impl ServiceSupervisor {
 
     /// Waits for the restart delay, allowing early exit on reload or cancellation.
     /// Returns `true` if restart should proceed, `false` if shutdown was requested.
+    /// Immediate restarts after a clean exit or reload do not advance the backoff counter.
     async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
         if matches!(decision, RestartDecision::Immediate) {
             if decision.should_record_failure() {
