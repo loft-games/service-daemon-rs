@@ -654,20 +654,20 @@ where
             let extensions = span.extensions();
 
             // 1. Critical Path: Native type extensions (Zero Allocation)
-            if service_id.is_none() {
-                if let Some(sid) = extensions.get::<ServiceId>() {
-                    service_id = Some(*sid);
-                }
+            if service_id.is_none()
+                && let Some(sid) = extensions.get::<ServiceId>()
+            {
+                service_id = Some(*sid);
             }
-            if message_id.is_none() {
-                if let Some(mid) = extensions.get::<Uuid>() {
-                    message_id = Some(*mid);
-                }
+            if message_id.is_none()
+                && let Some(mid) = extensions.get::<Uuid>()
+            {
+                message_id = Some(*mid);
             }
-            if instance_id.is_none() {
-                if let Some(iid) = extensions.get::<InstanceId>() {
-                    instance_id = Some(*iid);
-                }
+            if instance_id.is_none()
+                && let Some(iid) = extensions.get::<InstanceId>()
+            {
+                instance_id = Some(*iid);
             }
 
             // 2. Fallback Path: legacy string IDs (kept for macro-less spans)
@@ -681,17 +681,16 @@ where
                         service_id = Some(ServiceId::new(n));
                     }
                 }
-                if source_service_id.is_none() {
-                    if let Some(n) = fields.source_service_id {
-                        source_service_id = Some(ServiceId::new(n));
-                    }
+                if source_service_id.is_none()
+                    && let Some(n) = fields.source_service_id
+                {
+                    source_service_id = Some(ServiceId::new(n));
                 }
-                if message_id.is_none() {
-                    if let Some(ref s) = fields.message_id {
-                        if let Ok(id) = Uuid::parse_str(s) {
-                            message_id = Some(id);
-                        }
-                    }
+                if message_id.is_none()
+                    && let Some(ref s) = fields.message_id
+                    && let Ok(id) = Uuid::parse_str(s)
+                {
+                    message_id = Some(id);
                 }
 
                 // Numeric Instance ID fallback (required for legacy/test compatibility)

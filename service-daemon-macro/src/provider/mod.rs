@@ -48,15 +48,14 @@ fn extract_fallible_provider_type(ty: &syn::Type) -> Option<syn::Type> {
     };
 
     // Only accept error type whose last segment ident is ProviderError
-    if let syn::Type::Path(err_path) = err_ty {
-        if err_path
+    if let syn::Type::Path(err_path) = err_ty
+        && err_path
             .path
             .segments
             .last()
             .is_some_and(|s| s.ident == "ProviderError")
-        {
-            return Some(ok_ty);
-        }
+    {
+        return Some(ok_ty);
     }
 
     None

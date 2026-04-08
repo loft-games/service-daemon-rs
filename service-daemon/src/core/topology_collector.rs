@@ -191,10 +191,10 @@ pub fn export_mermaid() -> Option<String> {
 }
 
 pub fn reset_topology() {
-    if let Some(state) = TOPOLOGY_STATE.get() {
-        if let Ok(mut guard) = state.write() {
-            guard.edges.clear();
-        }
+    if let Some(state) = TOPOLOGY_STATE.get()
+        && let Ok(mut guard) = state.write()
+    {
+        guard.edges.clear();
     }
 }
 
