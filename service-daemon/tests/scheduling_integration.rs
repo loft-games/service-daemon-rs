@@ -121,7 +121,7 @@ async fn test_scheduling_isolation() -> anyhow::Result<()> {
     daemon.wait().await?;
 
     let names_guard = THREAD_NAMES.lock().await;
-    let names: &HashSet<String> = &*names_guard;
+    let names: &HashSet<String> = &names_guard;
 
     assert!(
         names.iter().any(|n| n == "isolated:svc-isolated_service"),
