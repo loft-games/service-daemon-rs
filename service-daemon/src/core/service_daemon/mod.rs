@@ -34,7 +34,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::core::context::{DaemonResources, process_token};
 use crate::models::{
     PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
-    ServiceDescription, ServiceError, ServiceId, ServiceStatus,
+    ServiceDescription, ServiceId, ServiceStatus,
 };
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -183,11 +183,24 @@ impl ServiceDaemon {
             }
         }
 
-        let order = toposort(&graph, None).unwrap_or_else(|_| {
-            // Cycles should already be detected by validate_dependency_graph().
-            // If we reach here, keep behavior explicit.
-            panic!("Circular dependency detected in provider graph during eager init");
-        });
+        // Cycles are pre-checked by validate_dependency_graph() in run();
+        // if we still land in Err here, report it as a Fatal init error
+        // rather than panicking, as a defense-in-depth measure.
+        let order = match toposort(&graph, None) {
+            Ok(order) => order,
+            Err(err) => {
+                let offending = providers_by_id
+                    .iter()
+                    .find_map(|(tid, p)| (*tid == graph[err.node_id()]).then_some(p.name))
+                    .unwrap_or("<unknown>");
+                return Err(ProviderInitError::Fatal {
+                    provider: offending.to_owned(),
+                    message: "Circular provider dependency reached eager_init; \
+                              this should have been caught by validate_dependency_graph"
+                        .to_owned(),
+                });
+            }
+        };
 
         // 5) Execute init in order, only for eager providers.
         let eager_ids: HashSet<TypeId> = eager_targets.iter().map(|p| p.type_id).collect();
@@ -248,6 +261,16 @@ impl ServiceDaemon {
     pub async fn run(&mut self) -> &mut Self {
         if self.services.is_empty() {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
+        }
+
+        // Validate the provider dependency graph. Cycles in the provider graph
+        // would deadlock at runtime, so we surface them as a pre-startup failure
+        // that triggers a graceful shutdown (observable via the daemon handle /
+        // status plane rather than blocking `run()`).
+        if let Err(err) = validate_dependency_graph(&self.services, PROVIDER_REGISTRY.iter()) {
+            tracing::error!(error = %err, "ServiceDaemon provider dependency graph validation failed");
+            self.shutdown();
+            return self;
         }
 
         // Eager-initialize reachable providers before spawning services.
@@ -610,9 +633,10 @@ impl ServiceDaemonBuilder {
     /// This method is **infallible** -- it always returns a valid daemon.
     /// If no registry was provided, all statically registered services are included.
     ///
-    /// During construction, a dependency graph is built from `ServiceParam::type_id`
-    /// metadata. If a circular dependency is detected, the method panics with
-    /// a clear diagnostic showing the cycle path.
+    /// Provider dependency cycles are checked later in [`ServiceDaemon::run`]
+    /// (not here) so that `build()` stays allocation-only and non-blocking.
+    /// A cycle surfaces as a `tracing::error!` followed by `shutdown()`; users
+    /// observe the outcome via the daemon handle / status plane.
     #[must_use]
     pub fn build(self) -> ServiceDaemon {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
@@ -632,10 +656,6 @@ impl ServiceDaemonBuilder {
                 }
             }
         }
-
-        // Validate the dependency graph before starting.
-        // This converts silent OnceCell deadlocks into clear panic messages.
-        Self::validate_dependency_graph(&services);
 
         #[cfg(feature = "simulation")]
         let resources = self.resources.unwrap_or_else(DaemonResources::new);
@@ -663,124 +683,113 @@ impl ServiceDaemonBuilder {
             resources,
         }
     }
+}
 
-    /// Validates the service dependency graph for circular dependencies.
-    ///
-    /// Builds a directed graph using `petgraph` where:
-    /// - **Nodes** are services (identified by name) and provider types
-    ///   (identified by `TypeId`).
-    /// - **Edges** point from each service to its dependency types.
-    ///
-    /// Then runs `petgraph::algo::toposort()` to detect cycles. If the
-    /// graph is acyclic, dependencies are logged for diagnostic visibility.
-    ///
-    /// # Panics
-    /// Panics with a diagnostic message listing the services and types
-    /// involved if a circular dependency is detected.
-    fn validate_dependency_graph(services: &[ServiceDescription]) {
-        // Each node is labeled with a human-readable name.
-        let mut graph = DiGraph::<&str, ()>::new();
+/// Validates the provider dependency graph for cycles.
+///
+/// Services themselves do not depend on each other; only providers depend on
+/// other providers. This function builds a directed graph where:
+/// - Services are included only as the **roots** that anchor reachability
+///   (service -> provider edges).
+/// - Providers are nodes; edges go from a provider to each of its dependency
+///   provider types.
+///
+/// `petgraph::algo::toposort` then reports any cycle as an error. On success,
+/// the dependency summary is logged for observability.
+///
+/// The `providers` iterator is injected (rather than read from the global
+/// `PROVIDER_REGISTRY`) so unit tests can exercise the cycle path without
+/// polluting the static slice.
+fn validate_dependency_graph<'a>(
+    services: &[ServiceDescription],
+    providers: impl IntoIterator<Item = &'a ProviderEntry>,
+) -> Result<(), ProviderInitError> {
+    let providers: Vec<&ProviderEntry> = providers.into_iter().collect();
 
-        // Maps to avoid duplicate node creation.
-        // service_name -> NodeIndex
-        let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
-        // TypeId -> NodeIndex (provider types as nodes)
-        let mut type_nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
+    let mut graph = DiGraph::<&str, ()>::new();
+    let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
+    let mut type_nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
 
-        // Phase 1: Service -> Provider edges (from ServiceDescription::params).
-        for service in services {
-            let svc_node = *service_nodes
-                .entry(service.name())
-                .or_insert_with(|| graph.add_node(service.name()));
+    // Phase 1: Service -> Provider edges (roots).
+    for service in services {
+        let svc_node = *service_nodes
+            .entry(service.name())
+            .or_insert_with(|| graph.add_node(service.name()));
 
-            for param in service.params() {
-                let type_node = *type_nodes
-                    .entry(param.type_id)
-                    .or_insert_with(|| graph.add_node(param.type_name));
-
-                // Edge: service depends on this provider type.
-                graph.add_edge(svc_node, type_node, ());
-            }
+        for param in service.params() {
+            let type_node = *type_nodes
+                .entry(param.type_id)
+                .or_insert_with(|| graph.add_node(param.type_name));
+            graph.add_edge(svc_node, type_node, ());
         }
+    }
 
-        // Phase 2: Provider -> Provider edges (from PROVIDER_REGISTRY).
-        //
-        // This completes the DAG by adding edges between provider types,
-        // enabling detection of circular provider dependencies (e.g.,
-        // ProviderA depends on ProviderB which depends on ProviderA).
-        for provider in PROVIDER_REGISTRY.iter() {
-            let prov_node = *type_nodes
-                .entry(provider.type_id)
-                .or_insert_with(|| graph.add_node(provider.name));
+    // Phase 2: Provider -> Provider edges (cycle-bearing subgraph).
+    for provider in &providers {
+        let prov_node = *type_nodes
+            .entry(provider.type_id)
+            .or_insert_with(|| graph.add_node(provider.name));
 
-            for param in provider.params {
-                let dep_node = *type_nodes
-                    .entry(param.type_id)
-                    .or_insert_with(|| graph.add_node(param.type_name));
-
-                // Edge: this provider depends on another provider type.
-                graph.add_edge(prov_node, dep_node, ());
-            }
+        for param in provider.params {
+            let dep_node = *type_nodes
+                .entry(param.type_id)
+                .or_insert_with(|| graph.add_node(param.type_name));
+            graph.add_edge(prov_node, dep_node, ());
         }
+    }
 
-        // Phase 3: Topological sort - Err means a cycle exists.
-        match toposort(&graph, None) {
-            Ok(_order) => {
-                // Graph is acyclic. Log the dependency summary.
-                for service in services {
-                    if !service.params().is_empty() {
-                        let dep_names: Vec<&str> =
-                            service.params().iter().map(|p| p.type_name).collect();
-                        info!(
-                            service = %service.name(),
-                            dependencies = ?dep_names,
-                            "Dependency graph edge"
-                        );
-                    }
+    match toposort(&graph, None) {
+        Ok(_order) => {
+            for service in services {
+                if !service.params().is_empty() {
+                    let dep_names: Vec<&str> =
+                        service.params().iter().map(|p| p.type_name).collect();
+                    info!(
+                        service = %service.name(),
+                        dependencies = ?dep_names,
+                        "Service dependency edge"
+                    );
                 }
-                for provider in PROVIDER_REGISTRY.iter() {
-                    if !provider.params.is_empty() {
-                        let dep_names: Vec<&str> =
-                            provider.params.iter().map(|p| p.type_name).collect();
-                        info!(
-                            provider = %provider.name,
-                            dependencies = ?dep_names,
-                            "Provider dependency edge"
-                        );
-                    }
+            }
+            for provider in &providers {
+                if !provider.params.is_empty() {
+                    let dep_names: Vec<&str> =
+                        provider.params.iter().map(|p| p.type_name).collect();
+                    info!(
+                        provider = %provider.name,
+                        dependencies = ?dep_names,
+                        "Provider dependency edge"
+                    );
                 }
-                info!(
-                    total_services = services.len(),
-                    total_providers = PROVIDER_REGISTRY.len(),
-                    total_graph_nodes = graph.node_count(),
-                    total_graph_edges = graph.edge_count(),
-                    "Dependency graph validated - no cycles detected"
-                );
             }
-            Err(cycle_node) => {
-                // Identify the node that caused the cycle.
-                let cycle_label = graph[cycle_node.node_id()];
+            info!(
+                total_services = services.len(),
+                total_providers = providers.len(),
+                total_graph_nodes = graph.node_count(),
+                total_graph_edges = graph.edge_count(),
+                "Provider dependency graph validated - no cycles detected"
+            );
+            Ok(())
+        }
+        Err(cycle_node) => {
+            let cycle_label = graph[cycle_node.node_id()];
+            let involved: Vec<&str> = graph
+                .node_indices()
+                .filter(|&n| {
+                    graph.contains_edge(n, cycle_node.node_id())
+                        || graph.contains_edge(cycle_node.node_id(), n)
+                })
+                .map(|n| graph[n])
+                .collect();
 
-                // Collect all nodes directly connected to the cycle node
-                // for a useful diagnostic.
-                let involved: Vec<&str> = graph
-                    .node_indices()
-                    .filter(|&n| {
-                        graph.contains_edge(n, cycle_node.node_id())
-                            || graph.contains_edge(cycle_node.node_id(), n)
-                    })
-                    .map(|n| graph[n])
-                    .collect();
-
-                panic!(
-                    "Circular dependency detected in service dependency graph!\n\
-                     Cycle involves: '{}'\n\
-                     Related nodes: {:?}\n\
-                     This would cause a deadlock at runtime. \
-                     Review the #[provider] dependency chain for these types.",
-                    cycle_label, involved
-                );
-            }
+            Err(ProviderInitError::Fatal {
+                provider: cycle_label.to_owned(),
+                message: format!(
+                    "Circular dependency detected in provider dependency graph. \
+                     Cycle involves '{cycle_label}', related nodes: {involved:?}. \
+                     This would deadlock at runtime; review the #[provider] chain for these types."
+                ),
+            })
         }
     }
 }
@@ -788,6 +797,7 @@ impl ServiceDaemonBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ServiceParam;
     use crate::service;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
@@ -796,6 +806,96 @@ mod tests {
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {
         Registry::builder().with_tag("__test_isolation__").build()
+    }
+
+    /// A no-op initializer suitable for fake `ProviderEntry` values in graph tests.
+    fn noop_init(
+        _: crate::models::RestartPolicy,
+        _: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Leak a params slice to satisfy `&'static [ServiceParam]` without a const context.
+    fn leaked_params(params: Vec<ServiceParam>) -> &'static [ServiceParam] {
+        Box::leak(params.into_boxed_slice())
+    }
+
+    #[test]
+    fn validate_dependency_graph_accepts_linear_provider_chain() {
+        let tid_a = TypeId::of::<u8>();
+        let tid_b = TypeId::of::<u16>();
+
+        let a = ProviderEntry {
+            name: "A",
+            module: "test",
+            type_id: tid_a,
+            params: leaked_params(vec![ServiceParam {
+                name: "b",
+                type_name: "B",
+                type_id: tid_b,
+            }]),
+            eager: false,
+            init: noop_init,
+        };
+        let b = ProviderEntry {
+            name: "B",
+            module: "test",
+            type_id: tid_b,
+            params: &[],
+            eager: false,
+            init: noop_init,
+        };
+
+        validate_dependency_graph(&[], [&a, &b]).expect("linear chain must validate");
+    }
+
+    #[test]
+    fn validate_dependency_graph_rejects_provider_cycle() {
+        let tid_a = TypeId::of::<u8>();
+        let tid_b = TypeId::of::<u16>();
+
+        // A depends on B and B depends on A -- classic two-node cycle.
+        let a = ProviderEntry {
+            name: "A",
+            module: "test",
+            type_id: tid_a,
+            params: leaked_params(vec![ServiceParam {
+                name: "b",
+                type_name: "B",
+                type_id: tid_b,
+            }]),
+            eager: false,
+            init: noop_init,
+        };
+        let b = ProviderEntry {
+            name: "B",
+            module: "test",
+            type_id: tid_b,
+            params: leaked_params(vec![ServiceParam {
+                name: "a",
+                type_name: "A",
+                type_id: tid_a,
+            }]),
+            eager: false,
+            init: noop_init,
+        };
+
+        let err =
+            validate_dependency_graph(&[], [&a, &b]).expect_err("cycle must surface as an error");
+        match err {
+            ProviderInitError::Fatal { provider, message } => {
+                assert!(
+                    matches!(provider.as_str(), "A" | "B"),
+                    "unexpected offending provider: {provider}"
+                );
+                assert!(
+                    message.contains("Circular"),
+                    "message should mention circularity, got: {message}"
+                );
+            }
+            other => panic!("expected ProviderInitError::Fatal, got {other:?}"),
+        }
     }
 
     fn setup_tracing() {

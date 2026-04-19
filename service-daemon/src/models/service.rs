@@ -174,6 +174,7 @@ impl ServicePriority {
 ///
 /// This policy determines whether the service shares the global multi-threaded
 /// `tokio` runtime or receives a dedicated OS thread for isolation.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub enum ServiceScheduling {
@@ -278,6 +279,7 @@ impl ServiceDescription {
 ///
 /// This is the single source of truth for all service status, combining
 /// both the external (daemon-observed) and internal (service-perceived) views.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceStatus {
     /// The service is starting for the first time in this process session.

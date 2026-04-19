@@ -2,6 +2,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 /// Core error type for the Service Daemon framework.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ServiceError {
     /// Failed to initialize a service.

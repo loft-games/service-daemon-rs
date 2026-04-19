@@ -162,7 +162,7 @@ pub fn export_mermaid() -> Option<String> {
 
     // Sort edges for deterministic output
     let mut sorted_edges: Vec<_> = guard.edges.iter().collect();
-    sorted_edges.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted_edges.sort_by_key(|(edge, _)| *edge);
 
     for (edge, count) in sorted_edges {
         let source_id = edge.source;

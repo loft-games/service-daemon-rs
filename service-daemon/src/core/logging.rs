@@ -18,7 +18,6 @@ use crate::ServicePriority;
 use crate::service;
 
 use std::borrow::Cow;
-use std::cell::Cell;
 use std::fmt::{self, Write as _};
 use std::io::{Write as _, stderr};
 use std::str::FromStr;
@@ -189,7 +188,16 @@ fn effective_batch_size() -> usize {
 /// service_daemon::core::logging::init_logging();
 /// ```
 pub fn set_log_batch_size(size: usize) {
-    let _ = LOG_BATCH_SIZE.set(size);
+    // TODO(set_log_batch_size): change signature to `-> Result<(), usize>` in a
+    // future minor release so callers can react to a late or duplicate call.
+    if LOG_BATCH_SIZE.set(size).is_err() {
+        let active = LOG_BATCH_SIZE.get().copied().unwrap_or(DEFAULT_BATCH_SIZE);
+        tracing::warn!(
+            requested = size,
+            active,
+            "set_log_batch_size: batch size already initialized; call ignored"
+        );
+    }
 }
 
 impl Default for LogQueue {
@@ -382,11 +390,19 @@ pub fn try_init_logging() -> Result<(), tracing_subscriber::util::TryInitError> 
 // guard is active, events bypass the LogQueue and are written directly to stderr.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// Thread-local flag set to `true` while `log_service` is processing a log event.
-    /// Checked by `DaemonLayer::on_event()` to prevent recursive queue insertion.
-    static IN_LOG_PROCESSING: Cell<bool> = const { Cell::new(false) };
+// clippy 1.95 false-positive: `missing_const_for_thread_local` still fires
+// despite the initializer already being wrapped in a `const {}` block.
+#[allow(clippy::missing_const_for_thread_local)]
+mod log_processing_flag {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Thread-local flag set to `true` while `log_service` is processing a log event.
+        /// Checked by `DaemonLayer::on_event()` to prevent recursive queue insertion.
+        pub(super) static IN_LOG_PROCESSING: Cell<bool> = const { Cell::new(false) };
+    }
 }
+use log_processing_flag::IN_LOG_PROCESSING;
 
 /// RAII guard that marks the current thread as "inside log processing".
 /// On drop (including panic unwinding), the flag is automatically cleared.
