@@ -32,12 +32,12 @@ use petgraph::{
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::{DaemonResources, process_token};
+#[cfg(unix)]
+use crate::models::ServiceError;
 use crate::models::{
     PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
     ServiceDescription, ServiceId, ServiceStatus,
 };
-#[cfg(unix)]
-use crate::models::ServiceError;
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
 
