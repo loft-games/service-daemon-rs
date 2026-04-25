@@ -80,16 +80,16 @@ match result {
 
 ## 2. Specialized Templates
 
-`service-daemon-rs` provides several built-in templates for common infrastructure needs. These templates are "early-initialized" during the **System Wave**, meaning they are ready before any business logic starts.
+`service-daemon-rs` provides several built-in templates for common infrastructure needs. Like all providers they are **lazy by default**; the templates ship the *capability* for early initialization but only run during the system startup wave when you also declare `eager = true` (covered in the next section).
 
-### Early-Binding Listeners (`Listen`)
-The `Listen` template solves the case where your TCP port must be bound *before* the rest of the application is ready -- typical for container health probes, supervisor liveness checks, or any external watcher that hits the socket as soon as the process is up.
+### `Listen` (TCP listener with FD cloning)
+The `Listen` template addresses cases where a TCP port must be bound *before* the rest of the application is ready -- typical for container health probes, supervisor liveness checks, or any external watcher that hits the socket as soon as the process is up.
 
-If you call `TcpListener::bind()` inside a service, the port doesn't open until that service runs. If your DB migration or some other initialization takes 10 seconds, the watcher times out and assumes the process is dead.
+If you call `TcpListener::bind()` inside a service, the port doesn't open until that service runs. If your DB migration or some other initialization takes 10 seconds, the watcher times out and assumes the process is dead. Pairing `Listen` with `eager = true` solves this by binding during the system startup wave, before any user service runs.
 
-- **Early Binding**: The port is bound immediately during system startup.
-- **FD Cloning**: Each call to `listener.get()` returns a new `tokio::net::TcpListener` by cloning the underlying OS file descriptor (`dup`). This allows multiple services or reload generations to share the same port.
-- **Resilience & Auto-Retry**: Built-in intelligent error mapping (see [Resilience Guide](resilience.md#22-smart-listen-strategy)). Transient errors like `AddrInUse` trigger automatic retries, while permission issues result in a fatal shutdown.
+- **Bind timing**: lazy on first injection by default; bound during the system startup wave when declared `eager = true`.
+- **FD cloning**: Each call to `listener.get()` returns a new `tokio::net::TcpListener` by cloning the underlying OS file descriptor (`dup`). This allows multiple services or reload generations to share the same port.
+- **Resilience and auto-retry**: Built-in error mapping (see [Resilience Guide](resilience.md#22-smart-listen-strategy)). Transient errors like `AddrInUse` are retried with backoff; permission errors are fatal.
 
 ### Eager Initialization: `eager = true`
 

@@ -57,13 +57,15 @@ pub async fn mqtt_provider() -> MqttBus {
 | :--- | :--- | :--- |
 | `Notify` | `Event` | A `tokio::sync::Notify` wrapper for one-to-one or one-to-all signaling. |
 | `Queue(T)` | `BQueue`, `BroadcastQueue` | A `tokio::sync::broadcast` channel for fan-out event distribution. |
-| `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning, intended for ports that must be bound before user services start. |
+| `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
 
 ### The `Listen` Template
 
-The `Listen` provider exists to bind a port early -- before any user service runs -- and lets multiple services share that port across reloads. Two relevant properties:
+The `Listen` provider gives you a `std::net::TcpListener` wrapped so that multiple services can share the same port across reloads. Two relevant properties:
 1. **OS-level sharing**: `get()` clones the underlying file descriptor via the kernel's `dup` syscall, so multiple services or reload generations can hold a `tokio::net::TcpListener` for the same physical port without conflicts.
 2. **Environment fallback**: `#[provider(Listen("0.0.0.0:80"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise.
+
+Like every provider, `Listen` is **lazy by default** -- the bind happens the first time a service requests it. To bind the port during the system startup wave (the case you actually want for health probes and supervisor-style liveness checks), declare it with `eager = true` (see below).
 
 **Avoid creating new Magic Providers unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
@@ -104,5 +106,6 @@ pub struct WebListener;
 | Inject a DB Connection | `#[provider] async fn db() -> Pool { ... }` |
 | Signal between services | `#[provider(Notify)] struct Signal;` |
 | Fan-out events | `#[provider(Queue(String))] struct Bus;` |
-| TCP Port Binding | `#[provider(Listen("0.0.0.0:80"))] struct HttpListener;` |
+| TCP Port Binding (lazy, on first inject) | `#[provider(Listen("0.0.0.0:80"))] struct HttpListener;` |
+| TCP Port Binding (early-bound for probes) | `#[provider(Listen("0.0.0.0:80"), eager = true)] struct HealthListener;` |
 | Early Background Task | `#[provider(eager = true)] async fn setup() -> () { ... }` |
