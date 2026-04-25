@@ -1,12 +1,12 @@
 # Advanced Macro Usage
 
-The `#[service]` and `#[trigger]` macros are the core of the framework's declarative design. But they are not just for basic registration--they are highly extensible.
+The `#[service]` and `#[trigger]` macros do more than register a function — they accept attribute arguments that drive selection, scheduling, and dispatch. This page covers the ones beyond the basics.
 
 ---
 
-## 1. The Power of Tags
+## 1. Tags
 
-We've mentioned tags before, but let's see why they are a "Power User" feature. Tags allow you to create **Application Profiles**.
+Tags attach string labels to a service. The daemon can filter services by tag at startup, which is how you build **Application Profiles**.
 
 ```rust,ignore
 #[service(tags = ["critical", "api"])]
@@ -52,14 +52,12 @@ Because the project uses `linkme`, the registration happens at the binary level.
 You *could* build a `ServiceDescription` manually and pass it to the daemon. But by using the macros, you benefit from:
 1.  **Compile-time Discovery**: No missing services due to typos.
 2.  **Automatic DI Mapping**: The macro analyzes your function arguments and writes the injection code for you.
-3.  **Unified Lifecycle**: All services get the same robust error handling and restart logic for free.
+3.  **Unified Lifecycle**: Every service goes through the same supervisor — error handling, backoff, and restart policy are applied consistently, with no per-service boilerplate.
 
 ---
 
-## Congratulations!
+## End of the Quick Start
 
-You've completed the Quick Start Guide. You've gone from a simple heartbeat to understanding the deep internals and extensibility of `service-daemon-rs`.
-
-Now, go forth and build something reliable!
+You've gone from a heartbeat service to the macro internals and extension points. From here, the [Architecture](../../architecture/internal-overview.md) docs cover the registry and DI internals; the [User Guides](../../guide/) cover triggers, state, resilience, and diagnostics in depth.
 
 [**<- Previous Step: Trigger Middlewares (Interceptors)**](./trigger-interceptors.md) | [**Back to the Quick Start Guide ->**](./quick-start.md)

@@ -57,13 +57,13 @@ pub async fn mqtt_provider() -> MqttBus {
 | :--- | :--- | :--- |
 | `Notify` | `Event` | A `tokio::sync::Notify` wrapper for one-to-one or one-to-all signaling. |
 | `Queue(T)` | `BQueue`, `BroadcastQueue` | A `tokio::sync::broadcast` channel for fan-out event distribution. |
-| `Listen(Addr)` | - | A production-grade `std::net::TcpListener` wrapper with FD cloning capability. |
+| `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning, intended for ports that must be bound before user services start. |
 
-### The `Listen` Template Excellence
+### The `Listen` Template
 
-The `Listen` provider is specifically designed for high-performance servers. Unlike a manual `TcpListener` bind:
-1. **OS-Level Sharing**: It uses the kernel's `dup` syscall via the `get()` method, allowing multiple services to share the same physical port without conflicts during reloads.
-2. **Environment Integration**: Supports automatic fallback to environment variables: `#[provider(Listen("0.0.0.0:80"), env = "PORT")]`.
+The `Listen` provider exists to bind a port early -- before any user service runs -- and lets multiple services share that port across reloads. Two relevant properties:
+1. **OS-level sharing**: `get()` clones the underlying file descriptor via the kernel's `dup` syscall, so multiple services or reload generations can hold a `tokio::net::TcpListener` for the same physical port without conflicts.
+2. **Environment fallback**: `#[provider(Listen("0.0.0.0:80"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise.
 
 **Avoid creating new Magic Providers unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.

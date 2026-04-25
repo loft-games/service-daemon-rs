@@ -1,6 +1,6 @@
 # Under the Hood
 
-You've learned how to use the framework. Now, let's take a look at the gears and pulleys that drive the internal mechanism. Understanding these core components will help you debug complex issues and design highly efficient systems.
+You've learned how to use the framework. This chapter walks through the four runtime components that implement what the macros wire up. Knowing what each one does makes it easier to debug startup failures, lock contention, or unexpected restarts.
 
 ---
 

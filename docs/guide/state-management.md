@@ -83,9 +83,9 @@ match result {
 `service-daemon-rs` provides several built-in templates for common infrastructure needs. These templates are "early-initialized" during the **System Wave**, meaning they are ready before any business logic starts.
 
 ### Early-Binding Listeners (`Listen`)
-The `Listen` template is designed for cloud-native environments (Kubernetes, Knative) where health probes start hitting your port as soon as the container is "Running".
+The `Listen` template solves the case where your TCP port must be bound *before* the rest of the application is ready -- typical for container health probes, supervisor liveness checks, or any external watcher that hits the socket as soon as the process is up.
 
-Normal `TcpListener::bind()` inside an async service starts too late. If your DB migration takes 10 seconds, the probe fails, and the container restarts.
+If you call `TcpListener::bind()` inside a service, the port doesn't open until that service runs. If your DB migration or some other initialization takes 10 seconds, the watcher times out and assumes the process is dead.
 
 - **Early Binding**: The port is bound immediately during system startup.
 - **FD Cloning**: Each call to `listener.get()` returns a new `tokio::net::TcpListener` by cloning the underlying OS file descriptor (`dup`). This allows multiple services or reload generations to share the same port.

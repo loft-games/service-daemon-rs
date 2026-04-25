@@ -1,8 +1,6 @@
 # Hello, Heartbeat!
 
-Every great journey starts with a single beat. In this first step, we'll build a simple "Heartbeat" service that prints a message to the console every few seconds. 
-
-This simple example introduces the three pillars of the framework: **Providers**, **Services**, and the **Daemon**.
+This first chapter builds a small service that prints a message every few seconds, introducing the three concepts the framework is built on: **Providers**, **Services**, and the **Daemon**.
 
 ---
 
@@ -54,9 +52,9 @@ You'll notice we use `tracing::info!` instead of `println!`. In `service-daemon-
 *   `is_shutdown()`: Returns `true` when the user presses Ctrl+C or the system is stopping. This is a non-blocking check, suitable for loop conditions.
 *   `service_daemon::sleep()`: Unlike standard `tokio::time::sleep`, this version is **cancellation-aware**. It wakes up immediately if a shutdown signal is detected. No more waiting for a long sleep to finish during shutdown!
 
-## 3. The Grand Finale: running the Daemon
+## 3. Running the Daemon
 
-Finally, you just need to tell the framework to run. It will find all your `#[service]` functions automatically and start them in the background.
+The last step is to start the framework. `ServiceDaemon::builder().build()` discovers every `#[service]`-annotated function in the binary and prepares to run them.
 
 ```rust,ignore
 use service_daemon::ServiceDaemon;

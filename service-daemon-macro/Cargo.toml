@@ -6,7 +6,7 @@ rust-version = "1.91"
 description = "Declarative macros for the service-daemon orchestration framework."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/loft-games/service-daemon-rs"
-keywords = ["daemon", "service", "dependency-injection", "proc-macro"]
+keywords = ["daemon", "supervisor", "lifecycle", "dependency-injection", "proc-macro"]
 categories = ["asynchronous", "development-tools::procedural-macro-helpers"]
 readme = "../README.md"
 

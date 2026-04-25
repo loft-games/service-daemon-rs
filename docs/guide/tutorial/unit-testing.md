@@ -23,7 +23,7 @@ In a simulation test, you run a **fully functional but isolated Daemon**. Instea
 use service_daemon::prelude::*;
 use std::time::Duration;
 
-// --- 1. The Robust Tested Service ---
+// --- 1. The service under test ---
 #[service(tags = ["sim_shelf"])]
 async fn shelf_reader_service() -> anyhow::Result<()> {
     loop {

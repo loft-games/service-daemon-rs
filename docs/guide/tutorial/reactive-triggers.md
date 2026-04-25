@@ -29,7 +29,7 @@ async fn job_worker(job: Job) -> anyhow::Result<()> {
 
 ## 2. Triggering the Trigger (Chain Reactions)
 
-Triggers are even more powerful when they talk to each other. A trigger can "fire" another trigger by publishing an event.
+Triggers compose: one trigger can fire the next by publishing the event another trigger is listening on. This keeps each handler small and single-purpose.
 
 Let's say after processing a `Job`, we want to notify a cleanup service.
 
@@ -82,7 +82,7 @@ async fn complex_worker(
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
 4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
-5.  **Elastic Scaling**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and automatically scales concurrency based on pressure via the dedicated `ScalingPolicy`. Other templates dispatch serially with no scaling overhead. You can customize these limits globally-see [**Error Handling & Retries**](./error-handling.md#2-mastering-throughput-scaling-policy).
+5.  **Elastic Scaling**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and scales concurrency based on backlog pressure via `ScalingPolicy`. Other templates dispatch serially with no scaling overhead. You can override the defaults globally -- see [**Error Handling & Retries**](./error-handling.md#2-throughput-scaling-policy).
 
 > [!TIP]
 > **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../triggers.md).

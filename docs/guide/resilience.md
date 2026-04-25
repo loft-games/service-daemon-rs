@@ -87,7 +87,7 @@ async fn license_checker() -> anyhow::Result<()> {
 
 ## 2. Initialization Resilience: Providers
 
-The `ServiceDaemon` provides robust initialization for **Providers** through managed retry cycles and error prioritization.
+When a provider's initialization fails, the daemon distinguishes transient errors (retried with backoff) from fatal errors (abort startup). The two paths are explicit and chosen by the provider via the `ProviderError` it returns.
 
 ### 2.1. Provider Error Mapping: Retryable vs Fatal
 

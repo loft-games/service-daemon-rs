@@ -1,8 +1,8 @@
 # DIY Providers
 
-In the first chapter, we used a `#[provider]` macro on a simple struct. But world-class applications often need more: a database connection pool, an MQTT client, or a complex HTTP client.
+In the first chapter, we used a `#[provider]` macro on a simple struct. Real applications often need more: a database connection pool, an MQTT client, an HTTP client with custom config.
 
-You shouldn't put complex initialization logic inside a macro. Instead, you can define a **Provider Function**.
+For these, the struct + `Default` pattern doesn't fit -- initialization is async, fallible, or depends on configuration. Use a **Provider Function** instead.
 
 ---
 
@@ -54,7 +54,7 @@ async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
 
 ## 4. Error Handling and Retries
 
-Modern applications must handle startup failures gracefully (e.g., waiting for a database to become ready). Instead of just panicking, you can return a `Result<T, ProviderError>`.
+Network resources may not be ready when your service starts. Instead of panicking, return a `Result<T, ProviderError>` and let the framework retry.
 
 The framework provides two error types:
 *   **`ProviderError::Fatal("msg")`**: Use this for configuration errors. The daemon will fail-fast and exit immediately.
@@ -79,7 +79,7 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 
 *   **Keep it clean**: Use Providers for *Shared Resources* (DB, MQTT, Config). Use Services for *Action* (Running the business logic).
 *   **Don't Block**: Always use `async` providers for network/disk operations.
-*   **Fail Gracefully**: Prefer `ProviderError::Retryable` for network resources to make your application resilient to startup order issues (e.g., in Docker Compose or K8s).
+*   **Fail Gracefully**: Prefer `ProviderError::Retryable` for network resources, so transient unavailability at startup (DB still booting, broker not yet listening) doesn't kill your daemon.
 
 > [!TIP]
 > **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../provider-best-practices.md) guide.

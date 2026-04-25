@@ -5,7 +5,7 @@ The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (St
 > [!NOTE]
 > `Watch(T)` requires the target type to implement `WatchableProvided`. (Note: This is automatically handled by the `#[provider]` macro.)
 
-But world-class systems often need more--like a GPIO pin interrupt, an HTTP webhook, or a proprietary sensor protocol.
+Real systems often need more: a GPIO pin interrupt, an HTTP webhook, a vendor sensor protocol, a filesystem watch.
 
 To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 
@@ -28,7 +28,7 @@ The framework wraps every payload in `Arc<P>` internally so that retries only cl
 > If your payload is large or cannot implement `Clone`, wrap it in an `Arc`: `type Payload = Arc<MyData>`, and declare your handler parameter as `Arc<Arc<MyData>>` or simply use `#[payload] data: Arc<MyData>`.
 > Since `Arc` itself is always `Clone`, the retry mechanism will work as expected without touching the underlying data.
 
-This decoupled design means you spend zero time on boilerplate and focus entirely on the event-waiting logic.
+The split lets you focus on the event-waiting logic; the framework reuses one engine across every trigger type.
 
 ## 2. Implementing a Custom Trigger
 

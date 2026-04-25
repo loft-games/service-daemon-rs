@@ -1,6 +1,6 @@
 # The Ripple Model: Causal Tracing in Asynchronous Chains
 
-In highly decoupled, event-driven systems like `service-daemon-rs`, traditional linear tracing (like OpenTelemetry spans) often fails to capture the "why" behind complex asynchronous interactions. We solve this using the **Ripple Model**.
+In an event-driven system where one trigger fires another, linear span-based tracing (e.g. OpenTelemetry's parent-child spans) doesn't fully capture causality once events fan out, queue, or cross service boundaries. The framework uses a model we call **Ripple** to keep this traceable.
 
 ## 1. The Analogy: A Stone in the Water
 Imagine a stone thrown into a still pond. The stone creates ripples that spread outward, potentially reaching distant shores and causing other stones to move. 

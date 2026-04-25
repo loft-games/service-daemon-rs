@@ -22,7 +22,7 @@ Triggers are specialized services. The macro generates a **Host Wrapper** that:
 
 ## 3. The "Macro Illusion"
 
-One of the most powerful features is how the framework handles shared state without breaking your IDE experience.
+The framework rewrites shared-state types behind the scenes without breaking your IDE experience. Two pieces work together:
 
 ### Transparent Tracking
 The macros perform a "replacement" of standard types:
@@ -31,7 +31,7 @@ The macros perform a "replacement" of standard types:
 - **Intellisense Friendly**: Because of span preservation, `rust-analyzer` still sees your original types, allowing "Jump to Definition" and documentation hints to work reliably.
 
 ### Qualified Path Support
-The macros are robust enough to handle various import styles:
+The macros recognize common import styles:
 - `std::sync::Arc<T>`
 - `Arc<T>`
 - `tokio::sync::RwLock<T>`

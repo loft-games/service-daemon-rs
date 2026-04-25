@@ -39,9 +39,9 @@ These same restart policies apply to individual **Trigger Handlers**. If a handl
 
 ---
 
-## 2. Mastering Throughput: Scaling Policy
+## 2. Throughput: Scaling Policy
 
-While `RestartPolicy` handles *time* (delays and retries), the **`ScalingPolicy`** handles *volume*. It determines how many trigger handlers can run concurrently and when to scale up.
+`RestartPolicy` controls *time* (delays and retries between failures). `ScalingPolicy` controls *volume* -- how many trigger handlers may run concurrently and when concurrency is allowed to grow under load.
 
 The default limit for streaming triggers (like `Queue`) is **64** concurrent handlers. If your system has high throughput requirements, you can tune this:
 
