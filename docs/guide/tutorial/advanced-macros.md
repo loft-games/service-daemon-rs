@@ -1,6 +1,6 @@
 # Advanced Macro Usage
 
-The `#[service]` and `#[trigger]` macros do more than register a function — they accept attribute arguments that drive selection, scheduling, and dispatch. This page covers the ones beyond the basics.
+The `#[service]` and `#[trigger]` macros do more than register a function -- they accept attribute arguments that drive selection, scheduling, and dispatch. This page covers the ones beyond the basics.
 
 ---
 
@@ -52,7 +52,7 @@ Because the project uses `linkme`, the registration happens at the binary level.
 You *could* build a `ServiceDescription` manually and pass it to the daemon. But by using the macros, you benefit from:
 1.  **Compile-time Discovery**: No missing services due to typos.
 2.  **Automatic DI Mapping**: The macro analyzes your function arguments and writes the injection code for you.
-3.  **Unified Lifecycle**: Every service goes through the same supervisor — error handling, backoff, and restart policy are applied consistently, with no per-service boilerplate.
+3.  **Unified Lifecycle**: Every service goes through the same supervisor -- error handling, backoff, and restart policy are applied consistently, with no per-service boilerplate.
 
 ---
 

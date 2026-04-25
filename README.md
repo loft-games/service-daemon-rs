@@ -8,7 +8,7 @@
 
 It earns its keep when your application has more than one long-running concern. Typical scenarios:
 
-- **Protocol bridges and IoT gateways** -- HTTP ↔ MQTT, WebSocket ↔ Redis stream, multi-protocol device front ends.
+- **Protocol bridges and IoT gateways** -- HTTP <-> MQTT, WebSocket <-> Redis stream, multi-protocol device front ends.
 - **Backends with rich background work** -- scheduled cleanup, cache warmers, queue consumers, webhook receivers, health monitors alongside your HTTP API.
 - **Edge / robotics / industrial control** -- sensor pipelines, camera + inference + uplink, control loops with strict startup/shutdown ordering.
 - **Any tokio application** where you find yourself rewriting the same `select! { ... shutdown ... } + restart + backoff` glue in every project.
