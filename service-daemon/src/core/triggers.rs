@@ -133,20 +133,31 @@ where
                 .downcast_ref()
                 .expect("TopicHost receiver type mismatch (internal bug)");
 
-            let result = rx_bridge.lock().await.recv().await;
-            match result {
-                Ok(value) => {
-                    // Read the pre-generated (message_id, source_id) from the TrackedSender
-                    let identity = target.last_id();
-                    TriggerTransition::Next(value, identity)
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("Queue trigger lagged by {} messages", n);
-                    TriggerTransition::Stop
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!("Queue trigger channel closed");
-                    TriggerTransition::Stop
+            // Hold the receiver lock across retries so a Lagged error does not
+            // permanently stop the trigger: broadcast guarantees the next
+            // `recv()` resumes from the new tail position. This matches the
+            // recovery convention used by `LogService` and the topology
+            // collector elsewhere in the framework.
+            let mut rx = rx_bridge.lock().await;
+            loop {
+                match rx.recv().await {
+                    Ok(value) => {
+                        // Read the pre-generated (message_id, source_id) from the TrackedSender
+                        let identity = target.last_id();
+                        return TriggerTransition::Next(value, identity);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            skipped = n,
+                            "Topic trigger lagged by {} messages, skipping and continuing",
+                            n
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("Topic trigger channel closed");
+                        return TriggerTransition::Stop;
+                    }
                 }
             }
         })
