@@ -149,8 +149,7 @@ where
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!(
                             skipped = n,
-                            "Topic trigger lagged by {} messages, skipping and continuing",
-                            n
+                            "Topic trigger lagged by {} messages, skipping and continuing", n
                         );
                         continue;
                     }
