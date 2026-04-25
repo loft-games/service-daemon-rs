@@ -107,6 +107,46 @@ The `Listen` template includes built-in intelligent error mapping for common I/O
 | `PermissionDenied` | **Fatal** | Attempted to bind to a low port (e.g., 80) without root privileges. |
 | `AddrNotAvailable` | **Fatal** | Attempted to bind to an IP address that doesn't exist on the host. |
 
+### 2.3. UnixListen Strategy (Unix Domain Socket Listener)
+
+The `UnixListen` template diverges from `Listen` on one critical point: `AddrInUse` on a Unix socket **almost always means a stale socket file** from an unclean shutdown rather than a live process holding the port. Silently unlinking would clobber a legitimately running second daemon, so `UnixListen` first probes with `UnixStream::connect`:
+
+- If a live process answers the probe -> **Fatal** ("held by another live process"). The framework refuses to bind.
+- If the probe fails (connection refused, file is a regular file, etc.) -> the path is treated as stale, `unlink`ed, and bind proceeds.
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| `AddrInUse` (after unlink) | **Retryable** | Race condition: another process recreated the path between our unlink and bind. Retry the detect-then-bind dance. |
+| `Interrupted`, `TimedOut` | **Retryable** | System signal during bind. |
+| `PermissionDenied` | **Fatal** | Parent directory not writable, or socket file owned by another user. |
+| `NotFound` | **Fatal** | Parent directory does not exist (the framework does **not** auto-create it). |
+| `InvalidInput` | **Fatal** | Path exceeds platform `sun_path` limit (~108 bytes Linux, ~104 bytes macOS). |
+
+The probe-then-unlink path emits a `tracing::warn!` event with `provider` and `path` fields when a stale file is removed, so operators investigating "who deleted my socket file" have a framework-side breadcrumb.
+
+### 2.4. UnixConnect Strategy (Unix Domain Socket Client)
+
+The `UnixConnect` template performs **one connectivity probe at provider init time** and discards the result. The probe serves two purposes:
+
+1. With `eager = true`, it blocks the system startup wave until the peer is reachable. This is the canonical pattern for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
+2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `try_connect()` somewhere in the hot path.
+
+Peer servers will observe a single `accept()` followed by an instant close from the probe -- this is normal and any reasonable server already handles port-scanner / health-probe traffic the same way.
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| `ConnectionRefused` | **Retryable** | Peer hasn't called `accept()` yet (peer is starting up). |
+| `NotFound` | **Retryable** | Peer hasn't created the socket file yet (peer init in progress). |
+| `ConnectionAborted` | **Retryable** | Peer accepted but immediately closed -- a startup race. |
+| `Interrupted`, `TimedOut` | **Retryable** | System signal during connect. |
+| `PermissionDenied` | **Fatal** | EACCES on the path -- a permissions issue is not a transient state. |
+| `InvalidInput` | **Fatal** | Path too long. |
+
+> [!IMPORTANT]
+> `NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory missing). The same `io::ErrorKind` carries different meaning depending on which side of the connection you are.
+
+After init succeeds, `try_connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
+
 ## 3. Advanced Resilience: Wave Timeouts
 
 The `RestartPolicy` also controls how long the daemon waits for services during startup and shutdown waves.

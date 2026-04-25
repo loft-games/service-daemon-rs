@@ -423,3 +423,506 @@ pub fn generate_listen_template(
 
     TokenStream::from(expanded)
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers for path-based templates (Listen / UnixListen / UnixConnect)
+// ---------------------------------------------------------------------------
+
+/// Builds the runtime address resolution expression shared by the Unix-socket
+/// templates: env-var override wins, literal default is the fallback.
+//
+// Why a free function: `generate_unix_listen_template` and
+// `generate_unix_connect_template` both need this exact resolution shape, and
+// keeping a single source prevents drift if env semantics ever change. We
+// intentionally leave `generate_listen_template` (TCP) using its inline copy
+// so this helper's first commit doesn't risk altering TCP expansion -- the
+// duplication is small (~5 lines) and isolated.
+fn unix_path_addr_expr(addr: &syn::LitStr, env: Option<&syn::LitStr>) -> proc_macro2::TokenStream {
+    if let Some(env_lit) = env {
+        let env_str = env_lit.value();
+        quote! {
+            std::env::var(#env_str).unwrap_or_else(|_| #addr.to_owned())
+        }
+    } else {
+        quote! { #addr.to_owned() }
+    }
+}
+
+/// Emits a `#[cfg(not(unix))] compile_error!(...)` guard for Unix-only
+/// templates so non-Unix builds get a single targeted diagnostic instead of a
+/// cascade of "type not found" errors from `std::os::unix::net::*` references.
+//
+// All generated items are also `#[cfg(unix)]`-gated; on non-Unix targets
+// every gated item vanishes and only this `compile_error!` remains. Users
+// wanting cross-platform code should wrap the `#[provider(UnixListen|...)]`
+// declaration in their own `#[cfg(unix)] mod {...}` -- the outer cfg
+// short-circuits this guard cleanly because cfg evaluation is hierarchical
+// over macro expansion output.
+fn unix_only_compile_error_guard(template_name: &str) -> proc_macro2::TokenStream {
+    let message = format!(
+        "`{}` provider template is only available on Unix targets. \
+         Wrap the `#[provider({}(\"...\"))]` declaration in `#[cfg(unix)]`, \
+         or for TCP use the cross-platform `Listen` template instead.",
+        template_name, template_name
+    );
+    quote! {
+        #[cfg(not(unix))]
+        const _: () = {
+            ::std::compile_error!(#message);
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UnixListen template
+// ---------------------------------------------------------------------------
+
+/// Generates a `UnixListen` (Unix domain socket listener) provider with
+/// FD cloning across reload generations.
+//
+// Mirrors `generate_listen_template` (TCP) in shape but adapts semantics:
+//   1. Stale-file detection. UDS `AddrInUse` almost always means a leftover
+//      socket file from an unclean shutdown, not a live process holding the
+//      path -- but silently unlinking would clobber a legitimately-running
+//      second daemon. We probe with `UnixStream::connect`: live process
+//      answers => Fatal "held by another live process"; otherwise unlink and
+//      bind. This is the same pattern dockerd uses for /var/run/docker.sock.
+//   2. Explicit `set_nonblocking(true)` on each cloned FD. POSIX dup() is
+//      not guaranteed to inherit O_NONBLOCK across libc implementations,
+//      so we set it explicitly on every clone before handing to tokio.
+//   3. `try_get` is `async fn` even though the body has no await points.
+//      This keeps the API symmetric with `UnixConnect::try_connect` (which
+//      is necessarily async) so callers always write `.await?`. The compiler
+//      inlines no-await async fns -- zero runtime cost, room to add metric /
+//      tracing instrumentation later without breaking the API.
+//   4. Single-file `#[cfg(unix)]` gating + `compile_error!` on non-Unix.
+pub fn generate_unix_listen_template(
+    struct_name: &syn::Ident,
+    vis: &syn::Visibility,
+    attrs: &[syn::Attribute],
+    addr: &syn::LitStr,
+    env: Option<&syn::LitStr>,
+    eager: bool,
+) -> TokenStream {
+    let struct_name_str = struct_name.to_string();
+    let clone_derive = if has_clone_derive(attrs) {
+        quote! {}
+    } else {
+        quote! { #[derive(Clone)] }
+    };
+
+    let addr_expr = unix_path_addr_expr(addr, env);
+    let compile_error_guard = unix_only_compile_error_guard("UnixListen");
+
+    let singleton_name = format_ident!(
+        "__PROVIDER_SINGLETON_{}",
+        struct_name.to_string().to_uppercase()
+    );
+    let type_tokens = quote! { #struct_name };
+
+    // Detect-and-unlink preamble + bind + set_nonblocking. Used by both the
+    // framework path (init_fallible) and the managed path (sync block).
+    //
+    // Why probe-then-unlink rather than blind unlink: see the docstring above
+    // (point 1). The guard against clobbering a live peer is the whole reason
+    // this preamble is more involved than the TCP version.
+    let bind_prelude = quote! {
+        let p = std::path::Path::new(&path);
+        if p.exists() {
+            // Probe: if a live process answers, refuse fatally. Otherwise
+            // assume stale and unlink. NotFound on remove_file is benign
+            // (someone else removed it concurrently) -- only escalate other
+            // io::Error kinds.
+            match std::os::unix::net::UnixStream::connect(p) {
+                Ok(_probe_stream) => {
+                    return Err(service_daemon::ProviderError::Fatal(format!(
+                        "Provider '{}': socket '{}' is held by another live process; refusing to bind",
+                        #struct_name_str, path,
+                    )));
+                }
+                Err(_probe_err) => {
+                    if let Err(remove_err) = std::fs::remove_file(p) {
+                        if remove_err.kind() != std::io::ErrorKind::NotFound {
+                            return Err(service_daemon::ProviderError::Fatal(format!(
+                                "Provider '{}': failed to remove stale socket '{}': {} (kind={:?})",
+                                #struct_name_str, path, remove_err, remove_err.kind(),
+                            )));
+                        }
+                    }
+                    // Structured warn so operators investigating "who deleted
+                    // my socket file" have a framework-side breadcrumb.
+                    ::tracing::warn!(
+                        provider = #struct_name_str,
+                        path = %path,
+                        "Removed stale Unix socket file before binding"
+                    );
+                }
+            }
+        }
+    };
+
+    // Classify io::ErrorKind for the framework's retry/backoff vocabulary.
+    // The kinds are listed explicitly (no catch-all) so a future ErrorKind
+    // addition forces the maintainer to make a deliberate choice.
+    let bind_and_classify = quote! {
+        let listener = std::os::unix::net::UnixListener::bind(&path).map_err(|e| {
+            let msg = format!(
+                "Provider '{}' failed to bind Unix socket '{}': {}",
+                #struct_name_str, path, e
+            );
+            match e.kind() {
+                std::io::ErrorKind::AddrInUse
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::TimedOut => {
+                    service_daemon::ProviderError::Retryable(msg)
+                }
+                _ => service_daemon::ProviderError::Fatal(msg),
+            }
+        })?;
+        listener.set_nonblocking(true).map_err(|e| {
+            service_daemon::ProviderError::Fatal(format!(
+                "Provider '{}' failed to set nonblocking for '{}': {}",
+                #struct_name_str, path, e
+            ))
+        })?;
+    };
+
+    // Framework path: init_fallible wraps the closure with backoff, total
+    // timeout, and cancellation -- we just supply the failable operation.
+    let framework_init_fn = quote! {
+        service_daemon::core::provider_init::init_fallible(
+            #struct_name_str,
+            policy,
+            cancel,
+            move || {
+                let path = #addr_expr;
+                async move {
+                    #bind_prelude
+                    #bind_and_classify
+                    Ok(#struct_name(std::sync::Arc::new(listener)))
+                }
+            },
+        )
+        .await
+    };
+
+    // Managed path: same logic, but called synchronously inside the
+    // resolve_managed flow (no init_fallible wrapper). The bind preamble and
+    // classify blocks are not async-bound -- they execute as a sync prologue.
+    //
+    // Wrapped in an async block so the `?` and `.await` semantics match the
+    // surrounding state-manager call site, but the body itself does not await.
+    let managed_init_fn = quote! {
+        async move {
+            let path = #addr_expr;
+            #bind_prelude
+            #bind_and_classify
+            Ok(std::sync::Arc::new(#struct_name(std::sync::Arc::new(listener))))
+        }.await
+    };
+
+    let provided_impl = generate_provided_impl(ProvidedImplConfig {
+        type_tokens: &type_tokens,
+        singleton_name: &singleton_name,
+        user_span: struct_name.span(),
+        param_entries: &[],
+        eager,
+        framework_init_fn: &framework_init_fn,
+        managed_init_fn: &managed_init_fn,
+        helper_style: HelperStyle::Fallible,
+    });
+
+    let expanded = quote! {
+        #compile_error_guard
+
+        // Wrapped Arc<UnixListener> so multiple reload generations can share
+        // one listening queue via dup()/try_clone(). The kernel listen socket
+        // is stateless from accept()'s perspective: every call draws from a
+        // single shared backlog regardless of which clone makes the call.
+        #[cfg(unix)]
+        #(#attrs)*
+        #clone_derive
+        #vis struct #struct_name(pub std::sync::Arc<std::os::unix::net::UnixListener>);
+
+        // Default uses panic-on-fail: it's only invoked outside the framework
+        // path (direct instantiation in tests). The framework path goes
+        // through init_fallible and uses the Retryable/Fatal vocabulary.
+        #[cfg(unix)]
+        impl Default for #struct_name {
+            fn default() -> Self {
+                let path = #addr_expr;
+                let p = std::path::Path::new(&path);
+                if p.exists()
+                    && std::os::unix::net::UnixStream::connect(p).is_err()
+                {
+                    let _ = std::fs::remove_file(p);
+                }
+                let listener = std::os::unix::net::UnixListener::bind(&path)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "FATAL: Provider '{}' failed to bind Unix socket '{}': {}",
+                            #struct_name_str, path, e
+                        );
+                    });
+                listener.set_nonblocking(true)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "FATAL: Provider '{}' failed to set nonblocking for '{}': {}",
+                            #struct_name_str, path, e
+                        );
+                    });
+                Self(std::sync::Arc::new(listener))
+            }
+        }
+
+        #[cfg(unix)]
+        impl std::ops::Deref for #struct_name {
+            type Target = std::os::unix::net::UnixListener;
+            fn deref(&self) -> &std::os::unix::net::UnixListener {
+                &self.0
+            }
+        }
+
+        // Display via as_pathname: std::os::unix::net::SocketAddr does NOT
+        // implement Display itself (only Debug). For unnamed sockets
+        // as_pathname returns None.
+        #[cfg(unix)]
+        impl std::fmt::Display for #struct_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self.0.local_addr() {
+                    Ok(addr) => match addr.as_pathname() {
+                        Some(p) => write!(f, "{}", p.display()),
+                        None => write!(f, "<unnamed>"),
+                    },
+                    Err(_) => write!(f, "<unresolved>"),
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        #provided_impl
+
+        #[cfg(unix)]
+        impl #struct_name {
+            /// Obtain an async `tokio::net::UnixListener` by cloning the
+            /// underlying OS file descriptor.
+            ///
+            /// Each call returns a new `tokio::net::UnixListener` that shares
+            /// the same kernel listen queue. The kernel distributes
+            /// incoming connections fairly across all clones, enabling
+            /// multiple services or reload generations to accept on the
+            /// same physical path concurrently.
+            //
+            // async fn even though body is sync: keep API symmetric with
+            // UnixConnect::try_connect (which is necessarily async). No await
+            // points -> compiler inlines, zero runtime cost. Future metric /
+            // tracing instrumentation can be added without breaking the API.
+            //
+            // We explicitly set_nonblocking(true) on the cloned FD because
+            // POSIX dup() is not guaranteed to inherit O_NONBLOCK across libc
+            // implementations -- relying on inheritance is
+            // undefined-behavior-adjacent on macOS and FreeBSD.
+            pub async fn try_get(&self) -> std::io::Result<service_daemon::tokio::net::UnixListener> {
+                let cloned = self.0.try_clone()?;
+                cloned.set_nonblocking(true)?;
+                service_daemon::tokio::net::UnixListener::from_std(cloned)
+            }
+
+            /// Returns the local address this socket is bound to.
+            pub fn local_addr(&self) -> std::io::Result<std::os::unix::net::SocketAddr> {
+                self.0.local_addr()
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+// ---------------------------------------------------------------------------
+// UnixConnect template
+// ---------------------------------------------------------------------------
+
+/// Generates a `UnixConnect` (Unix domain socket client) provider that holds
+/// only the target path and produces fresh `tokio::net::UnixStream`s on demand.
+//
+// Why hold path, not stream: UnixStream is a stateful kernel resource. A
+// `try_clone` would let multiple callers consume bytes from the same kernel
+// buffer, breaking any read-side framing. Each `try_connect` therefore opens
+// a new independent stream. The framework intentionally does NOT pool because
+// UDS connections are local and cheap to recreate; pooling would impose a
+// semantic ("which clone am I sharing?") that callers don't want.
+//
+// Why probe at init: provider initialization runs `connect()` once and
+// immediately drops the stream. Two purposes:
+//   1. With eager = true, this blocks the system startup wave until the peer
+//      is reachable. Adapter-style daemons routinely depend on a sidecar /
+//      supervisor that must be up before our own services start. The
+//      init_fallible backoff lets us tolerate the peer starting slightly
+//      after us.
+//   2. Fail-fast on misconfiguration: a typo in the path becomes Fatal at
+//      init time, not at first try_connect() somewhere in the hot path.
+// Peer servers WILL observe an accept() followed by an instant close --
+// this is normal and any reasonable server design handles port-scanner /
+// health-probe traffic the same way.
+pub fn generate_unix_connect_template(
+    struct_name: &syn::Ident,
+    vis: &syn::Visibility,
+    attrs: &[syn::Attribute],
+    addr: &syn::LitStr,
+    env: Option<&syn::LitStr>,
+    eager: bool,
+) -> TokenStream {
+    let struct_name_str = struct_name.to_string();
+    let clone_derive = if has_clone_derive(attrs) {
+        quote! {}
+    } else {
+        quote! { #[derive(Clone)] }
+    };
+
+    let addr_expr = unix_path_addr_expr(addr, env);
+    let compile_error_guard = unix_only_compile_error_guard("UnixConnect");
+
+    let singleton_name = format_ident!(
+        "__PROVIDER_SINGLETON_{}",
+        struct_name.to_string().to_uppercase()
+    );
+    let type_tokens = quote! { #struct_name };
+
+    // ConnectionRefused / NotFound / ConnectionAborted: peer is starting up.
+    // Retryable.
+    //   - ConnectionRefused: peer hasn't called accept() yet
+    //   - NotFound: peer hasn't created the socket file yet
+    //   - ConnectionAborted: peer accepted but immediately closed (init race)
+    // PermissionDenied: EACCES on the path -- a permissions issue is not a
+    // transient state, the operator has to fix it. Fatal.
+    let probe_and_classify = quote! {
+        // One-shot probe stream is created and immediately dropped. The
+        // sole purpose is reachability validation; we do not store it.
+        let _probe = service_daemon::tokio::net::UnixStream::connect(&path)
+            .await
+            .map_err(|e| {
+                let msg = format!(
+                    "Provider '{}' failed to probe Unix socket '{}': {}",
+                    #struct_name_str, path, e
+                );
+                match e.kind() {
+                    std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::TimedOut => {
+                        service_daemon::ProviderError::Retryable(msg)
+                    }
+                    _ => service_daemon::ProviderError::Fatal(msg),
+                }
+            })?;
+        drop(_probe);
+    };
+
+    // Framework path: init_fallible provides retry/backoff/timeout. The
+    // returned Arc<Self> caches only the path; subsequent try_connect()
+    // calls open fresh streams.
+    let framework_init_fn = quote! {
+        service_daemon::core::provider_init::init_fallible(
+            #struct_name_str,
+            policy,
+            cancel,
+            move || {
+                let path = #addr_expr;
+                async move {
+                    #probe_and_classify
+                    Ok(#struct_name {
+                        path: std::sync::Arc::new(std::path::PathBuf::from(path)),
+                    })
+                }
+            },
+        )
+        .await
+    };
+
+    let managed_init_fn = quote! {
+        async move {
+            let path = #addr_expr;
+            #probe_and_classify
+            Ok(std::sync::Arc::new(#struct_name {
+                path: std::sync::Arc::new(std::path::PathBuf::from(path)),
+            }))
+        }.await
+    };
+
+    let provided_impl = generate_provided_impl(ProvidedImplConfig {
+        type_tokens: &type_tokens,
+        singleton_name: &singleton_name,
+        user_span: struct_name.span(),
+        param_entries: &[],
+        eager,
+        framework_init_fn: &framework_init_fn,
+        managed_init_fn: &managed_init_fn,
+        helper_style: HelperStyle::Fallible,
+    });
+
+    let expanded = quote! {
+        #compile_error_guard
+
+        // Holds Arc<PathBuf>, NOT the connected stream. UnixStream is
+        // stateful; sharing one across callers would corrupt read-side
+        // framing. Each try_connect() establishes a fresh independent stream.
+        #[cfg(unix)]
+        #(#attrs)*
+        #clone_derive
+        #vis struct #struct_name {
+            path: std::sync::Arc<std::path::PathBuf>,
+        }
+
+        // Default uses panic-on-fail (probes synchronously via std). Only
+        // invoked outside the framework path; framework path goes through
+        // init_fallible with proper retry semantics.
+        #[cfg(unix)]
+        impl Default for #struct_name {
+            fn default() -> Self {
+                let path = #addr_expr;
+                let _probe = std::os::unix::net::UnixStream::connect(&path)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "FATAL: Provider '{}' failed to probe Unix socket '{}': {}",
+                            #struct_name_str, path, e
+                        );
+                    });
+                drop(_probe);
+                Self {
+                    path: std::sync::Arc::new(std::path::PathBuf::from(path)),
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        impl std::fmt::Display for #struct_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.path.display())
+            }
+        }
+
+        #[cfg(unix)]
+        #provided_impl
+
+        #[cfg(unix)]
+        impl #struct_name {
+            /// Open a fresh connection to the configured Unix socket.
+            ///
+            /// Each call establishes an independent `tokio::net::UnixStream`.
+            /// Callers needing a long-lived connection should hold the
+            /// returned stream themselves; the framework intentionally does
+            /// not pool because UDS connections are local and cheap.
+            pub async fn try_connect(&self) -> std::io::Result<service_daemon::tokio::net::UnixStream> {
+                service_daemon::tokio::net::UnixStream::connect(&*self.path).await
+            }
+
+            /// Returns the configured socket path.
+            pub fn path(&self) -> &std::path::Path {
+                &self.path
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}

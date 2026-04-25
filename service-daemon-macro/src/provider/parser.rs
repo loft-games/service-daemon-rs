@@ -6,7 +6,9 @@
 //! - **Template**: `#[provider(Notify)]`, `#[provider(Queue(String))]`,
 //!   `#[provider(Queue(ComplexJob), capacity = 500)]`,
 //!   `#[provider(Listen("0.0.0.0:8080"))]`,
-//!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`
+//!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`,
+//!   `#[provider(UnixListen("/run/myapp/sock"))]`,
+//!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
 //!
@@ -29,11 +31,27 @@ const TEMPLATE_NAMES: &[&str] = &[
     "BQueue",
     "BroadcastQueue",
     "Listen",
+    "UnixListen",
+    "UnixConnect",
 ];
+
+/// Templates whose parenthesized argument is a string literal (path / address)
+/// rather than a Rust type. Determines which arm of phase-1 parsing runs.
+//
+// Why centralize: parser must decide between `LitStr` and `Type` parsing
+// before it knows what the template generator wants. Listing the addr-based
+// names in one place avoids a 3-way conditional and prevents drift when a
+// future template (e.g. `Open(Path)`) joins the family.
+const ADDR_TEMPLATE_NAMES: &[&str] = &["Listen", "UnixListen", "UnixConnect"];
 
 /// Returns `true` if the identifier matches a known template name.
 fn is_template_name(ident: &Ident) -> bool {
     TEMPLATE_NAMES.iter().any(|&name| ident == name)
+}
+
+/// Returns `true` if the template expects a `LitStr` (path/address) argument.
+fn template_takes_addr(ident: &Ident) -> bool {
+    ADDR_TEMPLATE_NAMES.iter().any(|&name| ident == name)
 }
 
 // ---------------------------------------------------------------------------
@@ -128,16 +146,17 @@ impl Parse for ProviderArgs {
             if is_template_name(&ident) {
                 // Consume the identifier from the real stream
                 let name: Ident = input.parse()?;
-                let is_listen = name == "Listen";
+                let takes_addr = template_takes_addr(&name);
 
                 // Parse parenthesized argument:
-                // - Listen: expects a string literal address
+                // - Listen / UnixListen / UnixConnect: expects a string literal
+                //   address or path
                 // - Queue/others: expects a type
                 let mut arg = None;
                 if input.peek(syn::token::Paren) {
                     let content;
                     syn::parenthesized!(content in input);
-                    if is_listen {
+                    if takes_addr {
                         arg = Some(TemplateArg::Addr(content.parse::<syn::LitStr>()?));
                     } else {
                         arg = Some(TemplateArg::Type(Box::new(content.parse::<syn::Type>()?)));
@@ -519,5 +538,45 @@ mod tests {
         let args = parse_args(quote! { Queue(String), capacity = 200, env = "Q_VAR" }).unwrap();
         assert_eq!(args.capacity, Some(200));
         assert_eq!(args.env.as_ref().unwrap().value(), "Q_VAR");
+    }
+
+    // -- UnixListen / UnixConnect template branches -------------------------------
+
+    #[test]
+    fn unix_listen_template_with_path() {
+        let args = parse_args(quote! { UnixListen("/run/myapp/sock") }).unwrap();
+        match &args.kind {
+            ProviderKind::Template { name, arg } => {
+                assert_eq!(name.to_string(), "UnixListen");
+                match arg {
+                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "/run/myapp/sock"),
+                    _ => panic!("Expected Addr arg for UnixListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+    }
+
+    #[test]
+    fn unix_connect_template_with_path_env_eager() {
+        let args =
+            parse_args(quote! { UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true })
+                .unwrap();
+        match &args.kind {
+            ProviderKind::Template { name, arg } => {
+                assert_eq!(name.to_string(), "UnixConnect");
+                assert!(matches!(arg, Some(TemplateArg::Addr(_))));
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert_eq!(args.env.as_ref().unwrap().value(), "PEER_SOCK");
+        assert!(args.eager);
+    }
+
+    #[test]
+    fn unix_listen_env_inside_parens_is_error() {
+        // Parentheses must contain only the path literal; named attrs go outside.
+        let result = parse_args(quote! { UnixListen("/sock", env = "VAR") });
+        assert!(result.is_err());
     }
 }

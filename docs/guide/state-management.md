@@ -91,6 +91,40 @@ If you call `TcpListener::bind()` inside a service, the port doesn't open until 
 - **FD cloning**: Each call to `listener.get()` returns a new `tokio::net::TcpListener` by cloning the underlying OS file descriptor (`dup`). This allows multiple services or reload generations to share the same port.
 - **Resilience and auto-retry**: Built-in error mapping (see [Resilience Guide](resilience.md#22-smart-listen-strategy)). Transient errors like `AddrInUse` are retried with backoff; permission errors are fatal.
 
+### `UnixListen` and `UnixConnect` (Unix domain sockets, Unix-only)
+
+These two templates form the UDS counterpart of `Listen` and work as a pair: one service runs the accept loop via `UnixListen`, another runs the client side via `UnixConnect`. Both are gated by `#[cfg(unix)]`; on non-Unix targets the macro emits a `compile_error!` at the declaration site.
+
+- **`UnixListen("/path/to/sock")`**: wraps `Arc<std::os::unix::net::UnixListener>`. `try_get().await?` returns a fresh `tokio::net::UnixListener` via FD cloning -- semantics identical to TCP `Listen::get()`. Critical difference: at init time, if the path already exists, the template probes with `UnixStream::connect`; a live process answering means the framework refuses fatally, while a failed probe means the file is stale and is unlinked before bind. This protects a legitimately-running peer daemon while still recovering from unclean shutdowns.
+
+- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `try_connect().await?` opens a fresh `tokio::net::UnixStream` on each call (no pooling -- UDS connections are local and cheap). At init time the template performs one reachability probe and immediately drops the connection. Pair with `eager = true` to block the startup wave until the peer sidecar / supervisor is up.
+
+```rust
+#[derive(Clone)]
+#[provider(UnixListen("/run/myapp/api.sock"), eager = true)]
+pub struct ApiSocket;
+
+#[derive(Clone)]
+#[provider(UnixConnect("/run/peer/control.sock"), env = "PEER_SOCK")]
+pub struct PeerClient;
+
+#[service]
+pub async fn web_server(api: Arc<ApiSocket>) -> anyhow::Result<()> {
+    let l = api.try_get().await?;
+    // accept loop ...
+    Ok(())
+}
+
+#[service]
+pub async fn supervisor_caller(peer: Arc<PeerClient>) -> anyhow::Result<()> {
+    let mut conn = peer.try_connect().await?;
+    // request/response ...
+    Ok(())
+}
+```
+
+Error classification details for both sides live in [Resilience Guide § 2.3-2.4](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener). Note one subtlety: `io::ErrorKind::NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory does not exist).
+
 ### Eager Initialization: `eager = true`
 
 Providers are lazy-initialized upon their first injection by default. For providers that must start regardless of injection (e.g., health-check listeners or global telemetry), the `eager = true` parameter forces initialization during the system startup wave.

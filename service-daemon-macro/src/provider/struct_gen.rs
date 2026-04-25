@@ -10,6 +10,7 @@ use syn::spanned::Spanned;
 use super::parser::{ProviderArgs, ProviderKind, TemplateArg};
 use super::templates::{
     generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
+    generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
 
@@ -98,12 +99,66 @@ fn try_generate_template(
                 provider_args.eager,
             ))
         }
+        // UnixListen template (Unix domain socket listener with FD cloning)
+        "UnixListen" => {
+            let bind_path = match arg {
+                Some(TemplateArg::Addr(lit)) => lit,
+                _ => {
+                    proc_macro_error2::abort!(
+                        name,
+                        "UnixListen template requires a bind path";
+                        help = r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#
+                    );
+                }
+            };
+            if provider_args.capacity.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name,
+                    "UnixListen template does not use `capacity`; it will be ignored"
+                );
+            }
+            Some(generate_unix_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                bind_path,
+                provider_args.env.as_ref(),
+                provider_args.eager,
+            ))
+        }
+        // UnixConnect template (Unix domain socket client; reachability probe at init)
+        "UnixConnect" => {
+            let connect_path = match arg {
+                Some(TemplateArg::Addr(lit)) => lit,
+                _ => {
+                    proc_macro_error2::abort!(
+                        name,
+                        "UnixConnect template requires a target path";
+                        help = r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#
+                    );
+                }
+            };
+            if provider_args.capacity.is_some() {
+                proc_macro_error2::emit_warning!(
+                    name,
+                    "UnixConnect template does not use `capacity`; it will be ignored"
+                );
+            }
+            Some(generate_unix_connect_template(
+                struct_name,
+                vis,
+                attrs,
+                connect_path,
+                provider_args.env.as_ref(),
+                provider_args.eager,
+            ))
+        }
         _ => {
             // Unknown template name - emit helpful error at the exact span
             proc_macro_error2::abort!(
                 name,
                 "Unknown provider template '{}'", name;
-                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen"
+                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect"
             );
         }
     }
