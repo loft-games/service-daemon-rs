@@ -57,7 +57,14 @@ Policies communicate with the engine using a transition enum:
 ## 2. Detailed Usage
 
 ### Cron Trigger
+
+Cron triggers receive a provider type that resolves to the cron expression.
+
 ```rust
+#[derive(Clone)]
+#[provider("0 0 * * * *")]
+pub struct CleanupSchedule(pub String);
+
 #[trigger(Cron(CleanupSchedule))]
 async fn hourly_cleanup() -> anyhow::Result<()> {
     tracing::info!("Cleaning up...");
