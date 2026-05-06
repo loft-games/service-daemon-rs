@@ -34,6 +34,16 @@ impl Drop for PathGuard {
     }
 }
 
+fn prepare_socket_path(path: &'static str) -> PathGuard {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("Failed to create socket test directory");
+    }
+    cleanup_path(path);
+    PathGuard(path)
+}
+
 // Both providers point at the same path. In real usage they would belong to
 // different services (one running the accept loop, one acting as a client).
 #[derive(Debug)]
@@ -50,8 +60,7 @@ pub struct RtClient;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_listen_connect_roundtrip() {
     let path = "target/sd-uds-rt.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     // Bring up the listener provider FIRST, so the path exists before the
     // client provider's init-probe runs. Without this ordering the client

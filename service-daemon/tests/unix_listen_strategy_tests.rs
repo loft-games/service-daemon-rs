@@ -6,8 +6,8 @@
 // the very behaviors these tests are meant to exercise.
 //
 // Path strategy: hardcoded relative paths under `target/`. Cargo's test cwd
-// is the crate root, and `target/` is auto-created by the build system, so
-// `target/sd-uds-*.sock` is writable. `cargo clean` reclaims any stragglers.
+// is the crate root, so the test helper creates `target/` before binding.
+// `cargo clean` reclaims any stragglers.
 //
 // Windows-handoff note: this file is `#![cfg(unix)]` so on Windows it is
 // excluded entirely from compilation -- including syntactic checks. If a
@@ -40,6 +40,16 @@ impl Drop for PathGuard {
     }
 }
 
+fn prepare_socket_path(path: &'static str) -> PathGuard {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("Failed to create socket test directory");
+    }
+    cleanup_path(path);
+    PathGuard(path)
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: fresh-path bind succeeds.
 // ---------------------------------------------------------------------------
@@ -50,8 +60,7 @@ pub struct FreshListener;
 
 #[tokio::test]
 async fn test_unix_listen_fresh_path_ok() {
-    cleanup_path("target/sd-uds-listen-fresh.sock");
-    let _guard = PathGuard("target/sd-uds-listen-fresh.sock");
+    let _guard = prepare_socket_path("target/sd-uds-listen-fresh.sock");
 
     let result = <FreshListener as ManagedProvided>::resolve_managed().await;
     assert!(
@@ -72,8 +81,7 @@ pub struct StaleListener;
 #[tokio::test]
 async fn test_unix_listen_stale_file_recovers() {
     let path = "target/sd-uds-listen-stale.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     // Pre-create a regular file at the path. The probe `connect()` will fail
     // (it's a regular file, not a socket), so the template should classify
@@ -100,8 +108,7 @@ pub struct LiveListener;
 #[tokio::test]
 async fn test_unix_listen_live_process_refuses() {
     let path = "target/sd-uds-listen-live.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     // Bind a manual std listener and keep it alive for the duration of the
     // test. Our template's connect-probe will succeed against this live
@@ -164,8 +171,7 @@ pub struct CloneListener;
 #[tokio::test]
 async fn test_unix_listen_fd_clone() {
     let path = "target/sd-uds-listen-clone.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     let provider = <CloneListener as ManagedProvided>::resolve_managed()
         .await

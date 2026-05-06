@@ -23,6 +23,16 @@ impl Drop for PathGuard {
     }
 }
 
+fn prepare_socket_path(path: &'static str) -> PathGuard {
+    if let Some(parent) = std::path::Path::new(path).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("Failed to create socket test directory");
+    }
+    cleanup_path(path);
+    PathGuard(path)
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: connect succeeds when the peer is already listening at init time.
 // ---------------------------------------------------------------------------
@@ -34,8 +44,7 @@ pub struct OkClient;
 #[tokio::test]
 async fn test_unix_connect_succeeds_when_server_ready() {
     let path = "target/sd-uds-connect-ok.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     // Bring up a peer listener BEFORE the provider resolves. This satisfies
     // the init-time probe on the first attempt (no retry/backoff path
@@ -66,8 +75,7 @@ pub struct RetryClient;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_retries_on_connection_refused() {
     let path = "target/sd-uds-connect-retry.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     // Spawn a delayed peer that binds 200ms after the test starts. The
     // template's first probe will hit NotFound (Retryable); the framework
@@ -83,10 +91,10 @@ async fn test_unix_connect_retries_on_connection_refused() {
         drop(listener);
     });
 
-    let result = <RetryClient as ManagedProvided>::resolve_managed().await;
+    let result = RetryClient::resolve().await;
     assert!(
         result.is_ok(),
-        "Expected eventual connect success after delayed peer, got {:?}",
+        "Expected framework init to retry until delayed peer is ready, got {:?}",
         result
     );
 
@@ -106,8 +114,7 @@ pub struct IndepClient;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_provides_independent_streams_per_call() {
     let path = "target/sd-uds-connect-indep.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
 
@@ -150,8 +157,7 @@ pub struct PathFnClient;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_path_accessor_returns_configured_path() {
     let path = "target/sd-uds-connect-pathfn.sock";
-    cleanup_path(path);
-    let _guard = PathGuard(path);
+    let _guard = prepare_socket_path(path);
 
     let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
 
