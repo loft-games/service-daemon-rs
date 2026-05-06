@@ -1,8 +1,8 @@
 # Quick Start Guide
 
-This tutorial walks through `service-daemon-rs` from a single heartbeat service to event-driven triggers, state recovery, and unit testing. It assumes basic familiarity with `tokio` and async Rust.
+This tutorial walks through `service-daemon-rs` from a single heartbeat service to event-driven triggers, state recovery, priority scheduling, and unit testing. It assumes basic familiarity with `tokio` and async Rust.
 
-The framework manages the lifecycle of long-running async tasks (start order, restarts, dependencies, signal handling) and provides type-driven dependency injection. The chapters below introduce these one at a time.
+The framework manages the lifecycle of long-running async tasks (start order, runtime placement, restarts, dependencies, signal handling) and provides type-driven dependency injection. The chapters below introduce these one at a time.
 
 ---
 

@@ -7,18 +7,19 @@ This document explains how the procedural macros transform your code and how the
 When you annotate a function, the macro generates:
 1. **Logic Preservation**: The original function code remains mostly intact.
 2. **Wrapper Generation**: An `async move` block that resolves all dependencies before calling the original function.
-3. **Registry Entry**: A `static` entry collected by `linkme`.
+3. **Registry Entry**: A `static` entry collected by `linkme` with the service metadata the daemon needs at runtime.
 
 > [!IMPORTANT]
 > **Distributed Registration Requirement**: Because `linkme` works at the linker level, any module containing a `#[service]` or `#[trigger]` **must** be included in your compilation tree (e.g., via `mod my_module;`). If a module is not reachable from `main.rs`, its services will not be discovered.
 
 ## 2. The `#[trigger]` Transformation
 
-Triggers are specialized services. The macro generates a **Host Wrapper** that:
+Triggers are specialized services registered through the same service registry. The macro generates a **Host Wrapper** that:
 - Spawns the appropriate "Host" logic (e.g., `Notify_trigger_host`).
 - **DI Resolution**: Dependency providers are resolved **once** at trigger startup (outside the event loop), matching standard service behavior. This ensures consistent lifecycle management and prevents redundant resolutions on every event.
 - **Service-Level Integration (`Watch`)**: For `Watch` templates, the macro generates a service watcher that leverages the `ServiceDaemon`'s reload mechanism.
 - **Event Dispatch**: The host executes the user handler when events occur, managing the inversion of control.
+- **Runtime Placement**: The generated registry entry carries the selected scheduling policy; the daemon runner uses it when spawning the trigger service supervisor.
 
 ## 3. The "Macro Illusion"
 

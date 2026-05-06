@@ -17,7 +17,22 @@ pub async fn admin_service() -> Result<()> {
         thread_id, thread_name
     );
 
-    // Simulate continuous operation
+    time::sleep(Duration::from_secs(3600)).await;
+    Ok(())
+}
+
+/// Simulates a latency-sensitive supervisor running on the shared high-priority runtime.
+#[service(priority = ServicePriority::SYSTEM, scheduling = HighPriority)]
+pub async fn watchdog_service() -> Result<()> {
+    let thread = thread::current();
+    let thread_id = thread.id();
+    let thread_name = thread.name().unwrap_or("unnamed").to_string();
+
+    info!(
+        "[HighPriority] Watchdog service running on the shared high-priority runtime on thread {:?} ({})",
+        thread_id, thread_name
+    );
+
     time::sleep(Duration::from_secs(3600)).await;
     Ok(())
 }

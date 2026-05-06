@@ -111,4 +111,4 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 
 ---
 
-[**<- Previous Step: DIY Providers**](./diy-providers.md) | [**Next Step: Sequential Startup & Shutdown ->**](./priority-orchestration.md)
+[**<- Previous Step: DIY Providers**](./diy-providers.md) | [**Next Step: Priorities & Scheduling ->**](./priority-orchestration.md)

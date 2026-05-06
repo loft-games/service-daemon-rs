@@ -16,7 +16,7 @@ It earns its keep when your application has more than one long-running concern. 
 ## Why choose service-daemon?
 
 *   **Declarative orchestration** -- Describe services, triggers, providers, and their relationships with attributes like `#[service]` or `#[trigger(Cron(CleanupSchedule))]`, where trigger targets are provider types. No manual wiring in `main`, no spawn-and-pray.
-*   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, restart policies, graceful signal handling, early-binding TCP listeners for zero-downtime reload -- the glue you'd otherwise rewrite per project.
+*   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, scheduling lanes (`Standard`, `HighPriority`, `Isolated`), restart policies, graceful signal handling, early-binding TCP/Unix listeners -- the glue you'd otherwise rewrite per project.
 *   **Type-safe dependency injection** -- Resolved by Rust's type system. No runtime container, no string keys, no reflection. Discovery is linker-level via `linkme`.
 *   **Causal observability** -- UUID v7 message IDs propagate across services automatically. Optional **Mermaid** topology export visualizes the running system.
 *   **Testable by design** -- A feature-gated `MockContext` lets you simulate async behavior and state transitions in a controlled sandbox without spinning up the full daemon.
@@ -64,7 +64,7 @@ The **[Quick Start Guide](https://github.com/loft-games/service-daemon-rs/blob/m
 1. [**Hello, Heartbeat!**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/hello-heartbeat.md) -- Your first service.
 2. [**Reactive Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md) -- Events, queues, and chained handlers.
 3. [**State Management & Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/state-recovery.md) -- Persistence across restarts.
-4. [**Sequential Startup & Shutdown**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/priority-orchestration.md) -- Priority-based orchestration.
+4. [**Sequential Startup, Shutdown & Scheduling**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/priority-orchestration.md) -- Priority waves and runtime scheduling policies.
 5. See the [**Full Guide**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) for the complete chapter list.
 
 ---
@@ -80,6 +80,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **triggers** | Decoupled event-driven handlers (Cron, Queue, Watch) | `cargo run -p example-triggers` |
 | **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
 | **diagnostics** | Behavioral Topology and Mermaid export (`diagnostics` feature) | `cargo run -p example-diagnostics` |
+| **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
 > **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
@@ -96,6 +97,7 @@ Documentation is split by audience.
 - [State Management](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/state-management.md) -- Providers, mutability, zero-copy snapshots.
 - [Event Triggers](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/triggers.md) -- Cron, queues, watchers.
 - [Resilience & Lifecycle](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/resilience.md) -- Restart policy, jitter, wave-based orchestration.
+- [Priorities & Scheduling](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/priority-orchestration.md) -- Startup/shutdown priority waves and runtime lanes.
 - [Diagnostics & Logs](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/diagnostics.md) -- The `DaemonLayer` for runtime visibility.
 - [Testing & Troubleshooting](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/testing-troubleshooting.md) -- Mocking, FAQ.
 

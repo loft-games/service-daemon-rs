@@ -12,8 +12,9 @@ use crate::common::{TagsList, parse_scheduling_policy};
 /// ```ignore
 /// #[service]                                        // all defaults
 /// #[service(priority = 80)]                         // priority only
+/// #[service(scheduling = Isolated)]                  // scheduling only
 /// #[service(tags = ["infra", "core"])]              // tags only
-/// #[service(priority = 80, tags = ["infra"])]       // both
+/// #[service(priority = 80, scheduling = HighPriority, tags = ["infra"])]
 /// ```
 #[derive(Debug)]
 pub struct ServiceAttr {

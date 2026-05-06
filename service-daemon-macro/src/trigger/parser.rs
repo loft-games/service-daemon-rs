@@ -1,12 +1,12 @@
 //! Attribute parsing for the `#[trigger]` macro.
 //!
 //! Supports the modern syntax:
-//!   `#[trigger(Watch(MetricsData), priority = 80)]`
+//!   `#[trigger(Watch(MetricsData), priority = 80, scheduling = HighPriority)]`
 //!
 //! The first argument is always a template call in the form `Template(Target)`.
 //! `Template` is any type path that implements `TriggerHost<Target>` - no
 //! keyword validation is performed here; the compiler will catch invalid types.
-//! Optional named arguments like `priority = N` follow after a comma.
+//! Optional named arguments like `priority = N`, `scheduling = HighPriority`, and `tags = [...]` follow after a comma.
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -40,7 +40,7 @@ pub struct TriggerArgs {
 /// Parses the token stream inside `#[trigger(...)]`.
 ///
 /// Expected grammar:
-///   `HostPath(TargetType)` [, `priority` = EXPR]*
+///   `HostPath(TargetType)` [, `priority` = EXPR | `scheduling` = IDENT | `tags` = [...]]*
 ///
 /// Where `HostPath` is any valid Rust type path (e.g., `Watch`, `TT::Queue`,
 /// `service_daemon::TT::Cron`) and `TargetType` is any valid Rust type path.

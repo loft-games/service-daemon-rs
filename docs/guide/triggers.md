@@ -97,6 +97,17 @@ All triggers support the `priority` parameter for wave-based startup/shutdown or
 pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()> { ... }
 ```
 
+### Scheduling
+
+Triggers also support the same `scheduling` parameter as services. The trigger host still defines how events are received; scheduling controls which runtime lane supervises and executes the generated trigger service.
+
+```rust
+#[trigger(Queue(WorkerQueue), scheduling = HighPriority)]
+async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
+```
+
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop needs a dedicated OS thread and private Tokio runtime. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
+
 ## 3. Parameter Mapping Rules
 
 1. **Implicit Payload**: The first parameter that is *not* an `Arc<T>` is treated as the event payload.

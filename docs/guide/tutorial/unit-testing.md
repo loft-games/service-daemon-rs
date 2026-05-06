@@ -142,4 +142,4 @@ handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 
 ---
 
-[**-- Previous Step: Sequential Startup & Shutdown**](./priority-orchestration.md) | [**Next Step: Under the Hood --**](./under-the-hood.md)
+[**<- Previous Step: Priorities & Scheduling**](./priority-orchestration.md) | [**Next Step: Under the Hood ->**](./under-the-hood.md)

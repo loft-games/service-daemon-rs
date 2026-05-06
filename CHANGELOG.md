@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-alpha.4] - 2026-05-07
+
+### Added
+
+- **Unix Domain Socket Providers**: Added `UnixListen` and `UnixConnect` provider templates for local IPC, sidecar coordination, and Unix-only service handoff patterns, including stale-socket recovery, non-socket path refusal, reachability probes, and retryable connection initialization.
+
+### Changed
+
+- **Provider Guides**: Documented Unix socket listener/client setup, reachability probes, stale-socket recovery, and error classification.
+- **Scheduling Documentation**: Added `Standard`, `HighPriority`, and `Isolated` policy guidance to the tutorial, trigger guide, macro internals, and framework extension docs.
+
 ## [0.1.0-alpha.3] - 2026-03-29
 
 ### Added
@@ -59,7 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MockContext` simulation support (feature-gated).
 - `#![deny(unsafe_code)]` across the entire crate.
 
-[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.3...HEAD
+[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.4...HEAD
+[0.1.0-alpha.4]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.1
