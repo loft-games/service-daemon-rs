@@ -18,6 +18,7 @@
 #![cfg(unix)]
 
 use service_daemon::{ManagedProvided, ProviderError, provider};
+use std::os::unix::fs::FileTypeExt;
 
 /// Best-effort cleanup of a socket file path. NotFound is benign (path may
 /// already be gone). Other errors are logged but not propagated -- this is
@@ -51,7 +52,7 @@ fn prepare_socket_path(path: &'static str) -> PathGuard {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: fresh-path bind succeeds.
+// Fresh-path bind succeeds.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -71,7 +72,7 @@ async fn test_unix_listen_fresh_path_ok() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: stale socket file is detected, unlinked, and bind succeeds.
+// Stale socket files are detected, unlinked, and rebound.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -79,26 +80,93 @@ async fn test_unix_listen_fresh_path_ok() {
 pub struct StaleListener;
 
 #[tokio::test]
-async fn test_unix_listen_stale_file_recovers() {
+async fn test_unix_listen_stale_socket_recovers() {
     let path = "target/sd-uds-listen-stale.sock";
     let _guard = prepare_socket_path(path);
 
-    // Pre-create a regular file at the path. The probe `connect()` will fail
-    // (it's a regular file, not a socket), so the template should classify
-    // it as stale and unlink before binding.
-    std::fs::write(path, b"stale data from a prior unclean shutdown")
-        .expect("Failed to pre-create stale file");
+    let listener = std::os::unix::net::UnixListener::bind(path)
+        .expect("Failed to pre-create stale socket file");
+    drop(listener);
+
+    let metadata = std::fs::symlink_metadata(path).expect("stale socket metadata missing");
+    assert!(
+        metadata.file_type().is_socket(),
+        "test precondition failed: path must be a Unix socket"
+    );
 
     let result = <StaleListener as ManagedProvided>::resolve_managed().await;
     assert!(
         result.is_ok(),
-        "Expected stale-file recovery to bind successfully, got {:?}",
+        "Expected stale-socket recovery to bind successfully, got {:?}",
         result
     );
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: a live process holding the path is refused fatally.
+// Regular files are refused and preserved.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+#[provider(UnixListen("target/sd-uds-listen-regular-file.sock"))]
+pub struct RegularFileListener;
+
+#[tokio::test]
+async fn test_unix_listen_regular_file_refuses_and_preserves() {
+    let path = "target/sd-uds-listen-regular-file.sock";
+    let _guard = prepare_socket_path(path);
+    let sentinel = b"regular file that must not be removed";
+    std::fs::write(path, sentinel).expect("Failed to pre-create regular file");
+
+    let result = <RegularFileListener as ManagedProvided>::resolve_managed().await;
+    match result {
+        Err(ProviderError::Fatal(msg)) => {
+            assert!(
+                msg.contains("not a Unix socket"),
+                "Expected non-socket Fatal msg, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("refusing to remove"),
+                "Expected refusal-to-remove Fatal msg, got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected Fatal for regular file path, got {:?}", other),
+    }
+
+    let preserved = std::fs::read(path).expect("regular file should still exist");
+    assert_eq!(
+        preserved, sentinel,
+        "regular file contents must be preserved"
+    );
+}
+
+#[derive(Debug)]
+#[provider(UnixListen("target/sd-uds-listen-default-regular.sock"))]
+pub struct DefaultRegularFileListener;
+
+#[test]
+fn test_unix_listen_default_regular_file_refuses_and_preserves() {
+    let path = "target/sd-uds-listen-default-regular.sock";
+    let _guard = prepare_socket_path(path);
+    let sentinel = b"default regular file that must not be removed";
+    std::fs::write(path, sentinel).expect("Failed to pre-create regular file");
+
+    let result = std::panic::catch_unwind(|| DefaultRegularFileListener::default());
+    assert!(
+        result.is_err(),
+        "Default should panic for a regular file path"
+    );
+
+    let preserved = std::fs::read(path).expect("regular file should still exist");
+    assert_eq!(
+        preserved, sentinel,
+        "regular file contents must be preserved"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A live process holding the path is refused fatally.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -133,7 +201,7 @@ async fn test_unix_listen_live_process_refuses() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: permission-denied bind is Fatal (not retried into a long timeout).
+// Permission-denied bind is Fatal and not retried into a long timeout.
 // ---------------------------------------------------------------------------
 
 // `/proc/sd-uds-perm.sock`: /proc is typically not writable for unprivileged
@@ -161,7 +229,7 @@ async fn test_unix_listen_permission_denied_fatal() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: try_get clones the underlying FD; multiple clones coexist.
+// try_get clones the underlying FD so multiple clones coexist.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]

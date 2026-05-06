@@ -481,12 +481,12 @@ fn unix_only_compile_error_guard(template_name: &str) -> proc_macro2::TokenStrea
 /// FD cloning across reload generations.
 //
 // Mirrors `generate_listen_template` (TCP) in shape but adapts semantics:
-//   1. Stale-file detection. UDS `AddrInUse` almost always means a leftover
+//   1. Stale-socket detection. UDS `AddrInUse` often means a leftover
 //      socket file from an unclean shutdown, not a live process holding the
-//      path -- but silently unlinking would clobber a legitimately-running
-//      second daemon. We probe with `UnixStream::connect`: live process
-//      answers => Fatal "held by another live process"; otherwise unlink and
-//      bind. This is the same pattern dockerd uses for /var/run/docker.sock.
+//      path -- but blindly unlinking would clobber unrelated files. We probe
+//      with `UnixStream::connect`: live process answers => Fatal "held by
+//      another live process"; failed probe only unlinks after confirming the
+//      path is itself a Unix socket.
 //   2. Explicit `set_nonblocking(true)` on each cloned FD. POSIX dup() is
 //      not guaranteed to inherit O_NONBLOCK across libc implementations,
 //      so we set it explicitly on every clone before handing to tokio.
@@ -524,39 +524,70 @@ pub fn generate_unix_listen_template(
     // framework path (init_fallible) and the managed path (sync block).
     //
     // Why probe-then-unlink rather than blind unlink: see the docstring above
-    // (point 1). The guard against clobbering a live peer is the whole reason
-    // this preamble is more involved than the TCP version.
+    // (point 1). A failed probe is only stale after the path is confirmed to be
+    // a Unix socket; ordinary files and other path types are preserved.
     let bind_prelude = quote! {
         let p = std::path::Path::new(&path);
-        if p.exists() {
-            // Probe: if a live process answers, refuse fatally. Otherwise
-            // assume stale and unlink. NotFound on remove_file is benign
-            // (someone else removed it concurrently) -- only escalate other
-            // io::Error kinds.
-            match std::os::unix::net::UnixStream::connect(p) {
-                Ok(_probe_stream) => {
-                    return Err(service_daemon::ProviderError::Fatal(format!(
-                        "Provider '{}': socket '{}' is held by another live process; refusing to bind",
-                        #struct_name_str, path,
-                    )));
-                }
-                Err(_probe_err) => {
-                    if let Err(remove_err) = std::fs::remove_file(p) {
-                        if remove_err.kind() != std::io::ErrorKind::NotFound {
-                            return Err(service_daemon::ProviderError::Fatal(format!(
-                                "Provider '{}': failed to remove stale socket '{}': {} (kind={:?})",
-                                #struct_name_str, path, remove_err, remove_err.kind(),
-                            )));
+        match std::fs::symlink_metadata(p) {
+            Ok(_) => {
+                match std::os::unix::net::UnixStream::connect(p) {
+                    Ok(_probe_stream) => {
+                        return Err(service_daemon::ProviderError::Fatal(format!(
+                            "Provider '{}': socket '{}' is held by another live process; refusing to bind",
+                            #struct_name_str, path,
+                        )));
+                    }
+                    Err(_probe_err) => {
+                        let should_remove_stale_socket = match std::fs::symlink_metadata(p) {
+                            Ok(metadata) => {
+                                let file_type = metadata.file_type();
+                                if !std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
+                                    return Err(service_daemon::ProviderError::Fatal(format!(
+                                        "Provider '{}': path '{}' exists but is not a Unix socket; refusing to remove",
+                                        #struct_name_str, path,
+                                    )));
+                                }
+                                true
+                            }
+                            Err(metadata_err)
+                                if metadata_err.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                false
+                            }
+                            Err(metadata_err) => {
+                                return Err(service_daemon::ProviderError::Fatal(format!(
+                                    "Provider '{}': failed to inspect existing socket path '{}': {} (kind={:?})",
+                                    #struct_name_str, path, metadata_err, metadata_err.kind(),
+                                )));
+                            }
+                        };
+
+                        if should_remove_stale_socket {
+                            if let Err(remove_err) = std::fs::remove_file(p) {
+                                if remove_err.kind() != std::io::ErrorKind::NotFound {
+                                    return Err(service_daemon::ProviderError::Fatal(format!(
+                                        "Provider '{}': failed to remove stale socket '{}': {} (kind={:?})",
+                                        #struct_name_str, path, remove_err, remove_err.kind(),
+                                    )));
+                                }
+                            }
+                            // Structured warn so operators investigating "who deleted
+                            // my socket file" have a framework-side breadcrumb.
+                            ::tracing::warn!(
+                                provider = #struct_name_str,
+                                path = %path,
+                                "Removed stale Unix socket file before binding"
+                            );
                         }
                     }
-                    // Structured warn so operators investigating "who deleted
-                    // my socket file" have a framework-side breadcrumb.
-                    ::tracing::warn!(
-                        provider = #struct_name_str,
-                        path = %path,
-                        "Removed stale Unix socket file before binding"
-                    );
                 }
+            }
+            Err(metadata_err) if metadata_err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(metadata_err) => {
+                return Err(service_daemon::ProviderError::Fatal(format!(
+                    "Provider '{}': failed to inspect existing socket path '{}': {} (kind={:?})",
+                    #struct_name_str, path, metadata_err, metadata_err.kind(),
+                )));
             }
         }
     };
@@ -652,10 +683,60 @@ pub fn generate_unix_listen_template(
             fn default() -> Self {
                 let path = #addr_expr;
                 let p = std::path::Path::new(&path);
-                if p.exists()
-                    && std::os::unix::net::UnixStream::connect(p).is_err()
-                {
-                    let _ = std::fs::remove_file(p);
+                match std::fs::symlink_metadata(p) {
+                    Ok(_) => {
+                        match std::os::unix::net::UnixStream::connect(p) {
+                            Ok(_probe_stream) => {
+                                panic!(
+                                    "FATAL: Provider '{}': socket '{}' is held by another live process; refusing to bind",
+                                    #struct_name_str, path,
+                                );
+                            }
+                            Err(_probe_err) => {
+                                let should_remove_stale_socket = match std::fs::symlink_metadata(p) {
+                                    Ok(metadata) => {
+                                        let file_type = metadata.file_type();
+                                        if !std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
+                                            panic!(
+                                                "FATAL: Provider '{}': path '{}' exists but is not a Unix socket; refusing to remove",
+                                                #struct_name_str, path,
+                                            );
+                                        }
+                                        true
+                                    }
+                                    Err(metadata_err)
+                                        if metadata_err.kind() == std::io::ErrorKind::NotFound =>
+                                    {
+                                        false
+                                    }
+                                    Err(metadata_err) => {
+                                        panic!(
+                                            "FATAL: Provider '{}': failed to inspect existing socket path '{}': {} (kind={:?})",
+                                            #struct_name_str, path, metadata_err, metadata_err.kind(),
+                                        );
+                                    }
+                                };
+
+                                if should_remove_stale_socket {
+                                    if let Err(remove_err) = std::fs::remove_file(p) {
+                                        if remove_err.kind() != std::io::ErrorKind::NotFound {
+                                            panic!(
+                                                "FATAL: Provider '{}': failed to remove stale socket '{}': {} (kind={:?})",
+                                                #struct_name_str, path, remove_err, remove_err.kind(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(metadata_err) if metadata_err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(metadata_err) => {
+                        panic!(
+                            "FATAL: Provider '{}': failed to inspect existing socket path '{}': {} (kind={:?})",
+                            #struct_name_str, path, metadata_err, metadata_err.kind(),
+                        );
+                    }
                 }
                 let listener = std::os::unix::net::UnixListener::bind(&path)
                     .unwrap_or_else(|e| {
