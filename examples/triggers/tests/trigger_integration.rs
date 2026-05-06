@@ -3,8 +3,10 @@
 //! These tests verify end-to-end behavior of trigger registration,
 //! signal firing, and watch state changes through the public API.
 
+use std::time::Duration;
+
 use example_triggers::providers::{ExternalStatus, UserNotifier};
-use service_daemon::{Provided, Registry, RestartPolicy, ServiceDaemon};
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 
 /// Helper: Create an isolated registry that filters out all auto-registered services.
 fn isolated_registry() -> Registry {
@@ -24,10 +26,10 @@ async fn test_trigger_registration() -> anyhow::Result<()> {
     daemon.run().await;
 
     // Allow time for trigger initialization
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
 
     Ok(())
 }
@@ -43,14 +45,14 @@ async fn test_signal_trigger_fires() -> anyhow::Result<()> {
 
     daemon.run().await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Fire the signal
     UserNotifier::resolve().await.notify();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
     Ok(())
 }
 
@@ -66,7 +68,7 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
     daemon.run().await;
 
     // Wait for services to initialize
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Modify ExternalStatus -- this should trigger the Watch handler
     {
@@ -76,9 +78,9 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
         guard.updated_count = 1;
     }
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     cancel.cancel();
-    daemon.wait().await.unwrap();
+    daemon.wait().await?;
     Ok(())
 }

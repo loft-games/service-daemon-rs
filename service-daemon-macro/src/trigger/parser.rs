@@ -1,19 +1,19 @@
 //! Attribute parsing for the `#[trigger]` macro.
 //!
 //! Supports the modern syntax:
-//!   `#[trigger(Watch(MetricsData), priority = 80)]`
+//!   `#[trigger(Watch(MetricsData), priority = 80, scheduling = HighPriority)]`
 //!
 //! The first argument is always a template call in the form `Template(Target)`.
 //! `Template` is any type path that implements `TriggerHost<Target>` - no
 //! keyword validation is performed here; the compiler will catch invalid types.
-//! Optional named arguments like `priority = N` follow after a comma.
+//! Optional named arguments like `priority = N`, `scheduling = HighPriority`, and `tags = [...]` follow after a comma.
 
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, Token, parenthesized};
 
-use crate::common::TagsList;
+use crate::common::{TagsList, parse_scheduling_policy};
 
 /// Parsed result of `#[trigger(...)]` attributes.
 ///
@@ -40,7 +40,7 @@ pub struct TriggerArgs {
 /// Parses the token stream inside `#[trigger(...)]`.
 ///
 /// Expected grammar:
-///   `HostPath(TargetType)` [, `priority` = EXPR]*
+///   `HostPath(TargetType)` [, `priority` = EXPR | `scheduling` = IDENT | `tags` = [...]]*
 ///
 /// Where `HostPath` is any valid Rust type path (e.g., `Watch`, `TT::Queue`,
 /// `service_daemon::TT::Cron`) and `TargetType` is any valid Rust type path.
@@ -87,7 +87,7 @@ impl Parse for TriggerArgs {
                 }
                 "scheduling" => {
                     let ident: syn::Ident = input.parse()?;
-                    scheduling = crate::common::parse_scheduling_policy(&ident)?;
+                    scheduling = parse_scheduling_policy(&ident)?;
                 }
                 "tags" => {
                     let tag_list: TagsList = input.parse()?;
@@ -113,5 +113,47 @@ impl Parse for TriggerArgs {
             scheduling,
             tags,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_str;
+
+    #[test]
+    fn test_parse_scheduling_default() {
+        let args: TriggerArgs = parse_str("Notify(MySignal)").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: Standard"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_standard() {
+        let args: TriggerArgs = parse_str("Notify(MySignal), scheduling = Standard").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: Standard"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_high_priority() {
+        let args: TriggerArgs = parse_str("Notify(MySignal), scheduling = HighPriority").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: HighPriority"
+        );
+    }
+
+    #[test]
+    fn test_parse_scheduling_isolated() {
+        let args: TriggerArgs = parse_str("Notify(MySignal), scheduling = Isolated").unwrap();
+        assert_eq!(
+            args.scheduling.to_string(),
+            "service_daemon :: ServiceScheduling :: Isolated"
+        );
     }
 }

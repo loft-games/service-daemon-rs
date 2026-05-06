@@ -4,12 +4,11 @@ This document records the official performance measurements and resource consump
 characteristics of the service-daemon-rs framework. All tests were conducted in a
 controlled environment to ensure reproducibility.
 
-## Executive Summary
+## Summary
 
-- **Predictable Scalability**: Uses a fixed-cost model with consistent linear memory growth, ensuring the system remains stable even when managing over 1,000 active services.
-- **Resource Efficiency**: Each service adds only ~3.5 KB of memory overhead -- a negligible cost even for memory-constrained edge devices.
-- **Ready-to-Use Features**: This tiny memory cost gives you a professional-grade toolkit out of the box: automatic dependency injection, unified logging, and reliable graceful shutdown.
-- **Grows with You**: Start with a simple **`is_shutdown()` polling loop** (just like a standard thread), and efficiently migrate to **event-driven triggers and causal tracing** as your requirements grow -- all within the same unified architecture.
+- **Memory cost is linear in service count**: each additional service adds roughly **~3.5 KB** RSS overhead. Up to 1,000 services were measured stable in the test environment.
+- **Per-service cost includes**: DI resolution, logging plumbing, graceful-shutdown wiring. These are paid once at registration; runtime overhead per event is dominated by the user code, not framework bookkeeping.
+- **Two control-flow styles, same supervisor**: `is_shutdown()` polling loops and event-driven triggers run under the same restart/lifecycle machinery. Migrating from one to the other does not change the orchestration layer.
 
 ## Test Environment
 
@@ -221,32 +220,27 @@ Selecting between these two frameworks depends on the specific requirements of t
 - **Maximum Simplicity**: Preferring a thin wrapper around raw `tokio::spawn` with zero learning curve and near-instant compilation (no proc-macro or linker overhead).
 
 ### Choose service-daemon-rs if:
-- **Scalable Orchestration**: Managing numerous services that require **strict startup/shutdown ordering** and reliable dependency resolution.
-- **Rich Event Handling**: Your system needs to frequently interact with **Signals, Queues, Cron Tasks**, or other event sources.
-- **Progressive Productivity**: You want a **smooth learning curve** that starts with simple macros but scales to advanced diagnostics as your system grows.
-- **Reliability by Design**: You value **built-in safety** like cancellation-aware `sleep`, automated logging, and synchronous-block detection.
-- **Maintainability & Testing**: The project requires strong-typed Dependency Injection and advanced **Simulation/Mocking** (using `MockContext`) to verify complex logic in isolation.
-- **Deep Observability**: Causal tracing (Ripple Model) is needed to trace the "why" behind complex asynchronous event chains.
+- **Multiple services with ordering**: you have several long-running concerns whose startup and shutdown order matters, and you'd otherwise hand-roll a supervisor.
+- **Event-driven by composition**: signals, queues, cron, watch triggers as first-class, with the same restart/backoff machinery applied uniformly.
+- **DI by Rust types**: you want compile-time-checked dependency wiring without a runtime container or string keys.
+- **Testability**: `MockContext` (`simulation` feature) lets you instantiate parts of the daemon in a sandbox for unit testing without the full lifecycle.
+- **Causal tracing across event chains**: when "why did this run?" matters, the built-in UUID v7 propagation makes trigger-to-trigger chains traceable without manual span linking.
 
 ---
 
 ## 5. Credits and Acknowledgments
 
-The development of service-daemon-rs grew out of concrete requirements in large-scale
-production projects, where it was gradually abstracted into this standalone framework.
-However, its architectural maturity and benchmark methodology have been refined through
-the shared knowledge of the Rust open-source community. Special gratitude is extended to:
+service-daemon-rs grew out of concrete requirements in production projects and
+was gradually abstracted into a standalone framework. The benchmark methodology
+borrows from prior work in the Rust ecosystem:
 
-- **[task-supervisor](https://github.com/akhercha/task-supervisor)**: For providing a 
-  highly transparent, robust, and lightweight reference implementation. Watching its 
-  efficient handling of Tokio tasks set the benchmark for our own scalability goals. 
-  It remains the gold standard for "minimalist task supervision" in the ecosystem.
-- **The Tokio Team**: For building the asynchronous runtime that makes such linear 
-  scalability possible in Rust.
+- **[task-supervisor](https://github.com/akhercha/task-supervisor)** -- a small,
+  focused supervisor crate. Its scope and clarity informed our minimum viable
+  baseline for "supervise N tokio tasks" measurements.
+- **The Tokio team** -- for the runtime everything here is built on.
 
-This comparison is intended as a technical analysis of different architectural trade-offs 
-and is a tribute to the diversity of solutions solving the unique challenges of 
-embedded and edge computing.
+The comparison above is meant as analysis of architectural trade-offs, not a
+ranking. The two projects target different scopes.
 
 ---
 

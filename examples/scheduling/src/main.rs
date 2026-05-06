@@ -11,7 +11,7 @@ async fn main() -> Result<()> {
         .with_env_filter("info,service_daemon=info,examples_scheduling=info")
         .init();
 
-    info!("Starting Scheduling & Isolation Demo...");
+    info!("Starting Priority & Scheduling Demo...");
 
     let mut daemon = ServiceDaemon::builder().build();
 

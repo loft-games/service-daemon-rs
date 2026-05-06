@@ -16,6 +16,8 @@ Triggers are implemented as stateful hosts with a two-phase lifecycle managed by
 
 > [!NOTE]
 > The `#[trigger]` macro calls `TriggerHost::run_as_service` by default. This default implementation automatically handles the `setup` -> `TriggerRunner` lifecycle. Most hosts do **not** need to override `run_as_service`.
+>
+> Trigger scheduling is registry metadata, not host policy. A custom host should focus on event acquisition and `TriggerTransition`; the daemon applies the selected runtime lane when it supervises the generated trigger service.
 
 ### Example: Custom Host with Scaling
 

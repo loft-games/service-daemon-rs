@@ -14,16 +14,24 @@
 //! 3. Implement `handle_step` using `&mut self` to access them.
 //! 4. Done! The engine takes care of the rest.
 
-use anyhow::{Error, Result};
+#[cfg(feature = "cron")]
+use anyhow::Error;
+use anyhow::Result;
 use futures::future::BoxFuture;
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::ops::Deref;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, broadcast};
+#[cfg(feature = "cron")]
+use tokio::sync::Notify;
+use tokio::sync::{Mutex, broadcast};
+#[cfg(feature = "cron")]
+use tracing::error;
 use tracing::{info, warn};
 
 use crate::core::di::{Provided, WatchableProvided};
 use crate::core::managed_state::{TrackedNotify, TrackedSender};
+#[cfg(feature = "cron")]
+use crate::models::ServiceError;
 use crate::models::policy::ScalingPolicy;
 use crate::models::trigger::{TriggerHost, TriggerTransition};
 
@@ -80,6 +88,11 @@ pub struct TopicHost {
     /// Type-erased broadcast receiver bridge, initialized in `setup()`.
     /// Concrete type: `Arc<Mutex<broadcast::Receiver<P>>>`.
     receiver: Box<dyn Any + Send + Sync>,
+    /// `TypeId` of the concrete receiver captured at `setup()` time.
+    /// Cross-checked against the per-call `P` in `handle_step()` so a macro
+    /// mismatch fails with an actionable diagnostic rather than a bare
+    /// downcast panic.
+    receiver_type: TypeId,
 }
 
 impl<T, P> TriggerHost<T> for TopicHost
@@ -94,6 +107,7 @@ where
             let rx: Arc<Mutex<broadcast::Receiver<P>>> = Arc::new(Mutex::new(target.subscribe()));
             Ok(TopicHost {
                 receiver: Box::new(rx),
+                receiver_type: TypeId::of::<Arc<Mutex<broadcast::Receiver<P>>>>(),
             })
         })
     }
@@ -103,26 +117,46 @@ where
         target: &'a Arc<T>,
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async move {
+            // Cross-check the setup-time `P` against the call-time `P`.
+            // These must match because both are driven by the macro's generic
+            // param; a mismatch would signal a framework bug (not user error).
+            let expected = TypeId::of::<Arc<Mutex<broadcast::Receiver<P>>>>();
+            assert_eq!(
+                self.receiver_type, expected,
+                "TopicHost payload type mismatch (setup `P` differs from handle_step `P`); \
+                 this indicates a macro-generated invariant violation in service-daemon-macro"
+            );
+
             // Recover the concrete receiver type from the type-erased field.
             let rx_bridge: &Arc<Mutex<broadcast::Receiver<P>>> = self
                 .receiver
                 .downcast_ref()
                 .expect("TopicHost receiver type mismatch (internal bug)");
 
-            let result = rx_bridge.lock().await.recv().await;
-            match result {
-                Ok(value) => {
-                    // Read the pre-generated (message_id, source_id) from the TrackedSender
-                    let identity = target.last_id();
-                    TriggerTransition::Next(value, identity)
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("Queue trigger lagged by {} messages", n);
-                    TriggerTransition::Stop
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    warn!("Queue trigger channel closed");
-                    TriggerTransition::Stop
+            // Hold the receiver lock across retries so a Lagged error does not
+            // permanently stop the trigger: broadcast guarantees the next
+            // `recv()` resumes from the new tail position. This matches the
+            // recovery convention used by `LogService` and the topology
+            // collector elsewhere in the framework.
+            let mut rx = rx_bridge.lock().await;
+            loop {
+                match rx.recv().await {
+                    Ok(value) => {
+                        // Read the pre-generated (message_id, source_id) from the TrackedSender
+                        let identity = target.last_id();
+                        return TriggerTransition::Next(value, identity);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(
+                            skipped = n,
+                            "Topic trigger lagged by {} messages, skipping and continuing", n
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("Topic trigger channel closed");
+                        return TriggerTransition::Stop;
+                    }
                 }
             }
         })
@@ -191,16 +225,37 @@ where
             let notify_for_job = notify.clone();
             let schedule = target.to_string();
 
-            let sched = get_shared_scheduler().await?;
+            // Any failure from here on is a configuration error (invalid cron
+            // expression, scheduler init failure). Surface it as a fatal
+            // service error so the supervisor stops retrying instead of
+            // silently masking a broken trigger.
+            fn to_fatal(schedule: &str, source: Error) -> Error {
+                error!(
+                    schedule = %schedule,
+                    error = %source,
+                    "CronHost setup failed; trigger will not fire. Check cron expression and scheduler state."
+                );
+                anyhow::Error::new(ServiceError::Fatal(format!(
+                    "CronHost setup failed for schedule '{schedule}': {source}"
+                )))
+            }
+
+            let sched = get_shared_scheduler()
+                .await
+                .map_err(|e| to_fatal(&schedule, e))?;
 
             let job = Job::new_async(&schedule, move |_uuid, _lock| {
                 let n = notify_for_job.clone();
                 Box::pin(async move {
                     n.notify_waiters();
                 })
-            })?;
+            })
+            .map_err(|e| to_fatal(&schedule, anyhow::Error::new(e)))?;
 
-            sched.add(job).await?;
+            sched
+                .add(job)
+                .await
+                .map_err(|e| to_fatal(&schedule, anyhow::Error::new(e)))?;
             info!("Registered cron job with schedule '{}'", schedule);
 
             Ok(CronHost { bridge: notify })
@@ -250,5 +305,48 @@ where
             // Fire once, then tell the engine to idle until reload.
             TriggerTransition::Reload((), None)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a `TopicHost` the same way `<TopicHost as TriggerHost<T>>::setup`
+    /// does internally, bypassing the `Provided` trait bound that requires a
+    /// full daemon context. This mirrors the production body of `setup()`.
+    fn make_topic_host_for<P>(sender: &TrackedSender<P>) -> TopicHost
+    where
+        P: Clone + Send + Sync + 'static,
+    {
+        let rx: Arc<Mutex<broadcast::Receiver<P>>> = Arc::new(Mutex::new(sender.subscribe()));
+        TopicHost {
+            receiver: Box::new(rx),
+            receiver_type: TypeId::of::<Arc<Mutex<broadcast::Receiver<P>>>>(),
+        }
+    }
+
+    /// `TopicHost` must capture a concrete `TypeId` at setup time so that a
+    /// macro-generated mismatch between the `P` passed to `setup()` and the
+    /// `P` used in `handle_step()` fails with a named assertion rather than a
+    /// bare downcast panic. This test pins the invariant for two payload
+    /// types and verifies the TypeIds are distinct.
+    #[test]
+    fn topic_host_captures_concrete_receiver_type() {
+        let sender_i32 = TrackedSender::<i32>::new(4);
+        let host_i32 = make_topic_host_for(&sender_i32);
+        assert_eq!(
+            host_i32.receiver_type,
+            TypeId::of::<Arc<Mutex<broadcast::Receiver<i32>>>>(),
+        );
+
+        let sender_string = TrackedSender::<String>::new(4);
+        let host_string = make_topic_host_for(&sender_string);
+        assert_eq!(
+            host_string.receiver_type,
+            TypeId::of::<Arc<Mutex<broadcast::Receiver<String>>>>(),
+        );
+
+        assert_ne!(host_i32.receiver_type, host_string.receiver_type);
     }
 }

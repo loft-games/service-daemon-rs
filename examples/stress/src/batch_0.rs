@@ -1,5 +1,7 @@
 //! Stress batch 0: services 0..99
 
+use std::time::Duration;
+
 use service_daemon::service;
 
 macro_rules! define_stress_service {
@@ -8,7 +10,7 @@ macro_rules! define_stress_service {
         #[allow(sync_handler)]
         pub async fn $id() -> anyhow::Result<()> {
             while !service_daemon::is_shutdown() {
-                if !service_daemon::sleep(std::time::Duration::from_secs(3600)).await {
+                if !service_daemon::sleep(Duration::from_secs(3600)).await {
                     break;
                 }
             }

@@ -5,6 +5,8 @@
 //! - Use `sleep()` to avoid busy-waiting.
 //! - The framework handles `Initializing -> Healthy` transition automatically.
 
+use std::time::Duration;
+
 use crate::providers::{MinimalListener, Port};
 use service_daemon::service;
 use tracing::info;
@@ -22,7 +24,7 @@ pub async fn listener_service(listener: Arc<MinimalListener>) -> anyhow::Result<
     );
 
     while !service_daemon::is_shutdown() {
-        if !service_daemon::sleep(std::time::Duration::from_secs(10)).await {
+        if !service_daemon::sleep(Duration::from_secs(10)).await {
             break;
         }
     }
@@ -43,7 +45,7 @@ pub async fn heartbeat_service(port: Arc<Port>) -> anyhow::Result<()> {
     while !service_daemon::is_shutdown() {
         // `sleep()` is interruptible -- it returns `false` if a shutdown
         // signal arrives during the sleep, allowing immediate exit.
-        if !service_daemon::sleep(std::time::Duration::from_secs(5)).await {
+        if !service_daemon::sleep(Duration::from_secs(5)).await {
             break;
         }
         info!("Heartbeat: service is alive on port {}", port);

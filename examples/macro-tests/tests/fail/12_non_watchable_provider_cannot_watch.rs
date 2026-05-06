@@ -9,17 +9,23 @@ struct NotWatchable;
 // We implement `Provided` + `ManagedProvided` so the compile error is
 // specifically about watchability.
 impl service_daemon::Provided for NotWatchable {
-    async fn resolve() -> Arc<Self> {
-        Arc::new(Self)
+    async fn resolve() -> std::result::Result<Arc<Self>, service_daemon::ProviderInitError> {
+        Ok(Arc::new(Self))
     }
 }
 
 impl service_daemon::ManagedProvided for NotWatchable {
-    async fn resolve_rwlock() -> Arc<service_daemon::core::managed_state::RwLock<Self>> {
+    async fn resolve_rwlock(
+    ) -> std::result::Result<Arc<service_daemon::core::managed_state::RwLock<Self>>, service_daemon::ProviderInitError> {
         unimplemented!()
     }
 
-    async fn resolve_mutex() -> Arc<service_daemon::core::managed_state::Mutex<Self>> {
+    async fn resolve_mutex(
+    ) -> std::result::Result<Arc<service_daemon::core::managed_state::Mutex<Self>>, service_daemon::ProviderInitError> {
+        unimplemented!()
+    }
+
+    async fn resolve_managed() -> std::result::Result<Arc<Self>, service_daemon::ProviderError> {
         unimplemented!()
     }
 }

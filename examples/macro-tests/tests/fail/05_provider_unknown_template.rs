@@ -2,7 +2,6 @@
 
 use service_daemon::provider;
 
-#[derive(Clone)]
 #[provider(8080, bogus = "bad")]
 pub struct BadAttr(pub i32);
 

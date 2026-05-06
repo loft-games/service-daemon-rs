@@ -4,13 +4,13 @@
 //! even when the LogQueue is being flooded by a "noisy" service. It validates the
 //! `biased;` prioritized selection fix in the logging layer.
 
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
-use std::time::Duration;
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, service};
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
 /// A "noisy" service that generates logs as fast as possible.
 /// It intentionally ignores `is_shutdown()` to simulate a non-cooperative service.
-#[service_daemon::service(tags = ["noisy"])]
+#[service(tags = ["noisy"])]
 async fn noisy_service() -> anyhow::Result<()> {
     service_daemon::done();
     loop {
@@ -22,7 +22,7 @@ async fn noisy_service() -> anyhow::Result<()> {
 }
 
 /// A normal service that waits for shutdown.
-#[service_daemon::service(tags = ["normal"])]
+#[service(tags = ["normal"])]
 async fn normal_service() -> anyhow::Result<()> {
     service_daemon::done();
     while !service_daemon::is_shutdown() {
@@ -54,7 +54,7 @@ async fn test_livelock_shutdown_responsiveness() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     println!(">>> Triggering shutdown while log queue is flooded...");
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     cancel.cancel();
 
     // 4. Wait for shutdown with a strict timeout.

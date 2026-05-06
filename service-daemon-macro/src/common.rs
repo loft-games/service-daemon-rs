@@ -392,10 +392,14 @@ impl ParamProcessor {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
 
+        self.watcher_arms.push(quote! {
+            _ = <#inner_type as service_daemon::WatchableProvided>::changed() => {}
+        });
+
         match wrapper {
             WrapperKind::Arc(arc_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await;
+                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
                 });
                 self.clean_inputs.push(
                     syn::parse2(
@@ -411,7 +415,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await;
+                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
                 });
                 let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
                 self.clean_inputs.push(
@@ -428,7 +432,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await;
+                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
                 });
                 let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
                 self.clean_inputs.push(

@@ -3,6 +3,8 @@
 //! These `#[service]`-annotated functions are the real services used in
 //! simulation integration tests.
 
+use std::time::Duration;
+
 use service_daemon::{service, shelve, state, unshelve};
 
 // =============================================================================
@@ -45,7 +47,7 @@ pub async fn shelf_reader_service() -> anyhow::Result<()> {
             shelve("dynamic_result", val).await;
         }
 
-        service_daemon::sleep(std::time::Duration::from_millis(50)).await;
+        service_daemon::sleep(Duration::from_millis(50)).await;
     }
 
     Ok(())
@@ -71,7 +73,7 @@ pub async fn status_watcher_service() -> anyhow::Result<()> {
             break;
         }
 
-        service_daemon::sleep(std::time::Duration::from_millis(50)).await;
+        service_daemon::sleep(Duration::from_millis(50)).await;
     }
 
     Ok(())

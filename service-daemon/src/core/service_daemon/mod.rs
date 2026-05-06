@@ -4,29 +4,39 @@
 //! - `policy`: Restart policy configuration.
 //! - `runner`: Service spawning and lifecycle management.
 
+mod parts;
 mod policy;
 mod runner;
 
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::pending;
 use std::sync::Arc;
 #[cfg(feature = "simulation")]
 use std::time::Duration;
+#[cfg(all(feature = "simulation", test))]
+use std::time::Instant;
+use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use petgraph::algo::toposort;
-use petgraph::graph::DiGraph;
+use petgraph::{
+    algo::toposort,
+    graph::{DiGraph, NodeIndex},
+};
 
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::{DaemonResources, process_token};
+#[cfg(unix)]
+use crate::models::ServiceError;
 use crate::models::{
-    Registry, Result as ServiceResult, ServiceDescription, ServiceId, ServiceStatus,
+    PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
+    ServiceDescription, ServiceId, ServiceStatus,
 };
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -85,11 +95,19 @@ pub struct ServiceDaemon {
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
+    /// Shared runtime used by HighPriority services.
+    high_priority_runtime: Option<Runtime>,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: Arc<DaemonResources>,
+}
+
+impl Drop for ServiceDaemon {
+    fn drop(&mut self) {
+        self.shutdown_high_priority_runtime_detached();
+    }
 }
 
 impl ServiceDaemon {
@@ -99,10 +117,9 @@ impl ServiceDaemon {
         ServiceDaemonBuilder::new()
     }
 
-    async fn eager_init_reachable_providers(&self) {
-        let mut providers_by_id: HashMap<TypeId, &'static crate::models::ProviderEntry> =
-            HashMap::new();
-        for entry in crate::models::PROVIDER_REGISTRY.iter() {
+    async fn eager_init_reachable_providers(&self) -> Result<(), ProviderInitError> {
+        let mut providers_by_id: HashMap<TypeId, &'static ProviderEntry> = HashMap::new();
+        for entry in PROVIDER_REGISTRY.iter() {
             providers_by_id.insert(entry.type_id, entry);
         }
 
@@ -130,20 +147,20 @@ impl ServiceDaemon {
         }
 
         // 3) Filter eager targets.
-        let eager_targets: Vec<&'static crate::models::ProviderEntry> = reachable
+        let eager_targets: Vec<&'static ProviderEntry> = reachable
             .iter()
             .filter_map(|tid| providers_by_id.get(tid).copied())
             .filter(|p| p.eager)
             .collect();
 
         if eager_targets.is_empty() {
-            return;
+            return Ok(());
         }
 
         // 4) Toposort reachable provider DAG to get a deterministic init order.
         // Nodes are provider TypeIds; edges are dep -> provider.
         let mut graph = DiGraph::<TypeId, ()>::new();
-        let mut nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
+        let mut nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
 
         for tid in reachable.iter().copied() {
             if providers_by_id.contains_key(&tid) {
@@ -168,11 +185,24 @@ impl ServiceDaemon {
             }
         }
 
-        let order = toposort(&graph, None).unwrap_or_else(|_| {
-            // Cycles should already be detected by validate_dependency_graph().
-            // If we reach here, keep behavior explicit.
-            panic!("Circular dependency detected in provider graph during eager init");
-        });
+        // Cycles are pre-checked by validate_dependency_graph() in run();
+        // if we still land in Err here, report it as a Fatal init error
+        // rather than panicking, as a defense-in-depth measure.
+        let order = match toposort(&graph, None) {
+            Ok(order) => order,
+            Err(err) => {
+                let offending = providers_by_id
+                    .iter()
+                    .find_map(|(tid, p)| (*tid == graph[err.node_id()]).then_some(p.name))
+                    .unwrap_or("<unknown>");
+                return Err(ProviderInitError::Fatal {
+                    provider: offending.to_owned(),
+                    message: "Circular provider dependency reached eager_init; \
+                              this should have been caught by validate_dependency_graph"
+                        .to_owned(),
+                });
+            }
+        };
 
         // 5) Execute init in order, only for eager providers.
         let eager_ids: HashSet<TypeId> = eager_targets.iter().map(|p| p.type_id).collect();
@@ -185,8 +215,10 @@ impl ServiceDaemon {
                 .get(&tid)
                 .copied()
                 .expect("provider must exist in providers_by_id");
-            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await;
+            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await?;
         }
+
+        Ok(())
     }
 
     /// Get the cancellation token for this daemon.
@@ -233,10 +265,24 @@ impl ServiceDaemon {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
 
+        // Validate the provider dependency graph. Cycles in the provider graph
+        // would deadlock at runtime, so we surface them as a pre-startup failure
+        // that triggers a graceful shutdown (observable via the daemon handle /
+        // status plane rather than blocking `run()`).
+        if let Err(err) = validate_dependency_graph(&self.services, PROVIDER_REGISTRY.iter()) {
+            tracing::error!(error = %err, "ServiceDaemon provider dependency graph validation failed");
+            self.shutdown();
+            return self;
+        }
+
         // Eager-initialize reachable providers before spawning services.
         //
         // This is opt-in (providers must specify `eager = true`).
-        self.eager_init_reachable_providers().await;
+        if let Err(err) = self.eager_init_reachable_providers().await {
+            tracing::error!(error = %err, "ServiceDaemon eager provider initialization failed");
+            self.shutdown();
+            return self;
+        }
 
         // Spawn all services in the background
         runner::spawn_all_services(
@@ -244,12 +290,17 @@ impl ServiceDaemon {
             self.restart_policy,
             self.running_tasks.clone(),
             self.resources.clone(),
+            self.high_priority_runtime
+                .as_ref()
+                .expect("high_priority_runtime must exist while daemon is running")
+                .handle()
+                .clone(),
             &self.cancellation_token,
         )
         .await;
 
         #[cfg(feature = "diagnostics")]
-        crate::core::topology_collector::start_topology_collector();
+        super::topology_collector::start_topology_collector();
 
         info!(
             "ServiceDaemon running with {} service(s).",
@@ -270,22 +321,27 @@ impl ServiceDaemon {
     /// After the trigger event, this method performs a graceful shutdown
     /// of all services using wave-based priorities.
     ///
+    /// # Errors
+    /// - `ServiceError::InternalError(...)` if the daemon cannot register a
+    ///   shutdown signal listener (for example, `SIGINT` / `SIGTERM` on Unix,
+    ///   or `Ctrl+C` on non-Unix platforms).
+    ///
+    /// Runtime service/provider failures are handled by the runner and
+    /// shutdown path rather than being returned from `wait()`.
+    ///
     /// # Signal Guard (Layer 1 Defense)
-    /// If signal handler registration fails (e.g. restricted container environment),
-    /// this method returns `Err` immediately to prevent an uncontrollable daemon.
+    /// If signal handler registration fails, this method returns `Err`
+    /// immediately to prevent an uncontrollable daemon.
     #[instrument(skip(self))]
     pub async fn wait(&mut self) -> ServiceResult<()> {
         // Wait for shutdown signal (Ctrl+C, SIGTERM, or token cancellation)
         #[cfg(unix)]
         {
             let mut sigint = signal(SignalKind::interrupt()).map_err(|e| {
-                crate::models::ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
+                ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
             })?;
             let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
-                crate::models::ServiceError::InternalError(format!(
-                    "Failed to setup SIGTERM: {}",
-                    e
-                ))
+                ServiceError::InternalError(format!("Failed to setup SIGTERM: {}", e))
             })?;
 
             tokio::select! {
@@ -341,7 +397,7 @@ impl ServiceDaemon {
     }
 
     /// Internal helper: perform the actual graceful shutdown sequence.
-    async fn do_shutdown(&self) {
+    async fn do_shutdown(&mut self) {
         runner::stop_all_services(
             &self.services,
             self.running_tasks.clone(),
@@ -351,8 +407,10 @@ impl ServiceDaemon {
         )
         .await;
 
+        self.shutdown_high_priority_runtime();
+
         #[cfg(feature = "diagnostics")]
-        if let Some(mermaid) = crate::core::topology_collector::export_mermaid() {
+        if let Some(mermaid) = super::topology_collector::export_mermaid() {
             println!("\n=== BEHAVIORAL TOPOLOGY (MERMAID) ===\n");
             println!("{}\n", mermaid);
             println!("====================================\n");
@@ -361,34 +419,56 @@ impl ServiceDaemon {
         info!("ServiceDaemon stopped.");
     }
 
+    fn shutdown_high_priority_runtime(&mut self) {
+        if let Some(runtime) = self.high_priority_runtime.take() {
+            std::thread::spawn(move || drop(runtime))
+                .join()
+                .expect("failed to shut down high-priority runtime");
+        }
+    }
+
+    fn shutdown_high_priority_runtime_detached(&mut self) {
+        if let Some(runtime) = self.high_priority_runtime.take() {
+            let _ = std::thread::spawn(move || drop(runtime));
+        }
+    }
+
     /// Internal helper: wait on an external CancellationToken if present.
     /// If no external token was provided, this future never resolves.
     async fn wait_external_token(token: &Option<CancellationToken>) {
         match token {
             Some(t) => t.cancelled().await,
-            None => std::future::pending().await,
+            None => pending().await,
         }
     }
 
     /// Run for a limited duration (for testing).
     #[cfg(feature = "simulation")]
     #[instrument(skip(self))]
-    pub async fn run_for_duration(self, duration: Duration) -> ServiceResult<()> {
+    pub async fn run_for_duration(mut self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
+        let daemon_token = self.cancellation_token.clone();
 
         for service in &self.services {
-            runner::spawn_service(
-                service.id,
-                service.name(),
-                service.entry.wrapper,
-                service.entry.watcher,
-                test_policy,
-                service.entry.scheduling,
-                self.running_tasks.clone(),
-                self.resources.clone(),
-                service.cancellation_token.clone(),
-            )
+            runner::spawn_service(parts::SpawnServiceParts {
+                service_id: service.id,
+                name: service.name(),
+                run: service.entry.wrapper,
+                watcher: service.entry.watcher,
+                policy: test_policy,
+                scheduling: service.entry.scheduling,
+                running_tasks: self.running_tasks.clone(),
+                resources: self.resources.clone(),
+                cancellation_token: service.cancellation_token.clone(),
+                daemon_token: daemon_token.clone(),
+                runtime: self
+                    .high_priority_runtime
+                    .as_ref()
+                    .expect("high_priority_runtime must exist while daemon is running")
+                    .handle()
+                    .clone(),
+            })
             .await;
         }
 
@@ -402,6 +482,8 @@ impl ServiceDaemon {
             test_policy.wave_stop_timeout,
         )
         .await;
+
+        self.shutdown_high_priority_runtime_detached();
 
         Ok(())
     }
@@ -451,7 +533,7 @@ impl ServiceDaemonBuilder {
     pub(crate) fn new_isolated() -> Self {
         Self {
             registry: Some(
-                crate::models::Registry::builder()
+                Registry::builder()
                     .with_tag("__simulation_isolation__")
                     .build(),
             ),
@@ -553,9 +635,10 @@ impl ServiceDaemonBuilder {
     /// This method is **infallible** -- it always returns a valid daemon.
     /// If no registry was provided, all statically registered services are included.
     ///
-    /// During construction, a dependency graph is built from `ServiceParam::type_id`
-    /// metadata. If a circular dependency is detected, the method panics with
-    /// a clear diagnostic showing the cycle path.
+    /// Provider dependency cycles are checked later in [`ServiceDaemon::run`]
+    /// (not here) so that `build()` stays allocation-only and non-blocking.
+    /// A cycle surfaces as a `tracing::error!` followed by `shutdown()`; users
+    /// observe the outcome via the daemon handle / status plane.
     #[must_use]
     pub fn build(self) -> ServiceDaemon {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
@@ -576,10 +659,6 @@ impl ServiceDaemonBuilder {
             }
         }
 
-        // Validate the dependency graph before starting.
-        // This converts silent OnceCell deadlocks into clear panic messages.
-        Self::validate_dependency_graph(&services);
-
         #[cfg(feature = "simulation")]
         let resources = self.resources.unwrap_or_else(DaemonResources::new);
         #[cfg(not(feature = "simulation"))]
@@ -595,128 +674,124 @@ impl ServiceDaemonBuilder {
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
+            high_priority_runtime: Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("svc-high-priority")
+                    .build()
+                    .expect("Failed to create high-priority tokio runtime"),
+            ),
             external_cancel_token: self.external_cancel_token,
             resources,
         }
     }
+}
 
-    /// Validates the service dependency graph for circular dependencies.
-    ///
-    /// Builds a directed graph using `petgraph` where:
-    /// - **Nodes** are services (identified by name) and provider types
-    ///   (identified by `TypeId`).
-    /// - **Edges** point from each service to its dependency types.
-    ///
-    /// Then runs `petgraph::algo::toposort()` to detect cycles. If the
-    /// graph is acyclic, dependencies are logged for diagnostic visibility.
-    ///
-    /// # Panics
-    /// Panics with a diagnostic message listing the services and types
-    /// involved if a circular dependency is detected.
-    fn validate_dependency_graph(services: &[ServiceDescription]) {
-        // Each node is labeled with a human-readable name.
-        let mut graph = DiGraph::<&str, ()>::new();
+/// Validates the provider dependency graph for cycles.
+///
+/// Services themselves do not depend on each other; only providers depend on
+/// other providers. This function builds a directed graph where:
+/// - Services are included only as the **roots** that anchor reachability
+///   (service -> provider edges).
+/// - Providers are nodes; edges go from a provider to each of its dependency
+///   provider types.
+///
+/// `petgraph::algo::toposort` then reports any cycle as an error. On success,
+/// the dependency summary is logged for observability.
+///
+/// The `providers` iterator is injected (rather than read from the global
+/// `PROVIDER_REGISTRY`) so unit tests can exercise the cycle path without
+/// polluting the static slice.
+fn validate_dependency_graph<'a>(
+    services: &[ServiceDescription],
+    providers: impl IntoIterator<Item = &'a ProviderEntry>,
+) -> Result<(), ProviderInitError> {
+    let providers: Vec<&ProviderEntry> = providers.into_iter().collect();
 
-        // Maps to avoid duplicate node creation.
-        // service_name -> NodeIndex
-        let mut service_nodes: HashMap<&str, petgraph::graph::NodeIndex> = HashMap::new();
-        // TypeId -> NodeIndex (provider types as nodes)
-        let mut type_nodes: HashMap<TypeId, petgraph::graph::NodeIndex> = HashMap::new();
+    let mut graph = DiGraph::<&str, ()>::new();
+    let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
+    let mut type_nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
 
-        // Phase 1: Service -> Provider edges (from ServiceDescription::params).
-        for service in services {
-            let svc_node = *service_nodes
-                .entry(service.name())
-                .or_insert_with(|| graph.add_node(service.name()));
+    // Phase 1: Service -> Provider edges (roots).
+    for service in services {
+        let svc_node = *service_nodes
+            .entry(service.name())
+            .or_insert_with(|| graph.add_node(service.name()));
 
-            for param in service.params() {
-                let type_node = *type_nodes
-                    .entry(param.type_id)
-                    .or_insert_with(|| graph.add_node(param.type_name));
-
-                // Edge: service depends on this provider type.
-                graph.add_edge(svc_node, type_node, ());
-            }
+        for param in service.params() {
+            let type_node = *type_nodes
+                .entry(param.type_id)
+                .or_insert_with(|| graph.add_node(param.type_name));
+            graph.add_edge(svc_node, type_node, ());
         }
+    }
 
-        // Phase 2: Provider -> Provider edges (from PROVIDER_REGISTRY).
-        //
-        // This completes the DAG by adding edges between provider types,
-        // enabling detection of circular provider dependencies (e.g.,
-        // ProviderA depends on ProviderB which depends on ProviderA).
-        for provider in crate::models::PROVIDER_REGISTRY.iter() {
-            let prov_node = *type_nodes
-                .entry(provider.type_id)
-                .or_insert_with(|| graph.add_node(provider.name));
+    // Phase 2: Provider -> Provider edges (cycle-bearing subgraph).
+    for provider in &providers {
+        let prov_node = *type_nodes
+            .entry(provider.type_id)
+            .or_insert_with(|| graph.add_node(provider.name));
 
-            for param in provider.params {
-                let dep_node = *type_nodes
-                    .entry(param.type_id)
-                    .or_insert_with(|| graph.add_node(param.type_name));
-
-                // Edge: this provider depends on another provider type.
-                graph.add_edge(prov_node, dep_node, ());
-            }
+        for param in provider.params {
+            let dep_node = *type_nodes
+                .entry(param.type_id)
+                .or_insert_with(|| graph.add_node(param.type_name));
+            graph.add_edge(prov_node, dep_node, ());
         }
+    }
 
-        // Phase 3: Topological sort - Err means a cycle exists.
-        match toposort(&graph, None) {
-            Ok(_order) => {
-                // Graph is acyclic. Log the dependency summary.
-                for service in services {
-                    if !service.params().is_empty() {
-                        let dep_names: Vec<&str> =
-                            service.params().iter().map(|p| p.type_name).collect();
-                        info!(
-                            service = %service.name(),
-                            dependencies = ?dep_names,
-                            "Dependency graph edge"
-                        );
-                    }
+    match toposort(&graph, None) {
+        Ok(_order) => {
+            for service in services {
+                if !service.params().is_empty() {
+                    let dep_names: Vec<&str> =
+                        service.params().iter().map(|p| p.type_name).collect();
+                    info!(
+                        service = %service.name(),
+                        dependencies = ?dep_names,
+                        "Service dependency edge"
+                    );
                 }
-                for provider in crate::models::PROVIDER_REGISTRY.iter() {
-                    if !provider.params.is_empty() {
-                        let dep_names: Vec<&str> =
-                            provider.params.iter().map(|p| p.type_name).collect();
-                        info!(
-                            provider = %provider.name,
-                            dependencies = ?dep_names,
-                            "Provider dependency edge"
-                        );
-                    }
+            }
+            for provider in &providers {
+                if !provider.params.is_empty() {
+                    let dep_names: Vec<&str> =
+                        provider.params.iter().map(|p| p.type_name).collect();
+                    info!(
+                        provider = %provider.name,
+                        dependencies = ?dep_names,
+                        "Provider dependency edge"
+                    );
                 }
-                info!(
-                    total_services = services.len(),
-                    total_providers = crate::models::PROVIDER_REGISTRY.len(),
-                    total_graph_nodes = graph.node_count(),
-                    total_graph_edges = graph.edge_count(),
-                    "Dependency graph validated - no cycles detected"
-                );
             }
-            Err(cycle_node) => {
-                // Identify the node that caused the cycle.
-                let cycle_label = graph[cycle_node.node_id()];
+            info!(
+                total_services = services.len(),
+                total_providers = providers.len(),
+                total_graph_nodes = graph.node_count(),
+                total_graph_edges = graph.edge_count(),
+                "Provider dependency graph validated - no cycles detected"
+            );
+            Ok(())
+        }
+        Err(cycle_node) => {
+            let cycle_label = graph[cycle_node.node_id()];
+            let involved: Vec<&str> = graph
+                .node_indices()
+                .filter(|&n| {
+                    graph.contains_edge(n, cycle_node.node_id())
+                        || graph.contains_edge(cycle_node.node_id(), n)
+                })
+                .map(|n| graph[n])
+                .collect();
 
-                // Collect all nodes directly connected to the cycle node
-                // for a useful diagnostic.
-                let involved: Vec<&str> = graph
-                    .node_indices()
-                    .filter(|&n| {
-                        graph.contains_edge(n, cycle_node.node_id())
-                            || graph.contains_edge(cycle_node.node_id(), n)
-                    })
-                    .map(|n| graph[n])
-                    .collect();
-
-                panic!(
-                    "Circular dependency detected in service dependency graph!\n\
-                     Cycle involves: '{}'\n\
-                     Related nodes: {:?}\n\
-                     This would cause a deadlock at runtime. \
-                     Review the #[provider] dependency chain for these types.",
-                    cycle_label, involved
-                );
-            }
+            Err(ProviderInitError::Fatal {
+                provider: cycle_label.to_owned(),
+                message: format!(
+                    "Circular dependency detected in provider dependency graph. \
+                     Cycle involves '{cycle_label}', related nodes: {involved:?}. \
+                     This would deadlock at runtime; review the #[provider] chain for these types."
+                ),
+            })
         }
     }
 }
@@ -724,6 +799,8 @@ impl ServiceDaemonBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ServiceParam;
+    use crate::service;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tracing::debug;
@@ -731,6 +808,96 @@ mod tests {
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {
         Registry::builder().with_tag("__test_isolation__").build()
+    }
+
+    /// A no-op initializer suitable for fake `ProviderEntry` values in graph tests.
+    fn noop_init(
+        _: crate::models::RestartPolicy,
+        _: tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Leak a params slice to satisfy `&'static [ServiceParam]` without a const context.
+    fn leaked_params(params: Vec<ServiceParam>) -> &'static [ServiceParam] {
+        Box::leak(params.into_boxed_slice())
+    }
+
+    #[test]
+    fn validate_dependency_graph_accepts_linear_provider_chain() {
+        let tid_a = TypeId::of::<u8>();
+        let tid_b = TypeId::of::<u16>();
+
+        let a = ProviderEntry {
+            name: "A",
+            module: "test",
+            type_id: tid_a,
+            params: leaked_params(vec![ServiceParam {
+                name: "b",
+                type_name: "B",
+                type_id: tid_b,
+            }]),
+            eager: false,
+            init: noop_init,
+        };
+        let b = ProviderEntry {
+            name: "B",
+            module: "test",
+            type_id: tid_b,
+            params: &[],
+            eager: false,
+            init: noop_init,
+        };
+
+        validate_dependency_graph(&[], [&a, &b]).expect("linear chain must validate");
+    }
+
+    #[test]
+    fn validate_dependency_graph_rejects_provider_cycle() {
+        let tid_a = TypeId::of::<u8>();
+        let tid_b = TypeId::of::<u16>();
+
+        // A depends on B and B depends on A -- classic two-node cycle.
+        let a = ProviderEntry {
+            name: "A",
+            module: "test",
+            type_id: tid_a,
+            params: leaked_params(vec![ServiceParam {
+                name: "b",
+                type_name: "B",
+                type_id: tid_b,
+            }]),
+            eager: false,
+            init: noop_init,
+        };
+        let b = ProviderEntry {
+            name: "B",
+            module: "test",
+            type_id: tid_b,
+            params: leaked_params(vec![ServiceParam {
+                name: "a",
+                type_name: "A",
+                type_id: tid_a,
+            }]),
+            eager: false,
+            init: noop_init,
+        };
+
+        let err =
+            validate_dependency_graph(&[], [&a, &b]).expect_err("cycle must surface as an error");
+        match err {
+            ProviderInitError::Fatal { provider, message } => {
+                assert!(
+                    matches!(provider.as_str(), "A" | "B"),
+                    "unexpected offending provider: {provider}"
+                );
+                assert!(
+                    message.contains("Circular"),
+                    "message should mention circularity, got: {message}"
+                );
+            }
+            other => panic!("expected ProviderInitError::Fatal, got {other:?}"),
+        }
     }
 
     fn setup_tracing() {
@@ -798,7 +965,7 @@ mod tests {
     static SHORT_RUN_COUNT: AtomicU32 = AtomicU32::new(0);
 
     /// Test service that increments a global counter on each invocation.
-    #[service_daemon::service(tags = ["__test_short_run__"], priority = 50)]
+    #[service(tags = ["__test_short_run__"], priority = 50)]
     async fn counting_service() -> anyhow::Result<()> {
         SHORT_RUN_COUNT.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -816,7 +983,7 @@ mod tests {
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
 
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         daemon
             .run_for_duration(Duration::from_millis(500))
             .await

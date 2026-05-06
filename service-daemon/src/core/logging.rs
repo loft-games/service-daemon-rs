@@ -9,15 +9,21 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use uuid::Uuid;
 
+#[cfg(feature = "file-logging")]
+use tracing_appender::non_blocking;
+#[cfg(feature = "file-logging")]
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
+
+use crate::ServicePriority;
+use crate::service;
+
 use std::borrow::Cow;
-use std::cell::Cell;
 use std::fmt::{self, Write as _};
 use std::io::{Write as _, stderr};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
-use crate::models::ServiceId;
-use crate::models::service::InstanceId;
+use crate::models::{ServiceId, service::InstanceId};
 
 /// Log severity level with zero heap allocation.
 ///
@@ -182,7 +188,16 @@ fn effective_batch_size() -> usize {
 /// service_daemon::core::logging::init_logging();
 /// ```
 pub fn set_log_batch_size(size: usize) {
-    let _ = LOG_BATCH_SIZE.set(size);
+    // TODO(set_log_batch_size): change signature to `-> Result<(), usize>` in a
+    // future minor release so callers can react to a late or duplicate call.
+    if LOG_BATCH_SIZE.set(size).is_err() {
+        let active = LOG_BATCH_SIZE.get().copied().unwrap_or(DEFAULT_BATCH_SIZE);
+        tracing::warn!(
+            requested = size,
+            active,
+            "set_log_batch_size: batch size already initialized; call ignored"
+        );
+    }
 }
 
 impl Default for LogQueue {
@@ -375,11 +390,19 @@ pub fn try_init_logging() -> Result<(), tracing_subscriber::util::TryInitError> 
 // guard is active, events bypass the LogQueue and are written directly to stderr.
 // ---------------------------------------------------------------------------
 
-thread_local! {
-    /// Thread-local flag set to `true` while `log_service` is processing a log event.
-    /// Checked by `DaemonLayer::on_event()` to prevent recursive queue insertion.
-    static IN_LOG_PROCESSING: Cell<bool> = const { Cell::new(false) };
+// clippy 1.95 false-positive: `missing_const_for_thread_local` still fires
+// despite the initializer already being wrapped in a `const {}` block.
+#[allow(clippy::missing_const_for_thread_local)]
+mod log_processing_flag {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Thread-local flag set to `true` while `log_service` is processing a log event.
+        /// Checked by `DaemonLayer::on_event()` to prevent recursive queue insertion.
+        pub(super) static IN_LOG_PROCESSING: Cell<bool> = const { Cell::new(false) };
+    }
 }
+use log_processing_flag::IN_LOG_PROCESSING;
 
 /// RAII guard that marks the current thread as "inside log processing".
 /// On drop (including panic unwinding), the flag is automatically cleared.
@@ -629,10 +652,10 @@ fn extract_span_ids<S>(
     ctx: &Context<'_, S>,
     event: &Event<'_>,
 ) -> (
-    Option<crate::models::ServiceId>,
-    Option<crate::models::ServiceId>,
-    Option<uuid::Uuid>,
-    Option<crate::models::service::InstanceId>,
+    Option<ServiceId>,
+    Option<ServiceId>,
+    Option<Uuid>,
+    Option<InstanceId>,
 )
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -647,54 +670,50 @@ where
             let extensions = span.extensions();
 
             // 1. Critical Path: Native type extensions (Zero Allocation)
-            if service_id.is_none() {
-                if let Some(sid) = extensions.get::<crate::models::ServiceId>() {
-                    service_id = Some(*sid);
-                }
+            if service_id.is_none()
+                && let Some(sid) = extensions.get::<ServiceId>()
+            {
+                service_id = Some(*sid);
             }
-            if message_id.is_none() {
-                if let Some(mid) = extensions.get::<uuid::Uuid>() {
-                    message_id = Some(*mid);
-                }
+            if message_id.is_none()
+                && let Some(mid) = extensions.get::<Uuid>()
+            {
+                message_id = Some(*mid);
             }
-            if instance_id.is_none() {
-                if let Some(iid) = extensions.get::<crate::models::service::InstanceId>() {
-                    instance_id = Some(*iid);
-                }
+            if instance_id.is_none()
+                && let Some(iid) = extensions.get::<InstanceId>()
+            {
+                instance_id = Some(*iid);
             }
 
             // 2. Fallback Path: legacy string IDs (kept for macro-less spans)
             if let Some(fields) = extensions.get::<SpanFields>() {
                 if service_id.is_none() {
                     if let Some(ref s) = fields.service_id {
-                        if let Ok(id) = crate::models::ServiceId::from_str(s) {
+                        if let Ok(id) = ServiceId::from_str(s) {
                             service_id = Some(id);
                         }
                     } else if let Some(n) = fields.service_id_num {
-                        service_id = Some(crate::models::ServiceId::new(n));
+                        service_id = Some(ServiceId::new(n));
                     }
                 }
-                if source_service_id.is_none() {
-                    if let Some(n) = fields.source_service_id {
-                        source_service_id = Some(crate::models::ServiceId::new(n));
-                    }
+                if source_service_id.is_none()
+                    && let Some(n) = fields.source_service_id
+                {
+                    source_service_id = Some(ServiceId::new(n));
                 }
-                if message_id.is_none() {
-                    if let Some(ref s) = fields.message_id {
-                        if let Ok(id) = uuid::Uuid::parse_str(s) {
-                            message_id = Some(id);
-                        }
-                    }
+                if message_id.is_none()
+                    && let Some(ref s) = fields.message_id
+                    && let Ok(id) = Uuid::parse_str(s)
+                {
+                    message_id = Some(id);
                 }
 
                 // Numeric Instance ID fallback (required for legacy/test compatibility)
                 if instance_id.is_none() {
                     let svc_part = fields.instance_svc_id.or(fields.service_id_num);
                     if let (Some(svc), Some(seq)) = (svc_part, fields.instance_seq) {
-                        instance_id = Some(crate::models::service::InstanceId::new(
-                            crate::models::ServiceId::new(svc),
-                            seq,
-                        ));
+                        instance_id = Some(InstanceId::new(ServiceId::new(svc), seq));
                     }
                 }
             }
@@ -810,7 +829,7 @@ fn format_event_json(event: &LogEvent) -> String {
 /// 1. Block until at least one event arrives (`recv().await`).
 /// 2. Greedily drain all immediately available events via `try_recv()`.
 /// 3. Flush the entire batch in one pass with a single reentrancy guard.
-#[service_daemon::service(priority = service_daemon::ServicePriority::SYSTEM, tags = ["__log__"])]
+#[service(priority = ServicePriority::SYSTEM, tags = ["__log__"])]
 pub async fn log_service() -> anyhow::Result<()> {
     let mut rx = get_log_queue().tx.subscribe();
     let batch_size = effective_batch_size();
@@ -895,21 +914,26 @@ pub async fn log_service() -> anyhow::Result<()> {
 /// via `tracing-appender::rolling::daily`. File names follow the pattern:
 /// `{prefix}.YYYY-MM-DD`.
 #[cfg(feature = "file-logging")]
-#[service_daemon::service(priority = service_daemon::ServicePriority::SYSTEM, tags = ["__file_log__"])]
+#[service(priority = ServicePriority::SYSTEM, tags = ["__file_log__"])]
 pub async fn file_log_service() -> anyhow::Result<()> {
-    // Exit immediately if file logging was not configured
+    // If file logging is not configured, stay idle until shutdown instead of
+    // exiting immediately. Otherwise supervision treats the clean exit as a
+    // successful generation and hot-restarts this SYSTEM service forever.
     let config = match FILE_LOG_CONFIG.get() {
         Some(config) => config,
-        None => return Ok(()),
+        None => {
+            service_daemon::wait_shutdown().await;
+            return Ok(());
+        }
     };
 
     let rotation = match config.rotation {
-        RotationPolicy::Daily => tracing_appender::rolling::Rotation::DAILY,
-        RotationPolicy::Hourly => tracing_appender::rolling::Rotation::HOURLY,
-        RotationPolicy::Never => tracing_appender::rolling::Rotation::NEVER,
+        RotationPolicy::Daily => Rotation::DAILY,
+        RotationPolicy::Hourly => Rotation::HOURLY,
+        RotationPolicy::Never => Rotation::NEVER,
     };
 
-    let mut builder = tracing_appender::rolling::RollingFileAppender::builder()
+    let mut builder = RollingFileAppender::builder()
         .rotation(rotation)
         .filename_prefix(&config.file_prefix);
 
@@ -920,7 +944,7 @@ pub async fn file_log_service() -> anyhow::Result<()> {
     let file_appender = builder
         .build(&config.directory)
         .expect("Failed to initialize rolling file appender");
-    let (mut writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let (mut writer, _guard) = non_blocking(file_appender);
 
     let mut rx = get_log_queue().tx.subscribe();
     let batch_size = effective_batch_size();
@@ -991,12 +1015,12 @@ mod tests {
         message: &str,
         service_id: Option<ServiceId>,
         source_service_id: Option<ServiceId>,
-        message_id: Option<uuid::Uuid>,
-        instance_id: Option<crate::models::service::InstanceId>,
+        message_id: Option<Uuid>,
+        instance_id: Option<InstanceId>,
         error_chain: Option<&str>,
     ) -> LogEvent {
         LogEvent {
-            timestamp: chrono::Utc::now(),
+            timestamp: Utc::now(),
             level,
             target: Cow::Borrowed("test::target"),
             message: message.to_string(),
@@ -1108,8 +1132,8 @@ mod tests {
 
     #[test]
     fn render_includes_all_ids_when_present() {
-        let test_iid = crate::models::service::InstanceId::new(crate::models::ServiceId::new(3), 0);
-        let msg_id = uuid::Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
+        let test_iid = InstanceId::new(ServiceId::new(3), 0);
+        let msg_id = Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
         let event = make_event(
             LogLevel::Info,
             "triggered",
@@ -1215,7 +1239,7 @@ mod tests {
 
         assert_eq!(
             event.service_id,
-            Some(crate::models::ServiceId::new(42)),
+            Some(ServiceId::new(42)),
             "service_id should be extracted from Span"
         );
     }
@@ -1223,7 +1247,7 @@ mod tests {
     #[test]
     fn daemon_layer_captures_message_id_from_nested_span() {
         let msg_id_str = "0195e342-8874-7065-a86d-3e6a457b0195";
-        let msg_id = uuid::Uuid::parse_str(msg_id_str).unwrap();
+        let msg_id = Uuid::parse_str(msg_id_str).unwrap();
 
         let events = collect_events_with_daemon_layer(|| {
             let service_span = tracing::info_span!("service", service_id = "svc#1",);
@@ -1247,7 +1271,7 @@ mod tests {
 
         assert_eq!(
             event.service_id,
-            Some(crate::models::ServiceId::new(2)),
+            Some(ServiceId::new(2)),
             "service_id should come from innermost span"
         );
         assert_eq!(
@@ -1255,8 +1279,7 @@ mod tests {
             Some(msg_id),
             "message_id should be extracted from trigger span"
         );
-        let expected_iid =
-            crate::models::service::InstanceId::new(crate::models::ServiceId::new(3), 7);
+        let expected_iid = InstanceId::new(ServiceId::new(3), 7);
         assert_eq!(
             event.instance_id,
             Some(expected_iid),

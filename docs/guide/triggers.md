@@ -1,8 +1,8 @@
-Triggers are specialized services with built-in event loops that execute your functions when specific events occur. They consume zero CPU while waiting.
+Triggers are specialized services with built-in event loops that run your function when an event occurs. While idle they are blocked on the underlying primitive (channel `recv`, `Notify::notified()`, etc.) -- no polling, no busy-wait.
 
 ## 0. Quick Start: Chain Reactions
 
-Triggers become powerful when they talk to each other. A trigger can "fire" another by calling a provider's method directly.
+Triggers can compose into chains: one trigger fires the next by calling a provider method that another trigger is listening on.
 
 ```rust
 use service_daemon::prelude::*;
@@ -57,7 +57,14 @@ Policies communicate with the engine using a transition enum:
 ## 2. Detailed Usage
 
 ### Cron Trigger
+
+Cron triggers receive a provider type that resolves to the cron expression.
+
 ```rust
+#[derive(Clone)]
+#[provider("0 0 * * * *")]
+pub struct CleanupSchedule(pub String);
+
 #[trigger(Cron(CleanupSchedule))]
 async fn hourly_cleanup() -> anyhow::Result<()> {
     tracing::info!("Cleaning up...");
@@ -89,6 +96,17 @@ All triggers support the `priority` parameter for wave-based startup/shutdown or
 #[trigger(Watch(MetricsData), priority = 80)]
 pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()> { ... }
 ```
+
+### Scheduling
+
+Triggers also support the same `scheduling` parameter as services. The trigger host still defines how events are received; scheduling controls which runtime lane supervises and executes the generated trigger service.
+
+```rust
+#[trigger(Queue(WorkerQueue), scheduling = HighPriority)]
+async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
+```
+
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop needs a dedicated OS thread and private Tokio runtime. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
 
 ## 3. Parameter Mapping Rules
 

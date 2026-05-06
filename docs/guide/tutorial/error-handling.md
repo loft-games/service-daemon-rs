@@ -39,9 +39,9 @@ These same restart policies apply to individual **Trigger Handlers**. If a handl
 
 ---
 
-## 2. Mastering Throughput: Scaling Policy
+## 2. Throughput: Scaling Policy
 
-While `RestartPolicy` handles *time* (delays and retries), the **`ScalingPolicy`** handles *volume*. It determines how many trigger handlers can run concurrently and when to scale up.
+`RestartPolicy` controls *time* (delays and retries between failures). `ScalingPolicy` controls *volume* -- how many trigger handlers may run concurrently and when concurrency is allowed to grow under load.
 
 The default limit for streaming triggers (like `Queue`) is **64** concurrent handlers. If your system has high throughput requirements, you can tune this:
 
@@ -95,7 +95,9 @@ async fn license_watcher() -> anyhow::Result<()> {
 }
 ```
 
-When a `Fatal` error occurs, the daemon transitions that service to `Terminated` and stops trying. The rest of the system keeps running normally.
+When a `Fatal` error occurs during service execution, the daemon transitions that service to `Terminated` and stops trying. The rest of the system keeps running normally.
+
+For lazy providers, a `ProviderError::Fatal` raised during runtime initialization is treated differently: the service runner treats it as a daemon-wide shutdown signal and stops the `ServiceDaemon` cleanly.
 
 ## 4. Wave Timeouts
 
@@ -109,4 +111,4 @@ The `RestartPolicy` also controls how long the daemon waits for your services to
 
 ---
 
-[**<- Previous Step: DIY Providers**](./diy-providers.md) | [**Next Step: Sequential Startup & Shutdown ->**](./priority-orchestration.md)
+[**<- Previous Step: DIY Providers**](./diy-providers.md) | [**Next Step: Priorities & Scheduling ->**](./priority-orchestration.md)

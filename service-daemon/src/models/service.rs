@@ -1,3 +1,4 @@
+use crate::models::ProviderInitError;
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
@@ -173,6 +174,7 @@ impl ServicePriority {
 ///
 /// This policy determines whether the service shares the global multi-threaded
 /// `tokio` runtime or receives a dedicated OS thread for isolation.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub enum ServiceScheduling {
@@ -180,7 +182,8 @@ pub enum ServiceScheduling {
     /// Best for most services that don't have strict latency requirements.
     #[default]
     Standard,
-    /// High priority: hints the system to minimize latency (reserved for future use).
+    /// High priority: runs on the daemon's shared high-priority runtime.
+    /// Use this for latency-sensitive work that should stay off the standard lane.
     HighPriority,
     /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
     /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
@@ -276,6 +279,7 @@ impl ServiceDescription {
 ///
 /// This is the single source of truth for all service status, combining
 /// both the external (daemon-observed) and internal (service-perceived) views.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceStatus {
     /// The service is starting for the first time in this process session.
@@ -341,7 +345,7 @@ pub struct ProviderEntry {
     pub init: fn(
         crate::models::RestartPolicy,
         tokio_util::sync::CancellationToken,
-    ) -> futures::future::BoxFuture<'static, ()>,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
 }
 
 // ---------------------------------------------------------------------------

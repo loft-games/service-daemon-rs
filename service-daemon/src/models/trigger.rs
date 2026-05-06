@@ -181,6 +181,7 @@ pub type TriggerHandler<P> = Arc<
 ///   until the framework's `ServiceWatcher` restarts us (leveraging the
 ///   existing service reload mechanism).
 /// - [`Stop`](TriggerTransition::Stop): Exit the event loop cleanly.
+#[non_exhaustive]
 pub enum TriggerTransition<P> {
     /// The optional `(Uuid, ServiceId)` carries a pre-generated message ID and
     /// source service ID from a tracked primitive (e.g., `TrackedNotify`).

@@ -1,8 +1,8 @@
 # Quick Start Guide
 
-Welcome to the `service-daemon-rs` tutorial! If you've ever felt like building a reliable, event-driven background system is a challenge due to race conditions, thread locks, and complex lifecycle management, you're in the right place.
+This tutorial walks through `service-daemon-rs` from a single heartbeat service to event-driven triggers, state recovery, priority scheduling, and unit testing. It assumes basic familiarity with `tokio` and async Rust.
 
-`service-daemon-rs` is designed for **Boilerplate-free Orchestration**. It handles service management, dependency injection, and recovery, so you can focus on writing your business logic.
+The framework manages the lifecycle of long-running async tasks (start order, runtime placement, restarts, dependencies, signal handling) and provides type-driven dependency injection. The chapters below introduce these one at a time.
 
 ---
 
@@ -15,16 +15,16 @@ In this tutorial, we will walk through the progression of a real-world system:
 3.  [**State Management & Recovery**](./state-recovery.md) -- Persistence and resilience. See how services survive failures and restore state.
 4.  [**DIY Providers**](./diy-providers.md) -- Integrating external systems like MQTT or Databases.
 5.  [**Error Handling & Retries**](./error-handling.md) -- Learn exponential backoff and the "Kill Switch" for fatal errors.
-6.  [**Sequential Startup & Shutdown**](./priority-orchestration.md) -- Managing initialization order with priorities.
+6.  [**Priorities & Scheduling Policies**](./priority-orchestration.md) -- Managing initialization order and choosing between the shared standard runtime, the shared high-priority runtime, and isolated execution.
 7.  [**Unit Testing & Simulation**](./unit-testing.md) -- Test your logic in a controlled sandbox (MockContext).
 
 ---
 
-## Ready to dive in?
+## Reading order
 
-We recommend following the chapters in order, but feel free to jump around if you're looking for specific solutions.
+The chapters build on each other; reading in order is recommended for the first pass. Cross-referenced topics are also reachable directly if you're looking up something specific.
 
-[**Start the Journey: Hello, Heartbeat! ->**](./hello-heartbeat.md)
+[**Next: Hello, Heartbeat ->**](./hello-heartbeat.md)
 
 ### Additional Chapters
 

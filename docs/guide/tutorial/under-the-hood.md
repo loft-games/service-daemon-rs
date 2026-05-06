@@ -1,6 +1,6 @@
 # Under the Hood
 
-You've learned how to use the framework. Now, let's take a look at the gears and pulleys that drive the internal mechanism. Understanding these core components will help you debug complex issues and design highly efficient systems.
+You've learned how to use the framework. This chapter walks through the four runtime components that implement what the macros wire up. Knowing what each one does makes it easier to debug startup failures, lock contention, or unexpected restarts.
 
 ---
 
@@ -19,7 +19,7 @@ For a deep dive into how macros generate these entries, see [Macros Deep Dive](.
 
 The **Runner** is responsible for the actual `tokio::spawn` calls. 
 *   It manages the **Restart Policy**.
-*   It handles the **Handshake Protocol**. When a service starts, the Runner waits for the `Healthy` status before starting the next wave.
+*   It handles the **Handshake Protocol**. When a service starts, the Runner waits for the current wave to report `Healthy`, but only up to `wave_spawn_timeout`; if the timeout expires, the next wave still starts while the slow service continues booting in the background.
 *   It monitors for **Panics**. If a service thread crashes, the Runner catches it, records the error, and schedules a restart.
 
 Learn more about the internal orchestration logic in the [Internal Overview](../../architecture/internal-overview.md).

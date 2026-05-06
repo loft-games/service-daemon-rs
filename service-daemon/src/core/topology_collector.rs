@@ -38,7 +38,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::models::ServiceId;
+use crate::models::{SERVICE_REGISTRY, ServiceId};
 
 use super::logging::{LogEvent, get_log_queue};
 
@@ -162,18 +162,18 @@ pub fn export_mermaid() -> Option<String> {
 
     // Sort edges for deterministic output
     let mut sorted_edges: Vec<_> = guard.edges.iter().collect();
-    sorted_edges.sort_by(|(a, _), (b, _)| a.cmp(b));
+    sorted_edges.sort_by_key(|(edge, _)| *edge);
 
     for (edge, count) in sorted_edges {
         let source_id = edge.source;
         let target_id = edge.target;
 
         // Map IDs to names using the global static registry
-        let source_name = crate::models::SERVICE_REGISTRY
+        let source_name = SERVICE_REGISTRY
             .get(source_id.value())
             .map(|e| e.name)
             .unwrap_or("unknown");
-        let target_name = crate::models::SERVICE_REGISTRY
+        let target_name = SERVICE_REGISTRY
             .get(target_id.value())
             .map(|e| e.name)
             .unwrap_or("unknown");
@@ -191,19 +191,21 @@ pub fn export_mermaid() -> Option<String> {
 }
 
 pub fn reset_topology() {
-    if let Some(state) = TOPOLOGY_STATE.get() {
-        if let Ok(mut guard) = state.write() {
-            guard.edges.clear();
-        }
+    if let Some(state) = TOPOLOGY_STATE.get()
+        && let Ok(mut guard) = state.write()
+    {
+        guard.edges.clear();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::logging::LogLevel;
+    use chrono::Utc;
     use std::borrow::Cow;
     use uuid::Uuid;
+
+    use crate::core::logging::LogLevel;
 
     #[test]
     fn test_stateless_correlation() {
@@ -211,7 +213,7 @@ mod tests {
 
         // Event with both service_id and source_service_id
         let event = LogEvent {
-            timestamp: chrono::Utc::now(),
+            timestamp: Utc::now(),
             level: LogLevel::Info,
             target: Cow::Borrowed("test"),
             message: "trigger fired".to_string(),

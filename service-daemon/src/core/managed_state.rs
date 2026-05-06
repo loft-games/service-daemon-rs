@@ -1,3 +1,4 @@
+use parking_lot::RwLock as PlRwLock;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -6,6 +7,8 @@ use tokio::sync::{
     RwLockReadGuard as TokioRwLockReadGuard, RwLockWriteGuard as TokioRwLockWriteGuard, watch,
 };
 use uuid::Uuid;
+
+use crate::{ProviderError, models::ServiceId};
 
 /// Manages intelligent promotion and synchronization for shared state.
 ///
@@ -97,6 +100,51 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         Arc::new(TrackedMutex { inner: lock })
     }
 
+    /// Resolves as a tracked RwLock while allowing initialization to fail.
+    pub async fn resolve_rwlock_result<F, Fut, E>(
+        &self,
+        init: F,
+    ) -> Result<Arc<TrackedRwLock<T>>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<T>, E>> + Send,
+    {
+        self.lock
+            .get_or_try_init(|| async {
+                let initial_arc = if let Some(sn) = self.snapshot_cache.get() {
+                    sn.clone()
+                } else {
+                    init().await?
+                };
+
+                let val = initial_arc.clone();
+                let notify = self.get_notify().await;
+                let (tx, rx) = watch::channel(initial_arc);
+
+                // Ensure watch_rx is also populated
+                let _ = self.watch_rx.set(rx);
+
+                Ok(Arc::new(TrackedRwLock {
+                    inner: TokioRwLock::new(val),
+                    notify,
+                    watch_tx: tx,
+                }))
+            })
+            .await
+            .map(Clone::clone)
+    }
+
+    /// Resolves as a tracked Mutex while allowing initialization to fail.
+    pub async fn resolve_mutex_result<F, Fut, E>(&self, init: F) -> Result<Arc<TrackedMutex<T>>, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Arc<T>, E>> + Send,
+    {
+        self.resolve_rwlock_result(init)
+            .await
+            .map(|lock| Arc::new(TrackedMutex { inner: lock }))
+    }
+
     /// Resolves as a snapshot `Arc<T>`.
     /// Provides "Zero Lockdown" reads - never blocks even if a writer is holding the lock.
     pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
@@ -113,14 +161,34 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         self.snapshot_cache.get_or_init(init).await.clone()
     }
 
-    /// Resolves as the raw initialization result.
-    pub async fn resolve_managed<F, Fut>(
-        &self,
-        init: F,
-    ) -> std::result::Result<Arc<T>, crate::ProviderError>
+    /// Resolves as a snapshot while allowing initialization to fail.
+    pub async fn resolve_snapshot_result<F, Fut, E>(&self, init: F) -> Result<Arc<T>, E>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = std::result::Result<Arc<T>, crate::ProviderError>> + Send,
+        Fut: Future<Output = Result<Arc<T>, E>> + Send,
+    {
+        if let Some(rx) = self.watch_rx.get() {
+            return Ok(rx.borrow().clone());
+        }
+
+        if let Some(snapshot) = self.snapshot_cache.get() {
+            return Ok(snapshot.clone());
+        }
+
+        self.snapshot_cache
+            .get_or_try_init(init)
+            .await
+            .map(Clone::clone)
+    }
+
+    /// Resolves as the raw initialization result.
+    pub async fn resolve_managed_result<F, Fut>(
+        &self,
+        init: F,
+    ) -> std::result::Result<Arc<T>, ProviderError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<Arc<T>, ProviderError>> + Send,
     {
         // 1. Dynamic Check: If lock is already initialized, we return the latest snapshot
         if let Some(rx) = self.watch_rx.get() {
@@ -329,9 +397,9 @@ impl<T: Clone> DerefMut for TrackedMutexGuard<'_, T> {
 /// Generates a new UUID v7 message ID and captures the current service ID.
 /// Used by `TrackedNotify` and `TrackedSender` to maintain causal identity.
 #[inline]
-fn capture_message_identity() -> (Uuid, crate::models::ServiceId) {
+fn capture_message_identity() -> (Uuid, ServiceId) {
     let msg_id = Uuid::now_v7();
-    let src_id = crate::core::context::api::current_service_id();
+    let src_id = super::context::api::current_service_id();
     (msg_id, src_id)
 }
 
@@ -348,14 +416,14 @@ fn capture_message_identity() -> (Uuid, crate::models::ServiceId) {
 ///
 /// # Thread Safety
 ///
-/// The internal ID slot uses `std::sync::RwLock` (not tokio) because the
-/// critical section is a single `Uuid` copy (~16 bytes). This avoids async
-/// overhead while remaining safe across threads.
+/// The internal ID slot uses `parking_lot::RwLock` (not tokio) because the
+/// critical section is a single `Uuid` copy (~16 bytes). `parking_lot` avoids
+/// poison semantics and async overhead while remaining safe across threads.
 pub struct TrackedNotify {
     inner: TokioNotify,
     /// The most recently generated message ID and the emitting service's ID.
-    /// Protected by a std::sync::RwLock for minimal overhead (no async needed).
-    last_id: std::sync::RwLock<Option<(Uuid, crate::models::ServiceId)>>,
+    /// Protected by a `parking_lot::RwLock` for minimal overhead (no async needed).
+    last_id: PlRwLock<Option<(Uuid, ServiceId)>>,
 }
 
 impl TrackedNotify {
@@ -363,7 +431,7 @@ impl TrackedNotify {
     pub fn new() -> Self {
         Self {
             inner: TokioNotify::new(),
-            last_id: std::sync::RwLock::new(None),
+            last_id: PlRwLock::new(None),
         }
     }
 
@@ -374,7 +442,7 @@ impl TrackedNotify {
     /// by the trigger host after `notified()` returns.
     pub fn notify_waiters(&self) {
         let (msg_id, src_id) = capture_message_identity();
-        *self.last_id.write().expect("TrackedNotify lock poisoned") = Some((msg_id, src_id));
+        *self.last_id.write() = Some((msg_id, src_id));
         self.inner.notify_waiters();
     }
 
@@ -382,7 +450,7 @@ impl TrackedNotify {
     /// and capturing the current service's ID.
     pub fn notify_one(&self) {
         let (msg_id, src_id) = capture_message_identity();
-        *self.last_id.write().expect("TrackedNotify lock poisoned") = Some((msg_id, src_id));
+        *self.last_id.write() = Some((msg_id, src_id));
         self.inner.notify_one();
     }
 
@@ -395,11 +463,8 @@ impl TrackedNotify {
     ///
     /// Returns `Some((Uuid, ServiceId))` if a signal was emitted since the last call,
     /// `None` otherwise. The ID is cleared after reading to prevent reuse.
-    pub fn last_id(&self) -> Option<(Uuid, crate::models::ServiceId)> {
-        self.last_id
-            .write()
-            .expect("TrackedNotify lock poisoned")
-            .take()
+    pub fn last_id(&self) -> Option<(Uuid, ServiceId)> {
+        self.last_id.write().take()
     }
 }
 
@@ -415,9 +480,7 @@ impl Clone for TrackedNotify {
     fn clone(&self) -> Self {
         Self {
             inner: TokioNotify::new(),
-            last_id: std::sync::RwLock::new(
-                *self.last_id.read().expect("TrackedNotify lock poisoned"),
-            ),
+            last_id: PlRwLock::new(*self.last_id.read()),
         }
     }
 }
@@ -435,7 +498,7 @@ impl Clone for TrackedNotify {
 pub struct TrackedSender<P> {
     inner: tokio::sync::broadcast::Sender<P>,
     /// The most recently generated message ID and emitting service's ID.
-    last_id: std::sync::RwLock<Option<(Uuid, crate::models::ServiceId)>>,
+    last_id: PlRwLock<Option<(Uuid, ServiceId)>>,
 }
 
 impl<P: Clone> TrackedSender<P> {
@@ -445,7 +508,7 @@ impl<P: Clone> TrackedSender<P> {
         let (tx, _) = tokio::sync::broadcast::channel(capacity);
         Self {
             inner: tx,
-            last_id: std::sync::RwLock::new(None),
+            last_id: PlRwLock::new(None),
         }
     }
 
@@ -453,7 +516,7 @@ impl<P: Clone> TrackedSender<P> {
     pub fn from_sender(sender: tokio::sync::broadcast::Sender<P>) -> Self {
         Self {
             inner: sender,
-            last_id: std::sync::RwLock::new(None),
+            last_id: PlRwLock::new(None),
         }
     }
 
@@ -463,7 +526,7 @@ impl<P: Clone> TrackedSender<P> {
     /// The generated identity can be retrieved via [`last_id()`](Self::last_id).
     pub fn send(&self, value: P) -> Result<usize, tokio::sync::broadcast::error::SendError<P>> {
         let (msg_id, src_id) = capture_message_identity();
-        *self.last_id.write().expect("TrackedSender lock poisoned") = Some((msg_id, src_id));
+        *self.last_id.write() = Some((msg_id, src_id));
         self.inner.send(value)
     }
 
@@ -483,11 +546,8 @@ impl<P: Clone> TrackedSender<P> {
     ///
     /// Returns `Some((Uuid, ServiceId))` if a message was sent since the last call,
     /// `None` otherwise. The ID is cleared after reading to prevent reuse.
-    pub fn last_id(&self) -> Option<(Uuid, crate::models::ServiceId)> {
-        self.last_id
-            .write()
-            .expect("TrackedSender lock poisoned")
-            .take()
+    pub fn last_id(&self) -> Option<(Uuid, ServiceId)> {
+        self.last_id.write().take()
     }
 }
 
@@ -497,9 +557,7 @@ impl<P: Clone> Clone for TrackedSender<P> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            last_id: std::sync::RwLock::new(
-                *self.last_id.read().expect("TrackedSender lock poisoned"),
-            ),
+            last_id: PlRwLock::new(*self.last_id.read()),
         }
     }
 }
@@ -512,6 +570,7 @@ pub use TrackedRwLock as RwLock;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tokio::sync::Notify;
 
     #[tokio::test]
@@ -559,7 +618,7 @@ mod tests {
             drop(_guard);
             assert!(!tokio::select! {
                 _ = wait => true,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => false,
+                _ = tokio::time::sleep(Duration::from_millis(10)) => false,
             });
         }
 
@@ -571,7 +630,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => false,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => true,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => true,
                 },
                 "Write lock without mutation should NOT notify"
             );
@@ -586,7 +645,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => true,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => false,
                 },
                 "Write lock with mutation should notify"
             );
@@ -638,7 +697,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => false,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => true,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => true,
                 },
                 "Mutex lock without mutation should NOT notify"
             );
@@ -653,7 +712,7 @@ mod tests {
             assert!(
                 tokio::select! {
                     _ = wait => true,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => false,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => false,
                 },
                 "Mutex lock with mutation should notify"
             );

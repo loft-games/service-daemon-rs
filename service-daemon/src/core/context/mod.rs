@@ -24,8 +24,8 @@ pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
 pub use api::{
-    __run_service_scope, current_service_id, done, is_shutdown, shelve, shelve_clone, sleep,
-    spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
+    __run_service_scope, current_cancellation_token, current_service_id, done, is_shutdown, shelve,
+    shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
 };
 
 #[cfg(feature = "simulation")]
@@ -206,6 +206,39 @@ mod tests {
             assert_eq!(status2, Some(ServiceStatus::Initializing));
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn test_current_cancellation_token_uses_service_child_token_in_scope() {
+        let resources = create_test_resources();
+        let identity = create_test_identity("cancel_scope");
+        let parent = identity.cancellation_token.clone();
+
+        in_scope(identity, resources, || async move {
+            let child = current_cancellation_token();
+            assert!(!child.is_cancelled());
+            parent.cancel();
+            child.cancelled().await;
+            assert!(child.is_cancelled());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_current_cancellation_token_is_standalone_outside_scope() {
+        let first = current_cancellation_token();
+        let second = current_cancellation_token();
+
+        assert!(!first.is_cancelled());
+        assert!(!second.is_cancelled());
+
+        first.cancel();
+
+        assert!(first.is_cancelled());
+        assert!(
+            !second.is_cancelled(),
+            "outside service scope the fallback token should stay independent"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1,0 +1,98 @@
+# Windows + GNU toolchain linkme watchdog.
+#
+# Observed locally on rustc 1.95 + linkme 0.3.35/0.3.36 + x86_64-pc-windows-gnu:
+# the MinGW linker's --gc-sections pass drops #[link_section] entries backing
+# SERVICE_REGISTRY, so every #[service] / #[provider] defined outside the root
+# crate disappears at link time. Workaround: pass
+# `-C link-arg=-Wl,--no-gc-sections` to the linker.
+#
+# Upstream tracking (read these before modifying the workflow):
+#   * linkme issue #25 -- "Test failures on pc-windows-gnu" (OPEN, help wanted).
+#     Core tracking issue; dtolnay's stance is that this is a pc-windows-gnu
+#     toolchain concern rather than a linkme-side fix.
+#     https://github.com/dtolnay/linkme/issues/25
+#   * linkme PR #126 (merged into 0.3.36, 2026-04-17). Replaces ZST PE/COFF
+#     sentinels; closes a sibling issue (#125) but does NOT resolve #25.
+#     Verified locally: 0.3.36 still requires --no-gc-sections for our case.
+#     https://github.com/dtolnay/linkme/pull/126
+#   * rust-lang/rust issue #145362 -- upstream #[used(linker)] gap that would
+#     be one way to fix #25 from the compiler side.
+#     https://github.com/rust-lang/rust/issues/145362
+#   * linkme on crates.io (check for newer releases):
+#     https://crates.io/crates/linkme
+#
+# This workflow exists to notice the day the workaround stops being needed --
+# presumably after a rustc/LLVM/linkme upstream fix lands -- so we can retire
+# the flag (and any .cargo/config.toml carrying it) instead of leaving it in
+# perpetuity. It runs two jobs:
+#
+#   * `expected-to-fail`: no workaround. Expects the smoke test to *fail*.
+#     If it ever passes, the job fails with a loud notice -> investigate
+#     issue #25 above; if closed/fixed, retire this workflow.
+#   * `with-workaround`: applies `-Wl,--no-gc-sections` via RUSTFLAGS. Expects
+#     the smoke test to pass. If it ever fails, the workaround itself has
+#     regressed and we need to investigate.
+#
+# The workflow runs on PR/push plus a weekly cron so upstream fixes are noticed
+# even in weeks with no repo activity.
+
+name: Windows GNU linkme watchdog
+
+on:
+  push:
+    branches: [ "master", "develop" ]
+  pull_request:
+    branches: [ "master", "develop" ]
+  schedule:
+    - cron: '17 3 * * 1'  # Mondays, 03:17 UTC -- off the hour to dodge CI congestion.
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  expected-to-fail:
+    name: XFAIL without workaround (alert when it starts passing)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (x86_64-pc-windows-gnu)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Run linkme_smoke without --no-gc-sections (expecting failure)
+        run: |
+          set +e
+          cargo test --target x86_64-pc-windows-gnu --release \
+            -p service-daemon --test linkme_smoke
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "::error::linkme_smoke PASSED without the --no-gc-sections workaround."
+            echo "::error::The upstream issue appears to be fixed. Please remove the workaround"
+            echo "::error::from .cargo/config.toml (if present) and retire this watchdog workflow."
+            exit 1
+          fi
+          echo "XFAIL confirmed: linkme_smoke still requires -Wl,--no-gc-sections on x86_64-pc-windows-gnu."
+
+  with-workaround:
+    name: Workaround must keep working
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: "-C link-arg=-Wl,--no-gc-sections"
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (x86_64-pc-windows-gnu)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Run linkme_smoke with --no-gc-sections
+        run: |
+          cargo test --target x86_64-pc-windows-gnu --release \
+            -p service-daemon --test linkme_smoke

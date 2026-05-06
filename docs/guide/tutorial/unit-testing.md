@@ -23,7 +23,7 @@ In a simulation test, you run a **fully functional but isolated Daemon**. Instea
 use service_daemon::prelude::*;
 use std::time::Duration;
 
-// --- 1. The Robust Tested Service ---
+// --- 1. The service under test ---
 #[service(tags = ["sim_shelf"])]
 async fn shelf_reader_service() -> anyhow::Result<()> {
     loop {
@@ -75,7 +75,9 @@ mod tests {
         let daemon_task = tokio::spawn(async move {
             let mut daemon = daemon;
             daemon.run().await;
-            daemon.wait().await.unwrap();
+            if let Err(err) = daemon.wait().await {
+                panic!("daemon.wait() failed: {err}");
+            }
         });
 
         // Verify Phase 1: service initialized and read pre-filled value
@@ -140,4 +142,4 @@ handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 
 ---
 
-[**-- Previous Step: Sequential Startup & Shutdown**](./priority-orchestration.md) | [**Next Step: Under the Hood --**](./under-the-hood.md)
+[**<- Previous Step: Priorities & Scheduling**](./priority-orchestration.md) | [**Next Step: Under the Hood ->**](./under-the-hood.md)

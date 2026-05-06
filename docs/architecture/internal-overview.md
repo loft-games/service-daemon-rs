@@ -23,7 +23,9 @@ Unlike traditional DI containers that hold all instances in a central map, `serv
 - **Recursive Resolution**: When a service starts, its dependencies are resolved recursively. Errors are caught at compile-time.
 
 ### 2.1. Status Plane & Reactive Orchestration
-The daemon maintains a **Unified Status Plane** to track service health. To eliminate inefficient polling, the framework uses a global `STATUS_CHANGED` notification mechanism. When any service changes its status (e.g. transitioning from `Initializing` to `Healthy`), the daemon is notified immediately, enabling responsive wave-based startup and proactive dependency management.
+The daemon maintains a shared **Status Plane** to track service-observable lifecycle state. To eliminate inefficient polling, the framework uses a global `STATUS_CHANGED` notification mechanism. When a service writes a new status (for example, transitioning from `Initializing` to `Healthy`), the daemon is notified immediately, enabling responsive wave-based startup and lifecycle observation.
+
+Reloads use a companion control path in addition to the Status Plane. Dependency watchers notify the supervisor through per-service reload signals, which cancel the current generation's reload token immediately. Inside the service, `state()` then resolves to `NeedReload` from that token-driven control path, even before or without a separate `status_plane` write.
 
 ## 3. High-Level System Flow
 
@@ -88,7 +90,7 @@ The framework is organized into specialized submodules to ensure maintainability
 
 ## 5. Lifecycle & Status Plane
 
-The daemon maintains a **Unified Status Plane** to track service health and trigger reloads. This orchestration is driven by a reactive signal path that ensures wave-based consistency.
+The daemon maintains a shared **Status Plane** for lifecycle observation, while reload delivery is driven by a companion reactive signal path. Together they provide wave-based consistency without requiring every reload transition to be pre-written into the status map.
 
 Detailed state machine transitions and signal propagation logic can be found in **[Lifecycle & Status Plane](lifecycle-management.md)**.
 

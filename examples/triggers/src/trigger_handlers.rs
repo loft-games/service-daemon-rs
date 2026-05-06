@@ -4,10 +4,12 @@
 //! Triggers are **decoupled** from services: they execute independently
 //! and are registered in the daemon's global registry via the `#[trigger]` macro.
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use crate::providers::{CleanupSchedule, ExternalStatus, TaskQueue, UserNotifier, WorkerQueue};
 use service_daemon::TT::*;
 use service_daemon::trigger;
-use std::sync::Arc;
 
 // =============================================================================
 // Cron Trigger
@@ -117,7 +119,7 @@ pub async fn on_tick(tasks: Arc<TaskQueue>) -> anyhow::Result<()> {
     tracing::info!("Tick signal captured! Processing...");
 
     // Simulate some work
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Push the result to the shared broadcast queue via instance method
     let _ = tasks.push("Tick processed successfully".to_string());

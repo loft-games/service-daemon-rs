@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time;
 use tracing::info;
 
-/// Simulates a standard HTTP administration service running in the shared thread pool.
+/// Simulates a standard HTTP administration service running on the shared standard runtime.
 #[service(priority = ServicePriority::STORAGE)]
 pub async fn admin_service() -> Result<()> {
     let thread = thread::current();
@@ -13,11 +13,26 @@ pub async fn admin_service() -> Result<()> {
     let thread_name = thread.name().unwrap_or("unnamed").to_string();
 
     info!(
-        "[Standard] Admin service running on thread {:?} ({})",
+        "[Standard] Admin service running on the shared standard runtime on thread {:?} ({})",
         thread_id, thread_name
     );
 
-    // Simulate continuous operation
+    time::sleep(Duration::from_secs(3600)).await;
+    Ok(())
+}
+
+/// Simulates a latency-sensitive supervisor running on the shared high-priority runtime.
+#[service(priority = ServicePriority::SYSTEM, scheduling = HighPriority)]
+pub async fn watchdog_service() -> Result<()> {
+    let thread = thread::current();
+    let thread_id = thread.id();
+    let thread_name = thread.name().unwrap_or("unnamed").to_string();
+
+    info!(
+        "[HighPriority] Watchdog service running on the shared high-priority runtime on thread {:?} ({})",
+        thread_id, thread_name
+    );
+
     time::sleep(Duration::from_secs(3600)).await;
     Ok(())
 }

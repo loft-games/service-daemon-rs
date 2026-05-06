@@ -11,10 +11,11 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 | `Initializing` | `Healthy` | `done()` or implicit handshake |
 | `Restoring` | `Healthy` | Successful warm start or implicit handshake |
 | `Recovering(err)`| `Healthy` | Custom recovery logic + `done()` or implicit handshake |
-| `Healthy` | `NeedReload` | Dependency mutation detected |
-| `NeedReload` | `Terminated` | Service cleanup + exit |
-| `ShuttingDown` | `Terminated` | Daemon shutdown signal |
-| (Any) | `Terminated` | `ServiceError::Fatal` encountered |
+| `NeedReload` | `Terminated` | Service observes reload, performs cleanup, then calls `done()` |
+| `ShuttingDown` | `Terminated` | Daemon shutdown signal + service cleanup |
+| (Any) | `Terminated` | `ServiceError::Fatal` or daemon teardown |
+
+`NeedReload` is primarily a **service-observed lifecycle state** exposed by `state()`. In the runtime, dependency watchers notify the supervisor through reload signals, which cancel the current generation's reload token. Once that token is cancelled, `state()` resolves to `NeedReload` immediately for the running service. The shared Status Plane remains the durable observation surface, but reload intent is delivered first through the token/signal control path rather than requiring a separate `Healthy -> NeedReload` map write.
 
 > [!NOTE]
 > **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining consistent responsiveness to reload and shutdown signals.
@@ -46,7 +47,13 @@ sequenceDiagram
 Even if a service is in a restart backoff delay (due to a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.
 
 ### 1.3. Fatal Errors
-(Fatal error handling details...)
+Fatal outcomes stop the current service generation without entering the retry/backoff loop.
+
+- `ServiceError::Fatal(...)`: the supervisor marks that service as `Terminated` and does not restart it.
+- `ProviderInitError` during lazy service startup: the supervisor treats this as a daemon-wide startup/runtime boundary failure, requests daemon shutdown, and terminates the affected service.
+- Ordinary `Err(...)` and panics are different: they transition the service into `Recovering(...)` and restart with backoff.
+
+A normal `Ok(())` return is also distinct from failure recovery. The supervisor still starts a fresh generation, but it does so immediately and records success on the backoff controller instead of counting the exit as another failure.
 
 ### 1.4. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 
@@ -63,7 +70,7 @@ The controller tracks the uptime of the current service generation. When a servi
 
 Services are started and stopped synchronized by waves of `priority`.
 
-- **Startup (High to Low)**: Core services start first. A wave waits until all services in it report `Healthy` (via a handshake) before starting the next wave.
+- **Startup (High to Low)**: Core services start first. A wave waits until services in it report `Healthy` (via a handshake), but only up to `wave_spawn_timeout`; once the timeout expires, the daemon logs a warning and continues with the next wave.
 - **Shutdown (Low to High)**: External APIs stop first, followed by storage and then core systems.
 
 ## 3. The Handshake Protocol
@@ -131,9 +138,11 @@ Eager initialization applies only to **reachable** providers (those referenced b
 
 ### 5.4. RestartPolicy reuse
 
-Provider initialization retries should reuse the existing `RestartPolicy` model.
+Provider initialization retries reuse the existing `RestartPolicy` model.
 
-- A new `provider_init_timeout` is planned.
-- By default, it should match `wave_spawn_timeout` to keep timeouts consistent unless explicitly configured.
+- `provider_init_timeout` is implemented today.
+- By default, it matches `wave_spawn_timeout` to keep startup timing consistent unless explicitly configured.
+- `ProviderError::Retryable(...)` keeps retrying until that timeout is reached.
+- `ProviderError::Fatal(...)` skips retries and fails startup immediately.
 
 [Back to README](../../README.md)

@@ -14,7 +14,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Daemon running. Press Ctrl+C to stop and export the graph.");
 
     // Wait for the daemon to stop (handles Ctrl+C/SIGINT and auto-exports topology internally)
-    let _ = daemon.wait().await;
+    daemon.wait().await?;
 
     Ok(())
 }

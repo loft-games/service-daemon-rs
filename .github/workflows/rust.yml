@@ -31,6 +31,11 @@ jobs:
         run: cargo check --workspace
       - name: Run tests
         run: cargo test --workspace
+      # Release-mode smoke against linker section GC (see linkme_smoke.rs).
+      # Catches rustc/LLVM upgrades that silently drop #[service] entries
+      # before they can mask service-discovery failures in production builds.
+      - name: Linkme smoke (release)
+        run: cargo test -p service-daemon --release --test linkme_smoke
 
   fmt:
     name: Format
