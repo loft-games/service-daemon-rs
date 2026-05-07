@@ -43,12 +43,17 @@ By default, every service that asks for `Arc<MqttBus>` will receive the **same i
 Providers can depend on other providers! The framework handles the dependency graph for you.
 
 ```rust,ignore
+use service_daemon::{provider, ProviderError};
+use std::sync::Arc;
+
 #[provider]
 pub struct DatabaseUrl(pub String);
 
 #[provider]
-async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> MyDbPool {
-    MyDbPool::connect(&url).await.expect("Failed to connect to DB")
+async fn connection_pool_provider(url: Arc<DatabaseUrl>) -> Result<MyDbPool, ProviderError> {
+    MyDbPool::connect(&url)
+        .await
+        .map_err(|e| ProviderError::Retryable(format!("DB not ready: {e}")))
 }
 ```
 

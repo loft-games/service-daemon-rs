@@ -123,12 +123,14 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example with async function (dependency injection)
 /// ```rust,ignore
-/// use service_daemon::provider;
+/// use service_daemon::{provider, ProviderError};
 /// use std::sync::Arc;
 ///
 /// #[provider]
-/// pub async fn db_pool(url: Arc<DbUrl>) -> DatabasePool {
-///     DatabasePool::connect(&url).await.expect("DB connection failed")
+/// pub async fn db_pool(url: Arc<DbUrl>) -> Result<DatabasePool, ProviderError> {
+///     DatabasePool::connect(&url)
+///         .await
+///         .map_err(|e| ProviderError::Retryable(format!("DB connection failed: {e}")))
 /// }
 /// ```
 #[proc_macro_attribute]
