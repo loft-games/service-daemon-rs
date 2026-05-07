@@ -4,7 +4,7 @@
 //!
 //! - **Policy** (`handle_step`): Defined by each trigger host. It only cares about
 //!   *"how to wait for the next event"* and returns a [`TriggerTransition`].
-//! - **Engine** (`run_as_service` default impl --> [`TriggerRunner`](crate::core::trigger_runner::TriggerRunner)):
+//! - **Engine** (`run_as_service` default impl --> [`TriggerRunner`]):
 //!   Manages the event loop, tracing, retry, middleware pipeline, and graceful
 //!   shutdown. Host implementors get this for free.
 //!

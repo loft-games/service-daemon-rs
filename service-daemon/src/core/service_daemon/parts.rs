@@ -17,14 +17,21 @@ pub(super) struct ServiceSupervisorParts {
     pub run: ServiceFn,
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub policy: RestartPolicy,
+    pub generation_lane: GenerationExecutionLane,
     pub resources: Arc<DaemonResources>,
     pub cancellation_token: CancellationToken,
     pub daemon_token: CancellationToken,
 }
 
-pub(super) enum SpawnRuntimeLane {
+#[derive(Clone)]
+pub(super) enum SupervisorSpawnLane {
     Standard,
     HighPriority(Handle),
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum GenerationExecutionLane {
+    CurrentRuntime,
     Isolated,
 }
 
@@ -34,7 +41,8 @@ pub(super) struct SpawnServiceParts {
     pub run: ServiceFn,
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub policy: RestartPolicy,
-    pub runtime_lane: SpawnRuntimeLane,
+    pub supervisor_lane: SupervisorSpawnLane,
+    pub generation_lane: GenerationExecutionLane,
     pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub cancellation_token: CancellationToken,

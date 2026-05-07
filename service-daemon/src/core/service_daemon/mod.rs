@@ -486,8 +486,11 @@ impl ServiceDaemon {
             .map_err(|err| ServiceError::InternalError(err.to_string()))?;
 
         for service in &self.services {
-            let runtime_lane = match service.entry.scheduling {
-                ServiceScheduling::Standard => parts::SpawnRuntimeLane::Standard,
+            let (supervisor_lane, generation_lane) = match service.entry.scheduling {
+                ServiceScheduling::Standard => (
+                    parts::SupervisorSpawnLane::Standard,
+                    parts::GenerationExecutionLane::CurrentRuntime,
+                ),
                 ServiceScheduling::HighPriority => {
                     let Some(runtime) = high_priority_runtime.clone() else {
                         return Err(ServiceError::InternalError(format!(
@@ -495,9 +498,15 @@ impl ServiceDaemon {
                             service.name()
                         )));
                     };
-                    parts::SpawnRuntimeLane::HighPriority(runtime)
+                    (
+                        parts::SupervisorSpawnLane::HighPriority(runtime),
+                        parts::GenerationExecutionLane::CurrentRuntime,
+                    )
                 }
-                ServiceScheduling::Isolated => parts::SpawnRuntimeLane::Isolated,
+                ServiceScheduling::Isolated => (
+                    parts::SupervisorSpawnLane::Standard,
+                    parts::GenerationExecutionLane::Isolated,
+                ),
             };
 
             runner::spawn_service(parts::SpawnServiceParts {
@@ -506,7 +515,8 @@ impl ServiceDaemon {
                 run: service.entry.wrapper,
                 watcher: service.entry.watcher,
                 policy: test_policy,
-                runtime_lane,
+                supervisor_lane,
+                generation_lane,
                 running_tasks: self.running_tasks.clone(),
                 resources: self.resources.clone(),
                 cancellation_token: service.cancellation_token.clone(),

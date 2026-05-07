@@ -172,8 +172,9 @@ impl ServicePriority {
 
 /// Defines how a service should be scheduled and isolated.
 ///
-/// This policy determines whether the service shares the global multi-threaded
-/// `tokio` runtime or receives a dedicated OS thread for isolation.
+/// This policy determines which runtime lane executes the service or trigger
+/// generation body while the daemon keeps supervision, reload, and restart
+/// coordination under its lifecycle manager.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
@@ -188,7 +189,9 @@ pub enum ServiceScheduling {
     /// final registry contains at least one high-priority service or trigger.
     /// Use this for latency-sensitive work that should stay off the standard lane.
     HighPriority,
-    /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
+    /// Isolated: runs each service or trigger generation body in a dedicated OS thread
+    /// with a private tokio runtime while supervision/reload/restart handling
+    /// remains daemon-managed.
     /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
     Isolated,
 }

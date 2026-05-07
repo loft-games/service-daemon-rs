@@ -99,14 +99,14 @@ pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()
 
 ### Scheduling
 
-Triggers also support the same `scheduling` parameter as services. The trigger host still defines how events are received; scheduling controls which runtime lane supervises and executes the generated trigger service.
+Triggers also support the same `scheduling` parameter as services. The trigger host still defines how events are received; scheduling controls the runtime lane used by the generated trigger service body while daemon supervision remains lifecycle-managed.
 
 ```rust
 #[trigger(Queue(WorkerQueue), scheduling = HighPriority)]
 async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
-Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop needs a dedicated OS thread and private Tokio runtime. `HighPriority` triggers use the same shared runtime as high-priority services; it is created lazily by `ServiceDaemon::run()` only when needed. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` triggers use the same shared runtime as high-priority services; it is created lazily by `ServiceDaemon::run()` only when needed. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
 
 ## 3. Parameter Mapping Rules
 

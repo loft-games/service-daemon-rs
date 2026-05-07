@@ -1,11 +1,13 @@
-use service_daemon::{Registry, ServiceDaemon, service};
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, service};
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 static THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
+static ISOLATED_RESTART_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 static STANDARD_STARTED: AtomicBool = AtomicBool::new(false);
 static STANDARD_STOPPED: AtomicBool = AtomicBool::new(false);
@@ -13,6 +15,8 @@ static HIGH_PRIORITY_STARTED: AtomicBool = AtomicBool::new(false);
 static HIGH_PRIORITY_STOPPED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_STARTED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_STOPPED: AtomicBool = AtomicBool::new(false);
+static ISOLATED_RESTART_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+static ISOLATED_RESTART_STOPPED: AtomicBool = AtomicBool::new(false);
 
 async fn record_thread_name(prefix: &str) -> anyhow::Result<()> {
     let thread_name = std::thread::current()
@@ -23,6 +27,18 @@ async fn record_thread_name(prefix: &str) -> anyhow::Result<()> {
         .lock()
         .await
         .insert(format!("{}:{}", prefix, thread_name));
+    Ok(())
+}
+
+async fn record_isolated_restart_thread_name() -> anyhow::Result<()> {
+    let thread_name = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_string();
+    ISOLATED_RESTART_THREAD_NAMES
+        .lock()
+        .await
+        .insert(thread_name);
     Ok(())
 }
 
@@ -98,6 +114,24 @@ async fn isolated_lifecycle_service() -> anyhow::Result<()> {
     }
 
     ISOLATED_STOPPED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[service(tags = ["__test_isolated_bridge_restart__"], scheduling = Isolated)]
+async fn isolated_restart_service() -> anyhow::Result<()> {
+    record_isolated_restart_thread_name().await?;
+
+    if ISOLATED_RESTART_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+        return Err(anyhow::anyhow!("simulated isolated generation failure"));
+    }
+
+    service_daemon::done();
+
+    while !service_daemon::is_shutdown() {
+        service_daemon::sleep(Duration::from_millis(10)).await;
+    }
+
+    ISOLATED_RESTART_STOPPED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -195,6 +229,46 @@ async fn test_scheduling_variants_participate_in_startup_and_shutdown() -> anyho
     assert!(STANDARD_STOPPED.load(Ordering::SeqCst));
     assert!(HIGH_PRIORITY_STOPPED.load(Ordering::SeqCst));
     assert!(ISOLATED_STOPPED.load(Ordering::SeqCst));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_isolated_generation_failure_restarts_through_bridge() -> anyhow::Result<()> {
+    ISOLATED_RESTART_ATTEMPTS.store(0, Ordering::SeqCst);
+    ISOLATED_RESTART_STOPPED.store(false, Ordering::SeqCst);
+    ISOLATED_RESTART_THREAD_NAMES.lock().await.clear();
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__test_isolated_bridge_restart__")
+                .build(),
+        )
+        .with_restart_policy(RestartPolicy::for_testing())
+        .build();
+
+    let cancel = daemon.cancel_token();
+    daemon.run().await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while ISOLATED_RESTART_ATTEMPTS.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    assert!(
+        ISOLATED_RESTART_THREAD_NAMES
+            .lock()
+            .await
+            .contains("svc-isolated_restart_service")
+    );
+
+    cancel.cancel();
+    daemon.wait().await?;
+
+    assert!(ISOLATED_RESTART_STOPPED.load(Ordering::SeqCst));
 
     Ok(())
 }

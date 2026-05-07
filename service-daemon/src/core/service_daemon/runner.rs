@@ -31,8 +31,12 @@ use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
 };
 
-use super::parts::{ServiceSupervisorParts, SpawnRuntimeLane, SpawnServiceParts};
+use super::parts::{
+    GenerationExecutionLane, ServiceSupervisorParts, SpawnServiceParts, SupervisorSpawnLane,
+};
 use super::policy::RestartPolicy;
+
+type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
 
 // ---------------------------------------------------------------------------
 // Supervisor FSM State
@@ -48,7 +52,7 @@ enum SupervisorState {
     /// The service future is actively executing; monitor for completion or signals.
     Running,
     /// The service has exited; analyse the result and decide whether to restart.
-    Outcome(Result<Result<(), Error>, Box<dyn Any + Send>>),
+    Outcome(ServiceGenerationOutcome),
     /// Wait for the next restart window before looping back to `Starting`.
     Restart(RestartDecision),
     /// Terminal state -- exit the supervision loop.
@@ -67,6 +71,95 @@ impl RestartDecision {
     }
 }
 
+fn isolated_generation_error(name: &'static str, message: String) -> ServiceGenerationOutcome {
+    Ok(Err(Error::msg(format!(
+        "isolated service generation for '{}' failed: {}",
+        name, message
+    ))))
+}
+
+fn run_scoped_service_generation(
+    service_id: ServiceId,
+    name: &'static str,
+    run_fn: ServiceFn,
+    cancellation_token: CancellationToken,
+    reload_token: CancellationToken,
+    resources: Arc<DaemonResources>,
+) -> BoxFuture<'static, ServiceGenerationOutcome> {
+    Box::pin(async move {
+        let span = tracing::info_span!(
+            "service",
+            name = %name,
+            service_id = %service_id,
+            service_id_num = service_id.value(),
+        );
+        let identity =
+            ServiceIdentity::new(service_id, name, cancellation_token.clone(), reload_token);
+
+        __run_service_scope(identity, resources, || async move {
+            AssertUnwindSafe(run_fn(cancellation_token).instrument(span))
+                .catch_unwind()
+                .await
+        })
+        .await
+    })
+}
+
+fn run_isolated_service_generation(
+    service_id: ServiceId,
+    name: &'static str,
+    run_fn: ServiceFn,
+    cancellation_token: CancellationToken,
+    reload_token: CancellationToken,
+    resources: Arc<DaemonResources>,
+) -> BoxFuture<'static, ServiceGenerationOutcome> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let thread_name = format!("svc-{}", name);
+    let thread_name_for_error = thread_name.clone();
+
+    match std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let outcome = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(run_scoped_service_generation(
+                    service_id,
+                    name,
+                    run_fn,
+                    cancellation_token,
+                    reload_token,
+                    resources,
+                )),
+                Err(err) => isolated_generation_error(
+                    name,
+                    format!("failed to create private tokio runtime: {}", err),
+                ),
+            };
+            let _ = tx.send(outcome);
+        }) {
+        Ok(_) => Box::pin(async move {
+            match rx.await {
+                Ok(outcome) => outcome,
+                Err(err) => isolated_generation_error(
+                    name,
+                    format!("thread exited before reporting outcome: {}", err),
+                ),
+            }
+        }),
+        Err(err) => Box::pin(async move {
+            isolated_generation_error(
+                name,
+                format!(
+                    "failed to spawn thread '{}': {}",
+                    thread_name_for_error, err
+                ),
+            )
+        }),
+    }
+}
+
 /// Supervises a single service's lifecycle, including restarts and signal handling.
 ///
 /// Internally driven by a [`SupervisorState`] FSM -- see module-level docs.
@@ -76,6 +169,7 @@ struct ServiceSupervisor {
     name: &'static str,
     run: ServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    generation_lane: GenerationExecutionLane,
     backoff: BackoffController,
     resources: Arc<DaemonResources>,
     cancellation_token: CancellationToken,
@@ -96,6 +190,7 @@ impl ServiceSupervisor {
             run,
             watcher,
             policy,
+            generation_lane,
             resources,
             cancellation_token,
             daemon_token,
@@ -106,6 +201,7 @@ impl ServiceSupervisor {
             name,
             run,
             watcher,
+            generation_lane,
             backoff: BackoffController::new(policy),
             resources,
             cancellation_token,
@@ -164,7 +260,7 @@ impl ServiceSupervisor {
     /// whether the daemon should shut down, and what kind of restart policy to apply.
     fn handle_outcome(
         &self,
-        result: Result<Result<(), Error>, Box<dyn Any + Send>>,
+        result: ServiceGenerationOutcome,
         reload_token: &CancellationToken,
     ) -> (ServiceStatus, bool, bool, RestartDecision) {
         let mut should_restart = true;
@@ -337,14 +433,6 @@ impl ServiceSupervisor {
     /// Owns the `tokio::select!` that races the service against reload signals,
     /// then hands the raw result off to `Outcome`.
     async fn on_running(&mut self) -> SupervisorState {
-        let span = tracing::info_span!(
-            "service",
-            name = %self.name,
-            service_id = %self.service_id,
-            service_id_num = self.service_id.value(),
-        );
-
-        // Get or create reload signal
         let reload_signal = self
             .resources
             .reload_signals
@@ -352,39 +440,40 @@ impl ServiceSupervisor {
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
-        let reload_token = self
-            .reload_token
-            .as_ref()
-            .expect("reload_token must be set by on_starting")
-            .clone();
+        let Some(reload_token) = self.reload_token.as_ref().cloned() else {
+            return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
+                "service '{}' entered Running without a reload token",
+                self.name
+            )))));
+        };
 
-        let identity = ServiceIdentity::new(
-            self.service_id,
-            self.name,
-            self.cancellation_token.clone(),
-            reload_token.clone(),
-        );
+        let mut generation_future = match self.generation_lane {
+            GenerationExecutionLane::CurrentRuntime => run_scoped_service_generation(
+                self.service_id,
+                self.name,
+                self.run,
+                self.cancellation_token.clone(),
+                reload_token.clone(),
+                self.resources.clone(),
+            ),
+            GenerationExecutionLane::Isolated => run_isolated_service_generation(
+                self.service_id,
+                self.name,
+                self.run,
+                self.cancellation_token.clone(),
+                reload_token.clone(),
+                self.resources.clone(),
+            ),
+        };
 
-        let run_fn = self.run;
-        let token_for_run = self.cancellation_token.clone();
-        let resources_clone = self.resources.clone();
-        let reload_token_clone = reload_token;
-
-        let result = __run_service_scope(identity, resources_clone, || async move {
-            let mut service_future =
-                Box::pin(AssertUnwindSafe(run_fn(token_for_run).instrument(span)).catch_unwind());
-
-            // Integrated signal handling -- replaces the bridge_task
-            tokio::select! {
-                res = &mut service_future => res,
-                _ = reload_signal.notified() => {
-                    reload_token_clone.cancel();
-                    info!("Service reload signal received, waiting for service to exit...");
-                    service_future.await
-                }
+        let result = tokio::select! {
+            res = &mut generation_future => res,
+            _ = reload_signal.notified() => {
+                reload_token.cancel();
+                info!("Service reload signal received, waiting for service to exit...");
+                generation_future.await
             }
-        })
-        .await;
+        };
 
         SupervisorState::Outcome(result)
     }
@@ -393,10 +482,7 @@ impl ServiceSupervisor {
     ///
     /// Decides whether the service should restart (--> `Restart`) or stop
     /// permanently (--> `Terminated`).
-    async fn on_outcome(
-        &mut self,
-        result: Result<Result<(), Error>, Box<dyn Any + Send>>,
-    ) -> SupervisorState {
+    async fn on_outcome(&mut self, result: ServiceGenerationOutcome) -> SupervisorState {
         // Fast path: If shutdown was requested while the service was running,
         // skip outcome processing entirely -- no error logging, no restart.
         if self.cancellation_token.is_cancelled() {
@@ -579,7 +665,8 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         run,
         watcher,
         policy,
-        runtime_lane,
+        supervisor_lane,
+        generation_lane,
         running_tasks,
         resources,
         cancellation_token,
@@ -592,37 +679,15 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         run,
         watcher,
         policy,
+        generation_lane,
         resources,
         cancellation_token,
         daemon_token,
     });
 
-    let handle = match runtime_lane {
-        SpawnRuntimeLane::Standard => tokio::spawn(supervisor.run_loop()),
-        SpawnRuntimeLane::HighPriority(runtime) => runtime.spawn(supervisor.run_loop()),
-        SpawnRuntimeLane::Isolated => {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let thread_name = format!("svc-{}", name);
-
-            // Spawn a dedicated OS thread for this service
-            std::thread::Builder::new()
-                .name(thread_name)
-                .spawn(move || {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("Failed to create isolated tokio runtime");
-
-                    rt.block_on(supervisor.run_loop());
-                    let _ = tx.send(());
-                })
-                .expect("Failed to spawn isolated service thread");
-
-            // Wrap the thread completion in a tokio task so we can return a JoinHandle
-            tokio::spawn(async move {
-                let _ = rx.await;
-            })
-        }
+    let handle = match supervisor_lane {
+        SupervisorSpawnLane::Standard => tokio::spawn(supervisor.run_loop()),
+        SupervisorSpawnLane::HighPriority(runtime) => runtime.spawn(supervisor.run_loop()),
     };
 
     running_tasks.lock().await.insert(service_id, handle);
@@ -663,8 +728,11 @@ pub async fn spawn_all_services(
         );
 
         for service in &wave.services {
-            let runtime_lane = match service.entry.scheduling {
-                ServiceScheduling::Standard => SpawnRuntimeLane::Standard,
+            let (supervisor_lane, generation_lane) = match service.entry.scheduling {
+                ServiceScheduling::Standard => (
+                    SupervisorSpawnLane::Standard,
+                    GenerationExecutionLane::CurrentRuntime,
+                ),
                 ServiceScheduling::HighPriority => {
                     let Some(runtime) = high_priority_runtime.clone() else {
                         error!(
@@ -679,9 +747,15 @@ pub async fn spawn_all_services(
                         daemon_token.cancel();
                         return;
                     };
-                    SpawnRuntimeLane::HighPriority(runtime)
+                    (
+                        SupervisorSpawnLane::HighPriority(runtime),
+                        GenerationExecutionLane::CurrentRuntime,
+                    )
                 }
-                ServiceScheduling::Isolated => SpawnRuntimeLane::Isolated,
+                ServiceScheduling::Isolated => (
+                    SupervisorSpawnLane::Standard,
+                    GenerationExecutionLane::Isolated,
+                ),
             };
 
             spawn_service(SpawnServiceParts {
@@ -690,7 +764,8 @@ pub async fn spawn_all_services(
                 run: service.entry.wrapper,
                 watcher: service.entry.watcher,
                 policy: restart_policy,
-                runtime_lane,
+                supervisor_lane,
+                generation_lane,
                 running_tasks: running_tasks.clone(),
                 resources: resources.clone(),
                 cancellation_token: service.cancellation_token.clone(),
@@ -785,4 +860,46 @@ pub async fn stop_all_services(
     // Finally, cancel the daemon's own token to signal completion if anyone is watching it
     daemon_token.cancel();
     info!("All shutdown waves completed. ServiceDaemon stopped.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    #[test]
+    fn isolated_startup_errors_use_backoff_recovery() {
+        let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
+            service_id: ServiceId::new(1),
+            name: "isolated_startup",
+            run: noop_service,
+            watcher: None,
+            policy: RestartPolicy::for_testing(),
+            generation_lane: GenerationExecutionLane::Isolated,
+            resources: DaemonResources::new(),
+            cancellation_token: CancellationToken::new(),
+            daemon_token: CancellationToken::new(),
+        });
+        let reload_token = CancellationToken::new();
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision) = supervisor
+            .handle_outcome(
+                isolated_generation_error(
+                    "isolated_startup",
+                    "failed to spawn thread 'svc-isolated_startup'".to_string(),
+                ),
+                &reload_token,
+            );
+
+        assert!(matches!(
+            status,
+            ServiceStatus::Recovering(message) if message.contains("failed to spawn thread")
+        ));
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert!(matches!(restart_decision, RestartDecision::WithBackoff));
+    }
 }

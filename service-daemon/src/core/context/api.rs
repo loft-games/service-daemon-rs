@@ -321,7 +321,7 @@ pub async fn sleep(duration: Duration) -> bool {
 ///
 /// This function is typically called from the default `run_as_service`
 /// implementation in [`TriggerHost`](crate::models::trigger::TriggerHost) to check for user overrides before
-/// falling back to the template's self-declared [`ScalingPolicy`].
+/// falling back to the template's self-declared [`ScalingPolicy`](crate::models::ScalingPolicy).
 ///
 /// # Panics
 ///
