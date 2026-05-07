@@ -23,7 +23,9 @@ use std::io::{Write as _, stderr};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
-use crate::models::{ServiceError, ServiceId, service::InstanceId};
+#[cfg(feature = "file-logging")]
+use crate::models::ServiceError;
+use crate::models::{ServiceId, service::InstanceId};
 
 /// Log severity level with zero heap allocation.
 ///

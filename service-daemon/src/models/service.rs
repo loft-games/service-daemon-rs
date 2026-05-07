@@ -1,4 +1,4 @@
-use crate::models::ProviderInitError;
+use crate::models::{ProviderInitError, RestartPolicy};
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
@@ -346,7 +346,7 @@ pub struct ProviderEntry {
     /// Implementations are macro-generated and are expected to call into the
     /// provider's `StateManager` to populate the snapshot cache.
     pub init: fn(
-        crate::models::RestartPolicy,
+        RestartPolicy,
         tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
 }

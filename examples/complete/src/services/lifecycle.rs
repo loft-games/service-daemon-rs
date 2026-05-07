@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use crate::providers::typed_providers::{DbUrl, GlobalStats, Port};
 use service_daemon::prelude::*;
-use service_daemon::{done, service, shelve, sleep, state, unshelve};
+use service_daemon::{ServiceError, done, service, shelve, sleep, state, unshelve};
 use tracing::{error, info, warn};
 
 // =============================================================================
@@ -347,10 +347,9 @@ pub async fn fatal_error_demo() -> anyhow::Result<()> {
 
     if !is_config_valid {
         error!("[Fatal] UNRECOVERABLE error. Stopping permanently.");
-        return Err(service_daemon::models::ServiceError::Fatal(
-            "Configuration is invalid and cannot be recovered".into(),
-        )
-        .into());
+        return Err(
+            ServiceError::Fatal("Configuration is invalid and cannot be recovered".into()).into(),
+        );
     }
 
     info!("[Fatal] Config is valid, proceeding normally.");

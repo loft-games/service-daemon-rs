@@ -32,7 +32,7 @@ use petgraph::{
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::{DaemonResources, process_token};
-#[cfg(unix)]
+#[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
     PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
@@ -483,14 +483,14 @@ impl ServiceDaemon {
 
         let high_priority_runtime = self
             .ensure_high_priority_runtime()
-            .map_err(|err| crate::models::ServiceError::InternalError(err.to_string()))?;
+            .map_err(|err| ServiceError::InternalError(err.to_string()))?;
 
         for service in &self.services {
             let runtime_lane = match service.entry.scheduling {
                 ServiceScheduling::Standard => parts::SpawnRuntimeLane::Standard,
                 ServiceScheduling::HighPriority => {
                     let Some(runtime) = high_priority_runtime.clone() else {
-                        return Err(crate::models::ServiceError::InternalError(format!(
+                        return Err(ServiceError::InternalError(format!(
                             "HighPriority service '{}' is missing the shared high-priority runtime",
                             service.name()
                         )));
@@ -885,7 +885,7 @@ mod tests {
 
     /// A no-op initializer suitable for fake `ProviderEntry` values in graph tests.
     fn noop_init(
-        _: crate::models::RestartPolicy,
+        _: RestartPolicy,
         _: tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>> {
         Box::pin(async { Ok(()) })

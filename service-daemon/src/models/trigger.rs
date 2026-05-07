@@ -297,7 +297,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     ///
     /// Users can override the template's default via
     /// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
-    fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
+    fn scaling_policy() -> Option<ScalingPolicy> {
         None
     }
 
