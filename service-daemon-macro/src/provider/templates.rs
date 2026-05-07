@@ -491,8 +491,8 @@ fn unix_only_compile_error_guard(template_name: &str) -> proc_macro2::TokenStrea
 //      not guaranteed to inherit O_NONBLOCK across libc implementations,
 //      so we set it explicitly on every clone before handing to tokio.
 //   3. `try_get` is `async fn` even though the body has no await points.
-//      This keeps the API symmetric with `UnixConnect::try_connect` (which
-//      is necessarily async) so callers always write `.await?`. The compiler
+//      This keeps the API symmetric with `UnixConnect::connect` (which is
+//      necessarily async) so callers always write `.await?`. The compiler
 //      inlines no-await async fns -- zero runtime cost, room to add metric /
 //      tracing instrumentation later without breaking the API.
 //   4. Single-file `#[cfg(unix)]` gating + `compile_error!` on non-Unix.
@@ -795,7 +795,7 @@ pub fn generate_unix_listen_template(
             /// same physical path concurrently.
             //
             // async fn even though body is sync: keep API symmetric with
-            // UnixConnect::try_connect (which is necessarily async). No await
+            // UnixConnect::connect (which is necessarily async). No await
             // points -> compiler inlines, zero runtime cost. Future metric /
             // tracing instrumentation can be added without breaking the API.
             //
@@ -849,7 +849,7 @@ pub fn generate_unix_listen_template(
 //      init_fallible backoff lets us tolerate the peer starting slightly
 //      after us.
 //   2. Fail-fast on misconfiguration: a typo in the path becomes Fatal at
-//      init time, not at first try_connect() somewhere in the hot path.
+//      init time, not at first connect() somewhere in the hot path.
 // Peer servers WILL observe an accept() followed by an instant close --
 // this is normal and any reasonable server design handles port-scanner /
 // health-probe traffic the same way.
