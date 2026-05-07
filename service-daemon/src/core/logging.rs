@@ -23,7 +23,7 @@ use std::io::{Write as _, stderr};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
-use crate::models::{ServiceId, service::InstanceId};
+use crate::models::{ServiceError, ServiceId, service::InstanceId};
 
 /// Log severity level with zero heap allocation.
 ///
@@ -941,9 +941,12 @@ pub async fn file_log_service() -> anyhow::Result<()> {
         builder = builder.max_log_files(max_files);
     }
 
-    let file_appender = builder
-        .build(&config.directory)
-        .expect("Failed to initialize rolling file appender");
+    let file_appender = builder.build(&config.directory).map_err(|err| {
+        ServiceError::Fatal(format!(
+            "Failed to initialize rolling file appender for directory '{}' with prefix '{}': {}",
+            config.directory, config.file_prefix, err
+        ))
+    })?;
     let (mut writer, _guard) = non_blocking(file_appender);
 
     let mut rx = get_log_queue().tx.subscribe();
