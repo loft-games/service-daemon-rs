@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -36,7 +36,7 @@ use crate::core::context::{DaemonResources, process_token};
 use crate::models::ServiceError;
 use crate::models::{
     PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
-    ServiceDescription, ServiceId, ServiceStatus,
+    ServiceDescription, ServiceId, ServiceScheduling, ServiceStatus,
 };
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -95,7 +95,7 @@ pub struct ServiceDaemon {
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
-    /// Shared runtime used by HighPriority services.
+    /// Shared runtime lazily created for HighPriority services.
     high_priority_runtime: Option<Runtime>,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
@@ -221,6 +221,32 @@ impl ServiceDaemon {
         Ok(())
     }
 
+    fn has_high_priority_services(&self) -> bool {
+        self.services
+            .iter()
+            .any(|service| matches!(service.entry.scheduling, ServiceScheduling::HighPriority))
+    }
+
+    fn ensure_high_priority_runtime(&mut self) -> std::io::Result<Option<Handle>> {
+        if !self.has_high_priority_services() {
+            return Ok(None);
+        }
+
+        if self.high_priority_runtime.is_none() {
+            self.high_priority_runtime = Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("svc-high-priority")
+                    .build()?,
+            );
+        }
+
+        Ok(self
+            .high_priority_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone()))
+    }
+
     /// Get the cancellation token for this daemon.
     pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancellation_token.clone()
@@ -284,17 +310,22 @@ impl ServiceDaemon {
             return self;
         }
 
+        let high_priority_runtime = match self.ensure_high_priority_runtime() {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                tracing::error!(error = %err, "ServiceDaemon high-priority runtime creation failed");
+                self.shutdown();
+                return self;
+            }
+        };
+
         // Spawn all services in the background
         runner::spawn_all_services(
             &self.services,
             self.restart_policy,
             self.running_tasks.clone(),
             self.resources.clone(),
-            self.high_priority_runtime
-                .as_ref()
-                .expect("high_priority_runtime must exist while daemon is running")
-                .handle()
-                .clone(),
+            high_priority_runtime,
             &self.cancellation_token,
         )
         .await;
@@ -420,10 +451,10 @@ impl ServiceDaemon {
     }
 
     fn shutdown_high_priority_runtime(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take() {
-            std::thread::spawn(move || drop(runtime))
-                .join()
-                .expect("failed to shut down high-priority runtime");
+        if let Some(runtime) = self.high_priority_runtime.take()
+            && let Err(panic) = std::thread::spawn(move || drop(runtime)).join()
+        {
+            tracing::error!(?panic, "High-priority runtime shutdown thread panicked");
         }
     }
 
@@ -450,24 +481,36 @@ impl ServiceDaemon {
         let test_policy = RestartPolicy::for_testing();
         let daemon_token = self.cancellation_token.clone();
 
+        let high_priority_runtime = self
+            .ensure_high_priority_runtime()
+            .map_err(|err| crate::models::ServiceError::InternalError(err.to_string()))?;
+
         for service in &self.services {
+            let runtime_lane = match service.entry.scheduling {
+                ServiceScheduling::Standard => parts::SpawnRuntimeLane::Standard,
+                ServiceScheduling::HighPriority => {
+                    let Some(runtime) = high_priority_runtime.clone() else {
+                        return Err(crate::models::ServiceError::InternalError(format!(
+                            "HighPriority service '{}' is missing the shared high-priority runtime",
+                            service.name()
+                        )));
+                    };
+                    parts::SpawnRuntimeLane::HighPriority(runtime)
+                }
+                ServiceScheduling::Isolated => parts::SpawnRuntimeLane::Isolated,
+            };
+
             runner::spawn_service(parts::SpawnServiceParts {
                 service_id: service.id,
                 name: service.name(),
                 run: service.entry.wrapper,
                 watcher: service.entry.watcher,
                 policy: test_policy,
-                scheduling: service.entry.scheduling,
+                runtime_lane,
                 running_tasks: self.running_tasks.clone(),
                 resources: self.resources.clone(),
                 cancellation_token: service.cancellation_token.clone(),
                 daemon_token: daemon_token.clone(),
-                runtime: self
-                    .high_priority_runtime
-                    .as_ref()
-                    .expect("high_priority_runtime must exist while daemon is running")
-                    .handle()
-                    .clone(),
             })
             .await;
         }
@@ -674,13 +717,7 @@ impl ServiceDaemonBuilder {
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
-            high_priority_runtime: Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name("svc-high-priority")
-                    .build()
-                    .expect("Failed to create high-priority tokio runtime"),
-            ),
+            high_priority_runtime: None,
             external_cancel_token: self.external_cancel_token,
             resources,
         }
@@ -799,7 +836,7 @@ fn validate_dependency_graph<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ServiceParam;
+    use crate::models::{ServiceEntry, ServiceParam};
     use crate::service;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
@@ -808,6 +845,42 @@ mod tests {
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {
         Registry::builder().with_tag("__test_isolation__").build()
+    }
+
+    fn noop_service(
+        _: CancellationToken,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    static STANDARD_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "standard_test_service",
+        module: "test",
+        params: &[],
+        wrapper: noop_service,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        tags: &["__unit_runtime_standard__"],
+    };
+
+    static HIGH_PRIORITY_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "high_priority_test_service",
+        module: "test",
+        params: &[],
+        wrapper: noop_service,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::HighPriority,
+        tags: &["__unit_runtime_high_priority__"],
+    };
+
+    fn test_service(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
+        ServiceDescription {
+            id: ServiceId::new(id),
+            entry,
+            cancellation_token: CancellationToken::new(),
+        }
     }
 
     /// A no-op initializer suitable for fake `ProviderEntry` values in graph tests.
@@ -912,6 +985,69 @@ mod tests {
             .build();
         debug!("test_service_daemon_builder_default passed");
         let _ = daemon;
+    }
+
+    #[test]
+    fn build_does_not_create_high_priority_runtime() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[test]
+    fn ensure_high_priority_runtime_skips_standard_only_services() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        daemon.services = vec![test_service(1, &STANDARD_TEST_ENTRY)];
+
+        let runtime = daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime check should not fail for standard-only services");
+
+        assert!(runtime.is_none());
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[test]
+    fn ensure_high_priority_runtime_creates_for_high_priority_services() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        daemon.services = vec![test_service(1, &HIGH_PRIORITY_TEST_ENTRY)];
+
+        let runtime = daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime creation should succeed for high-priority services");
+
+        assert!(runtime.is_some());
+        assert!(daemon.high_priority_runtime.is_some());
+        daemon.shutdown_high_priority_runtime();
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_keeps_high_priority_runtime_absent_for_empty_registry() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        daemon.run().await;
+
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[test]
+    fn shutdown_high_priority_runtime_is_noop_when_never_created() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        daemon.shutdown_high_priority_runtime();
+
+        assert!(daemon.high_priority_runtime.is_none());
     }
 
     #[tokio::test]

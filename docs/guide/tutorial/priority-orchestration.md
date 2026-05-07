@@ -110,6 +110,8 @@ async fn admin_service() -> anyhow::Result<()> {
 `HighPriority` runs the service on the daemon's shared high-priority runtime.
 
 - Use it for latency-sensitive work that should stay on the shared runtime, but not compete with the standard lane.
+- The runtime is created lazily by `ServiceDaemon::run()` only when the final registry contains at least one `HighPriority` service or trigger.
+- `ServiceDaemonBuilder::build()` does not create this runtime, so applications that only use `Standard` and `Isolated` do not pay the extra shared runtime cost.
 - It is distinct from `Isolated`, which creates a private OS thread and Tokio runtime.
 
 ```rust,ignore

@@ -31,7 +31,7 @@ use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
 };
 
-use super::parts::{ServiceSupervisorParts, SpawnServiceParts};
+use super::parts::{ServiceSupervisorParts, SpawnRuntimeLane, SpawnServiceParts};
 use super::policy::RestartPolicy;
 
 // ---------------------------------------------------------------------------
@@ -579,12 +579,11 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         run,
         watcher,
         policy,
-        scheduling,
+        runtime_lane,
         running_tasks,
         resources,
         cancellation_token,
         daemon_token,
-        runtime,
     } = parts;
 
     let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
@@ -598,10 +597,10 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         daemon_token,
     });
 
-    let handle = match scheduling {
-        ServiceScheduling::Standard => tokio::spawn(supervisor.run_loop()),
-        ServiceScheduling::HighPriority => runtime.spawn(supervisor.run_loop()),
-        ServiceScheduling::Isolated => {
+    let handle = match runtime_lane {
+        SpawnRuntimeLane::Standard => tokio::spawn(supervisor.run_loop()),
+        SpawnRuntimeLane::HighPriority(runtime) => runtime.spawn(supervisor.run_loop()),
+        SpawnRuntimeLane::Isolated => {
             let (tx, rx) = tokio::sync::oneshot::channel();
             let thread_name = format!("svc-{}", name);
 
@@ -642,7 +641,7 @@ pub async fn spawn_all_services(
     restart_policy: RestartPolicy,
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
-    runtime: Handle,
+    high_priority_runtime: Option<Handle>,
     daemon_token: &CancellationToken,
 ) {
     info!("Beginning wave-based startup sequence...");
@@ -664,18 +663,38 @@ pub async fn spawn_all_services(
         );
 
         for service in &wave.services {
+            let runtime_lane = match service.entry.scheduling {
+                ServiceScheduling::Standard => SpawnRuntimeLane::Standard,
+                ServiceScheduling::HighPriority => {
+                    let Some(runtime) = high_priority_runtime.clone() else {
+                        error!(
+                            service = %service.name(),
+                            service_id = %service.id,
+                            "HighPriority service is missing the shared high-priority runtime"
+                        );
+                        resources
+                            .status_plane
+                            .insert(service.id, ServiceStatus::Terminated);
+                        resources.status_changed.notify_waiters();
+                        daemon_token.cancel();
+                        return;
+                    };
+                    SpawnRuntimeLane::HighPriority(runtime)
+                }
+                ServiceScheduling::Isolated => SpawnRuntimeLane::Isolated,
+            };
+
             spawn_service(SpawnServiceParts {
                 service_id: service.id,
                 name: service.name(),
                 run: service.entry.wrapper,
                 watcher: service.entry.watcher,
                 policy: restart_policy,
-                scheduling: service.entry.scheduling,
+                runtime_lane,
                 running_tasks: running_tasks.clone(),
                 resources: resources.clone(),
                 cancellation_token: service.cancellation_token.clone(),
                 daemon_token: daemon_token.clone(),
-                runtime: runtime.clone(),
             })
             .await;
         }

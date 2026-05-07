@@ -183,6 +183,9 @@ pub enum ServiceScheduling {
     #[default]
     Standard,
     /// High priority: runs on the daemon's shared high-priority runtime.
+    ///
+    /// The runtime is created lazily by `ServiceDaemon::run()` only when the
+    /// final registry contains at least one high-priority service or trigger.
     /// Use this for latency-sensitive work that should stay off the standard lane.
     HighPriority,
     /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
