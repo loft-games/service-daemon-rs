@@ -171,3 +171,29 @@ async fn test_unix_connect_path_accessor_returns_configured_path() {
         "path() should return the configured socket path"
     );
 }
+
+// ---------------------------------------------------------------------------
+// connect() opens a fresh independent stream per call.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+#[provider(UnixConnect("target/sd-uds-connect-convenience.sock"))]
+pub struct ConvenienceClient;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unix_connect_convenience_method_opens_independent_streams() {
+    let path = "target/sd-uds-connect-convenience.sock";
+    let _guard = prepare_socket_path(path);
+
+    let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
+
+    let provider = <ConvenienceClient as ManagedProvided>::resolve_managed()
+        .await
+        .expect("resolve_managed failed for ConvenienceClient");
+
+    let first_stream = provider.connect().await.expect("first connect failed");
+    let second_stream = provider.connect().await.expect("second connect failed");
+
+    drop(second_stream);
+    drop(first_stream);
+}

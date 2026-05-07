@@ -1,0 +1,12 @@
+[package]
+name = "example-unix-domain-socket"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Unix domain socket example: listener and connector provider templates."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon" }
+tokio = { version = "1.50", features = ["full"] }
+tracing = "0.1"
+anyhow = "1.0"

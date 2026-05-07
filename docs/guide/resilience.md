@@ -129,7 +129,7 @@ The probe-then-unlink path emits a `tracing::warn!` event with `provider` and `p
 The `UnixConnect` template performs **one connectivity probe at provider init time** and discards the result. The probe serves two purposes:
 
 1. With `eager = true`, it blocks the system startup wave until the peer is reachable. This is the canonical pattern for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
-2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `try_connect()` somewhere in the hot path.
+2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `connect()` somewhere in the hot path.
 
 Peer servers will observe a single `accept()` followed by an instant close from the probe -- this is normal and any reasonable server already handles port-scanner / health-probe traffic the same way.
 
@@ -145,7 +145,7 @@ Peer servers will observe a single `accept()` followed by an instant close from 
 > [!IMPORTANT]
 > `NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory missing). The same `io::ErrorKind` carries different meaning depending on which side of the connection you are.
 
-After init succeeds, `try_connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
+After init succeeds, `connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. `try_connect().await?` remains available as the explicitly named lower-level helper. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
 
 ## 3. Advanced Resilience: Wave Timeouts
 
