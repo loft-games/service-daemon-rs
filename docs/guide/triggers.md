@@ -106,7 +106,7 @@ Triggers also support the same `scheduling` parameter as services. The trigger h
 async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
-Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` triggers use the same shared runtime as high-priority services; it is created lazily by `ServiceDaemon::run()` only when needed. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` triggers use the same shared runtime as high-priority services; it is created lazily by `ServiceDaemon::run()` only when needed. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed. The generated trigger service participates in the same generation/lane diagnostics as regular services, including service sleep drift and runtime heartbeat probe summaries. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
 
 ## 3. Parameter Mapping Rules
 

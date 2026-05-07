@@ -55,7 +55,19 @@ Fatal outcomes stop the current service generation without entering the retry/ba
 
 A normal `Ok(())` return is also distinct from failure recovery. The supervisor still starts a fresh generation, but it does so immediately and records success on the backoff controller instead of counting the exit as another failure.
 
-### 1.4. `BackoffController` Internals
+### 1.4. Generation Diagnostics
+
+Each service generation is registered in an internal diagnostics store when the supervisor enters `Starting`. The generation records:
+
+- original scheduling lane (`Standard`, `HighPriority`, or `Isolated`);
+- lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
+- reload requests, restart decisions, backoff delay, and termination;
+- service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
+- runtime heartbeat probe observations for the lane.
+
+The supervisor includes a compact per-generation summary in the outcome tracing event. These diagnostics are internal and do not change restart/backoff behaviour. In particular, isolated thread/runtime/bridge startup failures are classified separately for diagnostics but still use the recoverable backoff path.
+
+### 1.5. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 
 
 #### State Management

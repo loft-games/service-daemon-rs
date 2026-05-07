@@ -10,8 +10,9 @@ use std::any::{Any, TypeId};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use crate::core::diagnostics::{SleepExitReason, SleepObservation, SleepObservationSource};
 use crate::models::{ServiceId, ServiceStatus};
 
 /// Runs a future within the context of a service.
@@ -298,15 +299,62 @@ pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
 pub async fn sleep(duration: Duration) -> bool {
     implicit_handshake();
     if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
+        let start = Instant::now();
         tokio::select! {
-            _ = tokio::time::sleep(duration) => true,
-            _ = id.cancellation_token.cancelled() => false,
-            _ = id.reload_token.cancelled() => false,
+            _ = tokio::time::sleep(duration) => {
+                let elapsed = start.elapsed();
+                record_service_sleep_observation(
+                    &id,
+                    SleepExitReason::Completed,
+                    duration,
+                    elapsed,
+                    elapsed.saturating_sub(duration),
+                );
+                true
+            }
+            _ = id.cancellation_token.cancelled() => {
+                record_service_sleep_observation(
+                    &id,
+                    SleepExitReason::Shutdown,
+                    duration,
+                    start.elapsed(),
+                    Duration::ZERO,
+                );
+                false
+            }
+            _ = id.reload_token.cancelled() => {
+                record_service_sleep_observation(
+                    &id,
+                    SleepExitReason::Reload,
+                    duration,
+                    start.elapsed(),
+                    Duration::ZERO,
+                );
+                false
+            }
         }
     } else {
         // Outside of a service context, just perform a regular sleep
         tokio::time::sleep(duration).await;
         true
+    }
+}
+
+fn record_service_sleep_observation(
+    id: &ServiceIdentity,
+    reason: SleepExitReason,
+    requested: Duration,
+    elapsed: Duration,
+    drift: Duration,
+) {
+    if let Some(diagnostics) = id.diagnostics.as_ref() {
+        diagnostics.record_sleep_observation(SleepObservation {
+            source: SleepObservationSource::ServiceSleep,
+            reason,
+            requested,
+            elapsed,
+            drift,
+        });
     }
 }
 
@@ -372,4 +420,71 @@ pub fn current_service_id() -> ServiceId {
     CURRENT_SERVICE
         .try_with(|identity| identity.service_id)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane};
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn sleep_records_completed_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(11);
+        let diagnostics =
+            store.register_generation(service_id, "sleep_completed", 1, RuntimeLane::Standard);
+        let identity = ServiceIdentity::new_with_diagnostics(
+            service_id,
+            "sleep_completed",
+            CancellationToken::new(),
+            CancellationToken::new(),
+            diagnostics,
+        );
+
+        let completed = __run_service_scope(identity, DaemonResources::new(), || async {
+            sleep(Duration::ZERO).await
+        })
+        .await;
+
+        assert!(completed);
+        let generation = store
+            .generation_snapshot(service_id, 1)
+            .expect("generation diagnostics should exist");
+        assert_eq!(generation.aggregate.service_sleep.completed, 1);
+        assert_eq!(generation.aggregate.service_sleep.interrupted, 0);
+
+        let lane = store.lane_snapshot(RuntimeLane::Standard);
+        assert_eq!(lane.aggregate.service_sleep.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn sleep_records_reload_interruption_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(12);
+        let diagnostics =
+            store.register_generation(service_id, "sleep_reload", 1, RuntimeLane::Standard);
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+        let identity = ServiceIdentity::new_with_diagnostics(
+            service_id,
+            "sleep_reload",
+            CancellationToken::new(),
+            reload_token,
+            diagnostics,
+        );
+
+        let completed = __run_service_scope(identity, DaemonResources::new(), || async {
+            sleep(Duration::from_secs(30)).await
+        })
+        .await;
+
+        assert!(!completed);
+        let generation = store
+            .generation_snapshot(service_id, 1)
+            .expect("generation diagnostics should exist");
+        assert_eq!(generation.aggregate.service_sleep.completed, 0);
+        assert_eq!(generation.aggregate.service_sleep.interrupted, 1);
+        assert_eq!(generation.aggregate.service_sleep.total_drift_ms, 0);
+    }
 }

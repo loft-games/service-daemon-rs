@@ -1,5 +1,6 @@
 pub mod context;
 pub mod di;
+pub(crate) mod diagnostics;
 pub mod logging;
 pub mod managed_state;
 pub mod provider_init;

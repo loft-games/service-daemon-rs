@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::diagnostics::GenerationDiagnosticsHandle;
 use crate::models::{ServiceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
@@ -86,6 +87,7 @@ pub struct ServiceIdentity {
     pub name: &'static str,
     pub cancellation_token: CancellationToken,
     pub reload_token: CancellationToken,
+    pub(crate) diagnostics: Option<GenerationDiagnosticsHandle>,
     /// Shared flag: true means the auto-handshake (Initializing->Healthy) has been performed.
     /// Uses Arc to persist the state across TLS clones within the same task generation.
     pub(crate) is_handshake_done: Arc<AtomicBool>,
@@ -104,6 +106,24 @@ impl ServiceIdentity {
             name,
             cancellation_token,
             reload_token,
+            diagnostics: None,
+            is_handshake_done: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub(crate) fn new_with_diagnostics(
+        service_id: ServiceId,
+        name: &'static str,
+        cancellation_token: CancellationToken,
+        reload_token: CancellationToken,
+        diagnostics: GenerationDiagnosticsHandle,
+    ) -> Self {
+        Self {
+            service_id,
+            name,
+            cancellation_token,
+            reload_token,
+            diagnostics: Some(diagnostics),
             is_handshake_done: Arc::new(AtomicBool::new(false)),
         }
     }

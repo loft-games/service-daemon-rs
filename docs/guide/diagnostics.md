@@ -107,7 +107,20 @@ if let Some(mermaid) = export_mermaid() {
 
 This is particularly useful for debugging complex "cascading" triggers where one event leads to a chain of reactions.
 
-## 3. What to Look For
+## 3. Runtime Pressure Baseline
+
+The daemon now keeps an internal runtime-pressure baseline for diagnostics. This is intentionally not exposed as a stable public metrics API yet; it exists to make lifecycle logs and future API design grounded in observed behaviour.
+
+Two low-level signals feed this baseline:
+
+- **Service sleep drift**: `service_daemon::sleep(duration)` records `requested`, `elapsed`, and `drift = elapsed - requested` when the sleep completes. Reload and shutdown interruptions are counted separately and do not contribute drift.
+- **Runtime heartbeat probes**: the framework runs a low-frequency internal sleep probe on the Standard/control runtime, on the shared HighPriority runtime when it exists, and inside each Isolated private runtime generation.
+
+The logical lanes are reported separately as `Standard`, `HighPriority`, and `Isolated`. The Standard probe observes the shared daemon/control runtime as well as Standard service bodies, so treat it as shared-runtime pressure rather than pure business-service pressure.
+
+Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, backoff delay, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
+
+## 4. What to Look For
 
 > [!WARNING]
 > Do **not** add `tracing_subscriber::fmt::layer()` alongside `DaemonLayer`.

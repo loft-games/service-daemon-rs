@@ -32,6 +32,7 @@ use petgraph::{
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::{DaemonResources, process_token};
+use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_probe};
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
@@ -97,11 +98,13 @@ pub struct ServiceDaemon {
     cancellation_token: CancellationToken,
     /// Shared runtime lazily created for HighPriority services.
     high_priority_runtime: Option<Runtime>,
+    runtime_probe_tasks: Vec<JoinHandle<()>>,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: Arc<DaemonResources>,
+    diagnostics: Arc<DiagnosticsStore>,
 }
 
 impl Drop for ServiceDaemon {
@@ -247,6 +250,23 @@ impl ServiceDaemon {
             .map(|runtime| runtime.handle().clone()))
     }
 
+    fn spawn_runtime_probe(&mut self, handle: &Handle, lane: RuntimeLane) {
+        let diagnostics = self.diagnostics.clone();
+        let token = self.cancellation_token.clone();
+        self.runtime_probe_tasks
+            .push(handle.spawn(run_lane_runtime_probe(diagnostics, lane, token)));
+    }
+
+    async fn stop_runtime_probes(&mut self) {
+        for handle in self.runtime_probe_tasks.drain(..) {
+            if let Err(err) = handle.await
+                && !err.is_cancelled()
+            {
+                tracing::warn!(error = ?err, "Runtime probe task ended unexpectedly");
+            }
+        }
+    }
+
     /// Get the cancellation token for this daemon.
     pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancellation_token.clone()
@@ -319,12 +339,18 @@ impl ServiceDaemon {
             }
         };
 
+        self.spawn_runtime_probe(&Handle::current(), RuntimeLane::Standard);
+        if let Some(runtime) = high_priority_runtime.as_ref() {
+            self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
+        }
+
         // Spawn all services in the background
         runner::spawn_all_services(
             &self.services,
             self.restart_policy,
             self.running_tasks.clone(),
             self.resources.clone(),
+            self.diagnostics.clone(),
             high_priority_runtime,
             &self.cancellation_token,
         )
@@ -438,6 +464,7 @@ impl ServiceDaemon {
         )
         .await;
 
+        self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime();
 
         #[cfg(feature = "diagnostics")]
@@ -485,6 +512,11 @@ impl ServiceDaemon {
             .ensure_high_priority_runtime()
             .map_err(|err| ServiceError::InternalError(err.to_string()))?;
 
+        self.spawn_runtime_probe(&Handle::current(), RuntimeLane::Standard);
+        if let Some(runtime) = high_priority_runtime.as_ref() {
+            self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
+        }
+
         for service in &self.services {
             let (supervisor_lane, generation_lane) = match service.entry.scheduling {
                 ServiceScheduling::Standard => (
@@ -515,10 +547,12 @@ impl ServiceDaemon {
                 run: service.entry.wrapper,
                 watcher: service.entry.watcher,
                 policy: test_policy,
+                scheduling: service.entry.scheduling,
                 supervisor_lane,
                 generation_lane,
                 running_tasks: self.running_tasks.clone(),
                 resources: self.resources.clone(),
+                diagnostics: self.diagnostics.clone(),
                 cancellation_token: service.cancellation_token.clone(),
                 daemon_token: daemon_token.clone(),
             })
@@ -536,6 +570,7 @@ impl ServiceDaemon {
         )
         .await;
 
+        self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime_detached();
 
         Ok(())
@@ -728,8 +763,10 @@ impl ServiceDaemonBuilder {
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
             high_priority_runtime: None,
+            runtime_probe_tasks: Vec::new(),
             external_cancel_token: self.external_cancel_token,
             resources,
+            diagnostics: Arc::new(DiagnosticsStore::new()),
         }
     }
 }

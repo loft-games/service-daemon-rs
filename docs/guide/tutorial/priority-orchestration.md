@@ -59,6 +59,8 @@ When you stop the system (Ctrl+C), the process reverses. We want to stop the "ou
 
 Priority decides when a service or trigger starts and stops. Scheduling decides whether its execution body uses the standard shared runtime, the shared high-priority runtime, or an isolated thread while daemon supervision remains lifecycle-managed.
 
+Diagnostics track these scheduling choices as three logical runtime lanes: `Standard`, `HighPriority`, and `Isolated`. The observations are diagnostic only: they distinguish lane pressure and generation outcomes, but they do not change scheduling policy or migrate services automatically.
+
 ```rust,ignore
 use service_daemon::prelude::*;
 use service_daemon::{provider, service, trigger};
