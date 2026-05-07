@@ -81,6 +81,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
 | **diagnostics** | Behavioral Topology and Mermaid export (`diagnostics` feature) | `cargo run -p example-diagnostics` |
 | **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
+| **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
 > **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
