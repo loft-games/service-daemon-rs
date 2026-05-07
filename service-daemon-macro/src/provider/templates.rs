@@ -809,6 +809,14 @@ pub fn generate_unix_listen_template(
                 service_daemon::tokio::net::UnixListener::from_std(cloned)
             }
 
+            /// Accept one connection from the configured Unix socket.
+            pub async fn accept(&self) -> std::io::Result<(
+                service_daemon::tokio::net::UnixStream,
+                service_daemon::tokio::net::unix::SocketAddr,
+            )> {
+                self.try_get().await?.accept().await
+            }
+
             /// Returns the local address this socket is bound to.
             pub fn local_addr(&self) -> std::io::Result<std::os::unix::net::SocketAddr> {
                 self.0.local_addr()
@@ -996,6 +1004,11 @@ pub fn generate_unix_connect_template(
             /// not pool because UDS connections are local and cheap.
             pub async fn try_connect(&self) -> std::io::Result<service_daemon::tokio::net::UnixStream> {
                 service_daemon::tokio::net::UnixStream::connect(&*self.path).await
+            }
+
+            /// Open a fresh connection to the configured Unix socket.
+            pub async fn connect(&self) -> std::io::Result<service_daemon::tokio::net::UnixStream> {
+                self.try_connect().await
             }
 
             /// Returns the configured socket path.

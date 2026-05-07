@@ -95,9 +95,9 @@ If you call `TcpListener::bind()` inside a service, the port doesn't open until 
 
 These two templates form the UDS counterpart of `Listen` and work as a pair: one service runs the accept loop via `UnixListen`, another runs the client side via `UnixConnect`. Both are gated by `#[cfg(unix)]`; on non-Unix targets the macro emits a `compile_error!` at the declaration site.
 
-- **`UnixListen("/path/to/sock")`**: wraps `Arc<std::os::unix::net::UnixListener>`. `try_get().await?` returns a fresh `tokio::net::UnixListener` via FD cloning -- semantics identical to TCP `Listen::get()`. Critical difference: at init time, if the path already exists, the template probes with `UnixStream::connect`; a live process answering means the framework refuses fatally, while a failed probe means the file is stale and is unlinked before bind. This protects a legitimately-running peer daemon while still recovering from unclean shutdowns.
+- **`UnixListen("/path/to/sock")`**: wraps `Arc<std::os::unix::net::UnixListener>`. `accept().await?` accepts a connection from a freshly cloned listener; use `try_get().await?` when you need direct access to that cloned `tokio::net::UnixListener`. Critical difference: at init time, if the path already exists, the template probes with `UnixStream::connect`; a live process answering means the framework refuses fatally, while a failed probe only unlinks the path after confirming it is a Unix socket. Ordinary files and other filesystem nodes are refused and preserved.
 
-- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `try_connect().await?` opens a fresh `tokio::net::UnixStream` on each call (no pooling -- UDS connections are local and cheap). At init time the template performs one reachability probe and immediately drops the connection. Pair with `eager = true` to block the startup wave until the peer sidecar / supervisor is up.
+- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `connect().await?` opens a fresh `tokio::net::UnixStream` on each call (no pooling -- UDS connections are local and cheap); `try_connect().await?` is the equivalent lower-level helper. At init time the template performs one reachability probe and immediately drops the connection. Pair with `eager = true` to block the startup wave until the peer sidecar / supervisor is up.
 
 ```rust
 #[derive(Clone)]
@@ -110,14 +110,14 @@ pub struct PeerClient;
 
 #[service]
 pub async fn web_server(api: Arc<ApiSocket>) -> anyhow::Result<()> {
-    let l = api.try_get().await?;
-    // accept loop ...
+    let (sock, _) = api.accept().await?;
+    // handle sock ...
     Ok(())
 }
 
 #[service]
 pub async fn supervisor_caller(peer: Arc<PeerClient>) -> anyhow::Result<()> {
-    let mut conn = peer.try_connect().await?;
+    let mut conn = peer.connect().await?;
     // request/response ...
     Ok(())
 }

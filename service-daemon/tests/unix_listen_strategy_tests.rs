@@ -264,3 +264,36 @@ async fn test_unix_listen_fd_clone() {
         "clones must share the same bound pathname"
     );
 }
+
+// ---------------------------------------------------------------------------
+// accept() accepts one connection from the configured socket.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+#[provider(UnixListen("target/sd-uds-listen-accept.sock"))]
+pub struct AcceptListener;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unix_listen_accept_convenience_method() {
+    let path = "target/sd-uds-listen-accept.sock";
+    let _guard = prepare_socket_path(path);
+
+    let provider = <AcceptListener as ManagedProvided>::resolve_managed()
+        .await
+        .expect("resolve_managed failed for AcceptListener");
+
+    let accept_task = tokio::spawn(async move {
+        let (connection, _) = provider
+            .accept()
+            .await
+            .expect("AcceptListener.accept failed");
+        drop(connection);
+    });
+
+    let connection = tokio::net::UnixStream::connect(path)
+        .await
+        .expect("client connection failed");
+    drop(connection);
+
+    accept_task.await.expect("accept task panicked");
+}

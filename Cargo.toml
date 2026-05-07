@@ -12,5 +12,6 @@ members = [
     "examples/memory-analysis",
     "examples/diagnostics",
     "examples/scheduling",
+    "examples/unix-domain-socket",
 ]
 resolver = "2"

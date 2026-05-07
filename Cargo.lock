@@ -355,6 +355,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-unix-domain-socket"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "service-daemon",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "examples-scheduling"
 version = "0.1.0"
 dependencies = [
