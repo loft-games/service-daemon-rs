@@ -15,7 +15,8 @@
 //!   interruption-aware waiting via `tokio::select!`.
 
 use rand::RngExt;
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -337,6 +338,104 @@ impl ScalingPolicyBuilder {
 }
 
 // ---------------------------------------------------------------------------
+// RestartStormGuard -- internal service restart rate limiter
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RestartStormConfig {
+    window: Duration,
+    failure_threshold: usize,
+    suppression_delay: Duration,
+}
+
+impl Default for RestartStormConfig {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(20),
+            failure_threshold: 6,
+            suppression_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RestartStormDecision {
+    pub policy_delay: Duration,
+    pub effective_delay: Duration,
+    pub rate_limited: bool,
+    pub window_failures: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct RestartStormGuard {
+    config: RestartStormConfig,
+    failures: VecDeque<Instant>,
+}
+
+impl Default for RestartStormGuard {
+    fn default() -> Self {
+        Self::new(RestartStormConfig::default())
+    }
+}
+
+impl RestartStormGuard {
+    pub(crate) fn new(config: RestartStormConfig) -> Self {
+        Self {
+            config: RestartStormConfig {
+                failure_threshold: config.failure_threshold.max(1),
+                ..config
+            },
+            failures: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn record_failure(
+        &mut self,
+        now: Instant,
+        policy_delay: Duration,
+    ) -> RestartStormDecision {
+        self.prune(now);
+        self.failures.push_back(now);
+
+        let window_failures = self.failures.len();
+        let storm_delay = if window_failures >= self.config.failure_threshold {
+            self.config.suppression_delay
+        } else {
+            Duration::ZERO
+        };
+        let effective_delay = policy_delay.max(storm_delay);
+
+        RestartStormDecision {
+            policy_delay,
+            effective_delay,
+            rate_limited: effective_delay > policy_delay,
+            window_failures,
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.failures.clear();
+    }
+
+    pub(crate) fn maybe_reset(&mut self, elapsed: Duration, reset_after: Duration) {
+        if elapsed >= reset_after {
+            self.reset();
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while self
+            .failures
+            .front()
+            .and_then(|failure| now.checked_duration_since(*failure))
+            .is_some_and(|elapsed| elapsed > self.config.window)
+        {
+            self.failures.pop_front();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BackoffController -- stateful retry engine
 // ---------------------------------------------------------------------------
 
@@ -423,7 +522,7 @@ impl BackoffController {
     /// The delay is multiplied according to the policy's exponential
     /// backoff parameters.
     pub fn record_failure(&mut self) {
-        self.attempt_count += 1;
+        self.attempt_count = self.attempt_count.saturating_add(1);
         self.current_delay = self.policy.next_delay(self.current_delay);
     }
 
@@ -617,6 +716,113 @@ mod tests {
 
         let result = ctrl.wait_or_cancel(&token).await;
         assert!(!result, "Should return false when cancelled");
+    }
+
+    #[test]
+    fn test_backoff_controller_record_failure_saturates_attempt_count() {
+        let mut ctrl = BackoffController::new(RestartPolicy::for_testing());
+        ctrl.attempt_count = u32::MAX;
+
+        ctrl.record_failure();
+
+        assert_eq!(ctrl.attempt_count(), u32::MAX);
+    }
+
+    #[test]
+    fn restart_storm_guard_inactive_before_threshold() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 3,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        let first = guard.record_failure(now, Duration::from_secs(1));
+        let second = guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(2));
+
+        assert!(!first.rate_limited);
+        assert_eq!(first.effective_delay, Duration::from_secs(1));
+        assert_eq!(second.window_failures, 2);
+        assert!(!second.rate_limited);
+        assert_eq!(second.effective_delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn restart_storm_guard_extends_delay_after_threshold() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        let decision = guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(2));
+
+        assert_eq!(decision.window_failures, 2);
+        assert!(decision.rate_limited);
+        assert_eq!(decision.policy_delay, Duration::from_secs(2));
+        assert_eq!(decision.effective_delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn restart_storm_guard_prunes_failures_outside_window() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        let decision = guard.record_failure(now + Duration::from_secs(11), Duration::from_secs(2));
+
+        assert_eq!(decision.window_failures, 1);
+        assert!(!decision.rate_limited);
+        assert_eq!(decision.effective_delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn restart_storm_guard_reset_clears_suppression() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        let limited = guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(1));
+        guard.reset();
+        let after_reset =
+            guard.record_failure(now + Duration::from_secs(2), Duration::from_secs(1));
+
+        assert!(limited.rate_limited);
+        assert_eq!(after_reset.window_failures, 1);
+        assert!(!after_reset.rate_limited);
+    }
+
+    #[test]
+    fn restart_storm_guard_maybe_reset_uses_reset_after() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(1));
+        guard.maybe_reset(Duration::from_secs(5), Duration::from_secs(5));
+        let decision = guard.record_failure(now + Duration::from_secs(2), Duration::from_secs(1));
+
+        assert_eq!(decision.window_failures, 1);
+        assert!(!decision.rate_limited);
     }
 
     // -----------------------------------------------------------------------

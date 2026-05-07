@@ -130,6 +130,9 @@ async fn watchdog_service() -> anyhow::Result<()> {
 - Best for deterministic loops, blocking adapters, or workloads that should not contend with the shared runtime.
 - Useful for things like tight polling intervals, device I/O bridges, or thread-affine integrations.
 - The daemon still owns supervision, reload signaling, restart/backoff, and shutdown coordination.
+- An internal admission gate limits concurrent isolated startup allocation so resource pressure does not create a thread/runtime creation storm.
+- The gate only covers OS thread spawn and private Tokio runtime build; once the generation body starts, it does not limit the body's lifetime.
+- Startup allocation failures are recoverable isolated startup failures and use the same backoff/storm-guard path as other recoverable service failures.
 - Comes with a higher runtime cost than `Standard`, so use it deliberately.
 
 ```rust,ignore

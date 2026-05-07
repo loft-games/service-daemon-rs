@@ -19,8 +19,7 @@ use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::runtime::Handle;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
@@ -32,14 +31,15 @@ use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind, RuntimeLane,
     run_generation_runtime_probe,
 };
+use crate::models::policy::RestartStormGuard;
 use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
 };
 
 use super::parts::{
-    GenerationExecutionLane, ServiceSupervisorParts, SpawnServiceParts, SupervisorSpawnLane,
+    GenerationExecutionLane, ServiceSupervisorParts, SpawnAllServicesParts, SpawnServiceParts,
+    SupervisorSpawnLane,
 };
-use super::policy::RestartPolicy;
 
 type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
 
@@ -64,25 +64,36 @@ enum SupervisorState {
     Terminated,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum RestartDecision {
-    Immediate,
-    WithBackoff,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartFailureKind {
+    RecoverableError,
+    Panic,
+    IsolatedStartupFailure,
+    InternalSupervisorError,
 }
 
-impl RestartDecision {
-    fn should_record_failure(self) -> bool {
-        matches!(self, Self::WithBackoff)
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartDecision {
+    Immediate,
+    WithBackoff(RestartFailureKind),
 }
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsolatedStartupFailureKind {
+    ThreadSpawn,
+    RuntimeBuild,
+    BridgeClosed,
+    StartupGateCancelled,
+}
+
 #[derive(Debug)]
 struct IsolatedGenerationStartupError {
     service_name: &'static str,
+    kind: IsolatedStartupFailureKind,
     message: String,
 }
 
@@ -90,17 +101,22 @@ impl fmt::Display for IsolatedGenerationStartupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "isolated service generation for '{}' failed: {}",
-            self.service_name, self.message
+            "isolated service generation for '{}' failed during {:?}: {}",
+            self.service_name, self.kind, self.message
         )
     }
 }
 
 impl std::error::Error for IsolatedGenerationStartupError {}
 
-fn isolated_generation_error(name: &'static str, message: String) -> ServiceGenerationOutcome {
+fn isolated_generation_error(
+    name: &'static str,
+    kind: IsolatedStartupFailureKind,
+    message: String,
+) -> ServiceGenerationOutcome {
     Ok(Err(Error::new(IsolatedGenerationStartupError {
         service_name: name,
+        kind,
         message,
     })))
 }
@@ -157,69 +173,104 @@ fn run_scoped_service_generation(
 
 fn run_isolated_service_generation(
     parts: ServiceGenerationParts,
+    startup_permits: Arc<Semaphore>,
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let name = parts.name;
-    let service_id = parts.service_id;
-    let generation = parts.generation;
-    let thread_name = format!("svc-{}", name);
-    let thread_name_for_error = thread_name.clone();
-
-    match std::thread::Builder::new()
-        .name(thread_name)
-        .spawn(move || {
-            let outcome = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => {
-                    let probe_diagnostics = parts.diagnostics.clone();
-                    runtime.block_on(async move {
-                        let probe_token = CancellationToken::new();
-                        let probe_handle = tokio::spawn(run_generation_runtime_probe(
-                            probe_diagnostics,
-                            probe_token.clone(),
-                        ));
-                        let outcome = run_scoped_service_generation(parts).await;
-                        probe_token.cancel();
-                        if let Err(err) = probe_handle.await {
-                            warn!(
-                                service = %name,
-                                service_id = %service_id,
-                                generation,
-                                error = ?err,
-                                "Isolated runtime probe task ended unexpectedly"
-                            );
-                        }
-                        outcome
-                    })
+    Box::pin(async move {
+        let name = parts.name;
+        let service_id = parts.service_id;
+        let generation = parts.generation;
+        let cancellation_token = parts.cancellation_token.clone();
+        let reload_token = parts.reload_token.clone();
+        let permit = tokio::select! {
+            permit = startup_permits.acquire_owned() => match permit {
+                Ok(permit) => permit,
+                Err(err) => {
+                    return isolated_generation_error(
+                        name,
+                        IsolatedStartupFailureKind::StartupGateCancelled,
+                        format!("isolated startup gate closed: {}", err),
+                    );
                 }
-                Err(err) => isolated_generation_error(
+            },
+            _ = cancellation_token.cancelled() => {
+                return isolated_generation_error(
                     name,
-                    format!("failed to create private tokio runtime: {}", err),
-                ),
-            };
-            let _ = tx.send(outcome);
-        }) {
-        Ok(_) => Box::pin(async move {
-            match rx.await {
+                    IsolatedStartupFailureKind::StartupGateCancelled,
+                    "shutdown while waiting for isolated startup permit".to_string(),
+                );
+            }
+            _ = reload_token.cancelled() => {
+                return isolated_generation_error(
+                    name,
+                    IsolatedStartupFailureKind::StartupGateCancelled,
+                    "reload while waiting for isolated startup permit".to_string(),
+                );
+            }
+        };
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let thread_name = format!("svc-{}", name);
+        let thread_name_for_error = thread_name.clone();
+
+        match std::thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || {
+                let outcome = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => {
+                        drop(permit);
+                        let probe_diagnostics = parts.diagnostics.clone();
+                        runtime.block_on(async move {
+                            let probe_token = CancellationToken::new();
+                            let probe_handle = tokio::spawn(run_generation_runtime_probe(
+                                probe_diagnostics,
+                                probe_token.clone(),
+                            ));
+                            let outcome = run_scoped_service_generation(parts).await;
+                            probe_token.cancel();
+                            if let Err(err) = probe_handle.await {
+                                warn!(
+                                    service = %name,
+                                    service_id = %service_id,
+                                    generation,
+                                    error = ?err,
+                                    "Isolated runtime probe task ended unexpectedly"
+                                );
+                            }
+                            outcome
+                        })
+                    }
+                    Err(err) => {
+                        drop(permit);
+                        isolated_generation_error(
+                            name,
+                            IsolatedStartupFailureKind::RuntimeBuild,
+                            format!("failed to create private tokio runtime: {}", err),
+                        )
+                    }
+                };
+                let _ = tx.send(outcome);
+            }) {
+            Ok(_) => match rx.await {
                 Ok(outcome) => outcome,
                 Err(err) => isolated_generation_error(
                     name,
+                    IsolatedStartupFailureKind::BridgeClosed,
                     format!("thread exited before reporting outcome: {}", err),
                 ),
-            }
-        }),
-        Err(err) => Box::pin(async move {
-            isolated_generation_error(
+            },
+            Err(err) => isolated_generation_error(
                 name,
+                IsolatedStartupFailureKind::ThreadSpawn,
                 format!(
                     "failed to spawn thread '{}': {}",
                     thread_name_for_error, err
                 ),
-            )
-        }),
-    }
+            ),
+        }
+    })
 }
 
 /// Supervises a single service's lifecycle, including restarts and signal handling.
@@ -234,8 +285,10 @@ struct ServiceSupervisor {
     scheduling: ServiceScheduling,
     generation_lane: GenerationExecutionLane,
     backoff: BackoffController,
+    restart_storm: RestartStormGuard,
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
+    isolated_startup_permits: Arc<Semaphore>,
     cancellation_token: CancellationToken,
     daemon_token: CancellationToken,
 
@@ -260,6 +313,7 @@ impl ServiceSupervisor {
             generation_lane,
             resources,
             diagnostics,
+            isolated_startup_permits,
             cancellation_token,
             daemon_token,
         } = parts;
@@ -272,8 +326,10 @@ impl ServiceSupervisor {
             scheduling,
             generation_lane,
             backoff: BackoffController::new(policy),
+            restart_storm: RestartStormGuard::default(),
             resources,
             diagnostics,
+            isolated_startup_permits,
             cancellation_token,
             daemon_token,
             generation_start: None,
@@ -387,20 +443,25 @@ impl ServiceSupervisor {
                         GenerationExitKind::ProviderInitError,
                     );
                 }
-                if e.downcast_ref::<IsolatedGenerationStartupError>().is_some() {
-                    error!("Service {} isolated startup failed: {:?}", self.name, e);
+                if let Some(startup_err) = e.downcast_ref::<IsolatedGenerationStartupError>() {
+                    error!(
+                        service = %self.name,
+                        startup_failure_kind = ?startup_err.kind,
+                        error = ?e,
+                        "Service isolated startup failed"
+                    );
                     return (
                         ServiceStatus::Recovering(format!("{:?}", e)),
                         should_restart,
                         should_shutdown_daemon,
-                        RestartDecision::WithBackoff,
+                        RestartDecision::WithBackoff(RestartFailureKind::IsolatedStartupFailure),
                         GenerationExitKind::IsolatedStartupFailure,
                     );
                 }
                 error!("Service {} failed: {:?}", self.name, e);
                 (
                     ServiceStatus::Recovering(format!("{:?}", e)),
-                    RestartDecision::WithBackoff,
+                    RestartDecision::WithBackoff(RestartFailureKind::RecoverableError),
                     GenerationExitKind::RecoverableError,
                 )
             }
@@ -415,7 +476,7 @@ impl ServiceSupervisor {
                 error!("Service {} panicked: {}", self.name, panic_msg);
                 (
                     ServiceStatus::Recovering(format!("Panic: {}", panic_msg)),
-                    RestartDecision::WithBackoff,
+                    RestartDecision::WithBackoff(RestartFailureKind::Panic),
                     GenerationExitKind::Panic,
                 )
             }
@@ -445,9 +506,20 @@ impl ServiceSupervisor {
         )
     }
 
-    fn record_restart_decision(&self, decision: RestartDecision, delay: Duration) {
+    fn record_restart_decision(
+        &self,
+        decision: RestartDecision,
+        policy_delay: Duration,
+        effective_delay: Duration,
+        rate_limited: bool,
+    ) {
         if let Some(diagnostics) = self.generation_diagnostics.as_ref() {
-            diagnostics.record_restart(matches!(decision, RestartDecision::WithBackoff), delay);
+            diagnostics.record_restart(
+                matches!(decision, RestartDecision::WithBackoff(_)),
+                policy_delay,
+                effective_delay,
+                rate_limited,
+            );
         }
     }
 
@@ -455,15 +527,12 @@ impl ServiceSupervisor {
     /// Returns `true` if restart should proceed, `false` if shutdown was requested.
     /// Immediate restarts after a clean exit or reload do not advance the backoff counter.
     async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
-        if matches!(decision, RestartDecision::Immediate) {
-            self.record_restart_decision(decision, Duration::ZERO);
-            if decision.should_record_failure() {
-                self.backoff.record_failure();
-            } else {
-                self.backoff.record_success();
-            }
+        let RestartDecision::WithBackoff(failure_kind) = decision else {
+            self.record_restart_decision(decision, Duration::ZERO, Duration::ZERO, false);
+            self.backoff.record_success();
+            self.restart_storm.reset();
             return true;
-        }
+        };
 
         let reload_signal = self
             .resources
@@ -472,14 +541,26 @@ impl ServiceSupervisor {
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
-        let restart_delay = self.backoff.current_delay();
-        self.record_restart_decision(decision, restart_delay);
+        let storm_decision = self
+            .restart_storm
+            .record_failure(Instant::now(), self.backoff.current_delay());
+        let restart_delay = storm_decision.effective_delay;
+        self.record_restart_decision(
+            decision,
+            storm_decision.policy_delay,
+            restart_delay,
+            storm_decision.rate_limited,
+        );
         warn!(
             service = %self.name,
             service_id = %self.service_id,
             generation = self.generation,
-            restart_delay_ms = duration_millis(restart_delay),
+            policy_delay_ms = duration_millis(storm_decision.policy_delay),
+            effective_delay_ms = duration_millis(restart_delay),
+            rate_limited = storm_decision.rate_limited,
+            storm_window_failures = storm_decision.window_failures,
             restart_decision = ?decision,
+            restart_failure_kind = ?failure_kind,
             "Restarting service after backoff"
         );
 
@@ -489,6 +570,7 @@ impl ServiceSupervisor {
                 info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
                 // Immediate reload -- reset backoff so we restart right away
                 self.backoff.record_success();
+                self.restart_storm.reset();
                 return true;
             }
             _ = self.cancellation_token.cancelled() => {
@@ -499,11 +581,7 @@ impl ServiceSupervisor {
             }
         }
 
-        if decision.should_record_failure() {
-            self.backoff.record_failure();
-        } else {
-            self.backoff.record_success();
-        }
+        self.backoff.record_failure();
         true
     }
 
@@ -603,7 +681,10 @@ impl ServiceSupervisor {
             GenerationExecutionLane::CurrentRuntime => {
                 run_scoped_service_generation(generation_parts)
             }
-            GenerationExecutionLane::Isolated => run_isolated_service_generation(generation_parts),
+            GenerationExecutionLane::Isolated => run_isolated_service_generation(
+                generation_parts,
+                self.isolated_startup_permits.clone(),
+            ),
         };
 
         let result = tokio::select! {
@@ -694,7 +775,9 @@ impl ServiceSupervisor {
                 .status_plane
                 .insert(self.service_id, ServiceStatus::Recovering(message));
             self.resources.status_changed.notify_waiters();
-            return SupervisorState::Restart(RestartDecision::WithBackoff);
+            return SupervisorState::Restart(RestartDecision::WithBackoff(
+                RestartFailureKind::InternalSupervisorError,
+            ));
         };
 
         let (next_status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
@@ -756,10 +839,13 @@ impl ServiceSupervisor {
             .insert(self.service_id, next_status);
         self.resources.status_changed.notify_waiters();
 
-        if matches!(restart_decision, RestartDecision::WithBackoff)
+        if matches!(restart_decision, RestartDecision::WithBackoff(_))
             && let Some(gen_start) = self.generation_start
         {
-            self.backoff.maybe_reset(gen_start.elapsed());
+            let elapsed = gen_start.elapsed();
+            self.backoff.maybe_reset(elapsed);
+            self.restart_storm
+                .maybe_reset(elapsed, self.backoff.policy().reset_after);
         }
 
         SupervisorState::Restart(restart_decision)
@@ -918,6 +1004,7 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         running_tasks,
         resources,
         diagnostics,
+        isolated_startup_permits,
         cancellation_token,
         daemon_token,
     } = parts;
@@ -932,6 +1019,7 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         generation_lane,
         resources,
         diagnostics,
+        isolated_startup_permits,
         cancellation_token,
         daemon_token,
     });
@@ -952,15 +1040,18 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
 /// The `daemon_token` is threaded through to `wait_for_healthy` so that
 /// the wave startup sequence can be interrupted immediately if the daemon
 /// receives a shutdown signal during startup.
-pub async fn spawn_all_services(
-    services: &[ServiceDescription],
-    restart_policy: RestartPolicy,
-    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: Arc<DaemonResources>,
-    diagnostics: Arc<DiagnosticsStore>,
-    high_priority_runtime: Option<Handle>,
-    daemon_token: &CancellationToken,
-) {
+pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
+    let SpawnAllServicesParts {
+        services,
+        restart_policy,
+        running_tasks,
+        resources,
+        diagnostics,
+        isolated_startup_permits,
+        high_priority_runtime,
+        daemon_token,
+    } = parts;
+
     info!("Beginning wave-based startup sequence...");
 
     let waves = ServiceWave::from_services(services);
@@ -1022,6 +1113,7 @@ pub async fn spawn_all_services(
                 running_tasks: running_tasks.clone(),
                 resources: resources.clone(),
                 diagnostics: diagnostics.clone(),
+                isolated_startup_permits: isolated_startup_permits.clone(),
                 cancellation_token: service.cancellation_token.clone(),
                 daemon_token: daemon_token.clone(),
             })
@@ -1118,10 +1210,38 @@ pub async fn stop_all_services(
 
 #[cfg(test)]
 mod tests {
+    use super::super::policy::RestartPolicy;
     use super::*;
 
     fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn fast_policy() -> RestartPolicy {
+        RestartPolicy {
+            initial_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            multiplier: 1.0,
+            jitter_factor: 0.0,
+            ..RestartPolicy::for_testing()
+        }
+    }
+
+    fn test_supervisor(policy: RestartPolicy) -> ServiceSupervisor {
+        ServiceSupervisor::new(ServiceSupervisorParts {
+            service_id: ServiceId::new(1),
+            name: "test_service",
+            run: noop_service,
+            watcher: None,
+            policy,
+            scheduling: ServiceScheduling::Standard,
+            generation_lane: GenerationExecutionLane::CurrentRuntime,
+            resources: DaemonResources::new(),
+            diagnostics: Arc::new(DiagnosticsStore::new()),
+            isolated_startup_permits: Arc::new(Semaphore::new(1)),
+            cancellation_token: CancellationToken::new(),
+            daemon_token: CancellationToken::new(),
+        })
     }
 
     #[test]
@@ -1136,6 +1256,7 @@ mod tests {
             generation_lane: GenerationExecutionLane::Isolated,
             resources: DaemonResources::new(),
             diagnostics: Arc::new(DiagnosticsStore::new()),
+            isolated_startup_permits: Arc::new(Semaphore::new(1)),
             cancellation_token: CancellationToken::new(),
             daemon_token: CancellationToken::new(),
         });
@@ -1145,6 +1266,7 @@ mod tests {
             supervisor.handle_outcome(
                 isolated_generation_error(
                     "isolated_startup",
+                    IsolatedStartupFailureKind::ThreadSpawn,
                     "failed to spawn thread 'svc-isolated_startup'".to_string(),
                 ),
                 &reload_token,
@@ -1156,7 +1278,200 @@ mod tests {
         ));
         assert!(should_restart);
         assert!(!should_shutdown_daemon);
-        assert!(matches!(restart_decision, RestartDecision::WithBackoff));
+        assert!(matches!(
+            restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::IsolatedStartupFailure)
+        ));
         assert_eq!(exit_kind, GenerationExitKind::IsolatedStartupFailure);
+    }
+
+    #[tokio::test]
+    async fn isolated_startup_gate_cancellation_returns_startup_failure() {
+        let store = Arc::new(DiagnosticsStore::new());
+        let service_id = ServiceId::new(1);
+        let cancellation_token = CancellationToken::new();
+        cancellation_token.cancel();
+        let generation_parts = ServiceGenerationParts {
+            service_id,
+            name: "isolated_gate",
+            generation: 1,
+            run: noop_service,
+            cancellation_token,
+            reload_token: CancellationToken::new(),
+            resources: DaemonResources::new(),
+            diagnostics: store.register_generation(
+                service_id,
+                "isolated_gate",
+                1,
+                RuntimeLane::Isolated,
+            ),
+        };
+
+        let outcome =
+            run_isolated_service_generation(generation_parts, Arc::new(Semaphore::new(0))).await;
+
+        match outcome {
+            Ok(Err(err)) => {
+                let startup_err = err
+                    .downcast_ref::<IsolatedGenerationStartupError>()
+                    .expect("expected isolated startup failure");
+                assert_eq!(
+                    startup_err.kind,
+                    IsolatedStartupFailureKind::StartupGateCancelled
+                );
+            }
+            other => panic!("unexpected isolated startup outcome: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn recoverable_errors_use_backoff_recovery() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(Ok(Err(Error::msg("transient"))), &reload_token);
+
+        assert!(matches!(status, ServiceStatus::Recovering(_)));
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert!(matches!(
+            restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
+        ));
+        assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+    }
+
+    #[test]
+    fn panics_use_backoff_recovery() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(Err(Box::new("boom")), &reload_token);
+
+        assert!(matches!(status, ServiceStatus::Recovering(_)));
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert!(matches!(
+            restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::Panic)
+        ));
+        assert_eq!(exit_kind, GenerationExitKind::Panic);
+    }
+
+    #[test]
+    fn fatal_service_errors_bypass_restart_guard() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(
+                Ok(Err(Error::new(ServiceError::Fatal("fatal".to_string())))),
+                &reload_token,
+            );
+
+        assert!(matches!(status, ServiceStatus::Terminated));
+        assert!(!should_restart);
+        assert!(!should_shutdown_daemon);
+        assert_eq!(restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_kind, GenerationExitKind::FatalServiceError);
+    }
+
+    #[test]
+    fn provider_init_errors_bypass_restart_guard_and_shutdown_daemon() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(
+                Ok(Err(Error::new(ProviderInitError::Cancelled {
+                    provider: "config".to_string(),
+                }))),
+                &reload_token,
+            );
+
+        assert!(matches!(status, ServiceStatus::Terminated));
+        assert!(!should_restart);
+        assert!(should_shutdown_daemon);
+        assert!(supervisor.daemon_token.is_cancelled());
+        assert_eq!(restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_kind, GenerationExitKind::ProviderInitError);
+    }
+
+    #[tokio::test]
+    async fn wait_for_restart_shutdown_interrupts_storm_guard_delay() {
+        let mut supervisor = test_supervisor(fast_policy());
+
+        for _ in 0..5 {
+            assert!(
+                supervisor
+                    .wait_for_restart(RestartDecision::WithBackoff(
+                        RestartFailureKind::RecoverableError,
+                    ))
+                    .await
+            );
+        }
+
+        let token = supervisor.cancellation_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            token.cancel();
+        });
+
+        let should_restart = supervisor
+            .wait_for_restart(RestartDecision::WithBackoff(
+                RestartFailureKind::RecoverableError,
+            ))
+            .await;
+
+        assert!(!should_restart);
+        assert_eq!(
+            supervisor
+                .resources
+                .status_plane
+                .get(&supervisor.service_id)
+                .map(|status| status.value().clone()),
+            Some(ServiceStatus::Terminated)
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_restart_reload_interrupts_storm_guard_delay_and_resets() {
+        let mut supervisor = test_supervisor(fast_policy());
+        let reload_signal = Arc::new(Notify::new());
+        supervisor
+            .resources
+            .reload_signals
+            .insert(supervisor.service_id, reload_signal.clone());
+
+        for _ in 0..5 {
+            assert!(
+                supervisor
+                    .wait_for_restart(RestartDecision::WithBackoff(
+                        RestartFailureKind::RecoverableError,
+                    ))
+                    .await
+            );
+        }
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            reload_signal.notify_one();
+        });
+
+        let should_restart = supervisor
+            .wait_for_restart(RestartDecision::WithBackoff(
+                RestartFailureKind::RecoverableError,
+            ))
+            .await;
+        let after_reset = supervisor
+            .restart_storm
+            .record_failure(Instant::now(), Duration::from_millis(1));
+
+        assert!(should_restart);
+        assert_eq!(supervisor.backoff.attempt_count(), 0);
+        assert_eq!(after_reset.window_failures, 1);
+        assert!(!after_reset.rate_limited);
     }
 }

@@ -55,17 +55,19 @@ Fatal outcomes stop the current service generation without entering the retry/ba
 
 A normal `Ok(())` return is also distinct from failure recovery. The supervisor still starts a fresh generation, but it does so immediately and records success on the backoff controller instead of counting the exit as another failure.
 
+Isolated startup failures are intentionally not fatal. If an isolated OS thread, private Tokio runtime, or startup bridge cannot be created, the generation is classified as an isolated startup failure and restarted through the recoverable backoff path.
+
 ### 1.4. Generation Diagnostics
 
 Each service generation is registered in an internal diagnostics store when the supervisor enters `Starting`. The generation records:
 
 - original scheduling lane (`Standard`, `HighPriority`, or `Isolated`);
 - lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
-- reload requests, restart decisions, backoff delay, and termination;
+- reload requests, restart decisions, policy/effective restart delay, rate-limited restart flags, and termination;
 - service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
 - runtime heartbeat probe observations for the lane.
 
-The supervisor includes a compact per-generation summary in the outcome tracing event. These diagnostics are internal and do not change restart/backoff behaviour. In particular, isolated thread/runtime/bridge startup failures are classified separately for diagnostics but still use the recoverable backoff path.
+The supervisor includes a compact per-generation summary in the outcome tracing event. These diagnostics are internal and do not change restart/backoff behaviour. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
 
 ### 1.5. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 
@@ -77,6 +79,11 @@ The `BackoffController` is a stateful abstraction shared by both `ServiceSupervi
 
 #### Self-Healing Reset
 The controller tracks the uptime of the current service generation. When a service remains in the `Healthy` state for longer than `reset_after` (default 60s), the failure counter is reset to 0. This prevents "historical baggage" from affecting the restart speed of stable systems.
+
+#### Restart Storm Guard
+Service supervisors layer an internal restart-storm guard on top of the policy backoff. Recoverable service errors, panics, and isolated startup failures are counted in a short sliding window; once the threshold is reached, the effective restart delay becomes `max(policy_delay, storm_guard_delay)`.
+
+This guard is deliberately not a public `RestartPolicy` knob yet. Clean `Ok(())` exits and reloads reset both the backoff controller and the storm guard, fatal/provider-init outcomes bypass the guard, and shutdown still interrupts any restart wait immediately.
 
 ## 2. Wave-Based Orchestration
 

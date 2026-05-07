@@ -24,11 +24,13 @@ daemon.run().await;
 daemon.wait().await?;
 ```
 
-### 1.1. Backoff & Jitter Strategy
+### 1.1. Backoff, Jitter & Restart Storm Protection
 The framework uses a unified `BackoffController` to manage retry delays, consecutive failure counts, and interruption-aware waiting. This ensures that both standard services and trigger handlers follow the same resilience policy.
 
+Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service failures happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, clean `Ok(())` exits still restart immediately, and reload/shutdown signals still interrupt restart waits.
+
 > [!NOTE]
-> **Internal Architecture**: For a deep dive into the `BackoffController` state machine and the self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#14-backoffcontroller-internals).
+> **Internal Architecture**: For a deep dive into the `BackoffController` state machine, restart-storm guard, and self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#15-backoffcontroller-internals).
 
 ### 1.2. Retry Design: Services vs. Triggers
 
@@ -36,7 +38,7 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 
 | Layer | Retry Behavior | How to Stop |
 | :--- | :--- | :--- |
-| **Service** | Restarts forever; failures use backoff, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
+| **Service** | Restarts forever; failures use backoff plus an internal storm guard, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
 | **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
 | **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
 
@@ -161,10 +163,10 @@ let policy = RestartPolicy::builder()
 - **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`. If the timeout is reached, the daemon logs a warning and proceeds to the next wave to avoid blocking the entire system.
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
-### 2.1. Concurrency & Elastic Scaling
+### 3.1. Concurrency & Elastic Scaling
 Resilience also extends to **throughput management**. For streaming triggers (e.g. `Queue`), elastic scaling is governed by a dedicated [`ScalingPolicy`] struct &mdash; separate from `RestartPolicy`. Each trigger template self-declares its scaling requirements via `TriggerHost::scaling_policy()`. Templates that do not need scaling (e.g. `Cron`, `Watch`, `Notify`) return `None` and incur zero scaling overhead. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
 
-## 3. Managing CPU-Intensive & Blocking Tasks
+## 4. Managing CPU-Intensive & Blocking Tasks
 
 The asynchronous executor (Tokio) relies on cooperative multitasking. If a service performs a long-running CPU computation or a blocking I/O operation without yielding, it will **stall the entire daemon**.
 
@@ -199,7 +201,7 @@ pub fn fast_calc() -> anyhow::Result<()> { Ok(()) }
 > [!WARNING]
 > **Never** use `#[allow(sync_handler)]` for network requests or disk I/O. This will cause severe performance degradation and may block shutdown.
 
-## 3. Lifecycle Priorities
+## 5. Lifecycle Priorities
 
 Services are assigned a `u8` priority (default 50) to determine their relative importance.
 - **Startup**: Descending order (100 -> 0). Core systems start first.
@@ -217,7 +219,7 @@ Services are assigned a `u8` priority (default 50) to determine their relative i
 pub async fn log_flush() { ... }
 ```
 
-## 4. Graceful Shutdown
+## 6. Graceful Shutdown
 
 The daemon uses `CancellationToken` to signal services to stop. 
 1. **Notification**: All services are notified via `is_shutdown()`.

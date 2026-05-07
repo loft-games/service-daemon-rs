@@ -118,7 +118,13 @@ Two low-level signals feed this baseline:
 
 The logical lanes are reported separately as `Standard`, `HighPriority`, and `Isolated`. The Standard probe observes the shared daemon/control runtime as well as Standard service bodies, so treat it as shared-runtime pressure rather than pure business-service pressure.
 
-Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, backoff delay, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
+Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
+
+### Restart and Recovery Signals
+
+When a service generation restarts after a recoverable failure, structured logs include the failure kind, configured policy delay, effective restart delay, whether the internal storm guard extended the delay, and the number of failures currently visible in the storm window. Internal lifecycle snapshots also track rate-limited restart counts and the last policy/effective delay pair.
+
+These fields are diagnostic only. They do not create a stable public metrics schema, and they do not change trigger retry semantics.
 
 ## 4. What to Look For
 

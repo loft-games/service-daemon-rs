@@ -205,6 +205,7 @@ pub(crate) struct LifecycleStatsSnapshot {
     pub reload_exit: u64,
     pub restart: u64,
     pub backoff_restart: u64,
+    pub rate_limited_restart: u64,
     pub terminated: u64,
     pub normal_exit: u64,
     pub recoverable_error: u64,
@@ -214,6 +215,8 @@ pub(crate) struct LifecycleStatsSnapshot {
     pub shutdown: u64,
     pub isolated_startup_failure: u64,
     pub last_backoff_delay_ms: u64,
+    pub last_policy_delay_ms: u64,
+    pub last_effective_restart_delay_ms: u64,
     pub last_exit_kind: Option<GenerationExitKind>,
 }
 
@@ -223,6 +226,7 @@ struct LifecycleStats {
     reload_exit: AtomicU64,
     restart: AtomicU64,
     backoff_restart: AtomicU64,
+    rate_limited_restart: AtomicU64,
     terminated: AtomicU64,
     normal_exit: AtomicU64,
     recoverable_error: AtomicU64,
@@ -232,6 +236,8 @@ struct LifecycleStats {
     shutdown: AtomicU64,
     isolated_startup_failure: AtomicU64,
     last_backoff_delay_ms: AtomicU64,
+    last_policy_delay_ms: AtomicU64,
+    last_effective_restart_delay_ms: AtomicU64,
     last_exit_kind: Mutex<Option<GenerationExitKind>>,
 }
 
@@ -240,13 +246,26 @@ impl LifecycleStats {
         self.reload_requested.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn record_restart(&self, backoff: bool, delay: Duration) {
+    fn record_restart(
+        &self,
+        backoff: bool,
+        policy_delay: Duration,
+        effective_delay: Duration,
+        rate_limited: bool,
+    ) {
         self.restart.fetch_add(1, Ordering::Relaxed);
         if backoff {
             self.backoff_restart.fetch_add(1, Ordering::Relaxed);
         }
+        if rate_limited {
+            self.rate_limited_restart.fetch_add(1, Ordering::Relaxed);
+        }
         self.last_backoff_delay_ms
-            .store(duration_millis(delay), Ordering::Relaxed);
+            .store(duration_millis(effective_delay), Ordering::Relaxed);
+        self.last_policy_delay_ms
+            .store(duration_millis(policy_delay), Ordering::Relaxed);
+        self.last_effective_restart_delay_ms
+            .store(duration_millis(effective_delay), Ordering::Relaxed);
     }
 
     fn record_terminated(&self) {
@@ -275,6 +294,7 @@ impl LifecycleStats {
             reload_exit: self.reload_exit.load(Ordering::Relaxed),
             restart: self.restart.load(Ordering::Relaxed),
             backoff_restart: self.backoff_restart.load(Ordering::Relaxed),
+            rate_limited_restart: self.rate_limited_restart.load(Ordering::Relaxed),
             terminated: self.terminated.load(Ordering::Relaxed),
             normal_exit: self.normal_exit.load(Ordering::Relaxed),
             recoverable_error: self.recoverable_error.load(Ordering::Relaxed),
@@ -284,6 +304,10 @@ impl LifecycleStats {
             shutdown: self.shutdown.load(Ordering::Relaxed),
             isolated_startup_failure: self.isolated_startup_failure.load(Ordering::Relaxed),
             last_backoff_delay_ms: self.last_backoff_delay_ms.load(Ordering::Relaxed),
+            last_policy_delay_ms: self.last_policy_delay_ms.load(Ordering::Relaxed),
+            last_effective_restart_delay_ms: self
+                .last_effective_restart_delay_ms
+                .load(Ordering::Relaxed),
             last_exit_kind: *lock_or_recover(&self.last_exit_kind),
         }
     }
@@ -507,16 +531,31 @@ impl GenerationDiagnosticsHandle {
         self.lane.aggregate.lifecycle.record_reload_requested();
     }
 
-    pub(crate) fn record_restart(&self, backoff: bool, delay: Duration) {
-        self.generation
-            .aggregate
-            .lifecycle
-            .record_restart(backoff, delay);
-        self.service
-            .aggregate
-            .lifecycle
-            .record_restart(backoff, delay);
-        self.lane.aggregate.lifecycle.record_restart(backoff, delay);
+    pub(crate) fn record_restart(
+        &self,
+        backoff: bool,
+        policy_delay: Duration,
+        effective_delay: Duration,
+        rate_limited: bool,
+    ) {
+        self.generation.aggregate.lifecycle.record_restart(
+            backoff,
+            policy_delay,
+            effective_delay,
+            rate_limited,
+        );
+        self.service.aggregate.lifecycle.record_restart(
+            backoff,
+            policy_delay,
+            effective_delay,
+            rate_limited,
+        );
+        self.lane.aggregate.lifecycle.record_restart(
+            backoff,
+            policy_delay,
+            effective_delay,
+            rate_limited,
+        );
     }
 
     pub(crate) fn record_terminated(&self) {
@@ -761,7 +800,12 @@ mod tests {
 
         handle.record_reload_requested();
         handle.record_exit(GenerationExitKind::IsolatedStartupFailure);
-        handle.record_restart(true, Duration::from_millis(250));
+        handle.record_restart(
+            true,
+            Duration::from_millis(250),
+            Duration::from_millis(500),
+            true,
+        );
         handle.record_terminated();
 
         let lifecycle = handle.snapshot().aggregate.lifecycle;
@@ -769,7 +813,10 @@ mod tests {
         assert_eq!(lifecycle.isolated_startup_failure, 1);
         assert_eq!(lifecycle.restart, 1);
         assert_eq!(lifecycle.backoff_restart, 1);
-        assert_eq!(lifecycle.last_backoff_delay_ms, 250);
+        assert_eq!(lifecycle.rate_limited_restart, 1);
+        assert_eq!(lifecycle.last_backoff_delay_ms, 500);
+        assert_eq!(lifecycle.last_policy_delay_ms, 250);
+        assert_eq!(lifecycle.last_effective_restart_delay_ms, 500);
         assert_eq!(lifecycle.terminated, 1);
         assert_eq!(
             lifecycle.last_exit_kind,

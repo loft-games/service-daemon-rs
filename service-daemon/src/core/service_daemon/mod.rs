@@ -18,7 +18,7 @@ use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
@@ -41,6 +41,8 @@ use crate::models::{
 };
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
+
+const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
 // ServiceDaemonHandle -- lightweight status query interface
@@ -105,6 +107,7 @@ pub struct ServiceDaemon {
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
+    isolated_startup_permits: Arc<Semaphore>,
 }
 
 impl Drop for ServiceDaemon {
@@ -345,15 +348,16 @@ impl ServiceDaemon {
         }
 
         // Spawn all services in the background
-        runner::spawn_all_services(
-            &self.services,
-            self.restart_policy,
-            self.running_tasks.clone(),
-            self.resources.clone(),
-            self.diagnostics.clone(),
+        runner::spawn_all_services(parts::SpawnAllServicesParts {
+            services: &self.services,
+            restart_policy: self.restart_policy,
+            running_tasks: self.running_tasks.clone(),
+            resources: self.resources.clone(),
+            diagnostics: self.diagnostics.clone(),
+            isolated_startup_permits: self.isolated_startup_permits.clone(),
             high_priority_runtime,
-            &self.cancellation_token,
-        )
+            daemon_token: &self.cancellation_token,
+        })
         .await;
 
         #[cfg(feature = "diagnostics")]
@@ -553,6 +557,7 @@ impl ServiceDaemon {
                 running_tasks: self.running_tasks.clone(),
                 resources: self.resources.clone(),
                 diagnostics: self.diagnostics.clone(),
+                isolated_startup_permits: self.isolated_startup_permits.clone(),
                 cancellation_token: service.cancellation_token.clone(),
                 daemon_token: daemon_token.clone(),
             })
@@ -767,6 +772,7 @@ impl ServiceDaemonBuilder {
             external_cancel_token: self.external_cancel_token,
             resources,
             diagnostics: Arc::new(DiagnosticsStore::new()),
+            isolated_startup_permits: Arc::new(Semaphore::new(ISOLATED_STARTUP_CONCURRENCY_LIMIT)),
         }
     }
 }

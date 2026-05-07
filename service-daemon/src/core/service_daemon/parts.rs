@@ -2,12 +2,12 @@ use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::diagnostics::DiagnosticsStore;
-use crate::models::{ServiceFn, ServiceId, ServiceScheduling};
+use crate::models::{ServiceDescription, ServiceFn, ServiceId, ServiceScheduling};
 
 use super::super::context::DaemonResources;
 use super::policy::RestartPolicy;
@@ -22,6 +22,7 @@ pub(super) struct ServiceSupervisorParts {
     pub generation_lane: GenerationExecutionLane,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
+    pub isolated_startup_permits: Arc<Semaphore>,
     pub cancellation_token: CancellationToken,
     pub daemon_token: CancellationToken,
 }
@@ -50,6 +51,18 @@ pub(super) struct SpawnServiceParts {
     pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
+    pub isolated_startup_permits: Arc<Semaphore>,
     pub cancellation_token: CancellationToken,
     pub daemon_token: CancellationToken,
+}
+
+pub(super) struct SpawnAllServicesParts<'a> {
+    pub services: &'a [ServiceDescription],
+    pub restart_policy: RestartPolicy,
+    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    pub resources: Arc<DaemonResources>,
+    pub diagnostics: Arc<DiagnosticsStore>,
+    pub isolated_startup_permits: Arc<Semaphore>,
+    pub high_priority_runtime: Option<Handle>,
+    pub daemon_token: &'a CancellationToken,
 }

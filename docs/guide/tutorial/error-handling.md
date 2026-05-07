@@ -34,8 +34,15 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-### 1.1. Shared for Triggers
-These same restart policies apply to individual **Trigger Handlers**. If a handler returns `Err`, the framework will back off and retry the specific event before giving up or shutting down.
+### 1.1. Services: Internal Restart-Storm Protection
+Services retry indefinitely for recoverable errors, panics, and isolated startup failures. In addition to the configured backoff, supervisors apply an internal restart-storm guard: if repeated backoff-eligible failures happen inside a short window, the daemon may extend the effective restart delay.
+
+This guard is not a public `RestartPolicy` setting yet. Clean `Ok(())` exits still restart immediately, `ServiceError::Fatal` still stops the service, and reload/shutdown signals still interrupt restart waits.
+
+### 1.2. Shared for Triggers
+These same restart policies apply to individual **Trigger Handlers**. If a handler returns `Err`, the framework will back off and retry the specific event according to trigger retry configuration.
+
+For trigger handlers that should not retry forever, set `trigger_max_retries` on `RestartPolicy`. Do not use `trigger_max_retries` to control service lifecycle; services should return `ServiceError::Fatal` when they need to stop permanently.
 
 ---
 
@@ -73,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
 ## 3. Fatal Errors: The Kill Switch
 
-Sometimes, a service encounter an error that **cannot** be fixed by a restart. For example:
+Sometimes, a service encounters an error that **cannot** be fixed by a restart. For example:
 *   A missing mandatory environment variable.
 *   An invalid license key.
 *   Incompatible hardware version.
@@ -96,6 +103,10 @@ async fn license_watcher() -> anyhow::Result<()> {
 ```
 
 When a `Fatal` error occurs during service execution, the daemon transitions that service to `Terminated` and stops trying. The rest of the system keeps running normally.
+
+Recoverable service errors and panics are different: they transition the service to `Recovering(...)` and restart with backoff plus the internal storm guard.
+
+For `ServiceScheduling::Isolated`, startup allocation failures are also recoverable. If the daemon cannot create the isolated thread, private Tokio runtime, or startup bridge for one generation, it records an isolated startup failure and retries through the same recovery path.
 
 For lazy providers, a `ProviderError::Fatal` raised during runtime initialization is treated differently: the service runner treats it as a daemon-wide shutdown signal and stops the `ServiceDaemon` cleanly.
 
