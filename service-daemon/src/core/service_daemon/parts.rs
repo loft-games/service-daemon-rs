@@ -106,6 +106,40 @@ impl fmt::Debug for BodyExecutionLane {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_body_lane_resolver_returns_declared_scheduling() {
+        let resolver = BodyLaneResolver::default();
+        let service_id = ServiceId::new(9);
+
+        assert_eq!(
+            resolver.resolve(service_id, 1, ServiceScheduling::Standard),
+            ServiceScheduling::Standard
+        );
+        assert_eq!(
+            resolver.resolve(service_id, 2, ServiceScheduling::HighPriority),
+            ServiceScheduling::HighPriority
+        );
+        assert_eq!(
+            resolver.resolve(service_id, 3, ServiceScheduling::Isolated),
+            ServiceScheduling::Isolated
+        );
+    }
+
+    #[test]
+    fn test_only_body_lane_resolver_override_is_explicit() {
+        let resolver = BodyLaneResolver::with_override(|_, _, _| ServiceScheduling::Isolated);
+
+        assert_eq!(
+            resolver.resolve(ServiceId::new(10), 1, ServiceScheduling::Standard),
+            ServiceScheduling::Isolated
+        );
+    }
+}
+
 pub(super) struct SpawnServiceParts {
     pub service_id: ServiceId,
     pub name: &'static str,

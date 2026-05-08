@@ -70,9 +70,22 @@ graph TD
     BL -->|execute| T
 ```
 
-The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, and the adaptive recommendation analyzer on the daemon-owned control runtime. User service and trigger bodies execute on the selected body lane (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
+The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, and the advisory analyzer on the daemon-owned control runtime. User service and trigger bodies execute on their statically declared mode (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
 
-The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Any future lane remap must happen through a cooperative generation boundary.
+The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models; the store, windows, evaluator, recommendation model, and lane resolver stay crate-private. Future mode-internal placement changes, such as HighPriority runtime epoch rollover, must happen through a cooperative generation boundary.
+
+### 3.1. Phase 6 Public Boundary
+
+| Surface | Boundary |
+| :--- | :--- |
+| `ServiceScheduling::{Standard, HighPriority, Isolated}` | Public static execution contract generated into the registry; runtime and public APIs do not override it across modes. |
+| Macro `scheduling = ...` | Accepts only `Standard`, `HighPriority`, or `Isolated`; there is no `Auto` or `Control` user-facing mode. |
+| `ServiceEntry` | Public metadata surface, but Phase 6 does not add experimental restart policy or scheduling hint fields. |
+| `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
+| `SchedulingAdvisoryProfile` | Public advisory emission control only; it does not change lifecycle, body placement, or declared scheduling. |
+| Isolated startup concurrency limit | Public builder knob for isolated startup allocation admission only, not a limit on running isolated body lifetime. |
+| Per-service restart override and scheduling hints | Deferred; future hints must stay within the declared mode and require a separate design. |
+| Diagnostics store, windows, evaluator, recommendation model, sampler, and lane resolver | Internal-only implementation details, not exported as public schema or command surfaces. |
 
 ## 4. Project Structure
 

@@ -170,29 +170,31 @@ impl ServicePriority {
 // ServiceScheduling: Execution and isolation policy
 // ---------------------------------------------------------------------------
 
-/// Defines how a service should be scheduled and isolated.
+/// Defines the static execution mode for a service or trigger body.
 ///
-/// This policy determines which runtime lane executes the service or trigger
-/// generation body while the daemon keeps supervision, reload, and restart
-/// coordination under its lifecycle manager.
+/// This value is generated into the registry by `#[service]` or `#[trigger]`.
+/// It is a declared execution contract, not a runtime policy hint: the daemon
+/// does not override it to move a service across scheduling modes.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub enum ServiceScheduling {
-    /// The default: scheduled on the shared multi-threaded `tokio` runtime.
-    /// Best for most services that don't have strict latency requirements.
+    /// The default host-runtime integration mode.
+    ///
+    /// The body runs on the Tokio runtime that calls `ServiceDaemon::run()`.
+    /// Best for most services that do not need a dedicated framework-owned lane.
     #[default]
     Standard,
-    /// High priority: runs on the daemon's shared high-priority runtime.
+    /// Runs the body on the daemon-owned low-contention high-priority runtime lane.
     ///
     /// The runtime is created lazily by `ServiceDaemon::run()` only when the
     /// final registry contains at least one high-priority service or trigger.
-    /// Use this for latency-sensitive work that should stay off the standard lane.
+    /// This is an explicit declaration, not an overflow target for `Standard`.
     HighPriority,
-    /// Isolated: runs each service or trigger generation body in a dedicated OS thread
-    /// with a private tokio runtime while supervision/reload/restart handling
-    /// remains daemon-managed.
-    /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
+    /// Runs each generation body in a dedicated OS thread with a private Tokio runtime.
+    ///
+    /// Supervision, reload, restart, and shutdown coordination remain daemon-managed.
+    /// Use this for deterministic responsiveness or strong runtime isolation.
     Isolated,
 }
 

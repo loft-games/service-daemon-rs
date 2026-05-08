@@ -7,7 +7,7 @@ In a large system, order matters. You can't start your API Gateway before your D
 - **`priority`** controls **startup and shutdown order**.
 - **`scheduling`** controls **which runtime lane the service or trigger body uses**.
 
-Use them together: let priorities express lifecycle dependencies, and let scheduling choose between the shared standard body runtime, the shared high-priority body runtime, and isolated body execution. The daemon's internal control runtime still owns supervision and lifecycle orchestration.
+Use them together: let priorities express lifecycle dependencies, and let scheduling declare whether the body uses the host Tokio runtime, the daemon-owned high-priority runtime lane, or isolated body execution. The daemon's internal control runtime still owns supervision and lifecycle orchestration.
 
 ---
 
@@ -57,17 +57,19 @@ When you stop the system (Ctrl+C), the process reverses. We want to stop the "ou
 
 ## 4. Choosing a Scheduling Policy
 
-Priority decides when a service or trigger starts and stops. Scheduling decides whether its execution body uses the standard shared runtime, the shared high-priority runtime, or an isolated thread. Supervision, watchers, startup/shutdown waves, reload, and restart/backoff orchestration stay on the daemon's internal control runtime.
+Priority decides when a service or trigger starts and stops. Scheduling is a static source-level declaration that decides whether its execution body uses the host Tokio runtime, the daemon-owned high-priority runtime lane, or an isolated thread. Supervision, watchers, startup/shutdown waves, reload, and restart/backoff orchestration stay on the daemon's internal control runtime.
 
-Diagnostics track the control plane and body execution lanes separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics lane, not a user-facing scheduling policy. The observations are diagnostic only: they distinguish lane pressure and generation outcomes, but they do not change scheduling policy or migrate services automatically.
+Diagnostics track the control plane and body execution lanes separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics lane, not a user-facing scheduling policy. The observations are diagnostic only: they distinguish lane pressure and generation outcomes, but they do not change the declared scheduling mode or migrate services automatically.
 
-Adaptive scheduling is currently recommendation-first. The internal analyzer may log advice such as `Observe`, `InvestigateControlPlane`, `ConsiderIsolation`, or `KeepCurrentLane`, but those are not executable migration commands. `HighPriority` is not an automatic overflow pool for ordinary services, and `Isolated` carries extra OS thread/runtime allocation cost.
+Scheduling advice is recommendation-first. The internal analyzer may log advice such as `Observe`, `InvestigateControlPlane`, `ConsiderIsolation`, or `KeepCurrentLane`, but those are investigation labels, not executable migration commands. `HighPriority` is not an automatic overflow pool for ordinary services, and `Isolated` carries extra OS thread/runtime allocation cost.
 
-| Candidate type | Examples | Adaptive interpretation |
+| Signal type | Examples | Interpretation |
 | :--- | :--- | :--- |
-| Good future candidates | Services that respond quickly to reload/shutdown, rebuild generation-local state cleanly, and do not depend on thread-local state | A future controlled decision could change only the next generation's body lane. |
-| Poor candidates | Services with slow shutdown, thread-affine integrations, non-recoverable generation-local handles, or unstable provider initialization | Keep the declared lane and fix lifecycle/resource ownership first. |
-| Never automatic from this signal alone | Control lane pressure, HighPriority saturation, restart storms, isolated startup pressure, or one service's high sleep drift | Investigate or suppress migration-like advice; sleep drift identifies pressure, not a sole culprit. |
+| Useful diagnostic signals | Service sleep drift, runtime probe drift, restart/backoff observations, isolated startup pressure | Investigate runtime pressure, lifecycle ownership, or whether the source-level scheduling declaration should be changed in a future build. |
+| Mode-internal future work | Sustained pressure inside declared `HighPriority` services | Phase 7+ may introduce HighPriority runtime epoch rollover, applied only at generation boundaries within the same declared mode. |
+| Never automatic from this signal alone | Control lane pressure, HighPriority saturation, restart storms, isolated startup pressure, or one service's high sleep drift | Do not infer cross-mode migration; sleep drift identifies pressure, not a sole culprit. |
+
+`SchedulingAdvisoryProfile` controls only whether this advisory emission runs. The default keeps it enabled; `SchedulingAdvisoryProfile::disabled()` stops advisory emission without changing declared scheduling modes, body placement, reload, restart, or shutdown behavior.
 
 ```rust,ignore
 use service_daemon::prelude::*;
@@ -104,9 +106,9 @@ async fn urgent_job_worker(job: Job) -> anyhow::Result<()> {
 
 `Standard` is the default.
 
-- Runs on the shared multi-threaded Tokio runtime.
+- Runs on the host Tokio runtime that calls `ServiceDaemon::run()`.
 - Best for most background services and triggers.
-- Use this unless you have a concrete reason to prefer another mode.
+- Use this unless you have a concrete reason to declare another mode.
 
 ```rust,ignore
 #[service(scheduling = Standard)]
@@ -117,12 +119,14 @@ async fn admin_service() -> anyhow::Result<()> {
 
 ### `HighPriority`
 
-`HighPriority` runs the service or trigger body on the daemon's shared high-priority runtime. The supervisor and lifecycle control path still run on the internal control runtime.
+`HighPriority` runs the service or trigger body on the daemon-owned low-contention high-priority runtime lane. The supervisor and lifecycle control path still run on the internal control runtime.
 
-- Use it for latency-sensitive work that should stay on a shared runtime, but not compete with the standard body lane.
+- Use it for latency-sensitive work that should stay on a shared framework-owned runtime, but not compete with the standard body lane.
 - The runtime is created lazily by `ServiceDaemon::run()` only when the final registry contains at least one `HighPriority` service or trigger.
 - `ServiceDaemonBuilder::build()` does not create this runtime, so applications that only use `Standard` and `Isolated` do not pay the extra shared runtime cost.
+- It is not an overflow pool for `Standard`; a service enters this lane only by declaring `scheduling = HighPriority` in source.
 - It is distinct from `Isolated`, which creates a private OS thread and Tokio runtime for each service generation body.
+- Future HighPriority runtime epoch rollover is Phase 7+ work and would remain inside the declared `HighPriority` mode.
 
 ```rust,ignore
 #[service(scheduling = HighPriority)]
@@ -138,8 +142,9 @@ async fn watchdog_service() -> anyhow::Result<()> {
 - Best for deterministic loops, blocking adapters, or workloads that should not contend with the shared runtime.
 - Useful for things like tight polling intervals, device I/O bridges, or thread-affine integrations.
 - The daemon still owns supervision, reload signaling, restart/backoff, and shutdown coordination.
-- An internal admission gate limits concurrent isolated startup allocation so resource pressure does not create a thread/runtime creation storm.
-- The gate only covers OS thread spawn and private Tokio runtime build; once the generation body starts, it does not limit the body's lifetime.
+- A daemon-level admission gate limits concurrent isolated startup allocation so resource pressure does not create a thread/runtime creation storm.
+- Configure the gate with `ServiceDaemonBuilder::with_isolated_startup_concurrency_limit(NonZeroUsize)` when the default is too high or too low.
+- The gate only covers permit acquisition, OS thread spawn, and private Tokio runtime build; once the generation body starts, it does not limit the body's lifetime.
 - Startup allocation failures are recoverable isolated startup failures and use the same backoff/storm-guard path as other recoverable service failures.
 - Comes with a higher runtime cost than `Standard`, so use it deliberately.
 
@@ -152,7 +157,9 @@ async fn modbus_server() -> anyhow::Result<()> {
 
 The `examples/scheduling` demo shows all three policies in practice: `Standard`, `HighPriority`, and `Isolated`.
 
-Scheduling is part of the static registry entry generated by both `#[service]` and `#[trigger]`. The scheduling policy controls the generated service or trigger body's execution lane. A trigger's host still controls how it waits for events, while daemon supervision stays on the control plane for every scheduling mode.
+Scheduling is part of the static registry entry generated by both `#[service]` and `#[trigger]`. It is a declared execution mode, not a runtime hint or public override surface; changing it means changing the source declaration and rebuilding/redeploying. A trigger's host still controls how it waits for events, while daemon supervision stays on the control plane for every scheduling mode.
+
+Per-service restart policy overrides and scheduling hints are deferred from Phase 6. Restart policy remains daemon-level, and any future scheduling hint must be limited to the declared mode's internal strategy; it must not change `Standard`, `HighPriority`, or `Isolated`.
 
 ## 5. Why This Split?
 

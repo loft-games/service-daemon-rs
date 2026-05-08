@@ -64,11 +64,14 @@ pub use core::service_daemon::{
 };
 pub use models::service::{ServicePriority, ServiceScheduling};
 pub use models::{
-    BackoffController, PROVIDER_REGISTRY, ProviderEntry, ProviderError, ProviderInitError,
-    Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder,
-    ServiceDescription, ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam,
-    ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage,
-    trigger_clone_payload,
+    BackoffController, DaemonDiagnosticsSnapshot, DiagnosticAggregateStats,
+    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticObservationStats,
+    DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot, PROVIDER_REGISTRY, ProviderEntry,
+    ProviderError, ProviderInitError, Registry, RegistryBuilder, Result,
+    RuntimeLaneDiagnosticsSnapshot, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder,
+    SchedulingAdvisoryProfile, ServiceDescription, ServiceDiagnosticsSnapshot, ServiceEntry,
+    ServiceError, ServiceFn, ServiceId, ServiceParam, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
 };
 pub use std::sync::Arc;
 
@@ -111,6 +114,8 @@ pub mod prelude {
         is_shutdown, shelve, shelve_clone, sleep, state, unshelve, wait_shutdown,
     };
     pub use crate::core::di::{ManagedProvided, Provided, WatchableProvided};
+    pub use crate::models::diagnostics::{DaemonDiagnosticsSnapshot, DiagnosticRuntimeLane};
+    pub use crate::models::policy::SchedulingAdvisoryProfile;
     pub use crate::models::service::ServicePriority;
     pub use crate::models::service::ServiceScheduling;
     pub use crate::models::service::ServiceStatus;

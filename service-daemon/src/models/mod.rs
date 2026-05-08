@@ -1,12 +1,19 @@
+pub mod diagnostics;
 pub mod error;
 pub mod policy;
 pub mod provider_error;
 pub mod service;
 pub mod trigger;
 
+pub use diagnostics::{
+    DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticGenerationExitKind,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRuntimeLane,
+    GenerationDiagnosticsSnapshot, RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
+};
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{
     BackoffController, RestartPolicy, RestartPolicyBuilder, ScalingPolicy, ScalingPolicyBuilder,
+    SchedulingAdvisoryProfile,
 };
 pub use provider_error::ProviderError;
 pub use service::{

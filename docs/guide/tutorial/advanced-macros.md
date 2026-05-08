@@ -45,7 +45,7 @@ You can use this to build **Internal Discovery Systems** or **Health Check Dashb
 
 ## 3. Customizing Macro Outputs (Future-Proofing)
 
-Because the project uses `linkme`, the registration happens at the binary level. If you need to add your own custom metadata (like "Department Name" or "Service Owner") to the services, you can contribute to the `ServiceEntry` struct in the framework or use the Tag system to encode this information (e.g., `tags = ["owner:billing"]`).
+Because the project uses `linkme`, the registration happens at the binary level. Use the tag system for service metadata such as ownership (e.g., `tags = ["owner:billing"]`). Per-service restart policy overrides, scheduling hints, and experimental scheduling fields are not part of the Phase 6 `ServiceEntry` contract.
 
 ## 4. Why stick with the Macros?
 

@@ -821,6 +821,55 @@ mod tests {
         assert_eq!(store.snapshot().services.len(), 0);
     }
 
+    #[test]
+    fn public_snapshot_distills_internal_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(4), "priority", 2, RuntimeLane::HighPriority);
+
+        handle.record_sleep_observation(SleepObservation {
+            source: SleepObservationSource::ServiceSleep,
+            reason: SleepExitReason::Completed,
+            requested: Duration::from_millis(25),
+            elapsed: Duration::from_millis(40),
+            drift: Duration::from_millis(15),
+        });
+        handle.record_exit(GenerationExitKind::RecoverableError);
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        assert_eq!(snapshot.services.len(), 1);
+        assert_eq!(snapshot.generations.len(), 1);
+        assert_eq!(snapshot.services[0].service_id, ServiceId::new(4));
+        assert_eq!(
+            snapshot.services[0].declared_scheduling,
+            Some(ServiceScheduling::HighPriority)
+        );
+        assert_eq!(
+            snapshot.generations[0].declared_scheduling,
+            Some(ServiceScheduling::HighPriority)
+        );
+        assert_eq!(
+            snapshot.generations[0]
+                .aggregate
+                .service_sleep
+                .total_drift_ms,
+            15
+        );
+        assert_eq!(
+            snapshot.generations[0]
+                .aggregate
+                .lifecycle
+                .recoverable_error,
+            1
+        );
+        assert!(
+            snapshot
+                .lanes
+                .iter()
+                .any(|lane| { lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Control })
+        );
+    }
+
     #[tokio::test]
     async fn lane_runtime_probe_records_cancellation() {
         let store = Arc::new(DiagnosticsStore::new());

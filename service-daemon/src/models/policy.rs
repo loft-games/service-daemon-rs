@@ -10,6 +10,8 @@
 //!   trigger templates (e.g. `Queue`). Declared via
 //!   [`TriggerHost::scaling_policy()`](crate::models::trigger::TriggerHost::scaling_policy) and optionally overridden by the user
 //!   via [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
+//! - [`SchedulingAdvisoryProfile`]: Coarse control for diagnostics advisory
+//!   emission. It does not change service placement or lifecycle behavior.
 //! - [`BackoffController`]: A **stateful** controller that tracks the current
 //!   backoff delay and attempt count. It wraps a `RestartPolicy` and provides
 //!   interruption-aware waiting via `tokio::select!`.
@@ -19,6 +21,46 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+// ---------------------------------------------------------------------------
+// SchedulingAdvisoryProfile -- diagnostics advisory emission
+// ---------------------------------------------------------------------------
+
+/// Coarse configuration for scheduling advisory diagnostics.
+///
+/// The default keeps the internal recommendation loop enabled. Disabling the
+/// profile only stops advisory emission; it does not change service lifecycle,
+/// declared scheduling modes, body placement, reload, or restart behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulingAdvisoryProfile {
+    enabled: bool,
+}
+
+impl SchedulingAdvisoryProfile {
+    /// Enable scheduling advisory diagnostics.
+    #[must_use]
+    pub const fn enabled() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Disable scheduling advisory diagnostics.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self { enabled: false }
+    }
+
+    /// Returns whether advisory emission is enabled.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        self.enabled
+    }
+}
+
+impl Default for SchedulingAdvisoryProfile {
+    fn default() -> Self {
+        Self::enabled()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RestartPolicy -- stateless backoff configuration

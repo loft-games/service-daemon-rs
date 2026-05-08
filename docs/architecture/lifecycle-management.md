@@ -20,21 +20,21 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 > [!NOTE]
 > **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining consistent responsiveness to reload and shutdown signals.
 
-### Control Plane Runtime and Body Lanes
+### Control Plane Runtime and Declared Body Modes
 
-Service supervisors, dependency watchers, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through explicit body lanes:
+Service supervisors, dependency watchers, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
-- `Standard`: the captured standard Tokio runtime that called `ServiceDaemon::run()`.
-- `HighPriority`: the daemon-owned shared high-priority runtime, created lazily when the registry needs it.
+- `Standard`: host Tokio runtime integration through the runtime that called `ServiceDaemon::run()`.
+- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily when the registry needs it.
 - `Isolated`: a private OS thread and private Tokio runtime for each generation body.
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
 
-### Adaptive Recommendations and Generation Boundaries
+### Scheduling Advisory and Generation Boundaries
 
-Adaptive scheduling is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate service placement or request restarts in production.
+Scheduling analysis is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or request restarts in production. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, or shutdown behavior.
 
-A running Tokio future cannot be moved between runtimes. Any future lane change must therefore happen at a generation boundary: a reload, restart, or shutdown signal causes the current generation to exit cooperatively, and only the next generation can resolve a different body lane. Services that cannot respond cleanly to reload/shutdown, depend on thread-local state, or hold non-recoverable generation-local resources are poor migration candidates.
+A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, must therefore happen at a generation boundary: a reload, restart, or shutdown signal causes the current generation to exit cooperatively, and only the next generation may bind to a new runtime epoch inside the same declared mode.
 
 ### 1.1. The Signal Path (Reactive Update Flow)
 How a state change is propagated through the system to trigger a reload:
@@ -77,13 +77,13 @@ Isolated startup failures are intentionally not fatal. If an isolated OS thread,
 
 Each service generation is registered in an internal diagnostics store when the supervisor enters `Starting`. The generation records:
 
-- body scheduling lane (`Standard`, `HighPriority`, or `Isolated`);
+- statically declared body scheduling mode (`Standard`, `HighPriority`, or `Isolated`);
 - lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
 - reload requests, restart decisions, policy/effective restart delay, rate-limited restart flags, and termination;
 - service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
 - runtime heartbeat probe observations for the control plane and body execution lanes.
 
-The supervisor includes a compact per-generation summary in the outcome tracing event. These diagnostics are internal and do not change restart/backoff behaviour. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
+The supervisor includes a compact per-generation summary in the outcome tracing event. The public `DaemonDiagnosticsSnapshot` exposes distilled service, generation, and lane summaries through read-only daemon/handle methods. The store, windows, evaluator, recommendation fingerprints, and mutation paths remain internal and do not change restart/backoff behaviour. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
 
 ### 1.5. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 

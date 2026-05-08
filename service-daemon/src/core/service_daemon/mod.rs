@@ -12,6 +12,7 @@ use dashmap::DashMap;
 use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::pending;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(feature = "simulation")]
 use std::time::Duration;
@@ -37,8 +38,9 @@ use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_p
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
-    PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
-    ServiceDescription, ServiceId, ServiceScheduling, ServiceStatus,
+    DaemonDiagnosticsSnapshot, PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry,
+    Result as ServiceResult, SchedulingAdvisoryProfile, ServiceDescription, ServiceId,
+    ServiceScheduling, ServiceStatus,
 };
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -54,6 +56,7 @@ const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
 #[derive(Clone)]
 pub struct ServiceDaemonHandle {
     resources: Arc<DaemonResources>,
+    diagnostics: Arc<DiagnosticsStore>,
 }
 
 impl ServiceDaemonHandle {
@@ -64,6 +67,11 @@ impl ServiceDaemonHandle {
             .get(id)
             .map(|s| s.clone())
             .unwrap_or(ServiceStatus::Terminated)
+    }
+
+    /// Return a read-only snapshot of daemon diagnostics.
+    pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
+        self.diagnostics.snapshot().into()
     }
 }
 
@@ -106,6 +114,7 @@ pub struct ServiceDaemon {
     high_priority_runtime: Option<Runtime>,
     runtime_probe_tasks: Vec<JoinHandle<()>>,
     adaptive_recommendation_task: Option<JoinHandle<()>>,
+    scheduling_advisory_profile: SchedulingAdvisoryProfile,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
@@ -289,7 +298,9 @@ impl ServiceDaemon {
     }
 
     fn spawn_adaptive_recommendation_loop(&mut self, handle: &Handle) {
-        if self.adaptive_recommendation_task.is_some() {
+        if self.adaptive_recommendation_task.is_some()
+            || !self.scheduling_advisory_profile.is_enabled()
+        {
             return;
         }
 
@@ -329,10 +340,11 @@ impl ServiceDaemon {
         self.cancellation_token.clone()
     }
 
-    /// Get a handle to the daemon for querying status.
+    /// Get a handle to the daemon for querying status and diagnostics.
     pub fn handle(&self) -> ServiceDaemonHandle {
         ServiceDaemonHandle {
             resources: self.resources.clone(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 
@@ -353,6 +365,11 @@ impl ServiceDaemon {
     /// Get the current status of a service by its `ServiceId`.
     pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
         self.handle().get_service_status(id).await
+    }
+
+    /// Return a read-only snapshot of daemon diagnostics.
+    pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
+        self.diagnostics.snapshot().into()
     }
 
     /// Start the daemon in the background (non-blocking).
@@ -746,6 +763,8 @@ pub struct ServiceDaemonBuilder {
     external_cancel_token: Option<CancellationToken>,
     /// Type-erased trigger configuration overrides.
     trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    scheduling_advisory_profile: SchedulingAdvisoryProfile,
+    isolated_startup_concurrency_limit: usize,
     /// Infrastructure tags whose services are always included in the final
     /// registry, regardless of the user-provided tag filters. Used by
     /// `MockContext` to auto-include `log_service` in simulation tests.
@@ -762,6 +781,8 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
             trigger_configs: DashMap::new(),
+            scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
+            isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
             infra_tags: Vec::new(),
             #[cfg(feature = "simulation")]
             resources: None,
@@ -783,6 +804,8 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
             trigger_configs: DashMap::new(),
+            scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
+            isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
             infra_tags: Vec::new(),
             resources: None,
         }
@@ -802,6 +825,27 @@ impl ServiceDaemonBuilder {
     #[must_use]
     pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
         self.restart_policy = policy;
+        self
+    }
+
+    /// Set the scheduling advisory profile.
+    ///
+    /// This controls advisory diagnostics emission only. It does not change
+    /// service lifecycle, declared scheduling modes, or body placement.
+    #[must_use]
+    pub fn with_scheduling_advisory_profile(mut self, profile: SchedulingAdvisoryProfile) -> Self {
+        self.scheduling_advisory_profile = profile;
+        self
+    }
+
+    /// Set the maximum number of isolated generations admitted to startup at once.
+    ///
+    /// This covers isolated startup allocation only: permit acquisition, OS
+    /// thread spawn, and private Tokio runtime creation. It does not limit how
+    /// many isolated generation bodies may keep running after startup.
+    #[must_use]
+    pub fn with_isolated_startup_concurrency_limit(mut self, limit: NonZeroUsize) -> Self {
+        self.isolated_startup_concurrency_limit = limit.get();
         self
     }
 
@@ -921,10 +965,13 @@ impl ServiceDaemonBuilder {
             high_priority_runtime: None,
             runtime_probe_tasks: Vec::new(),
             adaptive_recommendation_task: None,
+            scheduling_advisory_profile: self.scheduling_advisory_profile,
             external_cancel_token: self.external_cancel_token,
             resources,
             diagnostics: Arc::new(DiagnosticsStore::new()),
-            isolated_startup_permits: Arc::new(Semaphore::new(ISOLATED_STARTUP_CONCURRENCY_LIMIT)),
+            isolated_startup_permits: Arc::new(Semaphore::new(
+                self.isolated_startup_concurrency_limit,
+            )),
         }
     }
 }
@@ -1351,6 +1398,83 @@ mod tests {
             .insert(ServiceId(0), ServiceStatus::Healthy);
         let status = handle.get_service_status(&ServiceId(0)).await;
         assert_eq!(status, ServiceStatus::Healthy);
+    }
+
+    #[test]
+    fn diagnostics_snapshot_is_available_from_daemon_and_handle() {
+        setup_tracing();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let handle = daemon.handle();
+
+        let daemon_snapshot = daemon.diagnostics_snapshot();
+        let handle_snapshot = handle.diagnostics_snapshot();
+
+        assert_eq!(daemon_snapshot, handle_snapshot);
+        assert_eq!(daemon_snapshot.services.len(), 0);
+        assert_eq!(daemon_snapshot.generations.len(), 0);
+        assert!(
+            daemon_snapshot
+                .lanes
+                .iter()
+                .any(|lane| { lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Control })
+        );
+    }
+
+    #[test]
+    fn default_advisory_profile_spawns_recommendation_loop() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let control_runtime = daemon
+            .ensure_control_runtime()
+            .expect("control runtime should build");
+
+        daemon.spawn_adaptive_recommendation_loop(&control_runtime);
+
+        assert!(daemon.adaptive_recommendation_task.is_some());
+        daemon.shutdown();
+    }
+
+    #[test]
+    fn disabled_advisory_profile_skips_recommendation_loop() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_scheduling_advisory_profile(SchedulingAdvisoryProfile::disabled())
+            .build();
+        let control_runtime = daemon
+            .ensure_control_runtime()
+            .expect("control runtime should build");
+
+        daemon.spawn_adaptive_recommendation_loop(&control_runtime);
+
+        assert!(daemon.adaptive_recommendation_task.is_none());
+    }
+
+    #[test]
+    fn default_isolated_startup_limit_uses_internal_default() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        assert_eq!(
+            daemon.isolated_startup_permits.available_permits(),
+            ISOLATED_STARTUP_CONCURRENCY_LIMIT
+        );
+    }
+
+    #[test]
+    fn builder_configures_isolated_startup_limit() {
+        let limit = NonZeroUsize::new(2).expect("test limit should be non-zero");
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_isolated_startup_concurrency_limit(limit)
+            .build();
+
+        assert_eq!(daemon.isolated_startup_permits.available_permits(), 2);
     }
 
     /// Global counter for the `counting_service` test service.

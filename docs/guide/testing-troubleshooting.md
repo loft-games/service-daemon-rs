@@ -26,11 +26,11 @@ Integration tests verify the full lifecycle of the daemon:
 - Status transitions and shelving correctness.
 - Signal propagation and trigger execution.
 
-### Adaptive Lane Remap Validation
+### Generation-Boundary Resolver Regression Tests
 
-The framework test suite includes crate-private lane remap validation for adaptive scheduling research. This verifies that any controlled lane change can only apply at a service generation boundary after reload/restart; a running future is never moved between Tokio runtimes.
+The framework test suite includes a crate-private resolver hook used only for white-box generation-boundary regression tests. It verifies that a running future is never moved between Tokio runtimes and that any future mode-internal placement change would have to wait for a new generation.
 
-This override path is not a public testing API. Production and user-facing simulation keep using the scheduling declared by the service or trigger registry entry.
+This hook is not a public testing API and is not compiled into production builds. Production and user-facing simulation keep using the scheduling declared by the service or trigger registry entry.
 
 ### Unit Testing with MockContext (God Mode)
 
