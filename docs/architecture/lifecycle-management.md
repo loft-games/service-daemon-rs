@@ -25,16 +25,18 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 Service supervisors, dependency watchers, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
 - `Standard`: host Tokio runtime integration through the runtime that called `ServiceDaemon::run()`.
-- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily when the registry needs it.
+- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count planned from final declared HighPriority entries.
 - `Isolated`: a private OS thread and private Tokio runtime for each generation body.
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
+
+HighPriority capacity planning happens before runtime allocation and only reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the planned worker count. Pressure diagnostics remain advisory and do not rebuild or resize the runtime after creation.
 
 ### Scheduling Advisory and Generation Boundaries
 
 Scheduling analysis is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or request restarts in production. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, or shutdown behavior.
 
-A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, must therefore happen at a generation boundary: a reload, restart, or shutdown signal causes the current generation to exit cooperatively, and only the next generation may bind to a new runtime epoch inside the same declared mode.
+A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, is deferred to Phase 9 research and would need to happen at a generation boundary inside the same declared mode.
 
 ### 1.1. The Signal Path (Reactive Update Flow)
 How a state change is propagated through the system to trigger a reload:

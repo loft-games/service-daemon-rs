@@ -48,6 +48,52 @@ pub use policy::{RestartPolicy, RestartPolicyBuilder};
 const CONTROL_RUNTIME_WORKER_THREADS: usize = 1;
 const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HighPriorityCapacityPlan {
+    entry_count: usize,
+    worker_count: Option<NonZeroUsize>,
+}
+
+impl HighPriorityCapacityPlan {
+    fn from_services(services: &[ServiceDescription]) -> Self {
+        let entry_count = services
+            .iter()
+            .filter(|service| service.scheduling() == ServiceScheduling::HighPriority)
+            .count();
+
+        Self::from_entry_count(entry_count, read_available_parallelism())
+    }
+
+    fn from_entry_count(entry_count: usize, available_parallelism: Option<NonZeroUsize>) -> Self {
+        let worker_count = if entry_count == 0 {
+            None
+        } else {
+            let cap = match available_parallelism {
+                Some(parallelism) => parallelism.get(),
+                None => 1,
+            };
+            NonZeroUsize::new(entry_count.min(cap))
+        };
+
+        Self {
+            entry_count,
+            worker_count,
+        }
+    }
+
+    fn entry_count(&self) -> usize {
+        self.entry_count
+    }
+
+    fn worker_count(&self) -> Option<NonZeroUsize> {
+        self.worker_count
+    }
+}
+
+fn read_available_parallelism() -> Option<NonZeroUsize> {
+    std::thread::available_parallelism().ok()
+}
+
 // ---------------------------------------------------------------------------
 // ServiceDaemonHandle -- lightweight status query interface
 // ---------------------------------------------------------------------------
@@ -110,6 +156,7 @@ pub struct ServiceDaemon {
     cancellation_token: CancellationToken,
     /// Dedicated runtime for supervisor and control-plane work.
     control_runtime: Option<Runtime>,
+    high_priority_capacity: HighPriorityCapacityPlan,
     /// Shared runtime lazily created for HighPriority service bodies.
     high_priority_runtime: Option<Runtime>,
     runtime_probe_tasks: Vec<JoinHandle<()>>,
@@ -245,12 +292,6 @@ impl ServiceDaemon {
         Ok(())
     }
 
-    fn has_high_priority_services(&self) -> bool {
-        self.services
-            .iter()
-            .any(|service| matches!(service.entry.scheduling, ServiceScheduling::HighPriority))
-    }
-
     fn ensure_control_runtime(&mut self) -> std::io::Result<Handle> {
         if self.control_runtime.is_none() {
             self.control_runtime = Some(
@@ -271,14 +312,20 @@ impl ServiceDaemon {
     }
 
     fn ensure_high_priority_runtime(&mut self) -> std::io::Result<Option<Handle>> {
-        if !self.has_high_priority_services() {
+        let Some(worker_count) = self.high_priority_capacity.worker_count() else {
             return Ok(None);
-        }
+        };
 
         if self.high_priority_runtime.is_none() {
+            info!(
+                high_priority_entries = self.high_priority_capacity.entry_count(),
+                high_priority_worker_threads = worker_count.get(),
+                "Creating high-priority runtime from static capacity plan"
+            );
             self.high_priority_runtime = Some(
                 tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
+                    .worker_threads(worker_count.get())
                     .thread_name("svc-high-priority")
                     .build()?,
             );
@@ -946,6 +993,8 @@ impl ServiceDaemonBuilder {
             }
         }
 
+        let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
+
         #[cfg(feature = "simulation")]
         let resources = self.resources.unwrap_or_else(DaemonResources::new);
         #[cfg(not(feature = "simulation"))]
@@ -962,6 +1011,7 @@ impl ServiceDaemonBuilder {
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
             control_runtime: None,
+            high_priority_capacity,
             high_priority_runtime: None,
             runtime_probe_tasks: Vec::new(),
             adaptive_recommendation_task: None,
@@ -1089,7 +1139,7 @@ fn validate_dependency_graph<'a>(
 mod tests {
     use super::*;
     use crate::models::{ServiceEntry, ServiceParam};
-    use crate::service;
+    use crate::{TT::*, provider, service, trigger};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tracing::debug;
@@ -1127,6 +1177,17 @@ mod tests {
         tags: &["__unit_runtime_high_priority__"],
     };
 
+    static ISOLATED_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "isolated_test_service",
+        module: "test",
+        params: &[],
+        wrapper: noop_service,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Isolated,
+        tags: &["__unit_runtime_isolated__"],
+    };
+
     fn test_service(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
         ServiceDescription {
             id: ServiceId::new(id),
@@ -1146,6 +1207,143 @@ mod tests {
     /// Leak a params slice to satisfy `&'static [ServiceParam]` without a const context.
     fn leaked_params(params: Vec<ServiceParam>) -> &'static [ServiceParam] {
         Box::leak(params.into_boxed_slice())
+    }
+
+    fn non_zero(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).expect("test worker count should be non-zero")
+    }
+
+    #[service(tags = ["__unit_high_priority_capacity_primary__"], scheduling = HighPriority)]
+    async fn capacity_primary_high_priority_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[service(tags = ["__unit_high_priority_capacity_primary__"], scheduling = Standard)]
+    async fn capacity_primary_standard_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[service(tags = ["__unit_high_priority_capacity_infra__"], scheduling = HighPriority)]
+    async fn capacity_infra_high_priority_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[provider(Notify)]
+    pub struct CapacitySignal;
+
+    #[service(tags = ["__unit_high_priority_capacity_parity__"], scheduling = HighPriority)]
+    async fn capacity_parity_high_priority_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[trigger(
+        Event(CapacitySignal),
+        tags = ["__unit_high_priority_capacity_parity__"],
+        scheduling = HighPriority
+    )]
+    async fn capacity_parity_high_priority_trigger() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_skips_runtime_for_zero_entries() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(0, Some(non_zero(4)));
+
+        assert_eq!(plan.entry_count(), 0);
+        assert_eq!(plan.worker_count(), None);
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_uses_one_worker_for_one_entry() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(1, Some(non_zero(8)));
+
+        assert_eq!(plan.entry_count(), 1);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(1));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_uses_entry_count_within_parallelism() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(3, Some(non_zero(8)));
+
+        assert_eq!(plan.entry_count(), 3);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(3));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_caps_workers_by_parallelism() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(8, Some(non_zero(2)));
+
+        assert_eq!(plan.entry_count(), 8);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(2));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_falls_back_to_one_worker_without_parallelism() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(4, None);
+
+        assert_eq!(plan.entry_count(), 4);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(1));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_counts_only_declared_high_priority_entries() {
+        let services = vec![
+            test_service(1, &STANDARD_TEST_ENTRY),
+            test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
+            test_service(3, &ISOLATED_TEST_ENTRY),
+            test_service(4, &HIGH_PRIORITY_TEST_ENTRY),
+        ];
+
+        let plan = HighPriorityCapacityPlan::from_services(&services);
+
+        assert_eq!(plan.entry_count(), 2);
+        assert!(plan.worker_count().is_some());
+    }
+
+    #[test]
+    fn builder_capacity_plan_uses_filtered_final_registry() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .build();
+
+        assert_eq!(daemon.high_priority_capacity.entry_count(), 1);
+        assert!(daemon.high_priority_capacity.worker_count().is_some());
+    }
+
+    #[test]
+    fn builder_capacity_plan_merges_infra_tags_without_double_counting() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_infra_tags(&[
+                "__unit_high_priority_capacity_primary__",
+                "__unit_high_priority_capacity_infra__",
+            ])
+            .build();
+
+        assert_eq!(daemon.high_priority_capacity.entry_count(), 2);
+        assert!(daemon.high_priority_capacity.worker_count().is_some());
+    }
+
+    #[test]
+    fn builder_capacity_plan_counts_high_priority_triggers_and_services_equally() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_parity__")
+                    .build(),
+            )
+            .build();
+
+        assert_eq!(daemon.high_priority_capacity.entry_count(), 2);
+        assert!(daemon.high_priority_capacity.worker_count().is_some());
     }
 
     #[test]
@@ -1254,6 +1452,7 @@ mod tests {
             .with_registry(isolated_registry())
             .build();
         daemon.services = vec![test_service(1, &STANDARD_TEST_ENTRY)];
+        daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
 
         let runtime = daemon
             .ensure_high_priority_runtime()
@@ -1269,6 +1468,7 @@ mod tests {
             .with_registry(isolated_registry())
             .build();
         daemon.services = vec![test_service(1, &HIGH_PRIORITY_TEST_ENTRY)];
+        daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
 
         let runtime = daemon
             .ensure_high_priority_runtime()

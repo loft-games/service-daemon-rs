@@ -66,7 +66,8 @@ Scheduling advice is recommendation-first. The internal analyzer may log advice 
 | Signal type | Examples | Interpretation |
 | :--- | :--- | :--- |
 | Useful diagnostic signals | Service sleep drift, runtime probe drift, restart/backoff observations, isolated startup pressure | Investigate runtime pressure, lifecycle ownership, or whether the source-level scheduling declaration should be changed in a future build. |
-| Mode-internal future work | Sustained pressure inside declared `HighPriority` services | Phase 7+ may introduce HighPriority runtime epoch rollover, applied only at generation boundaries within the same declared mode. |
+| Mode-internal planning | Declared `HighPriority` services or triggers in the final registry | Phase 7 derives the high-priority runtime worker count at initialization from those entries. |
+| Future research only | Sustained pressure that remains after static HighPriority planning | Runtime epoch rollover is deferred to Phase 9 research and would still stay inside the declared `HighPriority` mode. |
 | Never automatic from this signal alone | Control lane pressure, HighPriority saturation, restart storms, isolated startup pressure, or one service's high sleep drift | Do not infer cross-mode migration; sleep drift identifies pressure, not a sole culprit. |
 
 `SchedulingAdvisoryProfile` controls only whether this advisory emission runs. The default keeps it enabled; `SchedulingAdvisoryProfile::disabled()` stops advisory emission without changing declared scheduling modes, body placement, reload, restart, or shutdown behavior.
@@ -123,10 +124,12 @@ async fn admin_service() -> anyhow::Result<()> {
 
 - Use it for latency-sensitive work that should stay on a shared framework-owned runtime, but not compete with the standard body lane.
 - The runtime is created lazily by `ServiceDaemon::run()` only when the final registry contains at least one `HighPriority` service or trigger.
+- Its worker count is planned from the final registry's declared `HighPriority` entry count, capped by available host parallelism.
+- HighPriority services and HighPriority triggers count as the same kind of registry entry; there is no trigger/service weighting model.
 - `ServiceDaemonBuilder::build()` does not create this runtime, so applications that only use `Standard` and `Isolated` do not pay the extra shared runtime cost.
 - It is not an overflow pool for `Standard`; a service enters this lane only by declaring `scheduling = HighPriority` in source.
 - It is distinct from `Isolated`, which creates a private OS thread and Tokio runtime for each service generation body.
-- Future HighPriority runtime epoch rollover is Phase 7+ work and would remain inside the declared `HighPriority` mode.
+- Runtime epoch rollover is deferred to Phase 9 research and would remain inside the declared `HighPriority` mode.
 
 ```rust,ignore
 #[service(scheduling = HighPriority)]

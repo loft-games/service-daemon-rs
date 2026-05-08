@@ -118,6 +118,8 @@ Two low-level signals feed this baseline:
 
 The logical lanes are reported separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics/control-plane lane, not a user-facing `ServiceScheduling` option. `Standard` represents the host runtime body lane rather than the supervisor/control runtime.
 
+HighPriority runtime capacity is planned from the daemon's final declared `HighPriority` service/trigger entries before the runtime is lazily created. The plan is read-only operational context: pressure probes and advisory recommendations can warn about lane saturation, but they do not resize the worker count, reload services, restart services, trigger rollover, or move work across modes.
+
 Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
 
 ### Public Diagnostics Snapshot
@@ -145,7 +147,7 @@ These recommendations are advisory. They can report:
 - Isolated resource pressure when isolated startup failures or rate-limited restarts appear.
 - Lifecycle instability when restart/backoff signals are high, which suppresses placement-like advice.
 
-The analyzer does not expose a public metrics schema and does not change the declared service scheduling mode. Future mode-internal runtime placement work, such as HighPriority runtime epoch rollover, must be a generation-boundary decision: the current generation exits cooperatively, and only the next generation may bind to a new runtime epoch inside the same declared mode.
+The analyzer does not expose a public metrics schema and does not change the declared service scheduling mode. It is not an input to Phase 7 HighPriority worker-count planning. Future mode-internal runtime placement work, such as HighPriority runtime epoch rollover, is deferred to Phase 9 research and would need to be a generation-boundary decision inside the same declared mode.
 
 The default `SchedulingAdvisoryProfile` keeps this advisory loop enabled. To suppress advisory emission without changing lifecycle or body placement, configure the daemon explicitly:
 
