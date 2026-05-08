@@ -31,6 +31,7 @@ use petgraph::{
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
+use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
 use crate::core::context::{DaemonResources, process_token};
 use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_probe};
 #[cfg(any(unix, feature = "simulation"))]
@@ -104,6 +105,7 @@ pub struct ServiceDaemon {
     /// Shared runtime lazily created for HighPriority service bodies.
     high_priority_runtime: Option<Runtime>,
     runtime_probe_tasks: Vec<JoinHandle<()>>,
+    adaptive_recommendation_task: Option<JoinHandle<()>>,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
@@ -115,6 +117,7 @@ pub struct ServiceDaemon {
 
 impl Drop for ServiceDaemon {
     fn drop(&mut self) {
+        self.abort_adaptive_recommendation_loop();
         self.shutdown_high_priority_runtime_detached();
         self.shutdown_control_runtime_detached();
     }
@@ -283,6 +286,17 @@ impl ServiceDaemon {
             .push(handle.spawn(run_lane_runtime_probe(diagnostics, lane, token)));
     }
 
+    fn spawn_adaptive_recommendation_loop(&mut self, handle: &Handle) {
+        if self.adaptive_recommendation_task.is_some() {
+            return;
+        }
+
+        let diagnostics = self.diagnostics.clone();
+        let token = self.cancellation_token.clone();
+        self.adaptive_recommendation_task =
+            Some(handle.spawn(run_adaptive_scheduling_recommendations(diagnostics, token)));
+    }
+
     async fn stop_runtime_probes(&mut self) {
         for handle in self.runtime_probe_tasks.drain(..) {
             if let Err(err) = handle.await
@@ -290,6 +304,21 @@ impl ServiceDaemon {
             {
                 tracing::warn!(error = ?err, "Runtime probe task ended unexpectedly");
             }
+        }
+    }
+
+    async fn stop_adaptive_recommendation_loop(&mut self) {
+        if let Some(handle) = self.adaptive_recommendation_task.take()
+            && let Err(err) = handle.await
+            && !err.is_cancelled()
+        {
+            tracing::error!(error = ?err, "Adaptive scheduling recommendation task ended unexpectedly");
+        }
+    }
+
+    fn abort_adaptive_recommendation_loop(&mut self) {
+        if let Some(handle) = self.adaptive_recommendation_task.take() {
+            handle.abort();
         }
     }
 
@@ -381,6 +410,7 @@ impl ServiceDaemon {
         let standard_runtime = Handle::current();
         if let Some(runtime) = control_runtime.as_ref() {
             self.spawn_runtime_probe(runtime, RuntimeLane::Control);
+            self.spawn_adaptive_recommendation_loop(runtime);
         }
         self.spawn_runtime_probe(&standard_runtime, RuntimeLane::Standard);
         if let Some(runtime) = high_priority_runtime.as_ref() {
@@ -539,6 +569,7 @@ impl ServiceDaemon {
             .await;
         }
 
+        self.stop_adaptive_recommendation_loop().await;
         self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime();
         self.shutdown_control_runtime();
@@ -613,6 +644,7 @@ impl ServiceDaemon {
         let standard_runtime = Handle::current();
         if let Some(runtime) = control_runtime.as_ref() {
             self.spawn_runtime_probe(runtime, RuntimeLane::Control);
+            self.spawn_adaptive_recommendation_loop(runtime);
         }
         self.spawn_runtime_probe(&standard_runtime, RuntimeLane::Standard);
         if let Some(runtime) = high_priority_runtime.as_ref() {
@@ -620,29 +652,19 @@ impl ServiceDaemon {
         }
 
         if let Some(control_runtime) = control_runtime.as_ref() {
+            let body_lanes = parts::BodyExecutionLanes {
+                standard: standard_runtime.clone(),
+                high_priority: high_priority_runtime.clone(),
+            };
             for service in &self.services {
-                let (supervisor_lane, body_lane) = match service.entry.scheduling {
-                    ServiceScheduling::Standard => (
-                        parts::SupervisorSpawnLane::Control(control_runtime.clone()),
-                        parts::BodyExecutionLane::Standard(standard_runtime.clone()),
-                    ),
-                    ServiceScheduling::HighPriority => {
-                        let Some(runtime) = high_priority_runtime.clone() else {
-                            return Err(ServiceError::InternalError(format!(
-                                "HighPriority service '{}' is missing the shared high-priority runtime",
-                                service.name()
-                            )));
-                        };
-                        (
-                            parts::SupervisorSpawnLane::Control(control_runtime.clone()),
-                            parts::BodyExecutionLane::HighPriority(runtime),
-                        )
-                    }
-                    ServiceScheduling::Isolated => (
-                        parts::SupervisorSpawnLane::Control(control_runtime.clone()),
-                        parts::BodyExecutionLane::Isolated,
-                    ),
-                };
+                if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
+                    && body_lanes.high_priority.is_none()
+                {
+                    return Err(ServiceError::InternalError(format!(
+                        "HighPriority service '{}' is missing the shared high-priority runtime",
+                        service.name()
+                    )));
+                }
 
                 runner::spawn_service(parts::SpawnServiceParts {
                     service_id: service.id,
@@ -651,8 +673,9 @@ impl ServiceDaemon {
                     watcher: service.entry.watcher,
                     policy: test_policy,
                     scheduling: service.entry.scheduling,
-                    supervisor_lane,
-                    body_lane,
+                    supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime.clone()),
+                    body_lanes: body_lanes.clone(),
+                    body_lane_resolver: parts::BodyLaneResolver::default(),
                     running_tasks: self.running_tasks.clone(),
                     resources: self.resources.clone(),
                     diagnostics: self.diagnostics.clone(),
@@ -675,6 +698,7 @@ impl ServiceDaemon {
         )
         .await;
 
+        self.stop_adaptive_recommendation_loop().await;
         self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime_detached();
         self.shutdown_control_runtime_detached();
@@ -882,6 +906,7 @@ impl ServiceDaemonBuilder {
             control_runtime: None,
             high_priority_runtime: None,
             runtime_probe_tasks: Vec::new(),
+            adaptive_recommendation_task: None,
             external_cancel_token: self.external_cancel_token,
             resources,
             diagnostics: Arc::new(DiagnosticsStore::new()),

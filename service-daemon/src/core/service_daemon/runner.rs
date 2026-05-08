@@ -37,8 +37,8 @@ use crate::models::{
 };
 
 use super::parts::{
-    BodyExecutionLane, ServiceSupervisorParts, SpawnAllServicesParts, SpawnServiceParts,
-    SupervisorSpawnLane,
+    BodyExecutionLane, BodyExecutionLanes, BodyLaneResolver, ServiceSupervisorParts,
+    SpawnAllServicesParts, SpawnServiceParts, SupervisorSpawnLane,
 };
 
 type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
@@ -351,7 +351,10 @@ struct ServiceSupervisor {
     run: ServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
     scheduling: ServiceScheduling,
-    body_lane: BodyExecutionLane,
+    body_lanes: BodyExecutionLanes,
+    body_lane_resolver: BodyLaneResolver,
+    generation_body_lane: Option<BodyExecutionLane>,
+    generation_scheduling: Option<ServiceScheduling>,
     backoff: BackoffController,
     restart_storm: RestartStormGuard,
     resources: Arc<DaemonResources>,
@@ -378,7 +381,8 @@ impl ServiceSupervisor {
             watcher,
             policy,
             scheduling,
-            body_lane,
+            body_lanes,
+            body_lane_resolver,
             resources,
             diagnostics,
             isolated_startup_permits,
@@ -392,7 +396,10 @@ impl ServiceSupervisor {
             run,
             watcher,
             scheduling,
-            body_lane,
+            body_lanes,
+            body_lane_resolver,
+            generation_body_lane: None,
+            generation_scheduling: None,
             backoff: BackoffController::new(policy),
             restart_storm: RestartStormGuard::default(),
             resources,
@@ -671,19 +678,28 @@ impl ServiceSupervisor {
 
         let start_status = self.determine_start_status();
         self.generation = self.generation.saturating_add(1);
-        let runtime_lane = RuntimeLane::from(self.scheduling);
+        let resolved_scheduling =
+            self.body_lane_resolver
+                .resolve(self.service_id, self.generation, self.scheduling);
+        let runtime_lane = RuntimeLane::from(resolved_scheduling);
         self.generation_diagnostics = Some(self.diagnostics.register_generation(
             self.service_id,
             self.name,
             self.generation,
             runtime_lane,
         ));
+        self.generation_scheduling = Some(resolved_scheduling);
+        self.generation_body_lane = self.body_lanes.resolve(resolved_scheduling);
+        self.generation_start = Some(Instant::now());
+        self.reload_token = Some(CancellationToken::new());
+
         info!(
             service = %self.name,
             service_id = %self.service_id,
             generation = self.generation,
-            scheduling = ?self.scheduling,
-            body_lane = ?self.body_lane,
+            declared_scheduling = ?self.scheduling,
+            resolved_scheduling = ?resolved_scheduling,
+            body_lane = ?self.generation_body_lane,
             runtime_lane = ?runtime_lane,
             status = ?start_status,
             "Starting service generation"
@@ -693,8 +709,12 @@ impl ServiceSupervisor {
             .insert(self.service_id, start_status);
         self.resources.status_changed.notify_waiters();
 
-        self.generation_start = Some(Instant::now());
-        self.reload_token = Some(CancellationToken::new());
+        if self.generation_body_lane.is_none() {
+            return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
+                "service '{}' resolved to HighPriority without an available high-priority runtime",
+                self.name
+            )))));
+        }
 
         SupervisorState::Running
     }
@@ -725,12 +745,21 @@ impl ServiceSupervisor {
             )))));
         };
 
+        let Some(body_lane) = self.generation_body_lane.as_ref().cloned() else {
+            return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
+                "service '{}' entered Running without a resolved body lane",
+                self.name
+            )))));
+        };
+        let resolved_scheduling = self.generation_scheduling.unwrap_or(self.scheduling);
+
         info!(
             service = %self.name,
             service_id = %self.service_id,
             generation = self.generation,
-            scheduling = ?self.scheduling,
-            body_lane = ?self.body_lane,
+            declared_scheduling = ?self.scheduling,
+            resolved_scheduling = ?resolved_scheduling,
+            body_lane = ?body_lane,
             runtime_lane = ?diagnostics.runtime_lane(),
             "Service generation running"
         );
@@ -745,7 +774,7 @@ impl ServiceSupervisor {
             resources: self.resources.clone(),
             diagnostics: diagnostics.clone(),
         };
-        let mut generation_future = match &self.body_lane {
+        let mut generation_future = match &body_lane {
             BodyExecutionLane::Standard(runtime) | BodyExecutionLane::HighPriority(runtime) => {
                 run_body_service_generation(generation_parts, runtime.clone())
             }
@@ -764,7 +793,7 @@ impl ServiceSupervisor {
                     service = %self.name,
                     service_id = %self.service_id,
                     generation = self.generation,
-                    body_lane = ?self.body_lane,
+                    body_lane = ?body_lane,
                     "Service reload signal received, waiting for service generation to exit"
                 );
                 generation_future.await
@@ -1068,7 +1097,8 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         policy,
         scheduling,
         supervisor_lane,
-        body_lane,
+        body_lanes,
+        body_lane_resolver,
         running_tasks,
         resources,
         diagnostics,
@@ -1084,7 +1114,8 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         watcher,
         policy,
         scheduling,
-        body_lane,
+        body_lanes,
+        body_lane_resolver,
         resources,
         diagnostics,
         isolated_startup_permits,
@@ -1123,6 +1154,10 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts) {
 
     info!("Beginning wave-based startup sequence...");
 
+    let body_lanes = BodyExecutionLanes {
+        standard: standard_runtime,
+        high_priority: high_priority_runtime,
+    };
     let waves = ServiceWave::from_services(&services);
 
     // Process waves in descending order of priority
@@ -1140,35 +1175,21 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts) {
         );
 
         for service in &wave.services {
-            let (supervisor_lane, body_lane) = match service.entry.scheduling {
-                ServiceScheduling::Standard => (
-                    SupervisorSpawnLane::Control(control_runtime.clone()),
-                    BodyExecutionLane::Standard(standard_runtime.clone()),
-                ),
-                ServiceScheduling::HighPriority => {
-                    let Some(runtime) = high_priority_runtime.clone() else {
-                        error!(
-                            service = %service.name(),
-                            service_id = %service.id,
-                            "HighPriority service is missing the shared high-priority runtime"
-                        );
-                        resources
-                            .status_plane
-                            .insert(service.id, ServiceStatus::Terminated);
-                        resources.status_changed.notify_waiters();
-                        daemon_token.cancel();
-                        return;
-                    };
-                    (
-                        SupervisorSpawnLane::Control(control_runtime.clone()),
-                        BodyExecutionLane::HighPriority(runtime),
-                    )
-                }
-                ServiceScheduling::Isolated => (
-                    SupervisorSpawnLane::Control(control_runtime.clone()),
-                    BodyExecutionLane::Isolated,
-                ),
-            };
+            if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
+                && body_lanes.high_priority.is_none()
+            {
+                error!(
+                    service = %service.name(),
+                    service_id = %service.id,
+                    "HighPriority service is missing the shared high-priority runtime"
+                );
+                resources
+                    .status_plane
+                    .insert(service.id, ServiceStatus::Terminated);
+                resources.status_changed.notify_waiters();
+                daemon_token.cancel();
+                return;
+            }
 
             spawn_service(SpawnServiceParts {
                 service_id: service.id,
@@ -1177,8 +1198,9 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts) {
                 watcher: service.entry.watcher,
                 policy: restart_policy,
                 scheduling: service.entry.scheduling,
-                supervisor_lane,
-                body_lane,
+                supervisor_lane: SupervisorSpawnLane::Control(control_runtime.clone()),
+                body_lanes: body_lanes.clone(),
+                body_lane_resolver: BodyLaneResolver::default(),
                 running_tasks: running_tasks.clone(),
                 resources: resources.clone(),
                 diagnostics: diagnostics.clone(),
@@ -1282,10 +1304,18 @@ mod tests {
     use super::super::policy::RestartPolicy;
     use super::*;
     use std::sync::LazyLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     static WATCHER_THREAD_NAME: LazyLock<Arc<Mutex<Option<String>>>> =
         LazyLock::new(|| Arc::new(Mutex::new(None)));
     static WATCHER_STARTED: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
+    static NO_LIVE_REMAP_THREADS: LazyLock<Arc<Mutex<Vec<String>>>> =
+        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
+    static NO_LIVE_REMAP_RECORD_AGAIN: AtomicBool = AtomicBool::new(false);
+    static STANDARD_TO_ISOLATED_THREADS: LazyLock<Arc<Mutex<Vec<String>>>> =
+        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
+    static ISOLATED_TO_STANDARD_THREADS: LazyLock<Arc<Mutex<Vec<String>>>> =
+        LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
     fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
@@ -1294,6 +1324,80 @@ mod tests {
     fn cancellable_service(token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async move {
             token.cancelled().await;
+            Ok(())
+        })
+    }
+
+    async fn record_current_thread_name(records: Arc<Mutex<Vec<String>>>) {
+        let thread_name = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        records.lock().await.push(thread_name);
+    }
+
+    async fn wait_for_thread_records(
+        records: Arc<Mutex<Vec<String>>>,
+        expected_len: usize,
+    ) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = records.lock().await.clone();
+                if snapshot.len() >= expected_len {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("thread records should reach expected length")
+    }
+
+    fn no_live_remap_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async {
+            record_current_thread_name(NO_LIVE_REMAP_THREADS.clone()).await;
+            crate::done();
+
+            while !NO_LIVE_REMAP_RECORD_AGAIN.load(Ordering::SeqCst) && !crate::is_shutdown() {
+                crate::sleep(Duration::from_millis(5)).await;
+            }
+
+            record_current_thread_name(NO_LIVE_REMAP_THREADS.clone()).await;
+
+            while !crate::is_shutdown() {
+                crate::sleep(Duration::from_millis(5)).await;
+            }
+
+            Ok(())
+        })
+    }
+
+    fn standard_to_isolated_remap_service(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async {
+            record_current_thread_name(STANDARD_TO_ISOLATED_THREADS.clone()).await;
+            crate::done();
+
+            while !crate::is_shutdown() {
+                crate::sleep(Duration::from_millis(5)).await;
+            }
+
+            Ok(())
+        })
+    }
+
+    fn isolated_to_standard_remap_service(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async {
+            record_current_thread_name(ISOLATED_TO_STANDARD_THREADS.clone()).await;
+            crate::done();
+
+            while !crate::is_shutdown() {
+                crate::sleep(Duration::from_millis(5)).await;
+            }
+
             Ok(())
         })
     }
@@ -1318,6 +1422,262 @@ mod tests {
             jitter_factor: 0.0,
             ..RestartPolicy::for_testing()
         }
+    }
+
+    fn test_body_lanes() -> BodyExecutionLanes {
+        BodyExecutionLanes {
+            standard: tokio::runtime::Handle::current(),
+            high_priority: None,
+        }
+    }
+
+    fn test_body_lanes_with_high_priority() -> BodyExecutionLanes {
+        let current = tokio::runtime::Handle::current();
+        BodyExecutionLanes {
+            standard: current.clone(),
+            high_priority: Some(current),
+        }
+    }
+
+    fn remap_supervisor(
+        service_id: ServiceId,
+        name: &'static str,
+        run: ServiceFn,
+        declared_scheduling: ServiceScheduling,
+        body_lane_resolver: BodyLaneResolver,
+        resources: Arc<DaemonResources>,
+        diagnostics: Arc<DiagnosticsStore>,
+        cancellation_token: CancellationToken,
+    ) -> ServiceSupervisor {
+        ServiceSupervisor::new(ServiceSupervisorParts {
+            service_id,
+            name,
+            run,
+            watcher: None,
+            policy: fast_policy(),
+            scheduling: declared_scheduling,
+            body_lanes: test_body_lanes(),
+            body_lane_resolver,
+            resources,
+            diagnostics,
+            isolated_startup_permits: Arc::new(Semaphore::new(1)),
+            cancellation_token,
+            daemon_token: CancellationToken::new(),
+        })
+    }
+
+    async fn stop_supervisor(cancellation_token: &CancellationToken, handle: JoinHandle<()>) {
+        cancellation_token.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("supervisor should stop after cancellation")
+            .expect("supervisor task should join cleanly");
+    }
+
+    #[tokio::test]
+    async fn default_body_lane_resolver_preserves_declared_scheduling_at_generation_start() {
+        let declared_lanes = [
+            ServiceScheduling::Standard,
+            ServiceScheduling::HighPriority,
+            ServiceScheduling::Isolated,
+        ];
+
+        for (index, declared_scheduling) in declared_lanes.into_iter().enumerate() {
+            let service_id = ServiceId::new(200 + index);
+            let diagnostics = Arc::new(DiagnosticsStore::new());
+            let mut supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
+                service_id,
+                name: "default_resolver",
+                run: noop_service,
+                watcher: None,
+                policy: fast_policy(),
+                scheduling: declared_scheduling,
+                body_lanes: test_body_lanes_with_high_priority(),
+                body_lane_resolver: BodyLaneResolver::default(),
+                resources: DaemonResources::new(),
+                diagnostics: diagnostics.clone(),
+                isolated_startup_permits: Arc::new(Semaphore::new(1)),
+                cancellation_token: CancellationToken::new(),
+                daemon_token: CancellationToken::new(),
+            });
+
+            let state = supervisor.on_starting().await;
+
+            assert!(matches!(state, SupervisorState::Running));
+            assert_eq!(supervisor.generation_scheduling, Some(declared_scheduling));
+            match (
+                declared_scheduling,
+                supervisor.generation_body_lane.as_ref(),
+            ) {
+                (ServiceScheduling::Standard, Some(BodyExecutionLane::Standard(_))) => {}
+                (ServiceScheduling::HighPriority, Some(BodyExecutionLane::HighPriority(_))) => {}
+                (ServiceScheduling::Isolated, Some(BodyExecutionLane::Isolated)) => {}
+                (_, lane) => panic!("unexpected body lane: {:?}", lane),
+            }
+            assert_eq!(
+                diagnostics
+                    .generation_snapshot(service_id, 1)
+                    .expect("generation diagnostics should be registered")
+                    .runtime_lane,
+                RuntimeLane::from(declared_scheduling)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_change_does_not_move_running_generation_before_reload() {
+        NO_LIVE_REMAP_THREADS.lock().await.clear();
+        NO_LIVE_REMAP_RECORD_AGAIN.store(false, Ordering::SeqCst);
+        let should_isolate_next_generation = Arc::new(AtomicBool::new(false));
+        let service_id = ServiceId::new(210);
+        let resources = DaemonResources::new();
+        let diagnostics = Arc::new(DiagnosticsStore::new());
+        let cancellation_token = CancellationToken::new();
+        let supervisor = remap_supervisor(
+            service_id,
+            "no_live_remap",
+            no_live_remap_service,
+            ServiceScheduling::Standard,
+            BodyLaneResolver::with_override({
+                let should_isolate_next_generation = should_isolate_next_generation.clone();
+                move |_, _, declared_scheduling| {
+                    if should_isolate_next_generation.load(Ordering::SeqCst) {
+                        ServiceScheduling::Isolated
+                    } else {
+                        declared_scheduling
+                    }
+                }
+            }),
+            resources,
+            diagnostics.clone(),
+            cancellation_token.clone(),
+        );
+        let handle = tokio::spawn(supervisor.run_loop());
+
+        let first_records = wait_for_thread_records(NO_LIVE_REMAP_THREADS.clone(), 1).await;
+        assert_ne!(first_records[0], "svc-no_live_remap");
+        should_isolate_next_generation.store(true, Ordering::SeqCst);
+        NO_LIVE_REMAP_RECORD_AGAIN.store(true, Ordering::SeqCst);
+
+        let records = wait_for_thread_records(NO_LIVE_REMAP_THREADS.clone(), 2).await;
+        assert_ne!(records[1], "svc-no_live_remap");
+        assert!(diagnostics.generation_snapshot(service_id, 2).is_none());
+
+        stop_supervisor(&cancellation_token, handle).await;
+    }
+
+    #[tokio::test]
+    async fn standard_to_isolated_remap_applies_only_after_reload_boundary() {
+        STANDARD_TO_ISOLATED_THREADS.lock().await.clear();
+        let service_id = ServiceId::new(220);
+        let resources = DaemonResources::new();
+        let reload_signal = resources
+            .reload_signals
+            .entry(service_id)
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone();
+        let diagnostics = Arc::new(DiagnosticsStore::new());
+        let cancellation_token = CancellationToken::new();
+        let supervisor = remap_supervisor(
+            service_id,
+            "standard_to_isolated_remap",
+            standard_to_isolated_remap_service,
+            ServiceScheduling::Standard,
+            BodyLaneResolver::with_override(|_, generation, declared_scheduling| {
+                if generation >= 2 {
+                    ServiceScheduling::Isolated
+                } else {
+                    declared_scheduling
+                }
+            }),
+            resources,
+            diagnostics.clone(),
+            cancellation_token.clone(),
+        );
+        let handle = tokio::spawn(supervisor.run_loop());
+
+        let first_records = wait_for_thread_records(STANDARD_TO_ISOLATED_THREADS.clone(), 1).await;
+        assert_ne!(first_records[0], "svc-standard_to_isolated_remap");
+        assert_eq!(
+            diagnostics
+                .generation_snapshot(service_id, 1)
+                .expect("generation 1 diagnostics should exist")
+                .runtime_lane,
+            RuntimeLane::Standard
+        );
+
+        reload_signal.notify_one();
+        let records = wait_for_thread_records(STANDARD_TO_ISOLATED_THREADS.clone(), 2).await;
+        assert_eq!(records[1], "svc-standard_to_isolated_remap");
+        let generation_1 = diagnostics
+            .generation_snapshot(service_id, 1)
+            .expect("generation 1 diagnostics should exist after reload");
+        let generation_2 = diagnostics
+            .generation_snapshot(service_id, 2)
+            .expect("generation 2 diagnostics should exist after reload");
+        assert_eq!(generation_1.runtime_lane, RuntimeLane::Standard);
+        assert_eq!(generation_1.aggregate.lifecycle.reload_requested, 1);
+        assert_eq!(generation_1.aggregate.lifecycle.reload_exit, 1);
+        assert_eq!(generation_2.runtime_lane, RuntimeLane::Isolated);
+
+        stop_supervisor(&cancellation_token, handle).await;
+    }
+
+    #[tokio::test]
+    async fn isolated_to_standard_remap_applies_only_after_reload_boundary() {
+        ISOLATED_TO_STANDARD_THREADS.lock().await.clear();
+        let service_id = ServiceId::new(230);
+        let resources = DaemonResources::new();
+        let reload_signal = resources
+            .reload_signals
+            .entry(service_id)
+            .or_insert_with(|| Arc::new(Notify::new()))
+            .clone();
+        let diagnostics = Arc::new(DiagnosticsStore::new());
+        let cancellation_token = CancellationToken::new();
+        let supervisor = remap_supervisor(
+            service_id,
+            "isolated_to_standard_remap",
+            isolated_to_standard_remap_service,
+            ServiceScheduling::Isolated,
+            BodyLaneResolver::with_override(|_, generation, declared_scheduling| {
+                if generation >= 2 {
+                    ServiceScheduling::Standard
+                } else {
+                    declared_scheduling
+                }
+            }),
+            resources,
+            diagnostics.clone(),
+            cancellation_token.clone(),
+        );
+        let handle = tokio::spawn(supervisor.run_loop());
+
+        let first_records = wait_for_thread_records(ISOLATED_TO_STANDARD_THREADS.clone(), 1).await;
+        assert_eq!(first_records[0], "svc-isolated_to_standard_remap");
+        assert_eq!(
+            diagnostics
+                .generation_snapshot(service_id, 1)
+                .expect("generation 1 diagnostics should exist")
+                .runtime_lane,
+            RuntimeLane::Isolated
+        );
+
+        reload_signal.notify_one();
+        let records = wait_for_thread_records(ISOLATED_TO_STANDARD_THREADS.clone(), 2).await;
+        assert_ne!(records[1], "svc-isolated_to_standard_remap");
+        let generation_1 = diagnostics
+            .generation_snapshot(service_id, 1)
+            .expect("generation 1 diagnostics should exist after reload");
+        let generation_2 = diagnostics
+            .generation_snapshot(service_id, 2)
+            .expect("generation 2 diagnostics should exist after reload");
+        assert_eq!(generation_1.runtime_lane, RuntimeLane::Isolated);
+        assert_eq!(generation_1.aggregate.lifecycle.reload_requested, 1);
+        assert_eq!(generation_1.aggregate.lifecycle.reload_exit, 1);
+        assert_eq!(generation_2.runtime_lane, RuntimeLane::Standard);
+
+        stop_supervisor(&cancellation_token, handle).await;
     }
 
     #[tokio::test]
@@ -1400,7 +1760,8 @@ mod tests {
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Standard,
             supervisor_lane: SupervisorSpawnLane::Control(control_runtime.handle().clone()),
-            body_lane: BodyExecutionLane::Standard(tokio::runtime::Handle::current()),
+            body_lanes: test_body_lanes(),
+            body_lane_resolver: BodyLaneResolver::default(),
             running_tasks: running_tasks.clone(),
             resources,
             diagnostics: Arc::new(DiagnosticsStore::new()),
@@ -1443,7 +1804,8 @@ mod tests {
             watcher: None,
             policy,
             scheduling: ServiceScheduling::Standard,
-            body_lane: BodyExecutionLane::Standard(tokio::runtime::Handle::current()),
+            body_lanes: test_body_lanes(),
+            body_lane_resolver: BodyLaneResolver::default(),
             resources: DaemonResources::new(),
             diagnostics: Arc::new(DiagnosticsStore::new()),
             isolated_startup_permits: Arc::new(Semaphore::new(1)),
@@ -1452,8 +1814,8 @@ mod tests {
         })
     }
 
-    #[test]
-    fn isolated_startup_errors_use_backoff_recovery() {
+    #[tokio::test]
+    async fn isolated_startup_errors_use_backoff_recovery() {
         let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
             service_id: ServiceId::new(1),
             name: "isolated_startup",
@@ -1461,7 +1823,8 @@ mod tests {
             watcher: None,
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Isolated,
-            body_lane: BodyExecutionLane::Isolated,
+            body_lanes: test_body_lanes(),
+            body_lane_resolver: BodyLaneResolver::default(),
             resources: DaemonResources::new(),
             diagnostics: Arc::new(DiagnosticsStore::new()),
             isolated_startup_permits: Arc::new(Semaphore::new(1)),

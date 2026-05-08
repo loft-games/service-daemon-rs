@@ -26,6 +26,12 @@ Integration tests verify the full lifecycle of the daemon:
 - Status transitions and shelving correctness.
 - Signal propagation and trigger execution.
 
+### Adaptive Lane Remap Validation
+
+The framework test suite includes crate-private lane remap validation for adaptive scheduling research. This verifies that any controlled lane change can only apply at a service generation boundary after reload/restart; a running future is never moved between Tokio runtimes.
+
+This override path is not a public testing API. Production and user-facing simulation keep using the scheduling declared by the service or trigger registry entry.
+
 ### Unit Testing with MockContext (God Mode)
 
 Testing background services is difficult. How do you test a database failure at 2 AM? The `simulation` feature gives you total control ("God Mode") over the environment.

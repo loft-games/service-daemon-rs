@@ -1,3 +1,4 @@
+pub(crate) mod adaptive_scheduling;
 pub mod context;
 pub mod di;
 pub(crate) mod diagnostics;

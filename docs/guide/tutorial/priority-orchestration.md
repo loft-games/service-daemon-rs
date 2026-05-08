@@ -61,6 +61,8 @@ Priority decides when a service or trigger starts and stops. Scheduling decides 
 
 Diagnostics track the control plane and body execution lanes separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics lane, not a user-facing scheduling policy. The observations are diagnostic only: they distinguish lane pressure and generation outcomes, but they do not change scheduling policy or migrate services automatically.
 
+Adaptive scheduling is currently recommendation-first. The internal analyzer may log advice such as `Observe`, `InvestigateControlPlane`, `ConsiderIsolation`, or `KeepCurrentLane`, but those are not executable migration commands. `HighPriority` is not an automatic overflow pool for ordinary services, and `Isolated` carries extra OS thread/runtime allocation cost.
+
 ```rust,ignore
 use service_daemon::prelude::*;
 use service_daemon::{provider, service, trigger};

@@ -20,7 +20,8 @@ pub(super) struct ServiceSupervisorParts {
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub policy: RestartPolicy,
     pub scheduling: ServiceScheduling,
-    pub body_lane: BodyExecutionLane,
+    pub body_lanes: BodyExecutionLanes,
+    pub body_lane_resolver: BodyLaneResolver,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
     pub isolated_startup_permits: Arc<Semaphore>,
@@ -31,6 +32,61 @@ pub(super) struct ServiceSupervisorParts {
 #[derive(Clone)]
 pub(super) enum SupervisorSpawnLane {
     Control(Handle),
+}
+
+#[derive(Clone)]
+pub(super) struct BodyExecutionLanes {
+    pub standard: Handle,
+    pub high_priority: Option<Handle>,
+}
+
+impl BodyExecutionLanes {
+    pub(super) fn resolve(&self, scheduling: ServiceScheduling) -> Option<BodyExecutionLane> {
+        match scheduling {
+            ServiceScheduling::Standard => Some(BodyExecutionLane::Standard(self.standard.clone())),
+            ServiceScheduling::HighPriority => self
+                .high_priority
+                .as_ref()
+                .map(|runtime| BodyExecutionLane::HighPriority(runtime.clone())),
+            ServiceScheduling::Isolated => Some(BodyExecutionLane::Isolated),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct BodyLaneResolver {
+    #[cfg(test)]
+    override_resolver:
+        Option<Arc<dyn Fn(ServiceId, u64, ServiceScheduling) -> ServiceScheduling + Send + Sync>>,
+}
+
+impl BodyLaneResolver {
+    pub(super) fn resolve(
+        &self,
+        service_id: ServiceId,
+        generation: u64,
+        declared_scheduling: ServiceScheduling,
+    ) -> ServiceScheduling {
+        #[cfg(test)]
+        if let Some(resolver) = &self.override_resolver {
+            return resolver(service_id, generation, declared_scheduling);
+        }
+
+        let _ = (service_id, generation);
+        declared_scheduling
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_override(
+        resolver: impl Fn(ServiceId, u64, ServiceScheduling) -> ServiceScheduling
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self {
+            override_resolver: Some(Arc::new(resolver)),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -58,7 +114,8 @@ pub(super) struct SpawnServiceParts {
     pub policy: RestartPolicy,
     pub scheduling: ServiceScheduling,
     pub supervisor_lane: SupervisorSpawnLane,
-    pub body_lane: BodyExecutionLane,
+    pub body_lanes: BodyExecutionLanes,
+    pub body_lane_resolver: BodyLaneResolver,
     pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,

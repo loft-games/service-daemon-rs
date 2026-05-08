@@ -120,6 +120,21 @@ The logical lanes are reported separately as `Control`, `Standard`, `HighPriorit
 
 Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
 
+### Adaptive Scheduling Recommendations
+
+The daemon also runs a low-frequency internal analyzer on the control runtime. It samples the diagnostics store into short windows, suppresses low-sample observations, and emits structured `tracing` recommendations only when the recommendation fingerprint changes.
+
+These recommendations are advisory. They can report:
+
+- Standard lane pressure when runtime probe drift is sustained.
+- An impacted Standard service when service-level sleep drift is high, without declaring that service to be the culprit.
+- Control-plane pressure as an investigation signal, never as a body migration command.
+- HighPriority saturation as a warning, not as permission to move more services into HighPriority.
+- Isolated resource pressure when isolated startup failures or rate-limited restarts appear.
+- Lifecycle instability when restart/backoff signals are high, which suppresses migration-like advice.
+
+The analyzer does not expose a public metrics schema and does not change service placement. Any future migration must be a generation-boundary decision: the current generation exits cooperatively, and only the next generation may resolve a different body lane.
+
 ### Restart and Recovery Signals
 
 When a service generation restarts after a recoverable failure, structured logs include the failure kind, configured policy delay, effective restart delay, whether the internal storm guard extended the delay, and the number of failures currently visible in the storm window. Internal lifecycle snapshots also track rate-limited restart counts and the last policy/effective delay pair.

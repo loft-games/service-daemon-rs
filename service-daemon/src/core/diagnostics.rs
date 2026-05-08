@@ -352,9 +352,7 @@ impl DiagnosticsAggregate {
 }
 
 struct ServiceDiagnostics {
-    #[cfg(test)]
     service_id: ServiceId,
-    #[cfg(test)]
     service_name: &'static str,
     current_generation: AtomicU64,
     runtime_lane: Mutex<RuntimeLane>,
@@ -362,20 +360,10 @@ struct ServiceDiagnostics {
 }
 
 impl ServiceDiagnostics {
-    #[cfg(test)]
     fn new(service_id: ServiceId, service_name: &'static str, lane: RuntimeLane) -> Self {
         Self {
             service_id,
             service_name,
-            current_generation: AtomicU64::new(0),
-            runtime_lane: Mutex::new(lane),
-            aggregate: DiagnosticsAggregate::default(),
-        }
-    }
-
-    #[cfg(not(test))]
-    fn new(_service_id: ServiceId, _service_name: &'static str, lane: RuntimeLane) -> Self {
-        Self {
             current_generation: AtomicU64::new(0),
             runtime_lane: Mutex::new(lane),
             aggregate: DiagnosticsAggregate::default(),
@@ -387,7 +375,6 @@ impl ServiceDiagnostics {
         *lock_or_recover(&self.runtime_lane) = lane;
     }
 
-    #[cfg(test)]
     fn snapshot(&self) -> ServiceDiagnosticsSnapshot {
         ServiceDiagnosticsSnapshot {
             service_id: self.service_id,
@@ -435,13 +422,11 @@ impl GenerationDiagnostics {
 }
 
 struct LaneDiagnostics {
-    #[cfg(test)]
     runtime_lane: RuntimeLane,
     aggregate: DiagnosticsAggregate,
 }
 
 impl LaneDiagnostics {
-    #[cfg(test)]
     fn new(runtime_lane: RuntimeLane) -> Self {
         Self {
             runtime_lane,
@@ -449,14 +434,6 @@ impl LaneDiagnostics {
         }
     }
 
-    #[cfg(not(test))]
-    fn new(_runtime_lane: RuntimeLane) -> Self {
-        Self {
-            aggregate: DiagnosticsAggregate::default(),
-        }
-    }
-
-    #[cfg(test)]
     fn snapshot(&self) -> RuntimeLaneSnapshot {
         RuntimeLaneSnapshot {
             runtime_lane: self.runtime_lane,
@@ -465,7 +442,6 @@ impl LaneDiagnostics {
     }
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServiceDiagnosticsSnapshot {
     pub service_id: ServiceId,
@@ -484,14 +460,12 @@ pub(crate) struct GenerationDiagnosticsSnapshot {
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeLaneSnapshot {
     pub runtime_lane: RuntimeLane,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
-#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiagnosticsSnapshot {
     pub services: Vec<ServiceDiagnosticsSnapshot>,
@@ -659,7 +633,6 @@ impl DiagnosticsStore {
         self.lane_diagnostics(lane).snapshot()
     }
 
-    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> DiagnosticsSnapshot {
         let mut services: Vec<_> = self
             .services

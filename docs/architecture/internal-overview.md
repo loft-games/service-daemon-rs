@@ -52,6 +52,7 @@ graph TD
         SD[ServiceDaemon]
         CR[Internal Control Runtime]
         SCP[Service Control Plane]
+        AD[Diagnostics Analyzer]
         BL[Body Execution Lanes]
     end
 
@@ -62,12 +63,16 @@ graph TD
     SD -->|load| SR & PR
     SD -->|own| CR
     CR -->|run| SCP
+    CR -->|run| AD
+    AD -->|sample| SCP
     SCP -->|supervise| BL
     BL -->|execute| S
     BL -->|execute| T
 ```
 
-The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, and control diagnostics on the daemon-owned control runtime. User service and trigger bodies execute on the selected body lane (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
+The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, and the adaptive recommendation analyzer on the daemon-owned control runtime. User service and trigger bodies execute on the selected body lane (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
+
+The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Any future lane remap must happen through a cooperative generation boundary.
 
 ## 4. Project Structure
 

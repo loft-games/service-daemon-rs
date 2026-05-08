@@ -30,6 +30,12 @@ Service supervisors, dependency watchers, startup wave orchestration, restart/ba
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
 
+### Adaptive Recommendations and Generation Boundaries
+
+Adaptive scheduling is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate service placement or request restarts in production.
+
+A running Tokio future cannot be moved between runtimes. Any future lane change must therefore happen at a generation boundary: a reload, restart, or shutdown signal causes the current generation to exit cooperatively, and only the next generation can resolve a different body lane. Services that cannot respond cleanly to reload/shutdown, depend on thread-local state, or hold non-recoverable generation-local resources are poor migration candidates.
+
 ### 1.1. The Signal Path (Reactive Update Flow)
 How a state change is propagated through the system to trigger a reload:
 
