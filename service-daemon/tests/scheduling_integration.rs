@@ -9,6 +9,8 @@ static THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 static ISOLATED_RESTART_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
+static ISOLATED_PANIC_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 static STANDARD_STARTED: AtomicBool = AtomicBool::new(false);
 static STANDARD_STOPPED: AtomicBool = AtomicBool::new(false);
 static HIGH_PRIORITY_STARTED: AtomicBool = AtomicBool::new(false);
@@ -17,6 +19,8 @@ static ISOLATED_STARTED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_STOPPED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_RESTART_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static ISOLATED_RESTART_STOPPED: AtomicBool = AtomicBool::new(false);
+static ISOLATED_PANIC_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+static ISOLATED_PANIC_STOPPED: AtomicBool = AtomicBool::new(false);
 
 async fn record_thread_name(prefix: &str) -> anyhow::Result<()> {
     let thread_name = std::thread::current()
@@ -39,6 +43,15 @@ async fn record_isolated_restart_thread_name() -> anyhow::Result<()> {
         .lock()
         .await
         .insert(thread_name);
+    Ok(())
+}
+
+async fn record_isolated_panic_thread_name() -> anyhow::Result<()> {
+    let thread_name = std::thread::current()
+        .name()
+        .unwrap_or("unnamed")
+        .to_string();
+    ISOLATED_PANIC_THREAD_NAMES.lock().await.insert(thread_name);
     Ok(())
 }
 
@@ -132,6 +145,24 @@ async fn isolated_restart_service() -> anyhow::Result<()> {
     }
 
     ISOLATED_RESTART_STOPPED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[service(tags = ["__test_isolated_bridge_panic__"], scheduling = Isolated)]
+async fn isolated_panic_service() -> anyhow::Result<()> {
+    record_isolated_panic_thread_name().await?;
+
+    if ISOLATED_PANIC_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+        panic!("simulated isolated generation panic");
+    }
+
+    service_daemon::done();
+
+    while !service_daemon::is_shutdown() {
+        service_daemon::sleep(Duration::from_millis(10)).await;
+    }
+
+    ISOLATED_PANIC_STOPPED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -283,6 +314,46 @@ async fn test_isolated_generation_failure_restarts_through_bridge() -> anyhow::R
     daemon.wait().await?;
 
     assert!(ISOLATED_RESTART_STOPPED.load(Ordering::SeqCst));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_isolated_generation_panic_restarts_through_bridge() -> anyhow::Result<()> {
+    ISOLATED_PANIC_ATTEMPTS.store(0, Ordering::SeqCst);
+    ISOLATED_PANIC_STOPPED.store(false, Ordering::SeqCst);
+    ISOLATED_PANIC_THREAD_NAMES.lock().await.clear();
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__test_isolated_bridge_panic__")
+                .build(),
+        )
+        .with_restart_policy(RestartPolicy::for_testing())
+        .build();
+
+    let cancel = daemon.cancel_token();
+    daemon.run().await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while ISOLATED_PANIC_ATTEMPTS.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    assert!(
+        ISOLATED_PANIC_THREAD_NAMES
+            .lock()
+            .await
+            .contains("svc-isolated_panic_service")
+    );
+
+    cancel.cancel();
+    daemon.wait().await?;
+
+    assert!(ISOLATED_PANIC_STOPPED.load(Ordering::SeqCst));
 
     Ok(())
 }

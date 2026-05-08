@@ -215,7 +215,6 @@ pub(crate) struct LifecycleStatsSnapshot {
     pub provider_init_error: u64,
     pub shutdown: u64,
     pub isolated_startup_failure: u64,
-    pub last_backoff_delay_ms: u64,
     pub last_policy_delay_ms: u64,
     pub last_effective_restart_delay_ms: u64,
     pub last_exit_kind: Option<GenerationExitKind>,
@@ -236,7 +235,6 @@ struct LifecycleStats {
     provider_init_error: AtomicU64,
     shutdown: AtomicU64,
     isolated_startup_failure: AtomicU64,
-    last_backoff_delay_ms: AtomicU64,
     last_policy_delay_ms: AtomicU64,
     last_effective_restart_delay_ms: AtomicU64,
     last_exit_kind: Mutex<Option<GenerationExitKind>>,
@@ -261,8 +259,6 @@ impl LifecycleStats {
         if rate_limited {
             self.rate_limited_restart.fetch_add(1, Ordering::Relaxed);
         }
-        self.last_backoff_delay_ms
-            .store(duration_millis(effective_delay), Ordering::Relaxed);
         self.last_policy_delay_ms
             .store(duration_millis(policy_delay), Ordering::Relaxed);
         self.last_effective_restart_delay_ms
@@ -304,7 +300,6 @@ impl LifecycleStats {
             provider_init_error: self.provider_init_error.load(Ordering::Relaxed),
             shutdown: self.shutdown.load(Ordering::Relaxed),
             isolated_startup_failure: self.isolated_startup_failure.load(Ordering::Relaxed),
-            last_backoff_delay_ms: self.last_backoff_delay_ms.load(Ordering::Relaxed),
             last_policy_delay_ms: self.last_policy_delay_ms.load(Ordering::Relaxed),
             last_effective_restart_delay_ms: self
                 .last_effective_restart_delay_ms
@@ -796,7 +791,6 @@ mod tests {
         assert_eq!(lifecycle.restart, 1);
         assert_eq!(lifecycle.backoff_restart, 1);
         assert_eq!(lifecycle.rate_limited_restart, 1);
-        assert_eq!(lifecycle.last_backoff_delay_ms, 500);
         assert_eq!(lifecycle.last_policy_delay_ms, 250);
         assert_eq!(lifecycle.last_effective_restart_delay_ms, 500);
         assert_eq!(lifecycle.terminated, 1);

@@ -63,6 +63,12 @@ Diagnostics track the control plane and body execution lanes separately as `Cont
 
 Adaptive scheduling is currently recommendation-first. The internal analyzer may log advice such as `Observe`, `InvestigateControlPlane`, `ConsiderIsolation`, or `KeepCurrentLane`, but those are not executable migration commands. `HighPriority` is not an automatic overflow pool for ordinary services, and `Isolated` carries extra OS thread/runtime allocation cost.
 
+| Candidate type | Examples | Adaptive interpretation |
+| :--- | :--- | :--- |
+| Good future candidates | Services that respond quickly to reload/shutdown, rebuild generation-local state cleanly, and do not depend on thread-local state | A future controlled decision could change only the next generation's body lane. |
+| Poor candidates | Services with slow shutdown, thread-affine integrations, non-recoverable generation-local handles, or unstable provider initialization | Keep the declared lane and fix lifecycle/resource ownership first. |
+| Never automatic from this signal alone | Control lane pressure, HighPriority saturation, restart storms, isolated startup pressure, or one service's high sleep drift | Investigate or suppress migration-like advice; sleep drift identifies pressure, not a sole culprit. |
+
 ```rust,ignore
 use service_daemon::prelude::*;
 use service_daemon::{provider, service, trigger};

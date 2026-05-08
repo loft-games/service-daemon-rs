@@ -224,10 +224,12 @@ impl ServiceDaemon {
             if !eager_ids.contains(&tid) {
                 continue;
             }
-            let entry = providers_by_id
-                .get(&tid)
-                .copied()
-                .expect("provider must exist in providers_by_id");
+            let Some(entry) = providers_by_id.get(&tid).copied() else {
+                return Err(ProviderInitError::Fatal {
+                    provider: "<unknown>".to_owned(),
+                    message: "provider missing from eager initialization graph".to_owned(),
+                });
+            };
             (entry.init)(self.restart_policy, self.cancellation_token.clone()).await?;
         }
 
@@ -628,6 +630,18 @@ impl ServiceDaemon {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
         let daemon_token = self.cancellation_token.clone();
+
+        if let Err(err) = validate_dependency_graph(&self.services, PROVIDER_REGISTRY.iter()) {
+            return Err(ServiceError::InternalError(format!(
+                "provider dependency graph validation failed: {err}"
+            )));
+        }
+
+        if let Err(err) = self.eager_init_reachable_providers().await {
+            return Err(ServiceError::InternalError(format!(
+                "eager provider initialization failed: {err}"
+            )));
+        }
 
         let control_runtime = if self.services.is_empty() {
             None

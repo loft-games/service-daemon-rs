@@ -51,7 +51,6 @@ pub(crate) struct LifecycleWindow {
     pub provider_init_error: u64,
     pub shutdown: u64,
     pub isolated_startup_failure: u64,
-    pub last_backoff_delay_ms: u64,
     pub last_policy_delay_ms: u64,
     pub last_effective_restart_delay_ms: u64,
 }
@@ -186,7 +185,6 @@ pub(crate) struct RecommendationObservation {
     pub provider_init_error: u64,
     pub shutdown: u64,
     pub isolated_startup_failure: u64,
-    pub last_backoff_delay_ms: u64,
     pub last_policy_delay_ms: u64,
     pub last_effective_restart_delay_ms: u64,
 }
@@ -219,7 +217,6 @@ impl RecommendationObservation {
             provider_init_error: lifecycle.provider_init_error,
             shutdown: lifecycle.shutdown,
             isolated_startup_failure: lifecycle.isolated_startup_failure,
-            last_backoff_delay_ms: lifecycle.last_backoff_delay_ms,
             last_policy_delay_ms: lifecycle.last_policy_delay_ms,
             last_effective_restart_delay_ms: lifecycle.last_effective_restart_delay_ms,
         }
@@ -739,7 +736,6 @@ fn lifecycle_window(
             previous.map(|snapshot| snapshot.isolated_startup_failure),
             current.isolated_startup_failure,
         ),
-        last_backoff_delay_ms: current.last_backoff_delay_ms,
         last_policy_delay_ms: current.last_policy_delay_ms,
         last_effective_restart_delay_ms: current.last_effective_restart_delay_ms,
     }
@@ -795,7 +791,7 @@ type ObservationFingerprint = (
         u64,
         u64,
     ),
-    (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64),
+    (u64, u64, u64, u64, u64, u64, u64, u64, u64, u64, u64),
 );
 
 fn target_fingerprint(target: &SchedulingRecommendationTarget) -> TargetFingerprint {
@@ -853,7 +849,6 @@ fn observation_fingerprint(observation: &RecommendationObservation) -> Observati
             observation.provider_init_error,
             observation.shutdown,
             observation.isolated_startup_failure,
-            observation.last_backoff_delay_ms,
             observation.last_policy_delay_ms,
             observation.last_effective_restart_delay_ms,
         ),
@@ -944,7 +939,6 @@ mod tests {
             provider_init_error: 0,
             shutdown: 0,
             isolated_startup_failure: 0,
-            last_backoff_delay_ms: 0,
             last_policy_delay_ms: 0,
             last_effective_restart_delay_ms: 0,
         }
