@@ -19,7 +19,7 @@ Triggers are specialized services registered through the same service registry. 
 - **DI Resolution**: Dependency providers are resolved **once** at trigger startup (outside the event loop), matching standard service behavior. This ensures consistent lifecycle management and prevents redundant resolutions on every event.
 - **Service-Level Integration (`Watch`)**: For `Watch` templates, the macro generates a service watcher that leverages the `ServiceDaemon`'s reload mechanism.
 - **Event Dispatch**: The host executes the user handler when events occur, managing the inversion of control.
-- **Runtime Placement**: The generated registry entry carries the selected scheduling policy; the daemon runner uses it to choose the trigger body's execution lane while keeping supervision lifecycle-managed by the daemon.
+- **Runtime Placement**: The generated registry entry carries the selected scheduling policy; the daemon runner uses it to choose the service or trigger body's execution lane while keeping supervision, watchers, reload, restart/backoff, and shutdown coordination on the daemon control plane.
 
 ## 3. The "Macro Illusion"
 

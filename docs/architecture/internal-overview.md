@@ -50,7 +50,9 @@ graph TD
 
     subgraph Core_Daemon ["Core Daemon"]
         SD[ServiceDaemon]
+        CR[Internal Control Runtime]
         SCP[Service Control Plane]
+        BL[Body Execution Lanes]
     end
 
     S --> M_S --> SR
@@ -58,10 +60,14 @@ graph TD
     T --> M_T --> SR
 
     SD -->|load| SR & PR
-    SD -->|orchestrate| SCP
-    SCP -->|spawn| S
-    SCP -->|spawn| T
+    SD -->|own| CR
+    CR -->|run| SCP
+    SCP -->|supervise| BL
+    BL -->|execute| S
+    BL -->|execute| T
 ```
+
+The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, and control diagnostics on the daemon-owned control runtime. User service and trigger bodies execute on the selected body lane (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
 
 ## 4. Project Structure
 

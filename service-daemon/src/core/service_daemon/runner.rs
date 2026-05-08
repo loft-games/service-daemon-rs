@@ -37,7 +37,7 @@ use crate::models::{
 };
 
 use super::parts::{
-    GenerationExecutionLane, ServiceSupervisorParts, SpawnAllServicesParts, SpawnServiceParts,
+    BodyExecutionLane, ServiceSupervisorParts, SpawnAllServicesParts, SpawnServiceParts,
     SupervisorSpawnLane,
 };
 
@@ -171,6 +171,74 @@ fn run_scoped_service_generation(
     })
 }
 
+struct BodyTaskAbortGuard {
+    handle: JoinHandle<ServiceGenerationOutcome>,
+    abort_on_drop: bool,
+}
+
+impl BodyTaskAbortGuard {
+    fn new(handle: JoinHandle<ServiceGenerationOutcome>) -> Self {
+        Self {
+            handle,
+            abort_on_drop: true,
+        }
+    }
+
+    async fn join(mut self) -> Result<ServiceGenerationOutcome, tokio::task::JoinError> {
+        let result = (&mut self.handle).await;
+        self.abort_on_drop = false;
+        result
+    }
+}
+
+impl Drop for BodyTaskAbortGuard {
+    fn drop(&mut self) {
+        if self.abort_on_drop {
+            self.handle.abort();
+        }
+    }
+}
+
+fn run_body_service_generation(
+    parts: ServiceGenerationParts,
+    runtime: tokio::runtime::Handle,
+) -> BoxFuture<'static, ServiceGenerationOutcome> {
+    Box::pin(async move {
+        let name = parts.name;
+        let service_id = parts.service_id;
+        let generation = parts.generation;
+        let handle = runtime.spawn(run_scoped_service_generation(parts));
+        let guard = BodyTaskAbortGuard::new(handle);
+
+        match guard.join().await {
+            Ok(outcome) => outcome,
+            Err(err) if err.is_panic() => {
+                error!(
+                    service = %name,
+                    service_id = %service_id,
+                    generation,
+                    error = ?err,
+                    "Service body task panicked outside scoped generation"
+                );
+                Err(err.into_panic())
+            }
+            Err(err) => {
+                warn!(
+                    service = %name,
+                    service_id = %service_id,
+                    generation,
+                    error = ?err,
+                    "Service body task ended before reporting outcome"
+                );
+                Ok(Err(Error::msg(format!(
+                    "service '{}' body task ended before reporting outcome: {}",
+                    name, err
+                ))))
+            }
+        }
+    })
+}
+
 fn run_isolated_service_generation(
     parts: ServiceGenerationParts,
     startup_permits: Arc<Semaphore>,
@@ -283,7 +351,7 @@ struct ServiceSupervisor {
     run: ServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
     scheduling: ServiceScheduling,
-    generation_lane: GenerationExecutionLane,
+    body_lane: BodyExecutionLane,
     backoff: BackoffController,
     restart_storm: RestartStormGuard,
     resources: Arc<DaemonResources>,
@@ -310,7 +378,7 @@ impl ServiceSupervisor {
             watcher,
             policy,
             scheduling,
-            generation_lane,
+            body_lane,
             resources,
             diagnostics,
             isolated_startup_permits,
@@ -324,7 +392,7 @@ impl ServiceSupervisor {
             run,
             watcher,
             scheduling,
-            generation_lane,
+            body_lane,
             backoff: BackoffController::new(policy),
             restart_storm: RestartStormGuard::default(),
             resources,
@@ -615,7 +683,7 @@ impl ServiceSupervisor {
             service_id = %self.service_id,
             generation = self.generation,
             scheduling = ?self.scheduling,
-            generation_lane = ?self.generation_lane,
+            body_lane = ?self.body_lane,
             runtime_lane = ?runtime_lane,
             status = ?start_status,
             "Starting service generation"
@@ -662,7 +730,7 @@ impl ServiceSupervisor {
             service_id = %self.service_id,
             generation = self.generation,
             scheduling = ?self.scheduling,
-            generation_lane = ?self.generation_lane,
+            body_lane = ?self.body_lane,
             runtime_lane = ?diagnostics.runtime_lane(),
             "Service generation running"
         );
@@ -677,11 +745,11 @@ impl ServiceSupervisor {
             resources: self.resources.clone(),
             diagnostics: diagnostics.clone(),
         };
-        let mut generation_future = match self.generation_lane {
-            GenerationExecutionLane::CurrentRuntime => {
-                run_scoped_service_generation(generation_parts)
+        let mut generation_future = match &self.body_lane {
+            BodyExecutionLane::Standard(runtime) | BodyExecutionLane::HighPriority(runtime) => {
+                run_body_service_generation(generation_parts, runtime.clone())
             }
-            GenerationExecutionLane::Isolated => run_isolated_service_generation(
+            BodyExecutionLane::Isolated => run_isolated_service_generation(
                 generation_parts,
                 self.isolated_startup_permits.clone(),
             ),
@@ -696,7 +764,7 @@ impl ServiceSupervisor {
                     service = %self.name,
                     service_id = %self.service_id,
                     generation = self.generation,
-                    generation_lane = ?self.generation_lane,
+                    body_lane = ?self.body_lane,
                     "Service reload signal received, waiting for service generation to exit"
                 );
                 generation_future.await
@@ -1000,7 +1068,7 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         policy,
         scheduling,
         supervisor_lane,
-        generation_lane,
+        body_lane,
         running_tasks,
         resources,
         diagnostics,
@@ -1016,7 +1084,7 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
         watcher,
         policy,
         scheduling,
-        generation_lane,
+        body_lane,
         resources,
         diagnostics,
         isolated_startup_permits,
@@ -1025,8 +1093,7 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
     });
 
     let handle = match supervisor_lane {
-        SupervisorSpawnLane::Standard => tokio::spawn(supervisor.run_loop()),
-        SupervisorSpawnLane::HighPriority(runtime) => runtime.spawn(supervisor.run_loop()),
+        SupervisorSpawnLane::Control(runtime) => runtime.spawn(supervisor.run_loop()),
     };
 
     running_tasks.lock().await.insert(service_id, handle);
@@ -1040,7 +1107,7 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
 /// The `daemon_token` is threaded through to `wait_for_healthy` so that
 /// the wave startup sequence can be interrupted immediately if the daemon
 /// receives a shutdown signal during startup.
-pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
+pub async fn spawn_all_services(parts: SpawnAllServicesParts) {
     let SpawnAllServicesParts {
         services,
         restart_policy,
@@ -1048,13 +1115,15 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
         resources,
         diagnostics,
         isolated_startup_permits,
+        control_runtime,
+        standard_runtime,
         high_priority_runtime,
         daemon_token,
     } = parts;
 
     info!("Beginning wave-based startup sequence...");
 
-    let waves = ServiceWave::from_services(services);
+    let waves = ServiceWave::from_services(&services);
 
     // Process waves in descending order of priority
     for (priority, wave) in waves.into_iter().rev() {
@@ -1071,10 +1140,10 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
         );
 
         for service in &wave.services {
-            let (supervisor_lane, generation_lane) = match service.entry.scheduling {
+            let (supervisor_lane, body_lane) = match service.entry.scheduling {
                 ServiceScheduling::Standard => (
-                    SupervisorSpawnLane::Standard,
-                    GenerationExecutionLane::CurrentRuntime,
+                    SupervisorSpawnLane::Control(control_runtime.clone()),
+                    BodyExecutionLane::Standard(standard_runtime.clone()),
                 ),
                 ServiceScheduling::HighPriority => {
                     let Some(runtime) = high_priority_runtime.clone() else {
@@ -1091,13 +1160,13 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
                         return;
                     };
                     (
-                        SupervisorSpawnLane::HighPriority(runtime),
-                        GenerationExecutionLane::CurrentRuntime,
+                        SupervisorSpawnLane::Control(control_runtime.clone()),
+                        BodyExecutionLane::HighPriority(runtime),
                     )
                 }
                 ServiceScheduling::Isolated => (
-                    SupervisorSpawnLane::Standard,
-                    GenerationExecutionLane::Isolated,
+                    SupervisorSpawnLane::Control(control_runtime.clone()),
+                    BodyExecutionLane::Isolated,
                 ),
             };
 
@@ -1109,7 +1178,7 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
                 policy: restart_policy,
                 scheduling: service.entry.scheduling,
                 supervisor_lane,
-                generation_lane,
+                body_lane,
                 running_tasks: running_tasks.clone(),
                 resources: resources.clone(),
                 diagnostics: diagnostics.clone(),
@@ -1121,7 +1190,7 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts<'_>) {
         }
 
         // Wait for services to become healthy using configurable timeout
-        wave.wait_for_healthy(&resources, restart_policy.wave_spawn_timeout, daemon_token)
+        wave.wait_for_healthy(&resources, restart_policy.wave_spawn_timeout, &daemon_token)
             .await;
     }
 
@@ -1212,9 +1281,33 @@ pub async fn stop_all_services(
 mod tests {
     use super::super::policy::RestartPolicy;
     use super::*;
+    use std::sync::LazyLock;
+
+    static WATCHER_THREAD_NAME: LazyLock<Arc<Mutex<Option<String>>>> =
+        LazyLock::new(|| Arc::new(Mutex::new(None)));
+    static WATCHER_STARTED: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
 
     fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
+    }
+
+    fn cancellable_service(token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async move {
+            token.cancelled().await;
+            Ok(())
+        })
+    }
+
+    fn control_runtime_watcher() -> BoxFuture<'static, ()> {
+        Box::pin(async {
+            let thread_name = std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_string();
+            *WATCHER_THREAD_NAME.lock().await = Some(thread_name);
+            WATCHER_STARTED.notify_one();
+            futures::future::pending::<()>().await;
+        })
     }
 
     fn fast_policy() -> RestartPolicy {
@@ -1227,6 +1320,121 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn body_bridge_returns_scoped_generation_outcome() {
+        let store = Arc::new(DiagnosticsStore::new());
+        let service_id = ServiceId::new(42);
+        let parts = ServiceGenerationParts {
+            service_id,
+            name: "body_bridge",
+            generation: 1,
+            run: noop_service,
+            cancellation_token: CancellationToken::new(),
+            reload_token: CancellationToken::new(),
+            resources: DaemonResources::new(),
+            diagnostics: store.register_generation(
+                service_id,
+                "body_bridge",
+                1,
+                RuntimeLane::Standard,
+            ),
+        };
+
+        let outcome = run_body_service_generation(parts, tokio::runtime::Handle::current()).await;
+
+        assert!(matches!(outcome, Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn body_task_abort_guard_aborts_spawned_body_task() {
+        struct DropNotifier(Arc<Notify>);
+
+        impl Drop for DropNotifier {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(Notify::new());
+        let handle = tokio::spawn({
+            let started = started.clone();
+            let dropped = dropped.clone();
+            async move {
+                let _drop_notifier = DropNotifier(dropped);
+                started.notify_one();
+                futures::future::pending::<ServiceGenerationOutcome>().await
+            }
+        });
+        let guard = BodyTaskAbortGuard::new(handle);
+
+        started.notified().await;
+        let dropped_notified = dropped.notified();
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), dropped_notified)
+            .await
+            .expect("body task should be aborted when guard is dropped");
+    }
+
+    #[tokio::test]
+    async fn spawn_service_runs_watcher_on_control_runtime() {
+        *WATCHER_THREAD_NAME.lock().await = None;
+        let control_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("test-control")
+            .build()
+            .expect("control runtime should build");
+        let service_id = ServiceId::new(77);
+        let running_tasks = Arc::new(Mutex::new(HashMap::new()));
+        let resources = DaemonResources::new();
+        let cancellation_token = CancellationToken::new();
+        let daemon_token = CancellationToken::new();
+
+        spawn_service(SpawnServiceParts {
+            service_id,
+            name: "control_watcher",
+            run: cancellable_service,
+            watcher: Some(control_runtime_watcher),
+            policy: RestartPolicy::for_testing(),
+            scheduling: ServiceScheduling::Standard,
+            supervisor_lane: SupervisorSpawnLane::Control(control_runtime.handle().clone()),
+            body_lane: BodyExecutionLane::Standard(tokio::runtime::Handle::current()),
+            running_tasks: running_tasks.clone(),
+            resources,
+            diagnostics: Arc::new(DiagnosticsStore::new()),
+            isolated_startup_permits: Arc::new(Semaphore::new(1)),
+            cancellation_token: cancellation_token.clone(),
+            daemon_token,
+        })
+        .await;
+
+        tokio::time::timeout(Duration::from_secs(1), WATCHER_STARTED.notified())
+            .await
+            .expect("watcher should start on control runtime");
+        let thread_name = WATCHER_THREAD_NAME
+            .lock()
+            .await
+            .clone()
+            .unwrap_or_else(|| "missing".to_string());
+
+        assert!(
+            thread_name.starts_with("test-control"),
+            "watcher ran on unexpected thread: {}",
+            thread_name
+        );
+
+        cancellation_token.cancel();
+        let handle = { running_tasks.lock().await.remove(&service_id) };
+        if let Some(handle) = handle {
+            let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        }
+        std::thread::spawn(move || drop(control_runtime))
+            .join()
+            .expect("control runtime drop thread should not panic");
+    }
+
     fn test_supervisor(policy: RestartPolicy) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
             service_id: ServiceId::new(1),
@@ -1235,7 +1443,7 @@ mod tests {
             watcher: None,
             policy,
             scheduling: ServiceScheduling::Standard,
-            generation_lane: GenerationExecutionLane::CurrentRuntime,
+            body_lane: BodyExecutionLane::Standard(tokio::runtime::Handle::current()),
             resources: DaemonResources::new(),
             diagnostics: Arc::new(DiagnosticsStore::new()),
             isolated_startup_permits: Arc::new(Semaphore::new(1)),
@@ -1253,7 +1461,7 @@ mod tests {
             watcher: None,
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Isolated,
-            generation_lane: GenerationExecutionLane::Isolated,
+            body_lane: BodyExecutionLane::Isolated,
             resources: DaemonResources::new(),
             diagnostics: Arc::new(DiagnosticsStore::new()),
             isolated_startup_permits: Arc::new(Semaphore::new(1)),
@@ -1324,8 +1532,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recoverable_errors_use_backoff_recovery() {
+    #[tokio::test]
+    async fn recoverable_errors_use_backoff_recovery() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
@@ -1342,8 +1550,8 @@ mod tests {
         assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
     }
 
-    #[test]
-    fn panics_use_backoff_recovery() {
+    #[tokio::test]
+    async fn panics_use_backoff_recovery() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
@@ -1360,8 +1568,8 @@ mod tests {
         assert_eq!(exit_kind, GenerationExitKind::Panic);
     }
 
-    #[test]
-    fn fatal_service_errors_bypass_restart_guard() {
+    #[tokio::test]
+    async fn fatal_service_errors_bypass_restart_guard() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
@@ -1378,8 +1586,8 @@ mod tests {
         assert_eq!(exit_kind, GenerationExitKind::FatalServiceError);
     }
 
-    #[test]
-    fn provider_init_errors_bypass_restart_guard_and_shutdown_daemon() {
+    #[tokio::test]
+    async fn provider_init_errors_bypass_restart_guard_and_shutdown_daemon() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 

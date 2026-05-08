@@ -17,10 +17,12 @@ For a deep dive into how macros generate these entries, see [Macros Deep Dive](.
 
 ## 2. The Runner (The Engine)
 
-The **Runner** is responsible for the actual `tokio::spawn` calls. 
+The **Runner** owns the control-plane orchestration and body-lane dispatch.
+*   It spawns service supervisors on the daemon's internal control runtime.
+*   It bridges service and trigger bodies onto the selected execution lane: `Standard`, `HighPriority`, or `Isolated`.
 *   It manages the **Restart Policy**.
 *   It handles the **Handshake Protocol**. When a service starts, the Runner waits for the current wave to report `Healthy`, but only up to `wave_spawn_timeout`; if the timeout expires, the next wave still starts while the slow service continues booting in the background.
-*   It monitors for **Panics**. If a service thread crashes, the Runner catches it, records the error, and schedules a restart.
+*   It monitors for **Panics**. If a service body panics, the Runner catches it, records the error, and schedules a restart.
 
 Learn more about the internal orchestration logic in the [Internal Overview](../../architecture/internal-overview.md).
 

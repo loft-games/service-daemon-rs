@@ -42,6 +42,7 @@ use crate::models::{
 
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
 
+const CONTROL_RUNTIME_WORKER_THREADS: usize = 1;
 const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
 
 // ---------------------------------------------------------------------------
@@ -98,7 +99,9 @@ pub struct ServiceDaemon {
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
-    /// Shared runtime lazily created for HighPriority services.
+    /// Dedicated runtime for supervisor and control-plane work.
+    control_runtime: Option<Runtime>,
+    /// Shared runtime lazily created for HighPriority service bodies.
     high_priority_runtime: Option<Runtime>,
     runtime_probe_tasks: Vec<JoinHandle<()>>,
     /// Optional external token for hierarchical lifecycle management.
@@ -113,6 +116,7 @@ pub struct ServiceDaemon {
 impl Drop for ServiceDaemon {
     fn drop(&mut self) {
         self.shutdown_high_priority_runtime_detached();
+        self.shutdown_control_runtime_detached();
     }
 }
 
@@ -233,6 +237,25 @@ impl ServiceDaemon {
             .any(|service| matches!(service.entry.scheduling, ServiceScheduling::HighPriority))
     }
 
+    fn ensure_control_runtime(&mut self) -> std::io::Result<Handle> {
+        if self.control_runtime.is_none() {
+            self.control_runtime = Some(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(CONTROL_RUNTIME_WORKER_THREADS)
+                    .thread_name("svc-control")
+                    .build()?,
+            );
+        }
+
+        match self.control_runtime.as_ref() {
+            Some(runtime) => Ok(runtime.handle().clone()),
+            None => Err(std::io::Error::other(
+                "control runtime missing after successful creation",
+            )),
+        }
+    }
+
     fn ensure_high_priority_runtime(&mut self) -> std::io::Result<Option<Handle>> {
         if !self.has_high_priority_services() {
             return Ok(None);
@@ -333,6 +356,19 @@ impl ServiceDaemon {
             return self;
         }
 
+        let control_runtime = if self.services.is_empty() {
+            None
+        } else {
+            match self.ensure_control_runtime() {
+                Ok(runtime) => Some(runtime),
+                Err(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon control runtime creation failed");
+                    self.shutdown();
+                    return self;
+                }
+            }
+        };
+
         let high_priority_runtime = match self.ensure_high_priority_runtime() {
             Ok(runtime) => runtime,
             Err(err) => {
@@ -342,23 +378,36 @@ impl ServiceDaemon {
             }
         };
 
-        self.spawn_runtime_probe(&Handle::current(), RuntimeLane::Standard);
+        let standard_runtime = Handle::current();
+        if let Some(runtime) = control_runtime.as_ref() {
+            self.spawn_runtime_probe(runtime, RuntimeLane::Control);
+        }
+        self.spawn_runtime_probe(&standard_runtime, RuntimeLane::Standard);
         if let Some(runtime) = high_priority_runtime.as_ref() {
             self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
         }
 
-        // Spawn all services in the background
-        runner::spawn_all_services(parts::SpawnAllServicesParts {
-            services: &self.services,
-            restart_policy: self.restart_policy,
-            running_tasks: self.running_tasks.clone(),
-            resources: self.resources.clone(),
-            diagnostics: self.diagnostics.clone(),
-            isolated_startup_permits: self.isolated_startup_permits.clone(),
-            high_priority_runtime,
-            daemon_token: &self.cancellation_token,
-        })
-        .await;
+        if let Some(control_runtime) = control_runtime.as_ref() {
+            let startup =
+                control_runtime.spawn(runner::spawn_all_services(parts::SpawnAllServicesParts {
+                    services: clone_service_descriptions(&self.services),
+                    restart_policy: self.restart_policy,
+                    running_tasks: self.running_tasks.clone(),
+                    resources: self.resources.clone(),
+                    diagnostics: self.diagnostics.clone(),
+                    isolated_startup_permits: self.isolated_startup_permits.clone(),
+                    control_runtime: control_runtime.clone(),
+                    standard_runtime,
+                    high_priority_runtime,
+                    daemon_token: self.cancellation_token.clone(),
+                }));
+
+            if let Err(err) = startup.await {
+                tracing::error!(error = ?err, "ServiceDaemon startup orchestration failed");
+                self.shutdown();
+                return self;
+            }
+        }
 
         #[cfg(feature = "diagnostics")]
         super::topology_collector::start_topology_collector();
@@ -459,17 +508,40 @@ impl ServiceDaemon {
 
     /// Internal helper: perform the actual graceful shutdown sequence.
     async fn do_shutdown(&mut self) {
-        runner::stop_all_services(
-            &self.services,
-            self.running_tasks.clone(),
-            self.resources.clone(),
-            self.cancellation_token.clone(),
-            self.restart_policy.wave_stop_timeout,
-        )
-        .await;
+        if let Some(control_runtime) = self.control_runtime.as_ref() {
+            let services = clone_service_descriptions(&self.services);
+            let running_tasks = self.running_tasks.clone();
+            let resources = self.resources.clone();
+            let cancellation_token = self.cancellation_token.clone();
+            let wave_stop_timeout = self.restart_policy.wave_stop_timeout;
+            let shutdown = control_runtime.spawn(async move {
+                runner::stop_all_services(
+                    &services,
+                    running_tasks,
+                    resources,
+                    cancellation_token,
+                    wave_stop_timeout,
+                )
+                .await;
+            });
+
+            if let Err(err) = shutdown.await {
+                tracing::error!(error = ?err, "ServiceDaemon shutdown orchestration failed");
+            }
+        } else {
+            runner::stop_all_services(
+                &self.services,
+                self.running_tasks.clone(),
+                self.resources.clone(),
+                self.cancellation_token.clone(),
+                self.restart_policy.wave_stop_timeout,
+            )
+            .await;
+        }
 
         self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime();
+        self.shutdown_control_runtime();
 
         #[cfg(feature = "diagnostics")]
         if let Some(mermaid) = super::topology_collector::export_mermaid() {
@@ -489,8 +561,22 @@ impl ServiceDaemon {
         }
     }
 
+    fn shutdown_control_runtime(&mut self) {
+        if let Some(runtime) = self.control_runtime.take()
+            && let Err(panic) = std::thread::spawn(move || drop(runtime)).join()
+        {
+            tracing::error!(?panic, "Control runtime shutdown thread panicked");
+        }
+    }
+
     fn shutdown_high_priority_runtime_detached(&mut self) {
         if let Some(runtime) = self.high_priority_runtime.take() {
+            let _ = std::thread::spawn(move || drop(runtime));
+        }
+    }
+
+    fn shutdown_control_runtime_detached(&mut self) {
+        if let Some(runtime) = self.control_runtime.take() {
             let _ = std::thread::spawn(move || drop(runtime));
         }
     }
@@ -512,56 +598,70 @@ impl ServiceDaemon {
         let test_policy = RestartPolicy::for_testing();
         let daemon_token = self.cancellation_token.clone();
 
+        let control_runtime = if self.services.is_empty() {
+            None
+        } else {
+            Some(
+                self.ensure_control_runtime()
+                    .map_err(|err| ServiceError::InternalError(err.to_string()))?,
+            )
+        };
         let high_priority_runtime = self
             .ensure_high_priority_runtime()
             .map_err(|err| ServiceError::InternalError(err.to_string()))?;
 
-        self.spawn_runtime_probe(&Handle::current(), RuntimeLane::Standard);
+        let standard_runtime = Handle::current();
+        if let Some(runtime) = control_runtime.as_ref() {
+            self.spawn_runtime_probe(runtime, RuntimeLane::Control);
+        }
+        self.spawn_runtime_probe(&standard_runtime, RuntimeLane::Standard);
         if let Some(runtime) = high_priority_runtime.as_ref() {
             self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
         }
 
-        for service in &self.services {
-            let (supervisor_lane, generation_lane) = match service.entry.scheduling {
-                ServiceScheduling::Standard => (
-                    parts::SupervisorSpawnLane::Standard,
-                    parts::GenerationExecutionLane::CurrentRuntime,
-                ),
-                ServiceScheduling::HighPriority => {
-                    let Some(runtime) = high_priority_runtime.clone() else {
-                        return Err(ServiceError::InternalError(format!(
-                            "HighPriority service '{}' is missing the shared high-priority runtime",
-                            service.name()
-                        )));
-                    };
-                    (
-                        parts::SupervisorSpawnLane::HighPriority(runtime),
-                        parts::GenerationExecutionLane::CurrentRuntime,
-                    )
-                }
-                ServiceScheduling::Isolated => (
-                    parts::SupervisorSpawnLane::Standard,
-                    parts::GenerationExecutionLane::Isolated,
-                ),
-            };
+        if let Some(control_runtime) = control_runtime.as_ref() {
+            for service in &self.services {
+                let (supervisor_lane, body_lane) = match service.entry.scheduling {
+                    ServiceScheduling::Standard => (
+                        parts::SupervisorSpawnLane::Control(control_runtime.clone()),
+                        parts::BodyExecutionLane::Standard(standard_runtime.clone()),
+                    ),
+                    ServiceScheduling::HighPriority => {
+                        let Some(runtime) = high_priority_runtime.clone() else {
+                            return Err(ServiceError::InternalError(format!(
+                                "HighPriority service '{}' is missing the shared high-priority runtime",
+                                service.name()
+                            )));
+                        };
+                        (
+                            parts::SupervisorSpawnLane::Control(control_runtime.clone()),
+                            parts::BodyExecutionLane::HighPriority(runtime),
+                        )
+                    }
+                    ServiceScheduling::Isolated => (
+                        parts::SupervisorSpawnLane::Control(control_runtime.clone()),
+                        parts::BodyExecutionLane::Isolated,
+                    ),
+                };
 
-            runner::spawn_service(parts::SpawnServiceParts {
-                service_id: service.id,
-                name: service.name(),
-                run: service.entry.wrapper,
-                watcher: service.entry.watcher,
-                policy: test_policy,
-                scheduling: service.entry.scheduling,
-                supervisor_lane,
-                generation_lane,
-                running_tasks: self.running_tasks.clone(),
-                resources: self.resources.clone(),
-                diagnostics: self.diagnostics.clone(),
-                isolated_startup_permits: self.isolated_startup_permits.clone(),
-                cancellation_token: service.cancellation_token.clone(),
-                daemon_token: daemon_token.clone(),
-            })
-            .await;
+                runner::spawn_service(parts::SpawnServiceParts {
+                    service_id: service.id,
+                    name: service.name(),
+                    run: service.entry.wrapper,
+                    watcher: service.entry.watcher,
+                    policy: test_policy,
+                    scheduling: service.entry.scheduling,
+                    supervisor_lane,
+                    body_lane,
+                    running_tasks: self.running_tasks.clone(),
+                    resources: self.resources.clone(),
+                    diagnostics: self.diagnostics.clone(),
+                    isolated_startup_permits: self.isolated_startup_permits.clone(),
+                    cancellation_token: service.cancellation_token.clone(),
+                    daemon_token: daemon_token.clone(),
+                })
+                .await;
+            }
         }
 
         tokio::time::sleep(duration).await;
@@ -577,9 +677,21 @@ impl ServiceDaemon {
 
         self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime_detached();
+        self.shutdown_control_runtime_detached();
 
         Ok(())
     }
+}
+
+fn clone_service_descriptions(services: &[ServiceDescription]) -> Vec<ServiceDescription> {
+    services
+        .iter()
+        .map(|service| ServiceDescription {
+            id: service.id,
+            entry: service.entry,
+            cancellation_token: service.cancellation_token.clone(),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -767,6 +879,7 @@ impl ServiceDaemonBuilder {
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
+            control_runtime: None,
             high_priority_runtime: None,
             runtime_probe_tasks: Vec::new(),
             external_cancel_token: self.external_cancel_token,
@@ -1101,6 +1214,57 @@ mod tests {
         daemon.shutdown_high_priority_runtime();
 
         assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn do_shutdown_drops_high_priority_runtime_before_control_runtime() {
+        let drop_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let high_priority_drop_order = drop_order.clone();
+        let control_drop_order = drop_order.clone();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        daemon.high_priority_runtime = Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .thread_name("test-high-priority-drop")
+                .on_thread_stop(move || {
+                    high_priority_drop_order
+                        .lock()
+                        .expect("drop order mutex should not be poisoned")
+                        .push("high_priority");
+                })
+                .build()
+                .expect("high-priority runtime should build"),
+        );
+        daemon.control_runtime = Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .thread_name("test-control-drop")
+                .on_thread_stop(move || {
+                    control_drop_order
+                        .lock()
+                        .expect("drop order mutex should not be poisoned")
+                        .push("control");
+                })
+                .build()
+                .expect("control runtime should build"),
+        );
+
+        daemon.do_shutdown().await;
+
+        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.control_runtime.is_none());
+        assert_eq!(
+            drop_order
+                .lock()
+                .expect("drop order mutex should not be poisoned")
+                .as_slice(),
+            ["high_priority", "control"]
+        );
     }
 
     #[tokio::test]

@@ -114,9 +114,9 @@ The daemon now keeps an internal runtime-pressure baseline for diagnostics. This
 Two low-level signals feed this baseline:
 
 - **Service sleep drift**: `service_daemon::sleep(duration)` records `requested`, `elapsed`, and `drift = elapsed - requested` when the sleep completes. Reload and shutdown interruptions are counted separately and do not contribute drift.
-- **Runtime heartbeat probes**: the framework runs a low-frequency internal sleep probe on the Standard/control runtime, on the shared HighPriority runtime when it exists, and inside each Isolated private runtime generation.
+- **Runtime heartbeat probes**: the framework runs low-frequency internal sleep probes on the daemon-owned Control runtime, on the captured Standard body runtime, on the shared HighPriority body runtime when it exists, and inside each Isolated private runtime generation.
 
-The logical lanes are reported separately as `Standard`, `HighPriority`, and `Isolated`. The Standard probe observes the shared daemon/control runtime as well as Standard service bodies, so treat it as shared-runtime pressure rather than pure business-service pressure.
+The logical lanes are reported separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics/control-plane lane, not a user-facing `ServiceScheduling` option. `Standard` now represents the captured Standard body runtime rather than the supervisor/control runtime.
 
 Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
 

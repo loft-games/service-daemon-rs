@@ -8,6 +8,7 @@ use crate::models::{ServiceId, ServiceScheduling};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeLane {
+    Control,
     Standard,
     HighPriority,
     Isolated,
@@ -572,6 +573,7 @@ impl GenerationDiagnosticsHandle {
 pub(crate) struct DiagnosticsStore {
     services: DashMap<ServiceId, Arc<ServiceDiagnostics>>,
     generations: DashMap<(ServiceId, u64), Arc<GenerationDiagnostics>>,
+    control: Arc<LaneDiagnostics>,
     standard: Arc<LaneDiagnostics>,
     high_priority: Arc<LaneDiagnostics>,
     isolated: Arc<LaneDiagnostics>,
@@ -582,6 +584,7 @@ impl Default for DiagnosticsStore {
         Self {
             services: DashMap::new(),
             generations: DashMap::new(),
+            control: Arc::new(LaneDiagnostics::new(RuntimeLane::Control)),
             standard: Arc::new(LaneDiagnostics::new(RuntimeLane::Standard)),
             high_priority: Arc::new(LaneDiagnostics::new(RuntimeLane::HighPriority)),
             isolated: Arc::new(LaneDiagnostics::new(RuntimeLane::Isolated)),
@@ -676,6 +679,7 @@ impl DiagnosticsStore {
             services,
             generations,
             lanes: vec![
+                self.control.snapshot(),
                 self.standard.snapshot(),
                 self.high_priority.snapshot(),
                 self.isolated.snapshot(),
@@ -685,6 +689,7 @@ impl DiagnosticsStore {
 
     fn lane_diagnostics(&self, lane: RuntimeLane) -> Arc<LaneDiagnostics> {
         match lane {
+            RuntimeLane::Control => self.control.clone(),
             RuntimeLane::Standard => self.standard.clone(),
             RuntimeLane::HighPriority => self.high_priority.clone(),
             RuntimeLane::Isolated => self.isolated.clone(),
@@ -738,6 +743,10 @@ mod tests {
         assert_eq!(
             RuntimeLane::from(ServiceScheduling::Isolated),
             RuntimeLane::Isolated
+        );
+        assert_ne!(
+            RuntimeLane::from(ServiceScheduling::Standard),
+            RuntimeLane::Control
         );
     }
 
@@ -829,7 +838,7 @@ mod tests {
         let store = DiagnosticsStore::new();
 
         store.record_lane_observation(
-            RuntimeLane::Standard,
+            RuntimeLane::Control,
             SleepObservation {
                 source: SleepObservationSource::RuntimeProbe,
                 reason: SleepExitReason::Completed,
@@ -839,7 +848,7 @@ mod tests {
             },
         );
 
-        let lane = store.lane_snapshot(RuntimeLane::Standard);
+        let lane = store.lane_snapshot(RuntimeLane::Control);
         assert_eq!(lane.aggregate.runtime_probe.completed, 1);
         assert_eq!(lane.aggregate.runtime_probe.total_drift_ms, 20);
         assert_eq!(store.snapshot().services.len(), 0);
@@ -851,9 +860,9 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
 
-        run_lane_runtime_probe(store.clone(), RuntimeLane::Standard, token).await;
+        run_lane_runtime_probe(store.clone(), RuntimeLane::Control, token).await;
 
-        let lane = store.lane_snapshot(RuntimeLane::Standard);
+        let lane = store.lane_snapshot(RuntimeLane::Control);
         assert_eq!(lane.aggregate.runtime_probe.completed, 0);
         assert_eq!(lane.aggregate.runtime_probe.interrupted, 1);
         assert_eq!(lane.aggregate.runtime_probe.total_drift_ms, 0);

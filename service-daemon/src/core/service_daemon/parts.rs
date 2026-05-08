@@ -1,5 +1,6 @@
 use futures::future::BoxFuture;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex, Semaphore};
@@ -19,7 +20,7 @@ pub(super) struct ServiceSupervisorParts {
     pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
     pub policy: RestartPolicy,
     pub scheduling: ServiceScheduling,
-    pub generation_lane: GenerationExecutionLane,
+    pub body_lane: BodyExecutionLane,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
     pub isolated_startup_permits: Arc<Semaphore>,
@@ -29,14 +30,24 @@ pub(super) struct ServiceSupervisorParts {
 
 #[derive(Clone)]
 pub(super) enum SupervisorSpawnLane {
-    Standard,
-    HighPriority(Handle),
+    Control(Handle),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum GenerationExecutionLane {
-    CurrentRuntime,
+#[derive(Clone)]
+pub(super) enum BodyExecutionLane {
+    Standard(Handle),
+    HighPriority(Handle),
     Isolated,
+}
+
+impl fmt::Debug for BodyExecutionLane {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Standard(_) => formatter.write_str("Standard"),
+            Self::HighPriority(_) => formatter.write_str("HighPriority"),
+            Self::Isolated => formatter.write_str("Isolated"),
+        }
+    }
 }
 
 pub(super) struct SpawnServiceParts {
@@ -47,7 +58,7 @@ pub(super) struct SpawnServiceParts {
     pub policy: RestartPolicy,
     pub scheduling: ServiceScheduling,
     pub supervisor_lane: SupervisorSpawnLane,
-    pub generation_lane: GenerationExecutionLane,
+    pub body_lane: BodyExecutionLane,
     pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
@@ -56,13 +67,15 @@ pub(super) struct SpawnServiceParts {
     pub daemon_token: CancellationToken,
 }
 
-pub(super) struct SpawnAllServicesParts<'a> {
-    pub services: &'a [ServiceDescription],
+pub(super) struct SpawnAllServicesParts {
+    pub services: Vec<ServiceDescription>,
     pub restart_policy: RestartPolicy,
     pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
     pub isolated_startup_permits: Arc<Semaphore>,
+    pub control_runtime: Handle,
+    pub standard_runtime: Handle,
     pub high_priority_runtime: Option<Handle>,
-    pub daemon_token: &'a CancellationToken,
+    pub daemon_token: CancellationToken,
 }

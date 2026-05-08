@@ -20,6 +20,16 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 > [!NOTE]
 > **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining consistent responsiveness to reload and shutdown signals.
 
+### Control Plane Runtime and Body Lanes
+
+Service supervisors, dependency watchers, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through explicit body lanes:
+
+- `Standard`: the captured standard Tokio runtime that called `ServiceDaemon::run()`.
+- `HighPriority`: the daemon-owned shared high-priority runtime, created lazily when the registry needs it.
+- `Isolated`: a private OS thread and private Tokio runtime for each generation body.
+
+The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
+
 ### 1.1. The Signal Path (Reactive Update Flow)
 How a state change is propagated through the system to trigger a reload:
 
@@ -61,11 +71,11 @@ Isolated startup failures are intentionally not fatal. If an isolated OS thread,
 
 Each service generation is registered in an internal diagnostics store when the supervisor enters `Starting`. The generation records:
 
-- original scheduling lane (`Standard`, `HighPriority`, or `Isolated`);
+- body scheduling lane (`Standard`, `HighPriority`, or `Isolated`);
 - lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
 - reload requests, restart decisions, policy/effective restart delay, rate-limited restart flags, and termination;
 - service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
-- runtime heartbeat probe observations for the lane.
+- runtime heartbeat probe observations for the control plane and body execution lanes.
 
 The supervisor includes a compact per-generation summary in the outcome tracing event. These diagnostics are internal and do not change restart/backoff behaviour. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
 

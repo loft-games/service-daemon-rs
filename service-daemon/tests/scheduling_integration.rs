@@ -170,10 +170,24 @@ async fn test_scheduling_isolation() -> anyhow::Result<()> {
     );
 
     assert!(
+        !names.iter().any(|n| n.starts_with("standard:svc-control")),
+        "Standard service body should not execute on the control runtime, found: {:?}",
+        names
+    );
+
+    assert!(
         names
             .iter()
             .any(|n| n.starts_with("high_priority:svc-high-priority")),
         "HighPriority service did not execute on the shared high-priority runtime, found: {:?}",
+        names
+    );
+
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.starts_with("high_priority:svc-control")),
+        "HighPriority service body should not execute on the control runtime, found: {:?}",
         names
     );
 
