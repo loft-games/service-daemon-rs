@@ -130,9 +130,20 @@ Generation outcome logs include a compact summary of sleep/probe observations, r
 - Lane records expose `DiagnosticRuntimeLane`, including the internal `Control` diagnostics lane for observation-only aggregates.
 - Observation stats expose completed/interrupted counts plus total/avg/max/last drift in milliseconds.
 - Lifecycle stats expose reload, restart, backoff, rate-limited restart, termination, and exit-kind counters.
-- Snapshot reads are side-effect free: they do not emit recommendations, mutate the diagnostics store, reload/restart services, or change body placement.
+- Standard service and Standard lane records may include read-only `DiagnosticInterpretation` entries with a label, confidence, and investigation hints.
+- Snapshot reads are side-effect free: they do not emit advisory logs, mutate the diagnostics store, reload/restart services, or change body placement.
 
 The public snapshot is a distilled read model. It does not expose `DiagnosticsStore`, diagnostics windows, recommendation fingerprints, evaluator thresholds, or mutation paths.
+
+### Read-only Diagnostic Interpretations
+
+Phase 8 adds a small interpretation layer on top of the raw counters. It is meant to help humans read Standard runtime symptoms, not to identify a definitive culprit or issue commands.
+
+Interpretation labels include low-sample suppression, host-runtime wake-delay suspicion, service-local wake-delay suspicion, service impacted by Standard lane pressure, blocking-risk suspicion, wake-storm suspicion, and lifecycle instability. Each interpretation carries `DiagnosticConfidence` and `DiagnosticRecommendationHint` values such as continue observing, investigate the host runtime, check blocking work, add business tracing, consider changing the source-level declared mode in a future build, or investigate lifecycle instability first.
+
+The Standard lane uses runtime heartbeat probe drift to label host-runtime wake delay and wake-storm symptoms. Declared Standard services use their own `service_daemon::sleep()` drift and lifecycle counters to label service-local wake delay, Standard lane impact, blocking risk, wake storm, or lifecycle instability. Lifecycle instability takes precedence over placement-like hints because repeated restarts, panics, fatal errors, or provider init failures are stronger signals than wake-delay interpretation.
+
+These interpretations are still read-only snapshot metadata. They do not read or drive the adaptive scheduling recommendation loop, do not expose public thresholds/windows/samplers, do not configure the host Tokio runtime, and do not trigger reload, restart, remap, worker-count changes, or mode migration.
 
 ### Scheduling Advisory Recommendations
 

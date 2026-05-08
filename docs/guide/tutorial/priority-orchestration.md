@@ -110,6 +110,7 @@ async fn urgent_job_worker(job: Job) -> anyhow::Result<()> {
 - Runs on the host Tokio runtime that calls `ServiceDaemon::run()`.
 - Best for most background services and triggers.
 - Use this unless you have a concrete reason to declare another mode.
+- Public diagnostics can attach read-only interpretation labels to Standard lane and Standard service drift, but the framework does not own, resize, or configure the host Tokio runtime.
 
 ```rust,ignore
 #[service(scheduling = Standard)]

@@ -2,6 +2,12 @@ use crate::core::diagnostics as internal;
 
 use super::service::{ServiceId, ServiceScheduling};
 
+const DIAGNOSTIC_MINIMUM_COMPLETED_SAMPLES: u64 = 3;
+const DIAGNOSTIC_HIGH_AVG_DRIFT_MS: u64 = 100;
+const DIAGNOSTIC_BLOCKING_RISK_AVG_DRIFT_MS: u64 = 250;
+const DIAGNOSTIC_WAKE_STORM_MAX_DRIFT_MS: u64 = 500;
+const DIAGNOSTIC_RESTART_INSTABILITY_THRESHOLD: u64 = 2;
+
 /// Observation-only runtime lane in diagnostics snapshots.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +31,68 @@ impl From<internal::RuntimeLane> for DiagnosticRuntimeLane {
             internal::RuntimeLane::Isolated => Self::Isolated,
         }
     }
+}
+
+/// Confidence level for best-effort diagnostic interpretation labels.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticConfidence {
+    /// The signal is weak or sample quality is low.
+    Low,
+    /// The signal is sustained enough to investigate.
+    Medium,
+    /// The signal is strong, but still not a command or definitive root cause.
+    High,
+}
+
+/// Best-effort interpretation label derived from read-only diagnostics facts.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticInterpretationLabel {
+    /// There are not enough completed samples for a stronger interpretation.
+    LowSampleSuppressed,
+    /// Standard host-runtime wakeups appear delayed.
+    HostRuntimeWakeDelaySuspected,
+    /// A Standard service's own wakeups appear delayed.
+    ServiceLocalWakeDelaySuspected,
+    /// A Standard service may be impacted by broader Standard lane pressure.
+    ServiceImpactedByLanePressure,
+    /// Blocking or CPU-bound work may be delaying cooperative async wakeups.
+    BlockingRiskSuspected,
+    /// A small number of large wakeup delays suggests bursty wake pressure.
+    WakeStormSuspected,
+    /// Lifecycle instability is a stronger signal than placement-like advice.
+    LifecycleInstability,
+}
+
+/// Human-facing investigation hint attached to a diagnostic interpretation.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticRecommendationHint {
+    /// Keep collecting samples before acting.
+    ContinueObserving,
+    /// Inspect the Tokio runtime that owns `Standard` service bodies.
+    InvestigateHostRuntime,
+    /// Audit blocking syscalls, CPU-bound loops, or missing `spawn_blocking` boundaries.
+    CheckBlockingWork,
+    /// Add business-level spans or metrics to identify culprit versus victim.
+    AddBusinessTracing,
+    /// Consider changing the source-level declared mode in a future build.
+    ConsiderDeclaredModeChange,
+    /// Investigate restart/backoff/failure causes before placement questions.
+    InvestigateLifecycleInstability,
+}
+
+/// Read-only interpretation derived from diagnostics counters.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticInterpretation {
+    /// Best-effort label inferred from observed counters.
+    pub label: DiagnosticInterpretationLabel,
+    /// Confidence in the label based on sample count and signal strength.
+    pub confidence: DiagnosticConfidence,
+    /// Non-command investigation hints for humans.
+    pub recommendations: Vec<DiagnosticRecommendationHint>,
 }
 
 /// Last recorded generation exit classification.
@@ -198,17 +266,30 @@ pub struct ServiceDiagnosticsSnapshot {
     pub declared_scheduling: Option<ServiceScheduling>,
     /// Aggregated diagnostics for the service.
     pub aggregate: DiagnosticAggregateStats,
+    /// Best-effort read-only diagnostic interpretations for this service.
+    pub interpretations: Vec<DiagnosticInterpretation>,
 }
 
-impl From<internal::ServiceDiagnosticsSnapshot> for ServiceDiagnosticsSnapshot {
-    fn from(value: internal::ServiceDiagnosticsSnapshot) -> Self {
+impl ServiceDiagnosticsSnapshot {
+    fn from_internal(
+        value: internal::ServiceDiagnosticsSnapshot,
+        standard_lane_pressure: bool,
+    ) -> Self {
+        let interpretations = service_interpretations(&value, standard_lane_pressure);
         Self {
             service_id: value.service_id,
             service_name: value.service_name,
             current_generation: value.current_generation,
             declared_scheduling: scheduling_from_lane(value.runtime_lane),
             aggregate: value.aggregate.into(),
+            interpretations,
         }
+    }
+}
+
+impl From<internal::ServiceDiagnosticsSnapshot> for ServiceDiagnosticsSnapshot {
+    fn from(value: internal::ServiceDiagnosticsSnapshot) -> Self {
+        Self::from_internal(value, false)
     }
 }
 
@@ -248,13 +329,17 @@ pub struct RuntimeLaneDiagnosticsSnapshot {
     pub runtime_lane: DiagnosticRuntimeLane,
     /// Aggregated diagnostics for the lane.
     pub aggregate: DiagnosticAggregateStats,
+    /// Best-effort read-only diagnostic interpretations for this lane.
+    pub interpretations: Vec<DiagnosticInterpretation>,
 }
 
 impl From<internal::RuntimeLaneSnapshot> for RuntimeLaneDiagnosticsSnapshot {
     fn from(value: internal::RuntimeLaneSnapshot) -> Self {
+        let interpretations = lane_interpretations(&value);
         Self {
             runtime_lane: value.runtime_lane.into(),
             aggregate: value.aggregate.into(),
+            interpretations,
         }
     }
 }
@@ -273,11 +358,184 @@ pub struct DaemonDiagnosticsSnapshot {
 
 impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
     fn from(value: internal::DiagnosticsSnapshot) -> Self {
+        let standard_lane_pressure = value.lanes.iter().any(standard_lane_has_pressure);
         Self {
-            services: value.services.into_iter().map(Into::into).collect(),
+            services: value
+                .services
+                .into_iter()
+                .map(|service| {
+                    ServiceDiagnosticsSnapshot::from_internal(service, standard_lane_pressure)
+                })
+                .collect(),
             generations: value.generations.into_iter().map(Into::into).collect(),
             lanes: value.lanes.into_iter().map(Into::into).collect(),
         }
+    }
+}
+
+fn lane_interpretations(lane: &internal::RuntimeLaneSnapshot) -> Vec<DiagnosticInterpretation> {
+    if lane.runtime_lane != internal::RuntimeLane::Standard {
+        return Vec::new();
+    }
+
+    let observation = &lane.aggregate.runtime_probe;
+    if observation_is_low_sample(observation) {
+        return vec![interpretation(
+            DiagnosticInterpretationLabel::LowSampleSuppressed,
+            DiagnosticConfidence::Low,
+            &[DiagnosticRecommendationHint::ContinueObserving],
+        )];
+    }
+
+    let mut interpretations = Vec::new();
+    if observation_has_drift_pressure(observation) {
+        interpretations.push(interpretation(
+            DiagnosticInterpretationLabel::HostRuntimeWakeDelaySuspected,
+            confidence_for_observation(observation),
+            &[
+                DiagnosticRecommendationHint::InvestigateHostRuntime,
+                DiagnosticRecommendationHint::CheckBlockingWork,
+            ],
+        ));
+    }
+    if observation_has_wake_storm(observation) {
+        interpretations.push(interpretation(
+            DiagnosticInterpretationLabel::WakeStormSuspected,
+            DiagnosticConfidence::Medium,
+            &[
+                DiagnosticRecommendationHint::InvestigateHostRuntime,
+                DiagnosticRecommendationHint::AddBusinessTracing,
+            ],
+        ));
+    }
+
+    interpretations
+}
+
+fn service_interpretations(
+    service: &internal::ServiceDiagnosticsSnapshot,
+    standard_lane_pressure: bool,
+) -> Vec<DiagnosticInterpretation> {
+    if service.runtime_lane != internal::RuntimeLane::Standard {
+        return Vec::new();
+    }
+
+    let lifecycle = &service.aggregate.lifecycle;
+    if lifecycle_has_instability(lifecycle) {
+        return vec![interpretation(
+            DiagnosticInterpretationLabel::LifecycleInstability,
+            DiagnosticConfidence::High,
+            &[DiagnosticRecommendationHint::InvestigateLifecycleInstability],
+        )];
+    }
+
+    let observation = &service.aggregate.service_sleep;
+    if observation_is_low_sample(observation) {
+        return vec![interpretation(
+            DiagnosticInterpretationLabel::LowSampleSuppressed,
+            DiagnosticConfidence::Low,
+            &[DiagnosticRecommendationHint::ContinueObserving],
+        )];
+    }
+
+    let mut interpretations = Vec::new();
+    if observation_has_drift_pressure(observation) {
+        if standard_lane_pressure {
+            interpretations.push(interpretation(
+                DiagnosticInterpretationLabel::ServiceImpactedByLanePressure,
+                DiagnosticConfidence::Low,
+                &[
+                    DiagnosticRecommendationHint::InvestigateHostRuntime,
+                    DiagnosticRecommendationHint::AddBusinessTracing,
+                ],
+            ));
+        } else {
+            interpretations.push(interpretation(
+                DiagnosticInterpretationLabel::ServiceLocalWakeDelaySuspected,
+                DiagnosticConfidence::Low,
+                &[
+                    DiagnosticRecommendationHint::CheckBlockingWork,
+                    DiagnosticRecommendationHint::AddBusinessTracing,
+                    DiagnosticRecommendationHint::ConsiderDeclaredModeChange,
+                ],
+            ));
+        }
+    }
+    if observation.avg_drift_ms >= DIAGNOSTIC_BLOCKING_RISK_AVG_DRIFT_MS {
+        interpretations.push(interpretation(
+            DiagnosticInterpretationLabel::BlockingRiskSuspected,
+            confidence_for_observation(observation),
+            &[
+                DiagnosticRecommendationHint::CheckBlockingWork,
+                DiagnosticRecommendationHint::AddBusinessTracing,
+            ],
+        ));
+    }
+    if observation_has_wake_storm(observation) {
+        interpretations.push(interpretation(
+            DiagnosticInterpretationLabel::WakeStormSuspected,
+            DiagnosticConfidence::Medium,
+            &[
+                DiagnosticRecommendationHint::AddBusinessTracing,
+                DiagnosticRecommendationHint::InvestigateHostRuntime,
+            ],
+        ));
+    }
+
+    interpretations
+}
+
+fn standard_lane_has_pressure(lane: &internal::RuntimeLaneSnapshot) -> bool {
+    lane.runtime_lane == internal::RuntimeLane::Standard
+        && observation_has_drift_pressure(&lane.aggregate.runtime_probe)
+}
+
+fn observation_is_low_sample(observation: &internal::ObservationStatsSnapshot) -> bool {
+    observation.completed < DIAGNOSTIC_MINIMUM_COMPLETED_SAMPLES
+}
+
+fn observation_has_drift_pressure(observation: &internal::ObservationStatsSnapshot) -> bool {
+    !observation_is_low_sample(observation)
+        && observation.avg_drift_ms >= DIAGNOSTIC_HIGH_AVG_DRIFT_MS
+}
+
+fn observation_has_wake_storm(observation: &internal::ObservationStatsSnapshot) -> bool {
+    !observation_is_low_sample(observation)
+        && observation.max_drift_ms >= DIAGNOSTIC_WAKE_STORM_MAX_DRIFT_MS
+        && observation.max_drift_ms >= observation.avg_drift_ms.saturating_mul(3)
+}
+
+fn lifecycle_has_instability(lifecycle: &internal::LifecycleStatsSnapshot) -> bool {
+    lifecycle.rate_limited_restart > 0
+        || lifecycle.backoff_restart >= DIAGNOSTIC_RESTART_INSTABILITY_THRESHOLD
+        || lifecycle.restart >= DIAGNOSTIC_RESTART_INSTABILITY_THRESHOLD
+        || lifecycle.recoverable_error >= DIAGNOSTIC_RESTART_INSTABILITY_THRESHOLD
+        || lifecycle.panic > 0
+        || lifecycle.fatal_service_error > 0
+        || lifecycle.provider_init_error > 0
+}
+
+fn confidence_for_observation(
+    observation: &internal::ObservationStatsSnapshot,
+) -> DiagnosticConfidence {
+    if observation.completed >= DIAGNOSTIC_MINIMUM_COMPLETED_SAMPLES.saturating_mul(2)
+        && observation.avg_drift_ms >= DIAGNOSTIC_HIGH_AVG_DRIFT_MS.saturating_mul(2)
+    {
+        DiagnosticConfidence::High
+    } else {
+        DiagnosticConfidence::Medium
+    }
+}
+
+fn interpretation(
+    label: DiagnosticInterpretationLabel,
+    confidence: DiagnosticConfidence,
+    recommendations: &[DiagnosticRecommendationHint],
+) -> DiagnosticInterpretation {
+    DiagnosticInterpretation {
+        label,
+        confidence,
+        recommendations: recommendations.to_vec(),
     }
 }
 

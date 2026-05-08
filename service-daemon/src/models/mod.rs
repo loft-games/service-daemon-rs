@@ -6,9 +6,11 @@ pub mod service;
 pub mod trigger;
 
 pub use diagnostics::{
-    DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticGenerationExitKind,
-    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRuntimeLane,
-    GenerationDiagnosticsSnapshot, RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
+    DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
+    DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
+    DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot, RuntimeLaneDiagnosticsSnapshot,
+    ServiceDiagnosticsSnapshot,
 };
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{

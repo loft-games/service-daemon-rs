@@ -64,8 +64,9 @@ pub use core::service_daemon::{
 };
 pub use models::service::{ServicePriority, ServiceScheduling};
 pub use models::{
-    BackoffController, DaemonDiagnosticsSnapshot, DiagnosticAggregateStats,
-    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticObservationStats,
+    BackoffController, DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
+    DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
     DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot, PROVIDER_REGISTRY, ProviderEntry,
     ProviderError, ProviderInitError, Registry, RegistryBuilder, Result,
     RuntimeLaneDiagnosticsSnapshot, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder,

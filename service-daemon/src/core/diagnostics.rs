@@ -718,6 +718,40 @@ mod tests {
         );
     }
 
+    fn completed_observation(
+        source: SleepObservationSource,
+        requested: Duration,
+        elapsed: Duration,
+    ) -> SleepObservation {
+        SleepObservation {
+            source,
+            reason: SleepExitReason::Completed,
+            requested,
+            elapsed,
+            drift: elapsed.saturating_sub(requested),
+        }
+    }
+
+    fn record_standard_lane_probe(store: &DiagnosticsStore, elapsed: Duration) {
+        store.record_lane_observation(
+            RuntimeLane::Standard,
+            completed_observation(
+                SleepObservationSource::RuntimeProbe,
+                Duration::from_millis(250),
+                elapsed,
+            ),
+        );
+    }
+
+    fn interpretation_labels(
+        interpretations: &[crate::models::DiagnosticInterpretation],
+    ) -> Vec<crate::models::DiagnosticInterpretationLabel> {
+        interpretations
+            .iter()
+            .map(|interpretation| interpretation.label)
+            .collect()
+    }
+
     #[test]
     fn service_sleep_observation_updates_generation_service_and_lane() {
         let store = DiagnosticsStore::new();
@@ -868,6 +902,158 @@ mod tests {
                 .iter()
                 .any(|lane| { lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Control })
         );
+    }
+
+    #[test]
+    fn public_snapshot_labels_standard_lane_low_samples() {
+        let store = DiagnosticsStore::new();
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let standard = snapshot
+            .lanes
+            .iter()
+            .find(|lane| lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Standard)
+            .expect("standard lane should be present");
+        let labels = interpretation_labels(&standard.interpretations);
+
+        assert!(
+            labels.contains(&crate::models::DiagnosticInterpretationLabel::LowSampleSuppressed)
+        );
+    }
+
+    #[test]
+    fn public_snapshot_labels_standard_lane_wake_delay_and_wake_storm() {
+        let store = DiagnosticsStore::new();
+        record_standard_lane_probe(&store, Duration::from_millis(250));
+        record_standard_lane_probe(&store, Duration::from_millis(250));
+        record_standard_lane_probe(&store, Duration::from_millis(1800));
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let standard = snapshot
+            .lanes
+            .iter()
+            .find(|lane| lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Standard)
+            .expect("standard lane should be present");
+        let labels = interpretation_labels(&standard.interpretations);
+
+        assert!(labels.contains(
+            &crate::models::DiagnosticInterpretationLabel::HostRuntimeWakeDelaySuspected
+        ));
+        assert!(labels.contains(&crate::models::DiagnosticInterpretationLabel::WakeStormSuspected));
+    }
+
+    #[test]
+    fn public_snapshot_labels_standard_service_local_wake_delay() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(10), "standard", 1, RuntimeLane::Standard);
+        for _ in 0..3 {
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(20),
+                Duration::from_millis(320),
+            ));
+        }
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let labels = interpretation_labels(&snapshot.services[0].interpretations);
+
+        assert!(labels.contains(
+            &crate::models::DiagnosticInterpretationLabel::ServiceLocalWakeDelaySuspected
+        ));
+        assert!(
+            labels.contains(&crate::models::DiagnosticInterpretationLabel::BlockingRiskSuspected)
+        );
+    }
+
+    #[test]
+    fn public_snapshot_labels_standard_service_impacted_by_lane_pressure() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(11), "standard", 1, RuntimeLane::Standard);
+        for _ in 0..3 {
+            record_standard_lane_probe(&store, Duration::from_millis(420));
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(20),
+                Duration::from_millis(180),
+            ));
+        }
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let labels = interpretation_labels(&snapshot.services[0].interpretations);
+
+        assert!(labels.contains(
+            &crate::models::DiagnosticInterpretationLabel::ServiceImpactedByLanePressure
+        ));
+        assert!(!labels.contains(
+            &crate::models::DiagnosticInterpretationLabel::ServiceLocalWakeDelaySuspected
+        ));
+    }
+
+    #[test]
+    fn public_snapshot_lifecycle_instability_takes_precedence_for_standard_service() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(12), "standard", 1, RuntimeLane::Standard);
+        for _ in 0..3 {
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(20),
+                Duration::from_millis(320),
+            ));
+        }
+        handle.record_exit(GenerationExitKind::RecoverableError);
+        handle.record_restart(false, Duration::ZERO, Duration::ZERO, false);
+        handle.record_exit(GenerationExitKind::RecoverableError);
+        handle.record_restart(false, Duration::ZERO, Duration::ZERO, false);
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let labels = interpretation_labels(&snapshot.services[0].interpretations);
+
+        assert_eq!(
+            labels,
+            vec![crate::models::DiagnosticInterpretationLabel::LifecycleInstability]
+        );
+    }
+
+    #[test]
+    fn public_snapshot_does_not_apply_standard_labels_to_high_priority_service() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(13), "priority", 1, RuntimeLane::HighPriority);
+        for _ in 0..3 {
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(20),
+                Duration::from_millis(320),
+            ));
+        }
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+
+        assert!(snapshot.services[0].interpretations.is_empty());
+    }
+
+    #[test]
+    fn public_snapshot_conversion_does_not_mutate_internal_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(14), "standard", 1, RuntimeLane::Standard);
+        for _ in 0..3 {
+            record_standard_lane_probe(&store, Duration::from_millis(420));
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(20),
+                Duration::from_millis(180),
+            ));
+        }
+
+        let before = store.snapshot();
+        let public_snapshot: crate::models::DaemonDiagnosticsSnapshot = before.clone().into();
+
+        assert!(!public_snapshot.services[0].interpretations.is_empty());
+        assert_eq!(store.snapshot(), before);
     }
 
     #[tokio::test]
