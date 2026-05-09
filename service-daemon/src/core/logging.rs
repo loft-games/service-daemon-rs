@@ -23,8 +23,6 @@ use std::io::{Write as _, stderr};
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
-#[cfg(feature = "file-logging")]
-use crate::models::ServiceError;
 use crate::models::{ServiceId, service::InstanceId};
 
 /// Log severity level with zero heap allocation.
@@ -100,8 +98,11 @@ pub struct LogEvent {
     pub level: LogLevel,
     pub target: Cow<'static, str>,
     pub message: String,
+    #[cfg_attr(not(feature = "file-logging"), allow(dead_code))]
     pub module_path: Option<Cow<'static, str>>,
+    #[cfg_attr(not(feature = "file-logging"), allow(dead_code))]
     pub file: Option<Cow<'static, str>>,
+    #[cfg_attr(not(feature = "file-logging"), allow(dead_code))]
     pub line: Option<u32>,
     /// The `ServiceId` of the service that produced this event.
     #[cfg_attr(
@@ -346,24 +347,24 @@ pub fn enable_file_logging(config: FileLogConfig) {
 /// File logging is configured separately via `enable_file_logging()` and
 /// consumed by the independent `file_log_service`.
 ///
-/// # Panics
-/// Panics if a global subscriber has already been set. Use
-/// [`try_init_logging()`] in test environments where multiple tests may race.
+/// If a global tracing subscriber has already been set, this function logs a
+/// warning through the existing subscriber and leaves it unchanged. Use
+/// [`try_init_logging()`] when callers need to observe that condition.
 pub fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(DaemonLayer)
-        .init();
+    if let Err(err) = try_init_logging() {
+        tracing::warn!(
+            error = %err,
+            "init_logging skipped because a global tracing subscriber is already initialized"
+        );
+    }
 }
 
-/// Fallible variant of [`init_logging()`] for test environments.
+/// Fallible variant of [`init_logging()`] for callers that need explicit
+/// initialization status.
 ///
-/// Identical to `init_logging()` but returns `Err` instead of panicking
-/// when a global subscriber has already been set. This is safe to call
-/// from multiple `#[tokio::test]` functions running in parallel.
+/// Returns `Err` instead of logging a warning when a global subscriber has
+/// already been set. This is safe to call from multiple `#[tokio::test]`
+/// functions running in parallel.
 ///
 /// # Example
 /// ```rust,ignore
@@ -943,12 +944,19 @@ pub async fn file_log_service() -> anyhow::Result<()> {
         builder = builder.max_log_files(max_files);
     }
 
-    let file_appender = builder.build(&config.directory).map_err(|err| {
-        ServiceError::Fatal(format!(
-            "Failed to initialize rolling file appender for directory '{}' with prefix '{}': {}",
-            config.directory, config.file_prefix, err
-        ))
-    })?;
+    let file_appender = match builder.build(&config.directory) {
+        Ok(file_appender) => file_appender,
+        Err(err) => {
+            tracing::warn!(
+                directory = %config.directory,
+                file_prefix = %config.file_prefix,
+                error = %err,
+                "file logging disabled; continuing with console logging only"
+            );
+            service_daemon::wait_shutdown().await;
+            return Ok(());
+        }
+    };
     let (mut writer, _guard) = non_blocking(file_appender);
 
     let mut rx = get_log_queue().tx.subscribe();
@@ -1011,6 +1019,15 @@ pub async fn file_log_service() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_logging_does_not_panic_when_global_subscriber_already_exists() {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+
+        let result = std::panic::catch_unwind(init_logging);
+
+        assert!(result.is_ok());
+    }
 
     // -----------------------------------------------------------------------
     // Helper: build a synthetic LogEvent with specified fields for testing
