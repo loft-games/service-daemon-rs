@@ -395,20 +395,6 @@ impl ServiceDaemon {
         }
     }
 
-    /// **[Simulation Only]** Returns a clone of the daemon's internal resources.
-    ///
-    /// This is used by `SimulationHandle` to perform dynamic injection ("SimulationHandle")
-    /// during a running simulation. Since `DaemonResources` uses `Arc` internally,
-    /// modifications through the returned clone are immediately visible to all services.
-    ///
-    /// # Safety
-    /// This method is gated behind the `simulation` feature to prevent misuse
-    /// in production environments.
-    #[cfg(feature = "simulation")]
-    pub fn resources(&self) -> Arc<DaemonResources> {
-        self.resources.clone()
-    }
-
     /// Get the current status of a service by its `ServiceId`.
     pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
         self.handle().get_service_status(id).await
@@ -906,7 +892,7 @@ impl ServiceDaemonBuilder {
     /// in production environments.
     #[cfg(feature = "simulation")]
     #[must_use]
-    pub fn with_resources(mut self, resources: Arc<DaemonResources>) -> Self {
+    pub(crate) fn with_resources(mut self, resources: Arc<DaemonResources>) -> Self {
         self.resources = Some(resources);
         self
     }

@@ -132,17 +132,17 @@ pub fn generate_notify_template(
     let expanded = quote! {
         #(#attrs)*
         #clone_derive
-        #vis struct #struct_name(pub std::sync::Arc<::service_daemon::core::managed_state::TrackedNotify>);
+        #vis struct #struct_name(pub std::sync::Arc<::service_daemon::TrackedNotify>);
 
         impl Default for #struct_name {
             fn default() -> Self {
-                Self(std::sync::Arc::new(::service_daemon::core::managed_state::TrackedNotify::new()))
+                Self(std::sync::Arc::new(::service_daemon::TrackedNotify::new()))
             }
         }
 
         impl ::std::ops::Deref for #struct_name {
-            type Target = ::service_daemon::core::managed_state::TrackedNotify;
-            fn deref(&self) -> &::service_daemon::core::managed_state::TrackedNotify {
+            type Target = ::service_daemon::TrackedNotify;
+            fn deref(&self) -> &::service_daemon::TrackedNotify {
                 &*self.0
             }
         }
@@ -189,20 +189,20 @@ pub fn generate_broadcast_queue_template(
         #(#attrs)*
         #clone_derive
         #vis struct #struct_name {
-            pub tx: service_daemon::core::managed_state::TrackedSender<#item_type>,
+            pub tx: service_daemon::TrackedSender<#item_type>,
         }
 
         impl Default for #struct_name {
             fn default() -> Self {
                 Self {
-                    tx: service_daemon::core::managed_state::TrackedSender::new(#capacity),
+                    tx: service_daemon::TrackedSender::new(#capacity),
                 }
             }
         }
 
         impl std::ops::Deref for #struct_name {
-            type Target = service_daemon::core::managed_state::TrackedSender<#item_type>;
-            fn deref(&self) -> &service_daemon::core::managed_state::TrackedSender<#item_type> {
+            type Target = service_daemon::TrackedSender<#item_type>;
+            fn deref(&self) -> &service_daemon::TrackedSender<#item_type> {
                 &self.tx
             }
         }
@@ -282,7 +282,7 @@ pub fn generate_listen_template(
 
     let type_tokens = quote! { #struct_name };
     let framework_init_fn = quote! {
-        service_daemon::core::provider_init::init_fallible(
+        service_daemon::__private::init_fallible(
             #struct_name_str,
             policy,
             cancel,
@@ -404,10 +404,10 @@ pub fn generate_listen_template(
             /// Each call creates a new file descriptor via the kernel's `dup` syscall,
             /// allowing multiple services or reload generations to share the same
             /// physical listening port concurrently.
-            pub fn get(&self) -> std::io::Result<service_daemon::tokio::net::TcpListener> {
+            pub fn get(&self) -> std::io::Result<service_daemon::__private::tokio::net::TcpListener> {
                 let cloned = self.0.try_clone()?;
                 cloned.set_nonblocking(true)?;
-                service_daemon::tokio::net::TcpListener::from_std(cloned)
+                service_daemon::__private::tokio::net::TcpListener::from_std(cloned)
             }
 
             /// Returns the local address this listener is bound to.
@@ -617,7 +617,7 @@ pub fn generate_unix_listen_template(
     // Framework path: init_fallible wraps the closure with backoff, total
     // timeout, and cancellation -- we just supply the failable operation.
     let framework_init_fn = quote! {
-        service_daemon::core::provider_init::init_fallible(
+        service_daemon::__private::init_fallible(
             #struct_name_str,
             policy,
             cancel,
@@ -799,16 +799,16 @@ pub fn generate_unix_listen_template(
             // POSIX dup() is not guaranteed to inherit O_NONBLOCK across libc
             // implementations -- relying on inheritance is
             // undefined-behavior-adjacent on macOS and FreeBSD.
-            pub async fn try_get(&self) -> std::io::Result<service_daemon::tokio::net::UnixListener> {
+            pub async fn try_get(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixListener> {
                 let cloned = self.0.try_clone()?;
                 cloned.set_nonblocking(true)?;
-                service_daemon::tokio::net::UnixListener::from_std(cloned)
+                service_daemon::__private::tokio::net::UnixListener::from_std(cloned)
             }
 
             /// Accept one connection from the configured Unix socket.
             pub async fn accept(&self) -> std::io::Result<(
-                service_daemon::tokio::net::UnixStream,
-                service_daemon::tokio::net::unix::SocketAddr,
+                service_daemon::__private::tokio::net::UnixStream,
+                service_daemon::__private::tokio::net::unix::SocketAddr,
             )> {
                 self.try_get().await?.accept().await
             }
@@ -883,7 +883,7 @@ pub fn generate_unix_connect_template(
     let probe_and_classify = quote! {
         // One-shot probe stream is created and immediately dropped. The
         // sole purpose is reachability validation; we do not store it.
-        let _probe = service_daemon::tokio::net::UnixStream::connect(&path)
+        let _probe = service_daemon::__private::tokio::net::UnixStream::connect(&path)
             .await
             .map_err(|e| {
                 let msg = format!(
@@ -908,7 +908,7 @@ pub fn generate_unix_connect_template(
     // returned Arc<Self> caches only the path; subsequent try_connect()
     // calls open fresh streams.
     let framework_init_fn = quote! {
-        service_daemon::core::provider_init::init_fallible(
+        service_daemon::__private::init_fallible(
             #struct_name_str,
             policy,
             cancel,
@@ -998,12 +998,12 @@ pub fn generate_unix_connect_template(
             /// Callers needing a long-lived connection should hold the
             /// returned stream themselves; the framework intentionally does
             /// not pool because UDS connections are local and cheap.
-            pub async fn try_connect(&self) -> std::io::Result<service_daemon::tokio::net::UnixStream> {
-                service_daemon::tokio::net::UnixStream::connect(&*self.path).await
+            pub async fn try_connect(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
+                service_daemon::__private::tokio::net::UnixStream::connect(&*self.path).await
             }
 
             /// Open a fresh connection to the configured Unix socket.
-            pub async fn connect(&self) -> std::io::Result<service_daemon::tokio::net::UnixStream> {
+            pub async fn connect(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
                 self.try_connect().await
             }
 

@@ -1439,15 +1439,19 @@ mod tests {
         }
     }
 
+    struct RemapSupervisorShared {
+        resources: Arc<DaemonResources>,
+        diagnostics: Arc<DiagnosticsStore>,
+        cancellation_token: CancellationToken,
+    }
+
     fn remap_supervisor(
         service_id: ServiceId,
         name: &'static str,
         run: ServiceFn,
         declared_scheduling: ServiceScheduling,
         body_lane_resolver: BodyLaneResolver,
-        resources: Arc<DaemonResources>,
-        diagnostics: Arc<DiagnosticsStore>,
-        cancellation_token: CancellationToken,
+        shared: RemapSupervisorShared,
     ) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
             service_id,
@@ -1458,10 +1462,10 @@ mod tests {
             scheduling: declared_scheduling,
             body_lanes: test_body_lanes(),
             body_lane_resolver,
-            resources,
-            diagnostics,
+            resources: shared.resources,
+            diagnostics: shared.diagnostics,
             isolated_startup_permits: Arc::new(Semaphore::new(1)),
-            cancellation_token,
+            cancellation_token: shared.cancellation_token,
             daemon_token: CancellationToken::new(),
         })
     }
@@ -1548,9 +1552,11 @@ mod tests {
                     }
                 }
             }),
-            resources,
-            diagnostics.clone(),
-            cancellation_token.clone(),
+            RemapSupervisorShared {
+                resources,
+                diagnostics: diagnostics.clone(),
+                cancellation_token: cancellation_token.clone(),
+            },
         );
         let handle = tokio::spawn(supervisor.run_loop());
 
@@ -1590,9 +1596,11 @@ mod tests {
                     declared_scheduling
                 }
             }),
-            resources,
-            diagnostics.clone(),
-            cancellation_token.clone(),
+            RemapSupervisorShared {
+                resources,
+                diagnostics: diagnostics.clone(),
+                cancellation_token: cancellation_token.clone(),
+            },
         );
         let handle = tokio::spawn(supervisor.run_loop());
 
@@ -1647,9 +1655,11 @@ mod tests {
                     declared_scheduling
                 }
             }),
-            resources,
-            diagnostics.clone(),
-            cancellation_token.clone(),
+            RemapSupervisorShared {
+                resources,
+                diagnostics: diagnostics.clone(),
+                cancellation_token: cancellation_token.clone(),
+            },
         );
         let handle = tokio::spawn(supervisor.run_loop());
 

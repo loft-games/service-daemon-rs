@@ -1,7 +1,9 @@
 # Interceptor Middleware
 
-The trigger dispatch pipeline uses a composable **interceptor chain** (onion model) that gives
+The trigger dispatch pipeline uses an internal composable **interceptor chain** (onion model) that gives
 each layer full control over when, whether, and how many times the next layer is invoked.
+
+Public interceptor registration is not exposed yet; this page documents the internal pipeline shape.
 
 ## 1. Architecture
 
@@ -9,12 +11,11 @@ each layer full control over when, whether, and how many times the next layer is
 dispatch(payload)
   +-- TracingInterceptor.intercept(ctx, next)       <- outermost: wraps in tracing span
         +-- RetryInterceptor.intercept(ctx, next)   <- retries inner chain on failure
-              +-- [user interceptors...]
-                    +-- handler(TriggerContext)      <- terminal: calls user handler
+              +-- handler(TriggerContext)      <- terminal: calls user handler
 ```
 
 Each interceptor receives a `DispatchContext<P>` (owned) and a `next` callback. It decides **if, when,
-and how many times** to call `next`, enabling patterns like retry, tracing, rate limiting, and circuit breaking.
+and how many times** to call `next`, enabling framework-owned patterns like retry and tracing.
 
 ## 2. Built-in Interceptors
 
@@ -65,15 +66,13 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 }
 ```
 
-## 4. Writing a Custom Interceptor
+## 4. Internal Interceptor Sketch
 
 ### Generic Interceptor (any payload)
-Use a blanket `impl<P>` - works with every trigger type:
+A blanket `impl<P>` works with every trigger type inside the framework:
 
-```rust
-use service_daemon::core::trigger_runner::{
-    DispatchContext, Next, TriggerInterceptor,
-};
+```rust,ignore
+// Internal pipeline sketch; public interceptor registration is not exposed yet.
 use futures::future::BoxFuture;
 
 pub struct TimingInterceptor;
@@ -100,7 +99,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TimingInterceptor {
 ```
 
 ### Payload-Specific Interceptor
-Implement only for a concrete payload type:
+Internal interceptors can also target a concrete payload type:
 
 ```rust
 impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
@@ -119,7 +118,7 @@ impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
 ```
 
 > [!TIP]
-> Payload-specific interceptors can only be registered on `TriggerRunner<SmsPayload>`.
+> Payload-specific interceptors can only be installed on `TriggerRunner<SmsPayload>`.
 > The compiler enforces this at build time - no runtime surprises.
 
 ## 5. Interceptor Patterns
@@ -153,7 +152,7 @@ next(ctx).instrument(span).await
 The type parameter `P` is bound at the **trait level** (`TriggerInterceptor<P>`), not at the method level.
 This makes the trait object-safe within a specific `TriggerRunner<P>`:
 
-- `Vec<Arc<dyn TriggerInterceptor<P>>>` - dynamic composition with safe cross-task sharing
+- `Vec<Arc<dyn TriggerInterceptor<P>>>` - framework-owned dynamic composition with safe cross-task sharing
 - Full compile-time payload type safety - no `Any` or `downcast`
 - Generic interceptors via `impl<P> TriggerInterceptor<P> for T`
 - Payload-specific interceptors via `impl TriggerInterceptor<MyPayload> for T`
@@ -163,7 +162,7 @@ This makes the trait object-safe within a specific `TriggerRunner<P>`:
 
 ## 7. More Information
 
-- [Extending the Framework](../development/extending-framework.md#3-adding-custom-interceptors): Quick-start for framework developers.
+- [Extending the Framework](../development/extending-framework.md#3-internal-trigger-interceptors): Maintainer notes for the internal interceptor pipeline.
 - [Trigger Guide](triggers.md#5-resilience-automatic-handler-retries): How retry works from the user's perspective.
 - [Architecture Overview](../architecture/internal-overview.md#7-event-traceability-architecture): System-level view of the interceptor pipeline.
 

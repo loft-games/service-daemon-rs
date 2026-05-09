@@ -254,12 +254,6 @@ impl ServiceDescription {
         self.entry.priority
     }
 
-    /// Compile-time tags for filtering.
-    #[inline]
-    pub fn tags(&self) -> &'static [&'static str] {
-        self.entry.tags
-    }
-
     /// Dependency parameters with `TypeId` for graph analysis.
     #[inline]
     pub fn params(&self) -> &'static [ServiceParam] {
@@ -270,12 +264,6 @@ impl ServiceDescription {
     #[inline]
     pub fn scheduling(&self) -> ServiceScheduling {
         self.entry.scheduling
-    }
-
-    /// Module path where the service is defined.
-    #[inline]
-    pub fn module(&self) -> &'static str {
-        self.entry.module
     }
 }
 

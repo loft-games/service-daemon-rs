@@ -111,7 +111,7 @@ async fn test_async_fn_eager_init() {
 
     let mut daemon = ServiceDaemon::builder()
         .with_registry(
-            service_daemon::models::Registry::builder()
+            service_daemon::Registry::builder()
                 .with_tag("stub_for_eager_test")
                 .build(),
         )
@@ -139,7 +139,7 @@ async fn test_async_fn_eager_init_failure_triggers_shutdown() {
 
     let mut daemon = ServiceDaemon::builder()
         .with_registry(
-            service_daemon::models::Registry::builder()
+            service_daemon::Registry::builder()
                 .with_tag("stub_for_eager_failure_test")
                 .build(),
         )
@@ -159,7 +159,7 @@ async fn test_missing_env_eager_provider_failure_triggers_shutdown() {
 
     let mut daemon = ServiceDaemon::builder()
         .with_registry(
-            service_daemon::models::Registry::builder()
+            service_daemon::Registry::builder()
                 .with_tag("stub_for_missing_env_failure_test")
                 .build(),
         )
@@ -178,7 +178,7 @@ async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
 
     let daemon = ServiceDaemon::builder()
         .with_registry(
-            service_daemon::models::Registry::builder()
+            service_daemon::Registry::builder()
                 .with_tag("stub_for_simulation_eager_test")
                 .build(),
         )
@@ -201,7 +201,7 @@ async fn test_run_for_duration_eager_init_failure_returns_error() {
 
     let daemon = ServiceDaemon::builder()
         .with_registry(
-            service_daemon::models::Registry::builder()
+            service_daemon::Registry::builder()
                 .with_tag("stub_for_simulation_eager_failure_test")
                 .build(),
         )

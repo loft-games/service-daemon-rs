@@ -5,7 +5,9 @@
 
 // Import library crate so that `#[service]` registrations participate in linkme.
 use example_simulation as _;
-use service_daemon::{MockContext, Registry, SERVICE_REGISTRY, ServiceId, ServiceStatus};
+use service_daemon::{
+    __private::SERVICE_REGISTRY, MockContext, Registry, ServiceId, ServiceStatus,
+};
 use std::time::Duration;
 
 fn service_id(name: &str) -> ServiceId {
@@ -25,7 +27,7 @@ fn service_id(name: &str) -> ServiceId {
 /// 4. Test verifies the service read the pre-filled value
 #[tokio::test]
 async fn test_real_service_reads_pre_filled_shelf() {
-    let _ = service_daemon::core::logging::try_init_logging();
+    let _ = service_daemon::try_init_logging();
 
     // Phase 1: Build sandbox with pre-filled shelf data
     let shelf_reader_id = service_id("shelf_reader_service");
@@ -61,7 +63,7 @@ async fn test_real_service_reads_pre_filled_shelf() {
 /// 4. Service observes the mutation on its next poll
 #[tokio::test]
 async fn test_god_hand_shelf_mutation_with_real_service() {
-    let _ = service_daemon::core::logging::try_init_logging();
+    let _ = service_daemon::try_init_logging();
 
     let shelf_reader_id = service_id("shelf_reader_service");
     let (builder, handle) = MockContext::builder().build();
@@ -106,7 +108,7 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
 /// 4. Service observes the mutation on its next poll
 #[tokio::test]
 async fn test_two_phase_god_hand_with_real_service() {
-    let _ = service_daemon::core::logging::try_init_logging();
+    let _ = service_daemon::try_init_logging();
 
     // Phase 1: pre-fill initial config
     let shelf_reader_id = service_id("shelf_reader_service");
@@ -157,7 +159,7 @@ async fn test_two_phase_god_hand_with_real_service() {
 /// assigned by `Registry`, then flips the status via the SimulationHandle.
 #[tokio::test]
 async fn test_god_hand_status_flip_with_real_service() {
-    let _ = service_daemon::core::logging::try_init_logging();
+    let _ = service_daemon::try_init_logging();
 
     let status_watcher_id = service_id("status_watcher_service");
     let (builder, handle) = MockContext::builder().build();

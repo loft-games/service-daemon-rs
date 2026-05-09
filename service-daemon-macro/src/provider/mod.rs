@@ -213,7 +213,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
             let arg_name_str = arg_name.to_string();
             let type_str = quote!(#inner_type).to_string().replace(' ', "");
             param_entries.push(quote! {
-                service_daemon::ServiceParam {
+                service_daemon::__private::ServiceParam {
                     name: #arg_name_str,
                     type_name: #type_str,
                     type_id: std::any::TypeId::of::<#inner_type>(),
@@ -248,7 +248,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let framework_init_fn = if is_fallible {
         quote! {
             #(#framework_resolve_tokens)*
-            service_daemon::core::provider_init::init_fallible(
+            service_daemon::__private::init_fallible(
                 #fn_name_str,
                 policy,
                 cancel,

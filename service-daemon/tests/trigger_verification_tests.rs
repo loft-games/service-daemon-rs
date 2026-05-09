@@ -2,7 +2,7 @@
 //!
 //! These tests verify that the Provided trait and SERVICE_REGISTRY work correctly.
 
-use service_daemon::SERVICE_REGISTRY;
+use service_daemon::__private::SERVICE_REGISTRY;
 use std::collections::HashSet;
 
 /// Test that we can collect service names from the registry

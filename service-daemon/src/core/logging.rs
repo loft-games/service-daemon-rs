@@ -187,7 +187,7 @@ fn effective_batch_size() -> usize {
 /// // Reduce batch size for a lightweight embedded daemon
 /// // Queue capacity will be 512 * 4 = 2,048 slots
 /// set_log_batch_size(512);
-/// service_daemon::core::logging::init_logging();
+/// service_daemon::init_logging();
 /// ```
 pub fn set_log_batch_size(size: usize) {
     // TODO(set_log_batch_size): change signature to `-> Result<(), usize>` in a
@@ -248,7 +248,7 @@ pub enum RotationPolicy {
 ///
 /// # Example
 /// ```rust,ignore
-/// use service_daemon::core::logging::FileLogConfig;
+/// use service_daemon::FileLogConfig;
 ///
 /// let config = FileLogConfig::new("logs", "app");
 /// ```
@@ -314,7 +314,7 @@ static FILE_LOG_CONFIG: tokio::sync::OnceCell<FileLogConfig> = tokio::sync::Once
 ///
 /// # Example
 /// ```rust,ignore
-/// use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
+/// use service_daemon::{FileLogConfig, enable_file_logging};
 ///
 /// enable_file_logging(FileLogConfig::new("logs", "my-app"));
 /// ```
@@ -333,7 +333,7 @@ pub fn enable_file_logging(config: FileLogConfig) {
 /// compose your own subscriber using `DaemonLayer` directly:
 ///
 /// ```rust,ignore
-/// use service_daemon::core::logging::DaemonLayer;
+/// use service_daemon::DaemonLayer;
 /// use tracing_subscriber::prelude::*;
 ///
 /// tracing_subscriber::registry()
@@ -369,7 +369,7 @@ pub fn init_logging() {
 /// ```rust,ignore
 /// #[tokio::test]
 /// async fn my_test() {
-///     let _ = service_daemon::core::logging::try_init_logging();
+///     let _ = service_daemon::try_init_logging();
 ///     // ... test logic
 /// }
 /// ```

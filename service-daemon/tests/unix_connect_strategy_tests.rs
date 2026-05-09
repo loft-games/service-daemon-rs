@@ -92,7 +92,7 @@ async fn test_unix_connect_missing_peer_returns_provider_init_error() {
 
     let mut daemon = ServiceDaemon::builder()
         .with_registry(
-            service_daemon::models::Registry::builder()
+            service_daemon::Registry::builder()
                 .with_tag("unix_connect_missing_peer_provider_test")
                 .build(),
         )

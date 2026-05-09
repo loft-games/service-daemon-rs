@@ -1,7 +1,7 @@
 //! Pass case: A provider struct with `Arc<RwLock<T>>` and `Arc<Mutex<T>>` fields
 //! should automatically inject using `ManagedProvided` (`resolve_rwlock()` / `resolve_mutex()`).
 
-use service_daemon::core::managed_state::{Mutex, RwLock};
+use service_daemon::{Mutex, RwLock};
 use service_daemon::provider;
 use std::sync::Arc;
 

@@ -12,7 +12,7 @@ To handle lifecycle events, we use `state()` instead of `is_shutdown()`. This al
 
 ```rust,ignore
 use service_daemon::{done, service, sleep, state};
-use service_daemon::models::ServiceStatus;
+use service_daemon::ServiceStatus;
 use std::time::Duration;
 
 #[service]

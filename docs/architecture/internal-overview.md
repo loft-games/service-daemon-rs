@@ -169,7 +169,7 @@ The system uses a unified messaging layer for all cross-service events:
 - **TriggerContext**: Provides execution-specific identity, including the current `service_id` and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`.
 - **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI resolution.
 - **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context (Source, Message, and Instance).
-- **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). User-defined interceptors can be added for rate limiting, authentication, metrics, etc.
+- **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). Public user-defined interceptor registration is not exposed yet.
 
 [Back to README](../../README.md)
 

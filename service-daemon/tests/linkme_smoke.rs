@@ -12,7 +12,7 @@
 //! The service defined here is intentionally a no-op and is never spawned --
 //! the test only asserts that its `ServiceEntry` survives the link step.
 
-use service_daemon::{Registry, SERVICE_REGISTRY, service};
+use service_daemon::{__private::SERVICE_REGISTRY, Registry, service};
 
 const SMOKE_TAG: &str = "__linkme_smoke__";
 

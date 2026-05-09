@@ -53,11 +53,14 @@ impl BodyExecutionLanes {
     }
 }
 
+#[cfg(test)]
+type BodyLaneOverrideResolver =
+    Arc<dyn Fn(ServiceId, u64, ServiceScheduling) -> ServiceScheduling + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub(super) struct BodyLaneResolver {
     #[cfg(test)]
-    override_resolver:
-        Option<Arc<dyn Fn(ServiceId, u64, ServiceScheduling) -> ServiceScheduling + Send + Sync>>,
+    override_resolver: Option<BodyLaneOverrideResolver>,
 }
 
 impl BodyLaneResolver {
@@ -106,6 +109,37 @@ impl fmt::Debug for BodyExecutionLane {
     }
 }
 
+pub(super) struct SpawnServiceParts {
+    pub service_id: ServiceId,
+    pub name: &'static str,
+    pub run: ServiceFn,
+    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    pub policy: RestartPolicy,
+    pub scheduling: ServiceScheduling,
+    pub supervisor_lane: SupervisorSpawnLane,
+    pub body_lanes: BodyExecutionLanes,
+    pub body_lane_resolver: BodyLaneResolver,
+    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    pub resources: Arc<DaemonResources>,
+    pub diagnostics: Arc<DiagnosticsStore>,
+    pub isolated_startup_permits: Arc<Semaphore>,
+    pub cancellation_token: CancellationToken,
+    pub daemon_token: CancellationToken,
+}
+
+pub(super) struct SpawnAllServicesParts {
+    pub services: Vec<ServiceDescription>,
+    pub restart_policy: RestartPolicy,
+    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    pub resources: Arc<DaemonResources>,
+    pub diagnostics: Arc<DiagnosticsStore>,
+    pub isolated_startup_permits: Arc<Semaphore>,
+    pub control_runtime: Handle,
+    pub standard_runtime: Handle,
+    pub high_priority_runtime: Option<Handle>,
+    pub daemon_token: CancellationToken,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,35 +172,4 @@ mod tests {
             ServiceScheduling::Isolated
         );
     }
-}
-
-pub(super) struct SpawnServiceParts {
-    pub service_id: ServiceId,
-    pub name: &'static str,
-    pub run: ServiceFn,
-    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
-    pub policy: RestartPolicy,
-    pub scheduling: ServiceScheduling,
-    pub supervisor_lane: SupervisorSpawnLane,
-    pub body_lanes: BodyExecutionLanes,
-    pub body_lane_resolver: BodyLaneResolver,
-    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    pub resources: Arc<DaemonResources>,
-    pub diagnostics: Arc<DiagnosticsStore>,
-    pub isolated_startup_permits: Arc<Semaphore>,
-    pub cancellation_token: CancellationToken,
-    pub daemon_token: CancellationToken,
-}
-
-pub(super) struct SpawnAllServicesParts {
-    pub services: Vec<ServiceDescription>,
-    pub restart_policy: RestartPolicy,
-    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    pub resources: Arc<DaemonResources>,
-    pub diagnostics: Arc<DiagnosticsStore>,
-    pub isolated_startup_permits: Arc<Semaphore>,
-    pub control_runtime: Handle,
-    pub standard_runtime: Handle,
-    pub high_priority_runtime: Option<Handle>,
-    pub daemon_token: CancellationToken,
 }

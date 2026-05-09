@@ -252,7 +252,7 @@ impl<T: Clone> TrackedRwLock<T> {
 
     /// Locks this `RwLock` with exclusive write access.
     ///
-    /// When the returned [TrackedWriteGuard] is dropped, any `Watch` triggers
+    /// When the returned `TrackedWriteGuard` is dropped, any `Watch` triggers
     /// listening to this state will be notified **only if the data was actually
     /// mutated** (i.e., `DerefMut` was invoked). This prevents spurious wakeups
     /// when write locks are acquired but no modification occurs.
@@ -360,7 +360,7 @@ pub struct TrackedMutex<T: Clone> {
 impl<T: Clone> TrackedMutex<T> {
     /// Locks this `Mutex`, causing the current task to yield until the lock has been acquired.
     ///
-    /// When the returned [TrackedMutexGuard] is dropped, any `Watch` triggers
+    /// When the returned `TrackedMutexGuard` is dropped, any `Watch` triggers
     /// listening to this state will be notified.
     ///
     /// See also [tokio::sync::Mutex::lock].
@@ -410,9 +410,9 @@ fn capture_message_identity() -> (Uuid, ServiceId) {
 /// A tracked version of [`tokio::sync::Notify`] that automatically generates
 /// a UUID v7 message ID on every `notify_waiters()` / `notify_one()` call.
 ///
-/// This is the core primitive for the "Macro Illusion" pattern: macro-generated
-/// provider code uses `Notify` (which is aliased to this type), so signal
-/// emissions transparently produce causal trace IDs without user code changes.
+/// This is the core primitive for the "Macro Illusion" pattern: template-generated
+/// signal providers use this type, so signal emissions transparently produce
+/// causal trace IDs without user code changes.
 ///
 /// # Thread Safety
 ///
@@ -564,7 +564,6 @@ impl<P: Clone> Clone for TrackedSender<P> {
 
 // Aliases for the macro "illusion"
 pub use TrackedMutex as Mutex;
-pub use TrackedNotify as Notify;
 pub use TrackedRwLock as RwLock;
 
 #[cfg(test)]

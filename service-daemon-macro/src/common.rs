@@ -378,7 +378,7 @@ impl ParamProcessor {
             // Uses a descriptive helper to produce a clear compiler
             // error when T does not implement Clone.
             self.call_args
-                .push(quote! { service_daemon::trigger_clone_payload(&*payload) });
+                .push(quote! { service_daemon::__private::trigger_clone_payload(&*payload) });
         }
     }
 
@@ -403,7 +403,7 @@ impl ParamProcessor {
                 });
                 self.clean_inputs.push(
                     syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#inner_type> },
+                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
                     )
                     .unwrap_or_else(|e| {
                         abort!(
@@ -417,27 +417,29 @@ impl ParamProcessor {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
                 });
-                let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
+                let rw_path = quote_spanned! { rwlock_span => service_daemon::RwLock<#inner_type> };
                 self.clean_inputs.push(
-                    syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> },
-                    )
-                    .unwrap_or_else(|e| {
-                        abort!(
-                            arg_name,
-                            format!("Internal macro error parsing Arc<RwLock> dependency: {}", e)
-                        )
-                    }),
+                    syn::parse2(quote_spanned! { arc_span => #arg_name: std::sync::Arc<#rw_path> })
+                        .unwrap_or_else(|e| {
+                            abort!(
+                                arg_name,
+                                format!(
+                                    "Internal macro error parsing Arc<RwLock> dependency: {}",
+                                    e
+                                )
+                            )
+                        }),
                 );
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
                 });
-                let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
+                let mutex_path =
+                    quote_spanned! { mutex_span => service_daemon::Mutex<#inner_type> };
                 self.clean_inputs.push(
                     syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> },
+                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#mutex_path> },
                     )
                     .unwrap_or_else(|e| {
                         abort!(
@@ -452,7 +454,7 @@ impl ParamProcessor {
         self.call_args.push(quote! { #arg_name });
         self.di_idents.push(arg_name.clone());
         self.param_entries.push(quote! {
-            service_daemon::ServiceParam {
+            service_daemon::__private::ServiceParam {
                 name: #arg_name_str,
                 type_name: #type_str,
                 type_id: std::any::TypeId::of::<#inner_type>(),
@@ -564,9 +566,9 @@ pub fn generate_watcher(
         (
             quote! {
                 /// Auto-generated watcher -- notifies when dependencies change
-                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
+                pub fn #watcher_name() -> service_daemon::__private::futures::future::BoxFuture<'static, ()> {
                     Box::pin(async move {
-                        service_daemon::tokio::select! {
+                        service_daemon::__private::tokio::select! {
                             #(#watcher_select_arms),*
                         }
                     })
@@ -665,7 +667,7 @@ pub fn generate_user_scope_mod(
 
             // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
             #[allow(unused_imports)]
-            use service_daemon::core::managed_state::{RwLock, Mutex};
+            use service_daemon::{Mutex, RwLock};
 
             #(#cleaned_attrs)*
             #inner_vis #clean_sig {
@@ -701,9 +703,9 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
     quote! {
         /// Auto-generated static registry entry - collected by linkme at link time
         #[allow(unsafe_code)] // linkme uses #[link_section] internally
-        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
+        #[service_daemon::__private::linkme::distributed_slice(service_daemon::__private::SERVICE_REGISTRY)]
+        #[linkme(crate = service_daemon::__private::linkme)]
+        static #entry_name: service_daemon::__private::ServiceEntry = service_daemon::__private::ServiceEntry {
             name: #fn_name_str,
             module: module_path!(),
             params: &[#(#param_entries),*],
@@ -724,8 +726,8 @@ pub fn generate_wrapper_fn(
     quote! {
         /// Auto-generated wrapper - resolves dependencies and executes logic
         pub fn #wrapper_name(
-            token: service_daemon::tokio_util::sync::CancellationToken,
-        ) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            token: service_daemon::__private::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::__private::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 #content
             })

@@ -75,7 +75,7 @@ Sometimes a service encounters an error that it cannot recover from via a restar
 When a service returns a `Fatal` error, the `ServiceDaemon` will **permanently stop** that service and transition its status to `Terminated`, bypassing the restart policy entirely.
 
 ```rust
-use service_daemon::models::ServiceError;
+use service_daemon::ServiceError;
 
 #[service]
 async fn license_checker() -> anyhow::Result<()> {

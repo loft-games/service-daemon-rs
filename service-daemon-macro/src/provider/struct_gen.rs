@@ -292,14 +292,14 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 }
 
                 /// Resolves a tracked RwLock for this provider.
-                pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>> {
+                pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::RwLock<Self>> {
                     <Self as service_daemon::ManagedProvided>::resolve_rwlock()
                         .await
                         .expect(#resolve_rwlock_msg)
                 }
 
                 /// Resolves a tracked Mutex for this provider.
-                pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>> {
+                pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::Mutex<Self>> {
                     <Self as service_daemon::ManagedProvided>::resolve_mutex()
                         .await
                         .expect(#resolve_mutex_msg)
@@ -320,12 +320,12 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 }
 
                 /// Resolves a tracked RwLock for this provider.
-                pub async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>>, service_daemon::ProviderInitError> {
+                pub async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
                     <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
                 }
 
                 /// Resolves a tracked Mutex for this provider.
-                pub async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>>, service_daemon::ProviderInitError> {
+                pub async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
                     <Self as service_daemon::ManagedProvided>::resolve_mutex().await
                 }
 
@@ -340,15 +340,15 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
     quote! {
         #bounds_assertion
 
-        static #singleton_name: service_daemon::core::managed_state::StateManager<#type_tokens> = service_daemon::core::managed_state::StateManager::new();
+        static #singleton_name: service_daemon::__private::StateManager<#type_tokens> = service_daemon::__private::StateManager::new();
 
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
                 #singleton_name
                     .resolve_snapshot_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::current_cancellation_token();
-                        match service_daemon::core::provider_init::catch_init_panic(
+                        let cancel = service_daemon::__private::current_cancellation_token();
+                        match service_daemon::__private::catch_init_panic(
                             #type_name_str,
                             async move { #framework_init_fn },
                         )
@@ -363,12 +363,12 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         }
 
         impl service_daemon::ManagedProvided for #type_tokens {
-            async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::RwLock<Self>>, service_daemon::ProviderInitError> {
+            async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
                 #singleton_name
                     .resolve_rwlock_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::current_cancellation_token();
-                        match service_daemon::core::provider_init::catch_init_panic(
+                        let cancel = service_daemon::__private::current_cancellation_token();
+                        match service_daemon::__private::catch_init_panic(
                             #type_name_str,
                             async move { #framework_init_fn },
                         )
@@ -381,12 +381,12 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     .await
             }
 
-            async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::core::managed_state::Mutex<Self>>, service_daemon::ProviderInitError> {
+            async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
                 #singleton_name
                     .resolve_mutex_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::current_cancellation_token();
-                        match service_daemon::core::provider_init::catch_init_panic(
+                        let cancel = service_daemon::__private::current_cancellation_token();
+                        match service_daemon::__private::catch_init_panic(
                             #type_name_str,
                             async move { #framework_init_fn },
                         )
@@ -403,7 +403,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 #singleton_name
                     .resolve_managed_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::current_cancellation_token();
+                        let cancel = service_daemon::__private::current_cancellation_token();
                         #managed_init_fn
                     })
                     .await
@@ -416,10 +416,10 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
 
         fn #init_fn_name(
             policy: service_daemon::RestartPolicy,
-            cancel: service_daemon::tokio_util::sync::CancellationToken,
-        ) -> service_daemon::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
+            cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                match service_daemon::core::provider_init::catch_init_panic(
+                match service_daemon::__private::catch_init_panic(
                     #type_name_str,
                     async move { #framework_init_fn },
                 )
@@ -434,9 +434,9 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
 
         /// Auto-generated provider registry entry for dependency graph analysis.
         #[allow(unsafe_code)] // linkme uses #[link_section] internally
-        #[service_daemon::linkme::distributed_slice(service_daemon::PROVIDER_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ProviderEntry = service_daemon::ProviderEntry {
+        #[service_daemon::__private::linkme::distributed_slice(service_daemon::__private::PROVIDER_REGISTRY)]
+        #[linkme(crate = service_daemon::__private::linkme)]
+        static #entry_name: service_daemon::__private::ProviderEntry = service_daemon::__private::ProviderEntry {
             name: #type_name_str,
             module: module_path!(),
             type_id: std::any::TypeId::of::<#type_tokens>(),
@@ -491,7 +491,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
                     let field_name_str = field_name.to_string();
                     let type_str = quote!(#inner_type).to_string().replace(' ', "");
                     quote! {
-                        service_daemon::ServiceParam {
+                        service_daemon::__private::ServiceParam {
                             name: #field_name_str,
                             type_name: #type_str,
                             type_id: std::any::TypeId::of::<#inner_type>(),

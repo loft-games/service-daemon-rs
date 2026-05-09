@@ -23,7 +23,9 @@
 use std::io::Read;
 use std::sync::Arc;
 
+use std::any::{Any, TypeId};
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -33,10 +35,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-use service_daemon::ServiceDaemon;
-use service_daemon::core::context::DaemonResources;
-use service_daemon::models::{
-    BackoffController, RestartPolicy, ServiceFn, ServiceId, ServiceScheduling, ServiceStatus,
+use service_daemon::{
+    BackoffController, RestartPolicy, ServiceDaemon, ServiceId, ServiceScheduling, ServiceStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -55,6 +55,39 @@ const WARMUP_ROUNDS: usize = 100;
 
 /// Seconds to wait after spawning services before sampling RSS.
 const SETTLE_DELAY_SECS: u64 = 2;
+
+type MockServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
+type MockShelfValue = Box<dyn Any + Send + Sync>;
+type MockServiceShelf = DashMap<String, MockShelfValue>;
+type MockGlobalShelfMapping = DashMap<ServiceId, MockServiceShelf>;
+
+#[allow(dead_code)]
+struct MockDaemonResources {
+    status_plane: DashMap<ServiceId, ServiceStatus>,
+    shelf: MockGlobalShelfMapping,
+    reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
+    status_changed: tokio::sync::Notify,
+    trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+}
+
+impl MockDaemonResources {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            status_plane: DashMap::new(),
+            shelf: DashMap::new(),
+            reload_signals: DashMap::new(),
+            status_changed: tokio::sync::Notify::new(),
+            trigger_configs: DashMap::new(),
+        })
+    }
+}
+
+#[allow(dead_code)]
+struct MockServiceDescription {
+    id: ServiceId,
+    entry: &'static (),
+    cancellation_token: CancellationToken,
+}
 
 // ---------------------------------------------------------------------------
 // MockSupervisor -- mirrors the private `ServiceSupervisor` in runner.rs
@@ -126,11 +159,21 @@ struct MockGenerationDiagnosticsHandle {
 }
 
 #[allow(dead_code)]
+struct MockServiceIdentity {
+    service_id: ServiceId,
+    name: &'static str,
+    cancellation_token: CancellationToken,
+    reload_token: CancellationToken,
+    diagnostics: Option<MockGenerationDiagnosticsHandle>,
+    is_handshake_done: Arc<AtomicBool>,
+}
+
+#[allow(dead_code)]
 struct MockSupervisor {
     // -- Immutable service identity --
     service_id: ServiceId,
     name: &'static str,
-    run: ServiceFn,
+    run: MockServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
     scheduling: ServiceScheduling,
     body_lanes: MockBodyExecutionLanes,
@@ -139,7 +182,7 @@ struct MockSupervisor {
     generation_scheduling: Option<ServiceScheduling>,
     backoff: BackoffController,
     restart_storm: MockRestartStormGuard,
-    resources: Arc<DaemonResources>,
+    resources: Arc<MockDaemonResources>,
     diagnostics: Arc<MockDiagnosticsStore>,
     isolated_startup_permits: Arc<Semaphore>,
     cancellation_token: CancellationToken,
@@ -230,8 +273,8 @@ fn run_static_analysis() {
         ("ServiceId", std::mem::size_of::<ServiceId>()),
         ("ServiceStatus", std::mem::size_of::<ServiceStatus>()),
         (
-            "ServiceDescription",
-            std::mem::size_of::<service_daemon::models::ServiceDescription>(),
+            "MockServiceDescription (~= internal ServiceDescription)",
+            std::mem::size_of::<MockServiceDescription>(),
         ),
         ("RestartPolicy", std::mem::size_of::<RestartPolicy>()),
         (
@@ -239,17 +282,20 @@ fn run_static_analysis() {
             std::mem::size_of::<BackoffController>(),
         ),
         (
-            "ServiceIdentity",
-            std::mem::size_of::<service_daemon::core::context::ServiceIdentity>(),
+            "MockServiceIdentity (~= internal ServiceIdentity)",
+            std::mem::size_of::<MockServiceIdentity>(),
         ),
-        ("DaemonResources", std::mem::size_of::<DaemonResources>()),
+        (
+            "MockDaemonResources",
+            std::mem::size_of::<MockDaemonResources>(),
+        ),
         (
             "CancellationToken",
             std::mem::size_of::<CancellationToken>(),
         ),
         (
-            "Arc<DaemonResources>",
-            std::mem::size_of::<Arc<DaemonResources>>(),
+            "Arc<MockDaemonResources>",
+            std::mem::size_of::<Arc<MockDaemonResources>>(),
         ),
         (
             "Arc<Notify>",
@@ -328,7 +374,7 @@ fn measure_cancellation_tokens() -> Option<f64> {
 
 fn measure_supervisor_heap_box() -> Option<f64> {
     warmup_allocator();
-    let res = DaemonResources::new();
+    let res = MockDaemonResources::new();
     let standard_handle = Handle::current();
     let diagnostics = Arc::new(MockDiagnosticsStore);
     let isolated_startup_permits = Arc::new(Semaphore::new(32));

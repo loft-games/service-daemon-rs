@@ -152,7 +152,7 @@ fn test_unix_listen_default_regular_file_refuses_and_preserves() {
     let sentinel = b"default regular file that must not be removed";
     std::fs::write(path, sentinel).expect("Failed to pre-create regular file");
 
-    let result = std::panic::catch_unwind(|| DefaultRegularFileListener::default());
+    let result = std::panic::catch_unwind(DefaultRegularFileListener::default);
     assert!(
         result.is_err(),
         "Default should panic for a regular file path"

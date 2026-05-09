@@ -36,7 +36,7 @@ use std::sync::Arc;
 /// let (daemon, handle) = ctx.run().await;
 ///
 /// // Phase 2: mid-flight mutation
-/// handle.set_shelf::<String>("config_svc", "db_url", "new://host".into());
+/// handle.set_shelf::<String>(svc_id, "db_url", "new://host".into());
 /// handle.set_status(svc_id, ServiceStatus::NeedReload);
 /// ```
 #[derive(Clone)]
@@ -101,7 +101,7 @@ impl SimulationHandle {
     // Safe Read API -- lock-free accessors that return owned values
     // =========================================================================
 
-    /// Reads a shelf value by service name and key, returning an owned clone.
+    /// Reads a shelf value by service ID and key, returning an owned clone.
     ///
     /// This is the **recommended** way to inspect shelf data in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
@@ -109,7 +109,7 @@ impl SimulationHandle {
     ///
     /// # Example
     /// ```rust,ignore
-    /// let val: Option<String> = handle.get_shelf("my_service", "config_key");
+    /// let val: Option<String> = handle.get_shelf(svc_id, "config_key");
     /// assert_eq!(val, Some("expected_value".to_string()));
     /// ```
     pub fn get_shelf<T: Any + Clone + Send + Sync>(
@@ -155,96 +155,6 @@ impl SimulationHandle {
             .get(&service_id)
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
-    }
-
-    /// Returns a clone of the underlying `DaemonResources` for advanced inspection.
-    ///
-    /// # WARNING: Deadlock Risk -- Real Incident Case Study
-    ///
-    /// **Why this warning is here instead of in a FAQ:**
-    /// If you are reaching for `resources()` to bypass [`get_shelf`] / [`get_status`],
-    /// you are an advanced user who reads source code. This documentation is
-    /// placed at the point of danger so you encounter it exactly when you need it.
-    /// A FAQ entry would be boilerplate-free to someone skimming the API surface.
-    ///
-    /// ## The Problem
-    ///
-    /// `DashMap::get()` returns a `Ref<K, V>` that **holds an internal shard lock**
-    /// for the entire lifetime of the `Ref`. These guards look like ordinary
-    /// variables, but they are **unbounded lock hazards**.
-    ///
-    /// ## Real Failure Scenario
-    ///
-    /// The following test code caused an **indefinite hang** in CI:
-    ///
-    /// ```rust,ignore
-    /// // DEADLOCK -- DO NOT DO THIS
-    /// let resources = handle.resources();
-    /// let shelf = resources.shelf.get("svc_name").unwrap();  // holds read lock!
-    /// let val = shelf.get("key").unwrap();                    // holds another read lock!
-    /// assert_eq!(val.value().downcast_ref::<String>(), ...);
-    /// // locks are still alive here...
-    ///
-    /// cancel.cancel();
-    /// daemon_task.await;  // <-- DEADLOCK: daemon waits for service to stop,
-    ///                     //   service calls shelve() which needs write lock,
-    ///                     //   but test still holds read lock above.
-    /// ```
-    ///
-    /// ## Circular Wait Diagram
-    ///
-    /// ```text
-    /// Test thread               Daemon / Service thread
-    /// -------------             ----------------------
-    /// shelf.get("svc")          (running service loop)
-    ///   | holds read lock
-    /// shelf.get("key")
-    ///   | holds read lock
-    /// cancel.cancel()
-    ///   |
-    /// daemon_task.await ------> stop_all_services()
-    ///   (blocked)                 | cancels service token
-    ///                          service loop exits
-    ///                            | calls shelve()
-    ///                          shelf.entry("svc").insert()
-    ///                            | needs WRITE lock
-    ///                          BLOCKED by test's read lock
-    ///                            ^
-    ///                          == circular wait ==
-    /// ```
-    ///
-    /// ## Safe Alternative
-    ///
-    /// Use the lock-free accessors instead -- they acquire and release the lock
-    /// within a single synchronous call, making cross-await deadlocks impossible:
-    ///
-    /// ```rust,ignore
-    /// // SAFE -- lock released before any .await
-    /// let val: Option<String> = handle.get_shelf("svc_name", "key");
-    /// assert_eq!(val, Some("expected".to_string()));
-    ///
-    /// cancel.cancel();
-    /// daemon_task.await;  // no lock held, no deadlock
-    /// ```
-    ///
-    /// ## If You Must Use `resources()`
-    ///
-    /// Scope every `DashMap::Ref` inside a `{ ... }` block so the lock is
-    /// dropped before any `.await`:
-    ///
-    /// ```rust,ignore
-    /// let val = {
-    ///     let resources = handle.resources();
-    ///     let shelf = resources.shelf.get("svc").unwrap();
-    ///     shelf.get("key").unwrap().value().downcast_ref::<String>().cloned()
-    /// }; // <-- all locks dropped here
-    ///
-    /// cancel.cancel();
-    /// daemon_task.await;  // safe
-    /// ```
-    #[doc(hidden)]
-    pub fn resources(&self) -> Arc<DaemonResources> {
-        self.resources.clone()
     }
 }
 

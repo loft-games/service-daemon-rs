@@ -95,7 +95,8 @@ pub struct ServiceIdentity {
 
 impl ServiceIdentity {
     /// Creates a new ServiceIdentity with the handshake flag set to false.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         service_id: ServiceId,
         name: &'static str,
         cancellation_token: CancellationToken,

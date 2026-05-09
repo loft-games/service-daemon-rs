@@ -1,8 +1,8 @@
 # Trigger Middlewares (Interceptors)
 
-You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. But have you ever wondered *where* that implementation lives? And more importantly -- can you add your own logic?
+You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. That implementation lives in **interceptors**: composable middleware layers that wrap the trigger dispatch pipeline.
 
-The answer is **interceptors**: composable middleware layers that wrap the trigger dispatch pipeline.
+Public interceptor registration is not exposed yet, so this chapter is an internal architecture sketch rather than a user extension guide.
 
 ---
 
@@ -14,20 +14,17 @@ Every time a trigger fires, the event payload passes through a chain of intercep
 dispatch(payload)
   +-- TracingInterceptor         <- creates the tracing span
         +-- RetryInterceptor     <- retries on failure
-              +-- [your interceptors here]
-                    +-- handler  <- your business logic
+              +-- handler  <- your business logic
 ```
 
 Each layer decides **if, when, and how many times** to call the next one.
 
-## 2. Your First Interceptor
+## 2. Internal Interceptor Sketch
 
-Let's write a simple timing interceptor that logs how long each dispatch takes.
+A framework-level timing interceptor that logs how long each dispatch takes would look like this.
 
 ```rust,ignore
-use service_daemon::core::trigger_runner::{
-    DispatchContext, Next, TriggerInterceptor,
-};
+// Internal pipeline sketch; public interceptor registration is not exposed yet.
 use futures::future::BoxFuture;
 
 pub struct TimingInterceptor;
@@ -93,7 +90,7 @@ Box::pin(async move {
 
 ## 4. Payload-Specific Interceptors
 
-Sometimes you want an interceptor that only works with a specific payload type. No problem -- just implement it for that type only:
+Internally, an interceptor can be specialized to one payload type by implementing it for that type only:
 
 ```rust,ignore
 impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
@@ -114,7 +111,7 @@ impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
 }
 ```
 
-The compiler will enforce that this interceptor can only be registered on a `TriggerRunner<SmsPayload>`. Try to use it with a different payload type? Compilation error. No surprises at runtime.
+The compiler enforces that such an interceptor can only be installed on a `TriggerRunner<SmsPayload>`. Try to use it with a different payload type? Compilation error. No surprises at runtime.
 
 ## 5. Under the Hood: `DispatchContext`
 
@@ -136,7 +133,7 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 ---
 
 > [!NOTE]
-> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so you get full compile-time type safety. But the interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving you runtime flexibility to add or skip interceptors dynamically - and safe cross-task sharing for async dispatch.
+> **Why "semi-static dispatch"?** The payload type `P` is fixed per `TriggerRunner<P>`, so the runtime keeps full compile-time type safety. The interceptor chain itself is a `Vec<Arc<dyn TriggerInterceptor<P>>>`, giving the framework runtime flexibility to compose built-in layers with safe cross-task sharing for async dispatch.
 
 ---
 

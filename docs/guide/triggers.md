@@ -137,7 +137,7 @@ When a handler fails:
 3. Errors are automatically logged with structured context.
 4. Shutdown signals are respected during backoff waits -- no hanging retries.
 
-The retry logic is implemented as an interceptor layer, part of the composable `TriggerInterceptor` pipeline. See [Interceptor Middleware](interceptor-middleware.md) for details on customizing the dispatch pipeline.
+The retry logic is implemented as an internal interceptor layer. See [Interceptor Middleware](interceptor-middleware.md) for architecture details.
 
 ### Payload Handling
 

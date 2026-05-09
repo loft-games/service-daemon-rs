@@ -19,8 +19,7 @@
 //!
 //! Each interceptor receives a [`DispatchContext`] by value and a `next`
 //! callback. The interceptor decides **if, when, and how many times** to
-//! call `next`, enabling patterns like retry, tracing spans, rate limiting,
-//! and circuit breaking - all as composable, user-extensible layers.
+//! call `next`, enabling framework-owned patterns like retry and tracing spans.
 //!
 //! The `TriggerRunner` owns the `select!` + shutdown logic, so that trigger
 //! hosts only need to implement `handle_step` and get a clean, flat event loop.
@@ -120,9 +119,9 @@ pub type Next<'a, P> =
 /// The payload type is bound at the trait level, making the trait object-safe
 /// within a specific `TriggerRunner<P>` instance. This is the "semi-static
 /// dispatch" design: payload types are statically checked, while the
-/// interceptor chain is dynamically composable via `Vec<Box<dyn ...>>`.
+/// interceptor chain is dynamically composable via `Vec<Arc<dyn ...>>`.
 ///
-/// # Writing a Generic Interceptor
+/// # Internal Generic Interceptor
 ///
 /// Interceptors that don't care about the payload type can use a blanket impl:
 ///
@@ -240,8 +239,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// The default interceptor order is:
     /// 1. `TracingInterceptor` - wraps everything in a tracing span
     /// 2. `RetryInterceptor` - retries the inner chain on failure
-    /// 3. (user interceptors added via `with_interceptor`)
-    /// 4. Terminal handler node (implicit)
+    /// 3. Terminal handler node (implicit)
     pub fn new(
         name: &'static str,
         service_id: ServiceId,
@@ -265,16 +263,6 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             semaphore: Arc::new(Semaphore::new(initial)),
             current_limit: Arc::new(AtomicUsize::new(initial)),
         }
-    }
-
-    /// Register an interceptor to the pipeline.
-    ///
-    /// Interceptors are invoked in registration order (onion model: first
-    /// registered = outermost layer). The built-in `TracingInterceptor` and
-    /// `RetryInterceptor` are always the first two layers.
-    pub fn with_interceptor(mut self, interceptor: Arc<dyn TriggerInterceptor<P>>) -> Self {
-        self.interceptors.push(interceptor);
-        self
     }
 
     /// Run the event loop with a pre-initialized host instance.

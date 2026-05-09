@@ -88,7 +88,7 @@ Sometimes, a service encounters an error that **cannot** be fixed by a restart. 
 In these cases, you should use `ServiceError::Fatal`.
 
 ```rust,ignore
-use service_daemon::models::ServiceError;
+use service_daemon::ServiceError;
 
 #[service]
 async fn license_watcher() -> anyhow::Result<()> {

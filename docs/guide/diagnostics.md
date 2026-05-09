@@ -20,7 +20,7 @@ Both logging consumers use a **fill-the-valley** batch strategy with a safety ca
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Registers DaemonLayer + EnvFilter (reads RUST_LOG, defaults to "info")
-    service_daemon::core::logging::init_logging();
+    service_daemon::init_logging();
 
     let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await;
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
 ```rust
 #[tokio::test]
 async fn my_test() {
-    let _ = service_daemon::core::logging::try_init_logging();
+    let _ = service_daemon::try_init_logging();
     // ... test logic
 }
 ```
@@ -43,7 +43,7 @@ async fn my_test() {
 **Custom subscriber stacks** (Sentry, OpenTelemetry, etc.) - use `DaemonLayer` directly:
 
 ```rust
-use service_daemon::core::logging::DaemonLayer;
+use service_daemon::DaemonLayer;
 use tracing_subscriber::prelude::*;
 
 tracing_subscriber::registry()
@@ -56,7 +56,7 @@ tracing_subscriber::registry()
 **File logging** - configured independently:
 
 ```rust
-use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
+use service_daemon::{FileLogConfig, enable_file_logging};
 
 // Daily rotation, retains last 30 log files (defaults)
 enable_file_logging(FileLogConfig::new("logs", "my-app"));
@@ -65,7 +65,7 @@ enable_file_logging(FileLogConfig::new("logs", "my-app"));
 Custom rotation and retention can be configured via the struct fields:
 
 ```rust
-use service_daemon::core::logging::{FileLogConfig, RotationPolicy, enable_file_logging};
+use service_daemon::{FileLogConfig, RotationPolicy, enable_file_logging};
 
 let config = FileLogConfig {
     rotation: RotationPolicy::Hourly,
@@ -84,7 +84,7 @@ use service_daemon::set_log_batch_size;
 // Queue capacity will be 512 * 4 = 2,048 slots
 set_log_batch_size(512);
 // Must be called BEFORE init_logging()
-service_daemon::core::logging::init_logging();
+service_daemon::init_logging();
 ```
 
 ## 2. Behavioral Topology (`diagnostics` feature)

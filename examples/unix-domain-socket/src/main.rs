@@ -29,7 +29,7 @@ fn cleanup_socket_path() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     use example_unix_domain_socket as _;
 
-    service_daemon::core::logging::init_logging();
+    service_daemon::init_logging();
     cleanup_socket_path()?;
 
     let mut daemon = ServiceDaemon::builder().build();

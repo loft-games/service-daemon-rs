@@ -390,11 +390,11 @@ mod simulation_tests {
             .with_shelf::<String>(svc_id, "name", "hello".to_string())
             .build();
 
-        // The handle should see the pre-filled resources
-        let resources = handle.resources();
-        let shelf = resources.shelf.get(&svc_id).unwrap();
-        let counter = shelf.get("counter").unwrap();
-        assert_eq!(counter.value().downcast_ref::<i32>(), Some(&42));
+        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(42));
+        assert_eq!(
+            handle.get_shelf::<String>(svc_id, "name"),
+            Some("hello".to_string())
+        );
 
         // Builder should be valid (not consumed)
         let _ = builder;
@@ -407,9 +407,7 @@ mod simulation_tests {
             .with_status(svc_id, ServiceStatus::Healthy)
             .build();
 
-        let resources = handle.resources();
-        let status = resources.status_plane.get(&svc_id).unwrap().clone();
-        assert_eq!(status, ServiceStatus::Healthy);
+        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Healthy));
     }
 
     #[test]
@@ -417,17 +415,11 @@ mod simulation_tests {
         let (_, handle) = MockContext::builder().build();
         let svc_id = ServiceId::new(7);
 
-        // Initially empty
-        assert!(handle.resources().shelf.get(&svc_id).is_none());
+        assert!(!handle.has_shelf(svc_id, "counter"));
 
-        // Dynamic injection via SimulationHandle
         handle.set_shelf::<i32>(svc_id, "counter", 99);
 
-        // Now visible
-        let resources = handle.resources();
-        let shelf = resources.shelf.get(&svc_id).unwrap();
-        let val = shelf.get("counter").unwrap();
-        assert_eq!(val.value().downcast_ref::<i32>(), Some(&99));
+        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(99));
     }
 
     #[test]
@@ -437,29 +429,11 @@ mod simulation_tests {
             .with_status(svc_id, ServiceStatus::Initializing)
             .build();
 
-        // Phase 1: initial state
-        assert_eq!(
-            handle
-                .resources()
-                .status_plane
-                .get(&svc_id)
-                .unwrap()
-                .clone(),
-            ServiceStatus::Initializing
-        );
+        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Initializing));
 
-        // Phase 2: SimulationHandle flips status
         handle.set_status(svc_id, ServiceStatus::NeedReload);
 
-        assert_eq!(
-            handle
-                .resources()
-                .status_plane
-                .get(&svc_id)
-                .unwrap()
-                .clone(),
-            ServiceStatus::NeedReload
-        );
+        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::NeedReload));
     }
 
     #[test]
@@ -473,34 +447,18 @@ mod simulation_tests {
             .build();
 
         assert_eq!(
-            handle_a
-                .resources()
-                .status_plane
-                .get(&ServiceId::new(1))
-                .unwrap()
-                .clone(),
-            ServiceStatus::Healthy
+            handle_a.get_status(ServiceId::new(1)),
+            Some(ServiceStatus::Healthy)
         );
         assert_eq!(
-            handle_b
-                .resources()
-                .status_plane
-                .get(&ServiceId::new(1))
-                .unwrap()
-                .clone(),
-            ServiceStatus::Initializing
+            handle_b.get_status(ServiceId::new(1)),
+            Some(ServiceStatus::Initializing)
         );
 
-        // Mutation in A should NOT affect B
         handle_a.set_status(ServiceId::new(1), ServiceStatus::Terminated);
         assert_eq!(
-            handle_b
-                .resources()
-                .status_plane
-                .get(&ServiceId::new(1))
-                .unwrap()
-                .clone(),
-            ServiceStatus::Initializing
+            handle_b.get_status(ServiceId::new(1)),
+            Some(ServiceStatus::Initializing)
         );
     }
 }
