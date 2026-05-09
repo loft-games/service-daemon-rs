@@ -158,13 +158,54 @@ impl RestartPolicy {
         }
     }
 
+    fn sanitized_multiplier(multiplier: f64) -> f64 {
+        if multiplier.is_finite() && multiplier > 0.0 {
+            multiplier
+        } else {
+            1.0
+        }
+    }
+
+    fn sanitized_jitter_factor(factor: f64) -> f64 {
+        if factor.is_finite() {
+            factor.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Calculate the next retry delay using exponential backoff with jitter.
     pub fn next_delay(&self, current_delay: Duration) -> Duration {
-        let base = current_delay.as_secs_f64() * self.multiplier;
-        let jitter_range = base * self.jitter_factor;
-        let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
-        let next = Duration::from_secs_f64((base + jitter).max(0.0));
-        next.min(self.max_delay)
+        let max_delay_seconds = self.max_delay.as_secs_f64();
+        if max_delay_seconds <= 0.0 {
+            return Duration::ZERO;
+        }
+
+        let multiplier = Self::sanitized_multiplier(self.multiplier);
+        let jitter_factor = Self::sanitized_jitter_factor(self.jitter_factor);
+        let base = current_delay.as_secs_f64() * multiplier;
+        if !base.is_finite() || base >= max_delay_seconds {
+            return self.max_delay;
+        }
+
+        let next_seconds = if jitter_factor > 0.0 && base > 0.0 {
+            let jitter_range = base * jitter_factor;
+            let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
+            base + jitter
+        } else {
+            base
+        };
+
+        if !next_seconds.is_finite() || next_seconds >= max_delay_seconds {
+            return self.max_delay;
+        }
+
+        if next_seconds <= 0.0 {
+            return Duration::ZERO;
+        }
+
+        Duration::try_from_secs_f64(next_seconds)
+            .map_or(self.max_delay, |next| next.min(self.max_delay))
     }
 }
 
@@ -186,7 +227,7 @@ impl RestartPolicyBuilder {
     }
 
     pub fn multiplier(mut self, multiplier: f64) -> Self {
-        self.policy.multiplier = multiplier;
+        self.policy.multiplier = RestartPolicy::sanitized_multiplier(multiplier);
         self
     }
 
@@ -196,7 +237,7 @@ impl RestartPolicyBuilder {
     }
 
     pub fn jitter_factor(mut self, factor: f64) -> Self {
-        self.policy.jitter_factor = factor.clamp(0.0, 1.0);
+        self.policy.jitter_factor = RestartPolicy::sanitized_jitter_factor(factor);
         self
     }
 
@@ -711,6 +752,71 @@ mod tests {
         let next = policy.next_delay(Duration::from_secs(1));
         // 1 * 100 = 100, clamped to max_delay = 10
         assert_eq!(next, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn restart_policy_next_delay_handles_invalid_public_float_fields() {
+        let cases = [
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 0.5),
+            (f64::NEG_INFINITY, 0.5),
+            (-2.0, -0.5),
+            (0.0, f64::NAN),
+            (2.0, f64::INFINITY),
+            (2.0, f64::NEG_INFINITY),
+            (2.0, 2.0),
+        ];
+
+        for (multiplier, jitter_factor) in cases {
+            let policy = RestartPolicy {
+                max_delay: Duration::from_secs(10),
+                multiplier,
+                jitter_factor,
+                ..RestartPolicy::default()
+            };
+
+            let next = policy.next_delay(Duration::from_secs(1));
+            assert!(next <= policy.max_delay);
+        }
+    }
+
+    #[test]
+    fn restart_policy_next_delay_caps_before_duration_conversion() {
+        let policy = RestartPolicy {
+            max_delay: Duration::from_millis(250),
+            multiplier: f64::MAX,
+            jitter_factor: 0.0,
+            ..RestartPolicy::default()
+        };
+
+        let next = policy.next_delay(Duration::from_secs(2));
+
+        assert_eq!(next, policy.max_delay);
+    }
+
+    #[test]
+    fn restart_policy_builder_sanitizes_invalid_floats() {
+        let invalid_policy = RestartPolicy::builder()
+            .multiplier(f64::NAN)
+            .jitter_factor(f64::INFINITY)
+            .build();
+        assert_eq!(invalid_policy.multiplier, 1.0);
+        assert_eq!(invalid_policy.jitter_factor, 0.0);
+        assert!(invalid_policy.next_delay(Duration::from_secs(1)) <= invalid_policy.max_delay);
+
+        let negative_policy = RestartPolicy::builder()
+            .multiplier(-2.0)
+            .jitter_factor(-1.0)
+            .build();
+        assert_eq!(negative_policy.multiplier, 1.0);
+        assert_eq!(negative_policy.jitter_factor, 0.0);
+
+        let clamped_policy = RestartPolicy::builder()
+            .multiplier(3.0)
+            .jitter_factor(2.0)
+            .build();
+        assert_eq!(clamped_policy.multiplier, 3.0);
+        assert_eq!(clamped_policy.jitter_factor, 1.0);
     }
 
     #[test]
