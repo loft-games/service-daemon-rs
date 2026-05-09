@@ -146,17 +146,28 @@ async fn test_unix_listen_regular_file_refuses_and_preserves() {
 pub struct DefaultRegularFileListener;
 
 #[test]
-fn test_unix_listen_default_regular_file_refuses_and_preserves() {
+fn test_unix_listen_direct_constructor_regular_file_refuses_and_preserves() {
     let path = "target/sd-uds-listen-default-regular.sock";
     let _guard = prepare_socket_path(path);
     let sentinel = b"default regular file that must not be removed";
     std::fs::write(path, sentinel).expect("Failed to pre-create regular file");
 
-    let result = std::panic::catch_unwind(DefaultRegularFileListener::default);
-    assert!(
-        result.is_err(),
-        "Default should panic for a regular file path"
-    );
+    let result = DefaultRegularFileListener::try_new();
+    match result {
+        Err(ProviderError::Fatal(msg)) => {
+            assert!(
+                msg.contains("not a Unix socket"),
+                "Expected non-socket Fatal msg, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("refusing to remove"),
+                "Expected refusal-to-remove Fatal msg, got: {}",
+                msg
+            );
+        }
+        other => panic!("Expected Fatal for regular file path, got {:?}", other),
+    }
 
     let preserved = std::fs::read(path).expect("regular file should still exist");
     assert_eq!(

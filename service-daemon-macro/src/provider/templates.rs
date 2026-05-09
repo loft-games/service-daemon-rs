@@ -53,8 +53,8 @@ struct TemplateContext<'a> {
 impl<'a> TemplateContext<'a> {
     /// Creates a new template context with all common boilerplate pre-computed.
     ///
-    /// All templates use `Self::default()` as the constructor. They default to
-    /// the full provider capability set: snapshot resolution, managed-state
+    /// In-memory templates use `Self::default()` as the constructor. They default
+    /// to the full provider capability set: snapshot resolution, managed-state
     /// injection, and watch notifications backed by `StateManager` snapshot
     /// publication.
     fn new(
@@ -62,7 +62,7 @@ impl<'a> TemplateContext<'a> {
         vis: &'a syn::Visibility,
         attrs: &'a [syn::Attribute],
         eager: bool,
-        generate_infallible_helpers: bool,
+        helper_style: HelperStyle,
     ) -> Self {
         let singleton_name = format_ident!(
             "__PROVIDER_SINGLETON_{}",
@@ -95,11 +95,7 @@ impl<'a> TemplateContext<'a> {
             eager,
             framework_init_fn: &framework_init_fn,
             managed_init_fn: &managed_init_fn,
-            helper_style: if generate_infallible_helpers {
-                HelperStyle::Infallible
-            } else {
-                HelperStyle::Fallible
-            },
+            helper_style,
         });
 
         Self {
@@ -119,7 +115,7 @@ pub fn generate_notify_template(
     attrs: &[syn::Attribute],
     eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, true);
+    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, HelperStyle::Infallible);
     let TemplateContext {
         struct_name,
         vis,
@@ -175,7 +171,7 @@ pub fn generate_broadcast_queue_template(
     capacity: usize,
     eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, true);
+    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, HelperStyle::Infallible);
     let TemplateContext {
         struct_name,
         vis,
@@ -229,8 +225,8 @@ pub fn generate_broadcast_queue_template(
 /// Generates a Listen (TCP Listener) provider with kernel-level FD cloning.
 ///
 /// The generated struct wraps `Arc<std::net::TcpListener>` to satisfy the
-/// `Clone` requirement of `Provided`. The `Default` impl performs the actual
-/// bind with a Fail-fast (panic) strategy. The `get()` method clones the
+/// `Clone` requirement of `Provided`. The `try_new()` constructor performs the
+/// fallible bind and classifies OS errors into provider errors. The `get()` method clones the
 /// underlying OS socket via `try_clone()` and converts to an async
 /// `tokio::net::TcpListener` for each caller, returning OS/runtime errors to
 /// the calling service.
@@ -240,8 +236,8 @@ pub fn generate_broadcast_queue_template(
 /// ```rust,ignore
 /// pub struct MyListener(pub std::sync::Arc<std::net::TcpListener>);
 ///
-/// impl Default for MyListener { /* bind + set_nonblocking + panic on fail */ }
 /// impl MyListener {
+///     pub fn try_new() -> Result<Self, service_daemon::ProviderError> { /* bind + classify */ }
 ///     pub fn get(&self) -> std::io::Result<tokio::net::TcpListener> { /* try_clone + from_std */ }
 /// }
 /// ```
@@ -286,58 +282,12 @@ pub fn generate_listen_template(
             #struct_name_str,
             policy,
             cancel,
-            move || {
-                let addr = #addr_expr;
-                async move {
-                    let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
-                        let msg = format!(
-                            "Provider '{}' failed to bind TCP port '{}': {}",
-                            #struct_name_str, addr, e
-                        );
-                        match e.kind() {
-                            std::io::ErrorKind::AddrInUse
-                            | std::io::ErrorKind::Interrupted
-                            | std::io::ErrorKind::TimedOut => {
-                                service_daemon::ProviderError::Retryable(msg)
-                            }
-                            _ => service_daemon::ProviderError::Fatal(msg),
-                        }
-                    })?;
-                    listener.set_nonblocking(true).map_err(|e| {
-                        service_daemon::ProviderError::Fatal(format!(
-                            "Provider '{}' failed to set nonblocking for '{}': {}",
-                            #struct_name_str, addr, e
-                        ))
-                    })?;
-                    Ok(#struct_name(std::sync::Arc::new(listener)))
-                }
-            },
+            move || async move { #struct_name::try_new() },
         )
         .await
     };
     let managed_init_fn = quote! {
-        let addr = #addr_expr;
-        let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
-            let msg = format!(
-                "Provider '{}' failed to bind TCP port '{}': {}",
-                #struct_name_str, addr, e
-            );
-            match e.kind() {
-                std::io::ErrorKind::AddrInUse
-                | std::io::ErrorKind::Interrupted
-                | std::io::ErrorKind::TimedOut => {
-                    service_daemon::ProviderError::Retryable(msg)
-                }
-                _ => service_daemon::ProviderError::Fatal(msg),
-            }
-        })?;
-        listener.set_nonblocking(true).map_err(|e| {
-            service_daemon::ProviderError::Fatal(format!(
-                "Provider '{}' failed to set nonblocking for '{}': {}",
-                #struct_name_str, addr, e
-            ))
-        })?;
-        Ok(std::sync::Arc::new(#struct_name(std::sync::Arc::new(listener))))
+        #struct_name::try_new().map(std::sync::Arc::new)
     };
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
@@ -356,27 +306,30 @@ pub fn generate_listen_template(
         #clone_derive
         #vis struct #struct_name(pub std::sync::Arc<std::net::TcpListener>);
 
-        impl Default for #struct_name {
-            fn default() -> Self {
+        impl #struct_name {
+            pub fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let addr = #addr_expr;
-                let listener = std::net::TcpListener::bind(&addr)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "FATAL: Provider '{}' failed to bind TCP port '{}': {}. Is another process using this port?",
-                            #struct_name_str, addr, e
-                        );
-                    });
-                // CRITICAL: Must set nonblocking before converting to tokio,
-                // otherwise `tokio::net::TcpListener::from_std` will panic
-                // or the event loop will hang indefinitely.
-                listener.set_nonblocking(true)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "FATAL: Provider '{}' failed to set nonblocking for '{}': {}",
-                            #struct_name_str, addr, e
-                        );
-                    });
-                Self(std::sync::Arc::new(listener))
+                let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
+                    let msg = format!(
+                        "Provider '{}' failed to bind TCP port '{}': {}",
+                        #struct_name_str, addr, e
+                    );
+                    match e.kind() {
+                        std::io::ErrorKind::AddrInUse
+                        | std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::TimedOut => {
+                            service_daemon::ProviderError::Retryable(msg)
+                        }
+                        _ => service_daemon::ProviderError::Fatal(msg),
+                    }
+                })?;
+                listener.set_nonblocking(true).map_err(|e| {
+                    service_daemon::ProviderError::Fatal(format!(
+                        "Provider '{}' failed to set nonblocking for '{}': {}",
+                        #struct_name_str, addr, e
+                    ))
+                })?;
+                Ok(Self(std::sync::Arc::new(listener)))
             }
         }
 
@@ -621,31 +574,13 @@ pub fn generate_unix_listen_template(
             #struct_name_str,
             policy,
             cancel,
-            move || {
-                let path = #addr_expr;
-                async move {
-                    #bind_prelude
-                    #bind_and_classify
-                    Ok(#struct_name(std::sync::Arc::new(listener)))
-                }
-            },
+            move || async move { #struct_name::try_new() },
         )
         .await
     };
 
-    // Managed path: same logic, but called synchronously inside the
-    // resolve_managed flow (no init_fallible wrapper). The bind preamble and
-    // classify blocks are not async-bound -- they execute as a sync prologue.
-    //
-    // Wrapped in an async block so the `?` and `.await` semantics match the
-    // surrounding state-manager call site, but the body itself does not await.
     let managed_init_fn = quote! {
-        async move {
-            let path = #addr_expr;
-            #bind_prelude
-            #bind_and_classify
-            Ok(std::sync::Arc::new(#struct_name(std::sync::Arc::new(listener))))
-        }.await
+        #struct_name::try_new().map(std::sync::Arc::new)
     };
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
@@ -671,84 +606,13 @@ pub fn generate_unix_listen_template(
         #clone_derive
         #vis struct #struct_name(pub std::sync::Arc<std::os::unix::net::UnixListener>);
 
-        // Default uses panic-on-fail: it's only invoked outside the framework
-        // path (direct instantiation in tests). The framework path goes
-        // through init_fallible and uses the Retryable/Fatal vocabulary.
         #[cfg(unix)]
-        impl Default for #struct_name {
-            fn default() -> Self {
+        impl #struct_name {
+            pub fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let path = #addr_expr;
-                let p = std::path::Path::new(&path);
-                match std::fs::symlink_metadata(p) {
-                    Ok(_) => {
-                        match std::os::unix::net::UnixStream::connect(p) {
-                            Ok(_probe_stream) => {
-                                panic!(
-                                    "FATAL: Provider '{}': socket '{}' is held by another live process; refusing to bind",
-                                    #struct_name_str, path,
-                                );
-                            }
-                            Err(_probe_err) => {
-                                let should_remove_stale_socket = match std::fs::symlink_metadata(p) {
-                                    Ok(metadata) => {
-                                        let file_type = metadata.file_type();
-                                        if !std::os::unix::fs::FileTypeExt::is_socket(&file_type) {
-                                            panic!(
-                                                "FATAL: Provider '{}': path '{}' exists but is not a Unix socket; refusing to remove",
-                                                #struct_name_str, path,
-                                            );
-                                        }
-                                        true
-                                    }
-                                    Err(metadata_err)
-                                        if metadata_err.kind() == std::io::ErrorKind::NotFound =>
-                                    {
-                                        false
-                                    }
-                                    Err(metadata_err) => {
-                                        panic!(
-                                            "FATAL: Provider '{}': failed to inspect existing socket path '{}': {} (kind={:?})",
-                                            #struct_name_str, path, metadata_err, metadata_err.kind(),
-                                        );
-                                    }
-                                };
-
-                                if should_remove_stale_socket {
-                                    if let Err(remove_err) = std::fs::remove_file(p) {
-                                        if remove_err.kind() != std::io::ErrorKind::NotFound {
-                                            panic!(
-                                                "FATAL: Provider '{}': failed to remove stale socket '{}': {} (kind={:?})",
-                                                #struct_name_str, path, remove_err, remove_err.kind(),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(metadata_err) if metadata_err.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(metadata_err) => {
-                        panic!(
-                            "FATAL: Provider '{}': failed to inspect existing socket path '{}': {} (kind={:?})",
-                            #struct_name_str, path, metadata_err, metadata_err.kind(),
-                        );
-                    }
-                }
-                let listener = std::os::unix::net::UnixListener::bind(&path)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "FATAL: Provider '{}' failed to bind Unix socket '{}': {}",
-                            #struct_name_str, path, e
-                        );
-                    });
-                listener.set_nonblocking(true)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "FATAL: Provider '{}' failed to set nonblocking for '{}': {}",
-                            #struct_name_str, path, e
-                        );
-                    });
-                Self(std::sync::Arc::new(listener))
+                #bind_prelude
+                #bind_and_classify
+                Ok(Self(std::sync::Arc::new(listener)))
             }
         }
 
@@ -912,27 +776,13 @@ pub fn generate_unix_connect_template(
             #struct_name_str,
             policy,
             cancel,
-            move || {
-                let path = #addr_expr;
-                async move {
-                    #probe_and_classify
-                    Ok(#struct_name {
-                        path: std::sync::Arc::new(std::path::PathBuf::from(path)),
-                    })
-                }
-            },
+            move || async move { #struct_name::try_new().await },
         )
         .await
     };
 
     let managed_init_fn = quote! {
-        async move {
-            let path = #addr_expr;
-            #probe_and_classify
-            Ok(std::sync::Arc::new(#struct_name {
-                path: std::sync::Arc::new(std::path::PathBuf::from(path)),
-            }))
-        }.await
+        #struct_name::try_new().await.map(std::sync::Arc::new)
     };
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
@@ -959,26 +809,6 @@ pub fn generate_unix_connect_template(
             path: std::sync::Arc<std::path::PathBuf>,
         }
 
-        // Default uses panic-on-fail (probes synchronously via std). Only
-        // invoked outside the framework path; framework path goes through
-        // init_fallible with proper retry semantics.
-        #[cfg(unix)]
-        impl Default for #struct_name {
-            fn default() -> Self {
-                let path = #addr_expr;
-                let _probe = std::os::unix::net::UnixStream::connect(&path)
-                    .unwrap_or_else(|e| {
-                        panic!(
-                            "FATAL: Provider '{}' failed to probe Unix socket '{}': {}",
-                            #struct_name_str, path, e
-                        );
-                    });
-                drop(_probe);
-                Self {
-                    path: std::sync::Arc::new(std::path::PathBuf::from(path)),
-                }
-            }
-        }
 
         #[cfg(unix)]
         impl std::fmt::Display for #struct_name {
@@ -992,6 +822,14 @@ pub fn generate_unix_connect_template(
 
         #[cfg(unix)]
         impl #struct_name {
+            pub async fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
+                let path = #addr_expr;
+                #probe_and_classify
+                Ok(Self {
+                    path: std::sync::Arc::new(std::path::PathBuf::from(path)),
+                })
+            }
+
             /// Open a fresh connection to the configured Unix socket.
             ///
             /// Each call establishes an independent `tokio::net::UnixStream`.

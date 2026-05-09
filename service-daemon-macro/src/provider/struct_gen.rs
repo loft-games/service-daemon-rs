@@ -474,8 +474,8 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     let default_impl = generate_default_impl(&tuple_info, &args, struct_name);
 
     // Generate constructors for both framework-level and raw managed resolution.
-    let framework_init_fn = generate_constructor(struct_name, fields, false);
-    let managed_init_fn = generate_constructor(struct_name, fields, true);
+    let framework_init_fn = generate_constructor(struct_name, fields, &tuple_info, &args, false);
+    let managed_init_fn = generate_constructor(struct_name, fields, &tuple_info, &args, true);
 
     // Collect dependency metadata from struct fields for PROVIDER_REGISTRY.
     // Only named fields with Arc-wrapped types are injectable dependencies.
@@ -517,6 +517,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     // Use the shared Provided impl generator
     let type_tokens = quote! { #struct_name };
     let eager = args.eager;
+    let helper_style = struct_provider_helper_style(fields, &tuple_info, &args);
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
@@ -526,7 +527,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         eager,
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
-        helper_style: HelperStyle::Infallible,
+        helper_style,
     });
 
     let expanded = quote! {
@@ -600,6 +601,44 @@ fn generate_extra_traits(
     }
 }
 
+fn required_env_value_provider<'a>(
+    tuple_info: &'a Option<TupleStructInfo>,
+    provider_args: &'a ProviderArgs,
+) -> Option<(&'a syn::LitStr, &'a syn::Type, bool)> {
+    let info = tuple_info.as_ref()?;
+    match &provider_args.kind {
+        ProviderKind::Value {
+            default_value: None,
+        } => {}
+        _ => return None,
+    }
+    provider_args
+        .env
+        .as_ref()
+        .map(|env| (env, &info.inner_type, info.is_string))
+}
+
+fn struct_provider_helper_style(
+    fields: &syn::Fields,
+    tuple_info: &Option<TupleStructInfo>,
+    provider_args: &ProviderArgs,
+) -> HelperStyle {
+    if required_env_value_provider(tuple_info, provider_args).is_some() {
+        return HelperStyle::Fallible;
+    }
+
+    if let syn::Fields::Named(named_fields) = fields
+        && named_fields
+            .named
+            .iter()
+            .any(|field| decompose_type(&field.ty).1.is_some())
+    {
+        return HelperStyle::Fallible;
+    }
+
+    HelperStyle::Infallible
+}
+
 /// Generates the Default impl for single-element tuple structs.
 fn generate_default_impl(
     tuple_info: &Option<TupleStructInfo>,
@@ -626,6 +665,10 @@ fn generate_default_impl(
         );
     }
 
+    if required_env_value_provider(tuple_info, provider_args).is_some() {
+        return quote! {};
+    }
+
     // Helper to wrap string literals with .to_owned() for String fields
     let expand_value = |expr: &syn::Expr| -> proc_macro2::TokenStream {
         if info.is_string {
@@ -642,62 +685,28 @@ fn generate_default_impl(
     };
 
     // Build the default expression
-    let struct_name_str = struct_name.to_string();
     let default_body = if let Some(env_lit) = env_opt {
         // Use env var with fallback to default
         let env_str = env_lit.value();
 
+        let Some(default_val) = default_expr_opt else {
+            return quote! {};
+        };
+        let default_tokens = expand_value(default_val);
+
         if info.is_string {
-            // String type: use env var directly without parsing
-            if let Some(default_val) = default_expr_opt {
-                let default_tokens = expand_value(default_val);
-                quote! {
-                    std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
-                }
-            } else {
-                // No fallback: env var is REQUIRED.
-                // Keep Default infallible by using an explicit fail-fast panic path.
-                quote! {
-                    std::env::var(#env_str).unwrap_or_else(|_| {
-                        panic!(
-                            "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
-                             Set it or add a default: #[provider(\"...\", env = \"{}\")]",
-                            #env_str, #struct_name_str, #env_str
-                        );
-                    })
-                }
+            quote! {
+                std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
             }
         } else {
             // Non-String type: parse the env var string into the target type.
             // This enables `#[provider(8080, env = "PORT")] struct Port(pub i32)`.
             let inner_ty = &info.inner_type;
-            if let Some(default_val) = default_expr_opt {
-                let default_tokens = expand_value(default_val);
-                quote! {
-                    std::env::var(#env_str)
-                        .ok()
-                        .and_then(|v| v.parse::<#inner_ty>().ok())
-                        .unwrap_or_else(|| #default_tokens)
-                }
-            } else {
-                // No fallback: env var is REQUIRED and must be parseable.
-                quote! {
-                    std::env::var(#env_str)
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "FATAL: Required environment variable '{}' is not set (needed by provider '{}'). \
-                                 Set it or add a default: #[provider(value, env = \"{}\")]",
-                                #env_str, #struct_name_str, #env_str
-                            );
-                        })
-                        .parse::<#inner_ty>()
-                        .unwrap_or_else(|e| {
-                            panic!(
-                                "FATAL: Environment variable '{}' for provider '{}' cannot be parsed: {}",
-                                #env_str, #struct_name_str, e
-                            );
-                        })
-                }
+            quote! {
+                std::env::var(#env_str)
+                    .ok()
+                    .and_then(|v| v.parse::<#inner_ty>().ok())
+                    .unwrap_or_else(|| #default_tokens)
             }
         }
     } else if let Some(default_val) = default_expr_opt {
@@ -717,6 +726,68 @@ fn generate_default_impl(
     }
 }
 
+fn generate_required_env_constructor(
+    struct_name: &syn::Ident,
+    env_lit: &syn::LitStr,
+    inner_type: &syn::Type,
+    is_string: bool,
+    managed_errors: bool,
+) -> proc_macro2::TokenStream {
+    let env_str = env_lit.value();
+    let struct_name_str = struct_name.to_string();
+
+    let missing_error = if managed_errors {
+        quote! {
+            service_daemon::ProviderError::Fatal(format!(
+                "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
+                #env_str, #struct_name_str, #env_str
+            ))
+        }
+    } else {
+        quote! {
+            service_daemon::ProviderInitError::Fatal {
+                provider: #struct_name_str.to_owned(),
+                message: format!(
+                    "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
+                    #env_str, #struct_name_str, #env_str
+                ),
+            }
+        }
+    };
+
+    if is_string {
+        return quote! {
+            let value = std::env::var(#env_str).map_err(|_| #missing_error)?;
+            Ok(std::sync::Arc::new(#struct_name(value)))
+        };
+    }
+
+    let parse_error = if managed_errors {
+        quote! {
+            service_daemon::ProviderError::Fatal(format!(
+                "Environment variable '{}' for provider '{}' cannot be parsed: {}",
+                #env_str, #struct_name_str, e
+            ))
+        }
+    } else {
+        quote! {
+            service_daemon::ProviderInitError::Fatal {
+                provider: #struct_name_str.to_owned(),
+                message: format!(
+                    "Environment variable '{}' for provider '{}' cannot be parsed: {}",
+                    #env_str, #struct_name_str, e
+                ),
+            }
+        }
+    };
+
+    quote! {
+        let raw_value = std::env::var(#env_str).map_err(|_| #missing_error)?;
+        let value = raw_value.parse::<#inner_type>().map_err(|e| #parse_error)?;
+        Ok(std::sync::Arc::new(#struct_name(value)))
+    }
+}
+
 /// Generates the constructor for the struct provider.
 ///
 /// Supports automatic injection for:
@@ -729,8 +800,22 @@ fn generate_default_impl(
 fn generate_constructor(
     struct_name: &syn::Ident,
     fields: &syn::Fields,
+    tuple_info: &Option<TupleStructInfo>,
+    provider_args: &ProviderArgs,
     managed_errors: bool,
 ) -> proc_macro2::TokenStream {
+    if let Some((env_lit, inner_type, is_string)) =
+        required_env_value_provider(tuple_info, provider_args)
+    {
+        return generate_required_env_constructor(
+            struct_name,
+            env_lit,
+            inner_type,
+            is_string,
+            managed_errors,
+        );
+    }
+
     match fields {
         syn::Fields::Named(named_fields) => {
             let field_inits: Vec<_> = named_fields

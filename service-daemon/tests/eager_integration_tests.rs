@@ -1,4 +1,4 @@
-use service_daemon::{ProviderError, ServiceDaemon, provider, service};
+use service_daemon::{ProviderError, ProviderInitError, ServiceDaemon, provider, service};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -46,7 +46,7 @@ async fn failing_stub_service(_token: Arc<FailingEagerToken>) -> anyhow::Result<
     Ok(())
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 #[provider(
     env = "SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A",
     eager = true
@@ -150,6 +150,24 @@ async fn test_async_fn_eager_init_failure_triggers_shutdown() {
     daemon.run().await;
     assert!(EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
     assert!(daemon.cancel_token().is_cancelled());
+}
+
+#[tokio::test]
+async fn test_missing_env_public_helper_returns_fatal_error() {
+    assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
+
+    let result = MissingEnvToken::resolve().await;
+    match result {
+        Err(ProviderInitError::Fatal { provider, message }) => {
+            assert_eq!(provider, "MissingEnvToken");
+            assert!(
+                message.contains("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A"),
+                "expected missing env name in Fatal message, got: {}",
+                message
+            );
+        }
+        other => panic!("Expected missing env Fatal, got {:?}", other),
+    }
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ use syn::{ItemFn, parse_macro_input};
 
 use crate::common::{WrapperKind, decompose_type, extract_sync_handler_flag};
 pub use parser::ProviderArgs;
-use struct_gen::generate_struct_provider;
+use struct_gen::{HelperStyle, generate_struct_provider};
 
 fn extract_fallible_provider_type(ty: &syn::Type) -> Option<syn::Type> {
     let syn::Type::Path(tp) = ty else {
@@ -224,6 +224,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     }
 
+    let helper_style = if is_fallible || !param_entries.is_empty() {
+        HelperStyle::Fallible
+    } else {
+        HelperStyle::Infallible
+    };
+
     // Build the call expression with or without dependency injection
     let fn_call_with_args = if fn_asyncness.is_some() {
         quote! { #fn_name(#(#call_args),*).await }
@@ -291,11 +297,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         eager,
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
-        helper_style: if is_fallible {
-            struct_gen::HelperStyle::Fallible
-        } else {
-            struct_gen::HelperStyle::Infallible
-        },
+        helper_style,
     });
 
     let expanded = quote! {
