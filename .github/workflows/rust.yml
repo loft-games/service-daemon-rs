@@ -19,6 +19,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Rust Check
         run: cargo check --workspace
+      - name: Rust Check All Features
+        run: cargo check --workspace --all-features
+      - name: Rust Check No Default Features
+        run: cargo check -p service-daemon --no-default-features
 
   test:
     name: Test
@@ -31,6 +35,10 @@ jobs:
         run: cargo check --workspace
       - name: Run tests
         run: cargo test --workspace
+      - name: Run tests with all features
+        run: cargo test --workspace --all-features
+      - name: Run service-daemon tests without default features
+        run: cargo test -p service-daemon --no-default-features
       # Release-mode smoke against linker section GC (see linkme_smoke.rs).
       # Catches rustc/LLVM upgrades that silently drop #[service] entries
       # before they can mask service-discovery failures in production builds.
@@ -60,3 +68,7 @@ jobs:
           components: clippy
       - name: Rust Clippy
         run: cargo clippy --workspace -- -D warnings
+      - name: Rust Clippy All Features
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Rust Clippy No Default Features
+        run: cargo clippy -p service-daemon --no-default-features -- -D warnings

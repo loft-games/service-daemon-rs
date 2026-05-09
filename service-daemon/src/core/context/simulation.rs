@@ -56,8 +56,8 @@ impl SimulationHandle {
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
-    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &'static str, key: &str, value: T) {
-        let entry = self.resources.shelf.entry(service_name).or_default();
+    pub fn set_shelf<T: Any + Send + Sync>(&self, service_id: ServiceId, key: &str, value: T) {
+        let entry = self.resources.shelf.entry(service_id).or_default();
         entry.insert(key.to_string(), Box::new(value));
     }
 
@@ -114,17 +114,14 @@ impl SimulationHandle {
     /// ```
     pub fn get_shelf<T: Any + Clone + Send + Sync>(
         &self,
-        service_name: &str,
+        service_id: ServiceId,
         key: &str,
     ) -> Option<T> {
-        self.resources
-            .shelf
-            .get(service_name as &str)
-            .and_then(|entry| {
-                entry
-                    .get(key)
-                    .and_then(|val| val.downcast_ref::<T>().cloned())
-            })
+        self.resources.shelf.get(&service_id).and_then(|entry| {
+            entry
+                .get(key)
+                .and_then(|val| val.downcast_ref::<T>().cloned())
+        })
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -142,20 +139,20 @@ impl SimulationHandle {
     /// Checks whether a shelf key exists for the specified service.
     ///
     /// Returns `true` if the key is present (regardless of its type).
-    pub fn has_shelf(&self, service_name: &str, key: &str) -> bool {
+    pub fn has_shelf(&self, service_id: ServiceId, key: &str) -> bool {
         self.resources
             .shelf
-            .get(service_name as &str)
+            .get(&service_id)
             .is_some_and(|entry| entry.contains_key(key))
     }
 
     /// Returns all shelf key names for the specified service.
     ///
     /// Returns an empty `Vec` if the service has no shelved data.
-    pub fn shelf_keys(&self, service_name: &str) -> Vec<String> {
+    pub fn shelf_keys(&self, service_id: ServiceId) -> Vec<String> {
         self.resources
             .shelf
-            .get(service_name as &str)
+            .get(&service_id)
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
     }
@@ -286,12 +283,12 @@ impl MockContextBuilder {
     /// and state persistence logic.
     pub fn with_shelf<T: Any + Send + Sync>(
         self,
-        service_name: &'static str,
+        service_id: ServiceId,
         key: &str,
         data: T,
     ) -> Self {
         {
-            let entry = self.resources.shelf.entry(service_name).or_default();
+            let entry = self.resources.shelf.entry(service_id).or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self

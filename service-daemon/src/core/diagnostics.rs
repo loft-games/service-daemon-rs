@@ -66,6 +66,7 @@ pub(crate) struct SleepObservation {
 }
 
 const RUNTIME_PROBE_INTERVAL: Duration = Duration::from_millis(250);
+const RETAINED_GENERATIONS_PER_SERVICE: usize = 1024;
 
 pub(crate) async fn run_lane_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
@@ -588,6 +589,7 @@ impl DiagnosticsStore {
         ));
         self.generations
             .insert((service_id, generation), generation_diagnostics.clone());
+        self.retain_recent_generations(service_id);
 
         GenerationDiagnosticsHandle {
             service,
@@ -661,6 +663,27 @@ impl DiagnosticsStore {
             RuntimeLane::Standard => self.standard.clone(),
             RuntimeLane::HighPriority => self.high_priority.clone(),
             RuntimeLane::Isolated => self.isolated.clone(),
+        }
+    }
+
+    fn retain_recent_generations(&self, service_id: ServiceId) {
+        let mut generations: Vec<_> = self
+            .generations
+            .iter()
+            .filter_map(|entry| {
+                let (entry_service_id, generation) = *entry.key();
+                (entry_service_id == service_id).then_some(generation)
+            })
+            .collect();
+
+        if generations.len() <= RETAINED_GENERATIONS_PER_SERVICE {
+            return;
+        }
+
+        generations.sort_unstable();
+        let evict_count = generations.len() - RETAINED_GENERATIONS_PER_SERVICE;
+        for generation in generations.into_iter().take(evict_count) {
+            self.generations.remove(&(service_id, generation));
         }
     }
 }
@@ -832,6 +855,41 @@ mod tests {
             lifecycle.last_exit_kind,
             Some(GenerationExitKind::IsolatedStartupFailure)
         );
+    }
+
+    #[test]
+    fn diagnostics_store_retains_only_recent_generation_snapshots_per_service() {
+        let store = DiagnosticsStore::new();
+
+        for generation in 1..=1030 {
+            let handle = store.register_generation(
+                ServiceId::new(5),
+                "crashing",
+                generation,
+                RuntimeLane::Standard,
+            );
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(10),
+                Duration::from_millis(11),
+            ));
+        }
+
+        let snapshot = store.snapshot();
+        let retained_generations: Vec<_> = snapshot
+            .generations
+            .iter()
+            .filter(|generation| generation.service_id == ServiceId::new(5))
+            .map(|generation| generation.generation)
+            .collect();
+        let service = store.service_snapshot(ServiceId::new(5)).unwrap();
+        let lane = store.lane_snapshot(RuntimeLane::Standard);
+
+        assert_eq!(retained_generations.len(), 1024);
+        assert_eq!(retained_generations.first(), Some(&7));
+        assert_eq!(retained_generations.last(), Some(&1030));
+        assert_eq!(service.aggregate.service_sleep.completed, 1030);
+        assert_eq!(lane.aggregate.service_sleep.completed, 1030);
     }
 
     #[test]

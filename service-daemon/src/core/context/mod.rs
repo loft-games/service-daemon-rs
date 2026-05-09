@@ -89,6 +89,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_shelf_isolated_by_service_id_for_duplicate_names() {
+        let resources = create_test_resources();
+        let first = ServiceIdentity::new(
+            ServiceId::new(1),
+            "duplicate_name",
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let second = ServiceIdentity::new(
+            ServiceId::new(2),
+            "duplicate_name",
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+
+        in_scope(first, resources.clone(), || async {
+            shelve("value", 42i32).await;
+        })
+        .await;
+
+        in_scope(second, resources.clone(), || async {
+            let val: Option<i32> = unshelve("value").await;
+            assert_eq!(val, None);
+            shelve("value", 7i32).await;
+        })
+        .await;
+
+        in_scope(
+            ServiceIdentity::new(
+                ServiceId::new(1),
+                "duplicate_name",
+                CancellationToken::new(),
+                CancellationToken::new(),
+            ),
+            resources,
+            || async {
+                let val: Option<i32> = unshelve("value").await;
+                assert_eq!(val, Some(42));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn test_state_transitions() {
         let resources = create_test_resources();
         let identity = create_test_identity("state_service");
@@ -340,14 +384,15 @@ mod simulation_tests {
     #[test]
     fn test_mock_context_shelf_pre_filling() {
         // Verify that pre-filled shelf data is accessible through the handle.
+        let svc_id = ServiceId::new(7);
         let (builder, handle) = MockContext::builder()
-            .with_shelf::<i32>("test_svc", "counter", 42)
-            .with_shelf::<String>("test_svc", "name", "hello".to_string())
+            .with_shelf::<i32>(svc_id, "counter", 42)
+            .with_shelf::<String>(svc_id, "name", "hello".to_string())
             .build();
 
         // The handle should see the pre-filled resources
         let resources = handle.resources();
-        let shelf = resources.shelf.get("test_svc").unwrap();
+        let shelf = resources.shelf.get(&svc_id).unwrap();
         let counter = shelf.get("counter").unwrap();
         assert_eq!(counter.value().downcast_ref::<i32>(), Some(&42));
 
@@ -370,16 +415,17 @@ mod simulation_tests {
     #[test]
     fn test_simulation_handle_dynamic_shelf_update() {
         let (_, handle) = MockContext::builder().build();
+        let svc_id = ServiceId::new(7);
 
         // Initially empty
-        assert!(handle.resources().shelf.get("svc").is_none());
+        assert!(handle.resources().shelf.get(&svc_id).is_none());
 
         // Dynamic injection via SimulationHandle
-        handle.set_shelf::<i32>("svc", "counter", 99);
+        handle.set_shelf::<i32>(svc_id, "counter", 99);
 
         // Now visible
         let resources = handle.resources();
-        let shelf = resources.shelf.get("svc").unwrap();
+        let shelf = resources.shelf.get(&svc_id).unwrap();
         let val = shelf.get("counter").unwrap();
         assert_eq!(val.value().downcast_ref::<i32>(), Some(&99));
     }

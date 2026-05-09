@@ -117,12 +117,12 @@ pub fn done() {
 /// This function is `async` for API consistency with the rest of the context module
 /// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
-        Ok(n) => n,
+    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+        Ok(id) => id,
         Err(_) => return,
     };
     if let Ok(resources) = CURRENT_RESOURCES.try_with(|r| r.clone()) {
-        let entry = resources.shelf.entry(name).or_default();
+        let entry = resources.shelf.entry(service_id).or_default();
         entry.insert(key.to_string(), Box::new(data));
     }
 }
@@ -136,13 +136,13 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// This function is `async` for API consistency with the rest of the context module
 /// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
-        Ok(n) => n,
+    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+        Ok(id) => id,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(name).and_then(|entry| {
+            r.shelf.get(&service_id).and_then(|entry| {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
@@ -166,13 +166,13 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// This function is `async` for API consistency with the rest of the context module
 /// and to allow future migration to async-aware storage backends without breaking changes.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
-        Ok(n) => n,
+    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+        Ok(id) => id,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(name).and_then(|entry| {
+            r.shelf.get(&service_id).and_then(|entry| {
                 entry
                     .get(key)
                     .and_then(|val| val.downcast_ref::<T>().cloned())

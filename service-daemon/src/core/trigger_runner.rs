@@ -31,7 +31,7 @@ use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 use tracing::{Instrument, info, warn};
 
@@ -46,6 +46,9 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
+
+type DispatchFailureSender = mpsc::UnboundedSender<anyhow::Error>;
+type DispatchFailureReceiver = mpsc::UnboundedReceiver<anyhow::Error>;
 
 /// Generates a globally unique, time-ordered message ID for each trigger event.
 ///
@@ -285,19 +288,42 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         H: TriggerHost<T, Payload = P>,
     {
         // Only spawn the scale monitor if elastic scaling is enabled.
-        let monitor_handle = if self.scaling.is_some() {
+        let mut monitor_handle = if self.scaling.is_some() {
             Some(self.spawn_scale_monitor())
         } else {
             None
         };
+        let (dispatch_failure_tx, mut dispatch_failure_rx) = mpsc::unbounded_channel();
 
         while !context::is_shutdown() {
-            let Some(transition) = Self::poll_next_event(host, &target, self.name).await else {
-                break;
-            };
+            tokio::select! {
+                biased;
 
-            if !self.handle_transition(transition).await {
-                break;
+                failure = dispatch_failure_rx.recv() => {
+                    if let Some(handle) = monitor_handle.take() {
+                        handle.abort();
+                    }
+                    return match failure {
+                        Some(error) => Err(error),
+                        None => Ok(()),
+                    };
+                }
+                transition = Self::poll_next_event(host, &target, self.name) => {
+                    let Some(transition) = transition else {
+                        break;
+                    };
+
+                    if !self
+                        .handle_transition(
+                            transition,
+                            &dispatch_failure_tx,
+                            &mut dispatch_failure_rx,
+                        )
+                        .await?
+                    {
+                        break;
+                    }
+                }
             }
         }
 
@@ -333,21 +359,35 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// Dispatch the payload according to the transition type.
     ///
     /// Returns `true` to continue the event loop, `false` to break out.
-    async fn handle_transition(&self, transition: TriggerTransition<P>) -> bool {
+    async fn handle_transition(
+        &self,
+        transition: TriggerTransition<P>,
+        dispatch_failure_tx: &DispatchFailureSender,
+        dispatch_failure_rx: &mut DispatchFailureReceiver,
+    ) -> Result<bool> {
         match transition {
             TriggerTransition::Next(payload, pre_id) => {
-                self.dispatch(payload, pre_id).await;
-                true
+                self.dispatch(payload, pre_id, dispatch_failure_tx.clone())
+                    .await?;
+                Ok(true)
             }
             TriggerTransition::Reload(payload, pre_id) => {
-                self.dispatch(payload, pre_id).await;
+                self.dispatch(payload, pre_id, dispatch_failure_tx.clone())
+                    .await?;
                 info!("Trigger '{}' entering reload-wait state", self.name);
-                context::wait_shutdown().await;
-                false
+                tokio::select! {
+                    biased;
+
+                    failure = dispatch_failure_rx.recv() => match failure {
+                        Some(error) => Err(error),
+                        None => Ok(false),
+                    },
+                    _ = context::wait_shutdown() => Ok(false),
+                }
             }
             TriggerTransition::Stop => {
                 info!("Trigger '{}' stopping", self.name);
-                false
+                Ok(false)
             }
         }
     }
@@ -531,7 +571,12 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     ///
     /// If the semaphore has no available permits, the event loop will wait
     /// here until a running handler finishes, providing natural backpressure.
-    async fn dispatch(&self, payload: P, identity: Option<(uuid::Uuid, ServiceId)>) {
+    async fn dispatch(
+        &self,
+        payload: P,
+        identity: Option<(uuid::Uuid, ServiceId)>,
+        dispatch_failure_tx: DispatchFailureSender,
+    ) -> Result<()> {
         let seq = self.instance_counter.fetch_add(1, Ordering::Relaxed);
         let (message_id, source_id) =
             identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
@@ -542,7 +587,12 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             .clone()
             .acquire_owned()
             .await
-            .expect("Semaphore should never be closed");
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Trigger '{}' could not acquire dispatch permit: {error}",
+                    self.name
+                )
+            })?;
 
         let ctx = DispatchContext {
             service_id: self.service_id,
@@ -560,18 +610,48 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let trigger_name = self.name;
 
         // Use the context-aware spawn to propagate identity and resources automatically
-        context::spawn_with_context(async move {
-            if let Err(e) = chain(ctx).await {
-                warn!(
-                    trigger = %trigger_name,
-                    error = %e,
-                    "Dispatch chain completed with error"
-                );
-            }
-
-            // Permit is dropped here, releasing the semaphore slot
+        let dispatch_task = context::spawn_with_context(async move {
+            let result = chain(ctx).await;
             drop(permit);
+            result
         });
+
+        tokio::spawn(async move {
+            match dispatch_task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    let propagated =
+                        anyhow::anyhow!("Trigger '{}' dispatch task failed: {error}", trigger_name);
+                    warn!(
+                        trigger = %trigger_name,
+                        error = %propagated,
+                        "Dispatch chain completed with error"
+                    );
+                    let _ = dispatch_failure_tx.send(propagated);
+                }
+                Err(join_error) => {
+                    let propagated = if join_error.is_panic() {
+                        anyhow::anyhow!(
+                            "Trigger '{}' dispatch task panicked: {join_error}",
+                            trigger_name
+                        )
+                    } else {
+                        anyhow::anyhow!(
+                            "Trigger '{}' dispatch task was cancelled: {join_error}",
+                            trigger_name
+                        )
+                    };
+                    warn!(
+                        trigger = %trigger_name,
+                        error = %propagated,
+                        "Dispatch task did not complete normally"
+                    );
+                    let _ = dispatch_failure_tx.send(propagated);
+                }
+            }
+        });
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -816,6 +896,33 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    struct OneShotBlockingHost {
+        emitted: bool,
+    }
+
+    impl TriggerHost<()> for OneShotBlockingHost {
+        type Payload = ();
+
+        fn setup(_target: Arc<()>) -> BoxFuture<'static, anyhow::Result<Self>> {
+            Box::pin(async { Ok(Self { emitted: false }) })
+        }
+
+        fn handle_step<'a>(
+            &'a mut self,
+            _target: &'a Arc<()>,
+        ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
+            Box::pin(async move {
+                if self.emitted {
+                    crate::core::context::wait_shutdown().await;
+                    TriggerTransition::Stop
+                } else {
+                    self.emitted = true;
+                    TriggerTransition::Next((), None)
+                }
+            })
+        }
+    }
 
     /// Verifies that the semaphore limits concurrent handler invocations
     /// to the configured `initial_concurrency`.
@@ -1122,6 +1229,115 @@ mod tests {
         assert_eq!(stored.scale_factor, 4);
         assert_eq!(stored.scale_threshold, 3);
         assert_eq!(stored.scale_cooldown, Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_failure_propagates_from_background_task() {
+        use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+        use tokio_util::sync::CancellationToken;
+
+        let handler: TriggerHandler<()> =
+            Arc::new(|_ctx| Box::pin(async { Err(anyhow::anyhow!("handler failed permanently")) }));
+        let restart_policy = RestartPolicy::builder()
+            .initial_delay(Duration::from_millis(1))
+            .max_delay(Duration::from_millis(1))
+            .jitter_factor(0.0)
+            .trigger_max_retries(1)
+            .build();
+        let runner = TriggerRunner::new(
+            "failing_dispatch_trigger",
+            ServiceId::new(200),
+            handler,
+            restart_policy,
+            None,
+        );
+
+        let result = __run_service_scope(
+            ServiceIdentity::new(
+                ServiceId::new(200),
+                "failing_dispatch_trigger",
+                CancellationToken::new(),
+                CancellationToken::new(),
+            ),
+            DaemonResources::new(),
+            || async move {
+                let mut host = OneShotBlockingHost { emitted: false };
+                let target = Arc::new(());
+                match tokio::time::timeout(
+                    Duration::from_millis(500),
+                    runner.run_with_host::<(), OneShotBlockingHost>(&mut host, target),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => panic!("dispatch failure was not propagated to run_with_host"),
+                }
+            },
+        )
+        .await;
+
+        let error = match result {
+            Ok(()) => panic!("run_with_host should fail when a dispatch task fails"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(
+            error.contains("exceeded max retry limit"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_panic_propagates_from_background_task() {
+        use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+        use tokio_util::sync::CancellationToken;
+
+        let handler: TriggerHandler<()> = Arc::new(|_ctx| {
+            Box::pin(async {
+                if std::hint::black_box(true) {
+                    panic!("handler panicked inside dispatch task");
+                }
+                Ok(())
+            })
+        });
+        let runner = TriggerRunner::new(
+            "panicking_dispatch_trigger",
+            ServiceId::new(201),
+            handler,
+            RestartPolicy::for_testing(),
+            None,
+        );
+
+        let result = __run_service_scope(
+            ServiceIdentity::new(
+                ServiceId::new(201),
+                "panicking_dispatch_trigger",
+                CancellationToken::new(),
+                CancellationToken::new(),
+            ),
+            DaemonResources::new(),
+            || async move {
+                let mut host = OneShotBlockingHost { emitted: false };
+                let target = Arc::new(());
+                match tokio::time::timeout(
+                    Duration::from_millis(500),
+                    runner.run_with_host::<(), OneShotBlockingHost>(&mut host, target),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => panic!("dispatch panic was not propagated to run_with_host"),
+                }
+            },
+        )
+        .await;
+
+        let error = match result {
+            Ok(()) => panic!("run_with_host should fail when a dispatch task panics"),
+            Err(error) => error.to_string(),
+        };
+
+        assert!(error.contains("panicked"), "unexpected error: {error}");
     }
 
     // -----------------------------------------------------------------------

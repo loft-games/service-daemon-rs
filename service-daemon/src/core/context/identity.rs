@@ -34,7 +34,7 @@ pub(crate) fn process_token() -> &'static CancellationToken {
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
-pub(crate) type GlobalShelfMapping = DashMap<&'static str, ServiceShelf>;
+pub(crate) type GlobalShelfMapping = DashMap<ServiceId, ServiceShelf>;
 
 /// Identity and resource container for a running service daemon.
 ///
@@ -47,7 +47,7 @@ pub struct DaemonResources {
     /// Indexed by `ServiceId` for safety and performance.
     pub status_plane: DashMap<ServiceId, ServiceStatus>,
     /// Global storage for service-owned arbitrary data (the shelf).
-    /// Keyed by service name to support persistence and user-facing inspection.
+    /// Keyed by `ServiceId` to prevent same-name services from sharing state.
     pub shelf: GlobalShelfMapping,
     /// Signals for services to reload, indexed by `ServiceId`.
     pub reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,

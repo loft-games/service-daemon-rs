@@ -24,9 +24,9 @@ use std::sync::Arc;
 #[cfg(feature = "cron")]
 use tokio::sync::Notify;
 use tokio::sync::{Mutex, broadcast};
+use tracing::warn;
 #[cfg(feature = "cron")]
-use tracing::error;
-use tracing::{info, warn};
+use tracing::{error, info};
 
 use crate::core::di::{Provided, WatchableProvided};
 use crate::core::managed_state::{TrackedNotify, TrackedSender};
