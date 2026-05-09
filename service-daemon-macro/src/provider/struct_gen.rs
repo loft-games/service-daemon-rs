@@ -348,7 +348,15 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     .resolve_snapshot_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
                         let cancel = service_daemon::current_cancellation_token();
-                        #framework_init_fn
+                        match service_daemon::core::provider_init::catch_init_panic(
+                            #type_name_str,
+                            async move { #framework_init_fn },
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(error),
+                        }
                     })
                     .await
             }
@@ -360,7 +368,15 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     .resolve_rwlock_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
                         let cancel = service_daemon::current_cancellation_token();
-                        #framework_init_fn
+                        match service_daemon::core::provider_init::catch_init_panic(
+                            #type_name_str,
+                            async move { #framework_init_fn },
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(error),
+                        }
                     })
                     .await
             }
@@ -370,7 +386,15 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     .resolve_mutex_result(|| async {
                         let policy = service_daemon::RestartPolicy::default();
                         let cancel = service_daemon::current_cancellation_token();
-                        #framework_init_fn
+                        match service_daemon::core::provider_init::catch_init_panic(
+                            #type_name_str,
+                            async move { #framework_init_fn },
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(error) => Err(error),
+                        }
                     })
                     .await
             }
@@ -395,7 +419,15 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             cancel: service_daemon::tokio_util::sync::CancellationToken,
         ) -> service_daemon::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                #framework_init_fn?;
+                match service_daemon::core::provider_init::catch_init_panic(
+                    #type_name_str,
+                    async move { #framework_init_fn },
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(error) => return Err(error),
+                };
                 Ok(())
             })
         }

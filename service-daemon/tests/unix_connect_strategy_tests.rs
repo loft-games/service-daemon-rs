@@ -6,7 +6,11 @@
 
 #![cfg(unix)]
 
-use service_daemon::{ManagedProvided, provider};
+use service_daemon::{ManagedProvided, RestartPolicy, ServiceDaemon, provider, service};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+static MISSING_PEER_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
 
 fn cleanup_path(path: &str) {
     match std::fs::remove_file(path) {
@@ -67,9 +71,47 @@ async fn test_unix_connect_succeeds_when_server_ready() {
 #[provider(UnixConnect("target/sd-uds-connect-retry.sock"))]
 pub struct RetryClient;
 
+#[derive(Debug)]
+#[provider(UnixConnect("target/sd-uds-connect-missing-peer.sock"), eager = true)]
+pub struct MissingPeerClient;
+
+#[service(tags = ["unix_connect_missing_peer_provider_test"])]
+async fn missing_peer_client_service(_client: Arc<MissingPeerClient>) -> anyhow::Result<()> {
+    MISSING_PEER_SERVICE_ENTERED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 // We need multi_thread so the delayed-bind task can run while the main task
 // is parked inside init_fallible's backoff sleep. With current_thread the
 // runtime would wait for the spawn to be polled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unix_connect_missing_peer_returns_provider_init_error() {
+    let path = "target/sd-uds-connect-missing-peer.sock";
+    let _guard = prepare_socket_path(path);
+    MISSING_PEER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            service_daemon::models::Registry::builder()
+                .with_tag("unix_connect_missing_peer_provider_test")
+                .build(),
+        )
+        .with_restart_policy(
+            RestartPolicy::builder()
+                .initial_delay(Duration::from_millis(1))
+                .max_delay(Duration::from_millis(5))
+                .jitter_factor(0.0)
+                .provider_init_timeout(Duration::from_millis(20))
+                .build(),
+        )
+        .build();
+
+    daemon.run().await;
+
+    assert!(daemon.cancel_token().is_cancelled());
+    assert!(!MISSING_PEER_SERVICE_ENTERED.load(Ordering::SeqCst));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_retries_on_connection_refused() {
     let path = "target/sd-uds-connect-retry.sock";

@@ -1914,6 +1914,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_io_service_errors_use_backoff_recovery() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(
+                Ok(Err(Error::new(ServiceError::runtime_io(
+                    "clone TCP listener",
+                    std::io::Error::other("descriptor unavailable"),
+                )))),
+                &reload_token,
+            );
+
+        assert!(matches!(status, ServiceStatus::Recovering(_)));
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert!(matches!(
+            restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
+        ));
+        assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+    }
+
+    #[tokio::test]
     async fn panics_use_backoff_recovery() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();

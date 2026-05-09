@@ -232,7 +232,8 @@ pub fn generate_broadcast_queue_template(
 /// `Clone` requirement of `Provided`. The `Default` impl performs the actual
 /// bind with a Fail-fast (panic) strategy. The `get()` method clones the
 /// underlying OS socket via `try_clone()` and converts to an async
-/// `tokio::net::TcpListener` for each caller.
+/// `tokio::net::TcpListener` for each caller, returning OS/runtime errors to
+/// the calling service.
 ///
 /// # Generated code shape
 ///
@@ -241,7 +242,7 @@ pub fn generate_broadcast_queue_template(
 ///
 /// impl Default for MyListener { /* bind + set_nonblocking + panic on fail */ }
 /// impl MyListener {
-///     pub fn get(&self) -> tokio::net::TcpListener { /* try_clone + from_std */ }
+///     pub fn get(&self) -> std::io::Result<tokio::net::TcpListener> { /* try_clone + from_std */ }
 /// }
 /// ```
 pub fn generate_listen_template(
@@ -403,15 +404,10 @@ pub fn generate_listen_template(
             /// Each call creates a new file descriptor via the kernel's `dup` syscall,
             /// allowing multiple services or reload generations to share the same
             /// physical listening port concurrently.
-            ///
-            /// # Panics
-            /// Panics if the FD clone or the std-to-tokio conversion fails. These
-            /// failures indicate OS-level resource exhaustion (e.g., `EMFILE`).
-            pub fn get(&self) -> service_daemon::tokio::net::TcpListener {
-                let cloned = self.0.try_clone()
-                    .expect("Failed to clone TCP listener file descriptor (OS resource exhaustion?)");
+            pub fn get(&self) -> std::io::Result<service_daemon::tokio::net::TcpListener> {
+                let cloned = self.0.try_clone()?;
+                cloned.set_nonblocking(true)?;
                 service_daemon::tokio::net::TcpListener::from_std(cloned)
-                    .expect("Failed to convert cloned std::net::TcpListener to tokio (nonblocking not set?)")
             }
 
             /// Returns the local address this listener is bound to.

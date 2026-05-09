@@ -406,10 +406,16 @@ where
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
 {
-    let identity = CURRENT_SERVICE.with(|id| id.clone());
-    let resources = CURRENT_RESOURCES.with(|r| r.clone());
+    let context = CURRENT_SERVICE
+        .try_with(|id| id.clone())
+        .and_then(|identity| CURRENT_RESOURCES.try_with(|r| (identity, r.clone())));
 
-    tokio::spawn(async move { __run_service_scope(identity, resources, || fut).await })
+    match context {
+        Ok((identity, resources)) => {
+            tokio::spawn(async move { __run_service_scope(identity, resources, || fut).await })
+        }
+        Err(_) => tokio::spawn(fut),
+    }
 }
 
 /// Returns the `ServiceId` of the calling service.
@@ -427,6 +433,15 @@ mod tests {
     use super::*;
     use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane};
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn spawn_with_context_falls_back_outside_service_scope() {
+        let task = spawn_with_context(async { 42u32 });
+
+        let value = task.await.expect("fallback task should join cleanly");
+
+        assert_eq!(value, 42);
+    }
 
     #[tokio::test]
     async fn sleep_records_completed_diagnostics() {

@@ -4,6 +4,7 @@ use std::time::Duration;
 
 static EAGER_INIT_CALLED: AtomicBool = AtomicBool::new(false);
 static EAGER_FAILURE_INIT_CALLED: AtomicBool = AtomicBool::new(false);
+static MISSING_ENV_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "simulation")]
 static SIMULATION_EAGER_INIT_CALLED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "simulation")]
@@ -42,6 +43,19 @@ async fn failing_eager_provider() -> std::result::Result<FailingEagerToken, Prov
 
 #[service(tags = ["stub_for_eager_failure_test"])]
 async fn failing_stub_service(_token: Arc<FailingEagerToken>) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[derive(Clone)]
+#[provider(
+    env = "SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A",
+    eager = true
+)]
+pub struct MissingEnvToken(pub String);
+
+#[service(tags = ["stub_for_missing_env_failure_test"])]
+async fn missing_env_stub_service(_token: Arc<MissingEnvToken>) -> anyhow::Result<()> {
+    MISSING_ENV_SERVICE_ENTERED.store(true, Ordering::SeqCst);
     Ok(())
 }
 
@@ -136,6 +150,25 @@ async fn test_async_fn_eager_init_failure_triggers_shutdown() {
     daemon.run().await;
     assert!(EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
     assert!(daemon.cancel_token().is_cancelled());
+}
+
+#[tokio::test]
+async fn test_missing_env_eager_provider_failure_triggers_shutdown() {
+    assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
+    MISSING_ENV_SERVICE_ENTERED.store(false, Ordering::SeqCst);
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            service_daemon::models::Registry::builder()
+                .with_tag("stub_for_missing_env_failure_test")
+                .build(),
+        )
+        .build();
+
+    daemon.run().await;
+
+    assert!(daemon.cancel_token().is_cancelled());
+    assert!(!MISSING_ENV_SERVICE_ENTERED.load(Ordering::SeqCst));
 }
 
 #[cfg(feature = "simulation")]
