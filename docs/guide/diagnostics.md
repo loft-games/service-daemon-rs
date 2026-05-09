@@ -78,11 +78,15 @@ enable_file_logging(config);
 **Log batch size** - controls both drain cycle size and queue capacity:
 
 ```rust
+use std::num::NonZeroUsize;
+
 use service_daemon::set_log_batch_size;
 
 // Reduce batch size for a lightweight embedded daemon
 // Queue capacity will be 512 * 4 = 2,048 slots
-set_log_batch_size(512);
+if let Some(batch_size) = NonZeroUsize::new(512) {
+    set_log_batch_size(batch_size);
+}
 // Must be called BEFORE init_logging()
 service_daemon::init_logging();
 ```

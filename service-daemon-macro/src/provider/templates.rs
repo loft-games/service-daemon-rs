@@ -168,9 +168,10 @@ pub fn generate_broadcast_queue_template(
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     item_type: &syn::Type,
-    capacity: usize,
+    capacity: std::num::NonZeroUsize,
     eager: bool,
 ) -> TokenStream {
+    let capacity = capacity.get();
     let ctx = TemplateContext::new(struct_name, vis, attrs, eager, HelperStyle::Infallible);
     let TemplateContext {
         struct_name,
@@ -190,8 +191,13 @@ pub fn generate_broadcast_queue_template(
 
         impl Default for #struct_name {
             fn default() -> Self {
+                const CAPACITY: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(#capacity) {
+                    Some(capacity) => capacity,
+                    None => panic!("Queue provider capacity must be greater than zero"),
+                };
+
                 Self {
-                    tx: service_daemon::TrackedSender::new(#capacity),
+                    tx: service_daemon::TrackedSender::new(CAPACITY),
                 }
             }
         }

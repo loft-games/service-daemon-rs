@@ -1,5 +1,6 @@
 use parking_lot::RwLock as PlRwLock;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use tokio::sync::{
@@ -503,9 +504,9 @@ pub struct TrackedSender<P> {
 
 impl<P: Clone> TrackedSender<P> {
     /// Creates a new `TrackedSender` wrapping a broadcast channel with the
-    /// given capacity.
-    pub fn new(capacity: usize) -> Self {
-        let (tx, _) = tokio::sync::broadcast::channel(capacity);
+    /// given non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(capacity.get());
         Self {
             inner: tx,
             last_id: PlRwLock::new(None),

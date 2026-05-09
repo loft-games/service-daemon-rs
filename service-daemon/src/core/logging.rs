@@ -20,6 +20,7 @@ use crate::service;
 use std::borrow::Cow;
 use std::fmt::{self, Write as _};
 use std::io::{Write as _, stderr};
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock};
 
@@ -161,11 +162,13 @@ const LOG_QUEUE_BATCH_MULTIPLIER: usize = 4;
 /// Global batch size override, set via [`set_log_batch_size()`].
 /// Must be configured before the first call to `get_log_queue()` (which is
 /// triggered by `init_logging()` or the first tracing event).
-static LOG_BATCH_SIZE: OnceLock<usize> = OnceLock::new();
+static LOG_BATCH_SIZE: OnceLock<NonZeroUsize> = OnceLock::new();
 
 /// Returns the effective batch size (user-configured or default).
 fn effective_batch_size() -> usize {
-    LOG_BATCH_SIZE.get().copied().unwrap_or(DEFAULT_BATCH_SIZE)
+    LOG_BATCH_SIZE
+        .get()
+        .map_or(DEFAULT_BATCH_SIZE, |size| size.get())
 }
 
 /// Sets the batch processing size for the log service drain cycle.
@@ -183,20 +186,23 @@ fn effective_batch_size() -> usize {
 ///
 /// # Example
 /// ```rust,ignore
+/// use std::num::NonZeroUsize;
 /// use service_daemon::set_log_batch_size;
 ///
 /// // Reduce batch size for a lightweight embedded daemon
 /// // Queue capacity will be 512 * 4 = 2,048 slots
-/// set_log_batch_size(512);
+/// if let Some(batch_size) = NonZeroUsize::new(512) {
+///     set_log_batch_size(batch_size);
+/// }
 /// service_daemon::init_logging();
 /// ```
-pub fn set_log_batch_size(size: usize) {
-    // TODO(set_log_batch_size): change signature to `-> Result<(), usize>` in a
-    // future minor release so callers can react to a late or duplicate call.
+pub fn set_log_batch_size(size: NonZeroUsize) {
+    // TODO(set_log_batch_size): change signature to `-> Result<(), NonZeroUsize>`
+    // in a future minor release so callers can react to a late or duplicate call.
     if LOG_BATCH_SIZE.set(size).is_err() {
-        let active = LOG_BATCH_SIZE.get().copied().unwrap_or(DEFAULT_BATCH_SIZE);
+        let active = effective_batch_size();
         tracing::warn!(
-            requested = size,
+            requested = size.get(),
             active,
             "set_log_batch_size: batch size already initialized; call ignored"
         );

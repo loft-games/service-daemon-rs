@@ -333,14 +333,15 @@ mod tests {
     /// types and verifies the TypeIds are distinct.
     #[test]
     fn topic_host_captures_concrete_receiver_type() {
-        let sender_i32 = TrackedSender::<i32>::new(4);
+        let capacity = std::num::NonZeroUsize::new(4).unwrap();
+        let sender_i32 = TrackedSender::<i32>::new(capacity);
         let host_i32 = make_topic_host_for(&sender_i32);
         assert_eq!(
             host_i32.receiver_type,
             TypeId::of::<Arc<Mutex<broadcast::Receiver<i32>>>>(),
         );
 
-        let sender_string = TrackedSender::<String>::new(4);
+        let sender_string = TrackedSender::<String>::new(capacity);
         let host_string = make_topic_host_for(&sender_string);
         assert_eq!(
             host_string.receiver_type,

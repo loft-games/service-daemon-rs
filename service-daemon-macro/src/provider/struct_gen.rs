@@ -56,7 +56,10 @@ fn try_generate_template(
                 Some(TemplateArg::Type(ty)) => (*ty).clone(),
                 _ => syn::parse_quote!(String),
             };
-            let cap = provider_args.capacity.unwrap_or(100);
+            let cap = match std::num::NonZeroUsize::new(provider_args.capacity.unwrap_or(100)) {
+                Some(cap) => cap,
+                None => proc_macro_error2::abort!(name, "Queue capacity must be greater than zero"),
+            };
             if provider_args.env.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,

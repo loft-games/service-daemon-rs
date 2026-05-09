@@ -113,6 +113,17 @@ pub enum TemplateArg {
     Addr(syn::LitStr),
 }
 
+fn parse_capacity_literal(lit: syn::LitInt) -> syn::Result<usize> {
+    let capacity = lit.base10_parse::<usize>()?;
+    if capacity == 0 {
+        return Err(syn::Error::new(
+            lit.span(),
+            "provider capacity must be greater than zero",
+        ));
+    }
+    Ok(capacity)
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
@@ -191,7 +202,7 @@ impl Parse for ProviderArgs {
                     }
                     "capacity" => {
                         let lit: syn::LitInt = input.parse()?;
-                        capacity = Some(lit.base10_parse::<usize>()?);
+                        capacity = Some(parse_capacity_literal(lit)?);
                     }
                     "eager" => {
                         eager = input.parse::<syn::LitBool>()?.value;
@@ -354,6 +365,15 @@ mod tests {
         let args = parse_args(quote! { Queue(String), capacity = 500 }).unwrap();
         assert!(matches!(&args.kind, ProviderKind::Template { .. }));
         assert_eq!(args.capacity, Some(500));
+    }
+
+    #[test]
+    fn capacity_zero_is_rejected() {
+        let err = parse_args(quote! { Queue(String), capacity = 0 }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("capacity must be greater than zero")
+        );
     }
 
     #[test]
