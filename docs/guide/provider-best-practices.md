@@ -134,7 +134,15 @@ pub struct WebListener;
 
 ---
 
-## 5. Common Misconceptions
+## 5. Helper APIs Are Usually Not the Main Path
+
+Most applications should not call provider helper methods directly. Declare providers, inject `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` into services or triggers, and let the daemon own initialization, retry, and shutdown behavior.
+
+If you are writing tests, diagnostics, or macro-level integrations and need the exact helper return shapes, see [Macros Deep Dive](../architecture/macros-deep-dive.md#provider-helper-return-shapes).
+
+---
+
+## 6. Common Misconceptions
 
 * **"I need a Magic Provider for my DB"**: No! Use an `async fn` provider that returns your connection pool.
 * **"Magic Providers are faster"**: No! They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are just shorthand for common patterns.
@@ -142,7 +150,7 @@ pub struct WebListener;
 
 ---
 
-## 5. Summary Table
+## 7. Summary Table
 
 | Goal | Best Approach |
 | :--- | :--- |

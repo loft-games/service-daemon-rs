@@ -92,24 +92,29 @@ The `examples/` directory contains focused examples organized by use case:
 
 Documentation is split by audience.
 
+### Tutorial
+*Recommended first path for new users.*
+
+- [Quick Start Tutorial](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) -- Best-practice path from the first service through triggers, state recovery, retries, scheduling, and simulation.
+
 ### User Guides
-*For people building applications on top of the framework.*
+*For people building applications on top of the framework who need complete usage references.*
 
 - [State Management](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/state-management.md) -- Providers, mutability, zero-copy snapshots.
 - [Event Triggers](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/triggers.md) -- Cron, queues, watchers.
 - [Resilience & Lifecycle](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/resilience.md) -- Restart policy, jitter, wave-based orchestration.
-- [Priorities & Scheduling](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/priority-orchestration.md) -- Startup/shutdown priority waves and runtime lanes.
 - [Diagnostics & Logs](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/diagnostics.md) -- The `DaemonLayer` for runtime visibility.
 - [Testing & Troubleshooting](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/testing-troubleshooting.md) -- Mocking, FAQ.
 
 ### Architecture & Internals
-*For people extending the framework or debugging its internals.*
+*For people studying framework design or debugging internals.*
 
 - [Internal Overview](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) -- Registry design, linkme segments, DI resolution.
 - [The Ripple Model](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/causal-tracing.md) -- Causal tracing across asynchronous trigger chains.
 - [Lifecycle Deep Dive](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md) -- Reload paths and supervisor internals.
 - [Macros Mechanics](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macros-deep-dive.md) -- How `#[service]` / `#[trigger]` rewrite your code.
-- [Extending the Framework](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/extending-framework.md) -- Adding new trigger types or providers.
+
+For contribution workflow and maintainer-oriented development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 
 ---
 

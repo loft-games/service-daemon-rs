@@ -1,0 +1,5 @@
+error: duplicate provider attribute `eager`
+ --> tests/fail/22_provider_duplicate_eager.rs:3:67
+  |
+3 | #[provider(UnixConnect("/tmp/service-daemon.sock"), eager = true, eager = false)]
+  |                                                                   ^^^^^

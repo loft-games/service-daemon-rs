@@ -18,6 +18,8 @@
 
 use rand::RngExt;
 use std::collections::VecDeque;
+use std::error::Error as StdError;
+use std::fmt;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
@@ -305,39 +307,54 @@ impl RestartPolicyBuilder {
 ///
 /// Users can override the template default via
 /// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
+/// Construct custom policies with [`ScalingPolicy::builder`] or
+/// [`ScalingPolicy::try_new`]; custom [`TriggerHost::scaling_policy()`](crate::models::trigger::TriggerHost::scaling_policy)
+/// implementations should return a validated policy value.
 #[derive(Debug, Clone, Copy)]
 pub struct ScalingPolicy {
-    /// Number of concurrent handler instances at cold-start (default: 1).
-    ///
-    /// The trigger runner starts with this many dispatch slots and scales
-    /// up only when the pressure ratio exceeds `scale_threshold`.
-    pub initial_concurrency: usize,
-    /// Hard upper limit on concurrent handler instances (default: 64).
-    ///
-    /// The auto-scaler will never exceed this value, even under sustained
-    /// high pressure. This acts as a safety guard against unbounded
-    /// resource consumption.
-    pub max_concurrency: usize,
-    /// Multiplier applied to the current concurrency limit on each
-    /// scale-up event (default: 2).
-    ///
-    /// For example, with `scale_factor = 2`, limits grow as:
-    /// 1 -> 2 -> 4 -> 8 -> ... -> `max_concurrency`.
-    pub scale_factor: usize,
-    /// Pressure ratio threshold that triggers a scale-up (default: 5).
-    ///
-    /// Pressure ratio is defined as `queue_depth / current_instances`.
-    /// A threshold of 5 means: "if the backlog would take 5 processing
-    /// cycles to drain at the current rate, scale up". Backlogs that
-    /// can be consumed within fewer cycles are not worth scaling for.
-    pub scale_threshold: usize,
-    /// Duration of queue idleness before the runner starts reclaiming
-    /// excess handler instances (default: 30 seconds).
-    ///
-    /// After the queue has been empty for this long, the runner
-    /// shrinks concurrency back towards `initial_concurrency`.
-    pub scale_cooldown: Duration,
+    initial_concurrency: usize,
+    max_concurrency: usize,
+    scale_factor: usize,
+    scale_threshold: usize,
+    scale_cooldown: Duration,
 }
+
+/// Error returned by [`ScalingPolicy::try_new`] for invalid scaling configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalingPolicyError {
+    /// `initial_concurrency` must be at least 1.
+    InitialConcurrencyZero,
+    /// `max_concurrency` must be at least 1.
+    MaxConcurrencyZero,
+    /// `scale_factor` must be at least 2.
+    ScaleFactorTooSmall { requested: usize, min: usize },
+    /// `scale_threshold` must be at least 1.
+    ScaleThresholdZero,
+    /// `initial_concurrency` must not exceed `max_concurrency`.
+    InitialConcurrencyExceedsMax { initial: usize, max: usize },
+}
+
+impl fmt::Display for ScalingPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InitialConcurrencyZero => {
+                write!(f, "initial_concurrency must be greater than zero")
+            }
+            Self::MaxConcurrencyZero => write!(f, "max_concurrency must be greater than zero"),
+            Self::ScaleFactorTooSmall { requested, min } => write!(
+                f,
+                "scale_factor {requested} is below the minimum supported value {min}"
+            ),
+            Self::ScaleThresholdZero => write!(f, "scale_threshold must be greater than zero"),
+            Self::InitialConcurrencyExceedsMax { initial, max } => write!(
+                f,
+                "initial_concurrency {initial} exceeds max_concurrency {max}"
+            ),
+        }
+    }
+}
+
+impl StdError for ScalingPolicyError {}
 
 impl Default for ScalingPolicy {
     fn default() -> Self {
@@ -355,6 +372,75 @@ impl ScalingPolicy {
     /// Create a scaling policy builder.
     pub fn builder() -> ScalingPolicyBuilder {
         ScalingPolicyBuilder::default()
+    }
+
+    /// Create a scaling policy with strict validation.
+    pub fn try_new(
+        initial_concurrency: usize,
+        max_concurrency: usize,
+        scale_factor: usize,
+        scale_threshold: usize,
+        scale_cooldown: Duration,
+    ) -> Result<Self, ScalingPolicyError> {
+        if initial_concurrency == 0 {
+            return Err(ScalingPolicyError::InitialConcurrencyZero);
+        }
+        if max_concurrency == 0 {
+            return Err(ScalingPolicyError::MaxConcurrencyZero);
+        }
+        if scale_factor < 2 {
+            return Err(ScalingPolicyError::ScaleFactorTooSmall {
+                requested: scale_factor,
+                min: 2,
+            });
+        }
+        if scale_threshold == 0 {
+            return Err(ScalingPolicyError::ScaleThresholdZero);
+        }
+        if initial_concurrency > max_concurrency {
+            return Err(ScalingPolicyError::InitialConcurrencyExceedsMax {
+                initial: initial_concurrency,
+                max: max_concurrency,
+            });
+        }
+
+        Ok(Self {
+            initial_concurrency,
+            max_concurrency,
+            scale_factor,
+            scale_threshold,
+            scale_cooldown,
+        })
+    }
+
+    /// Number of concurrent handler instances at cold start.
+    #[must_use]
+    pub const fn initial_concurrency(&self) -> usize {
+        self.initial_concurrency
+    }
+
+    /// Hard upper limit on concurrent handler instances.
+    #[must_use]
+    pub const fn max_concurrency(&self) -> usize {
+        self.max_concurrency
+    }
+
+    /// Multiplier applied to the current concurrency limit on each scale-up event.
+    #[must_use]
+    pub const fn scale_factor(&self) -> usize {
+        self.scale_factor
+    }
+
+    /// Pressure ratio threshold that triggers scale-up.
+    #[must_use]
+    pub const fn scale_threshold(&self) -> usize {
+        self.scale_threshold
+    }
+
+    /// Queue idle duration before the runner starts shrinking concurrency.
+    #[must_use]
+    pub const fn scale_cooldown(&self) -> Duration {
+        self.scale_cooldown
     }
 
     /// Create a scaling policy for testing with smaller limits.
@@ -670,11 +756,11 @@ mod tests {
     #[test]
     fn test_scaling_policy_default() {
         let policy = ScalingPolicy::default();
-        assert_eq!(policy.initial_concurrency, 1);
-        assert_eq!(policy.max_concurrency, 64);
-        assert_eq!(policy.scale_factor, 2);
-        assert_eq!(policy.scale_threshold, 5);
-        assert_eq!(policy.scale_cooldown, Duration::from_secs(30));
+        assert_eq!(policy.initial_concurrency(), 1);
+        assert_eq!(policy.max_concurrency(), 64);
+        assert_eq!(policy.scale_factor(), 2);
+        assert_eq!(policy.scale_threshold(), 5);
+        assert_eq!(policy.scale_cooldown(), Duration::from_secs(30));
     }
 
     #[test]
@@ -686,24 +772,24 @@ mod tests {
             .scale_threshold(10)
             .scale_cooldown(Duration::from_secs(60))
             .build();
-        assert_eq!(policy.initial_concurrency, 4);
-        assert_eq!(policy.max_concurrency, 2048);
-        assert_eq!(policy.scale_factor, 3);
-        assert_eq!(policy.scale_threshold, 10);
-        assert_eq!(policy.scale_cooldown, Duration::from_secs(60));
+        assert_eq!(policy.initial_concurrency(), 4);
+        assert_eq!(policy.max_concurrency(), 2048);
+        assert_eq!(policy.scale_factor(), 3);
+        assert_eq!(policy.scale_threshold(), 10);
+        assert_eq!(policy.scale_cooldown(), Duration::from_secs(60));
     }
 
     #[test]
     fn test_scaling_policy_builder_clamping() {
         // initial_concurrency minimum is 1
         let policy = ScalingPolicy::builder().initial_concurrency(0).build();
-        assert_eq!(policy.initial_concurrency, 1);
+        assert_eq!(policy.initial_concurrency(), 1);
         // scale_factor minimum is 2
         let policy = ScalingPolicy::builder().scale_factor(1).build();
-        assert_eq!(policy.scale_factor, 2);
+        assert_eq!(policy.scale_factor(), 2);
         // scale_threshold minimum is 1
         let policy = ScalingPolicy::builder().scale_threshold(0).build();
-        assert_eq!(policy.scale_threshold, 1);
+        assert_eq!(policy.scale_threshold(), 1);
     }
 
     #[test]
@@ -714,10 +800,53 @@ mod tests {
             .max_concurrency(4)
             .build();
         assert_eq!(
-            policy.initial_concurrency, 4,
+            policy.initial_concurrency(),
+            4,
             "initial_concurrency must be clamped to max_concurrency"
         );
-        assert_eq!(policy.max_concurrency, 4);
+        assert_eq!(policy.max_concurrency(), 4);
+    }
+
+    #[test]
+    fn scaling_policy_try_new_accepts_valid_values() {
+        let policy = ScalingPolicy::try_new(4, 16, 3, 10, Duration::from_secs(60))
+            .expect("valid scaling policy should be accepted");
+
+        assert_eq!(policy.initial_concurrency(), 4);
+        assert_eq!(policy.max_concurrency(), 16);
+        assert_eq!(policy.scale_factor(), 3);
+        assert_eq!(policy.scale_threshold(), 10);
+        assert_eq!(policy.scale_cooldown(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn scaling_policy_try_new_rejects_invalid_values() {
+        assert_eq!(
+            ScalingPolicy::try_new(0, 16, 2, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::InitialConcurrencyZero)
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(1, 0, 2, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::MaxConcurrencyZero)
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(1, 16, 1, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::ScaleFactorTooSmall {
+                requested: 1,
+                min: 2,
+            })
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(1, 16, 2, 0, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::ScaleThresholdZero)
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(17, 16, 2, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::InitialConcurrencyExceedsMax {
+                initial: 17,
+                max: 16,
+            })
+        );
     }
 
     #[tokio::test]

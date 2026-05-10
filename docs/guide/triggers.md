@@ -1,3 +1,5 @@
+# Event Triggers
+
 Triggers are specialized services with built-in event loops that run your function when an event occurs. While idle they are blocked on the underlying primitive (channel `recv`, `Notify::notified()`, etc.) -- no polling, no busy-wait.
 
 ## 0. Quick Start: Chain Reactions
@@ -106,7 +108,7 @@ Triggers also support the same static `scheduling` declaration as services. The 
 async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
-Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `Standard` uses the host runtime body lane; `HighPriority` triggers use the same daemon-owned body runtime as high-priority services, and that runtime is created lazily by `ServiceDaemon::run()` only when needed. `HighPriority` is not an overflow pool for ordinary triggers. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed on the control plane. The generated trigger service participates in the same generation/lane diagnostics as regular services, including service sleep drift and runtime heartbeat probe summaries. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` is not an overflow pool for ordinary triggers; a trigger uses that lane only when its source declaration asks for it. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed.
 
 ## 3. Parameter Mapping Rules
 
@@ -137,7 +139,7 @@ When a handler fails:
 3. Errors are automatically logged with structured context.
 4. Shutdown signals are respected during backoff waits -- no hanging retries.
 
-The retry logic is implemented as an internal interceptor layer. See [Interceptor Middleware](interceptor-middleware.md) for architecture details.
+The retry logic is implemented internally; application code usually only configures the restart policy and writes idempotent handlers.
 
 ### Payload Handling
 
@@ -157,7 +159,25 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 
 Elastic scaling is **automatically enabled** only for streaming trigger templates that declare scaling support (e.g. `Queue` / `TopicHost`). Other templates (`Cron`, `Watch`, `Notify`) dispatch handlers serially with zero scaling overhead.
 
-Each trigger template declares its scaling needs via `TriggerHost::scaling_policy()`. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+Each trigger template declares its scaling needs via `TriggerHost::scaling_policy()`. Most users should keep the template defaults; when you need to override them, use `ScalingPolicy::builder()` and pass the result to `ServiceDaemonBuilder::with_trigger_config(...)`.
+
+```rust
+use std::time::Duration;
+
+use service_daemon::{ScalingPolicy, ServiceDaemon};
+
+let scaling = ScalingPolicy::builder()
+    .initial_concurrency(4)
+    .max_concurrency(64)
+    .scale_factor(2)
+    .scale_threshold(5)
+    .scale_cooldown(Duration::from_secs(30))
+    .build();
+
+let mut daemon = ServiceDaemon::builder()
+    .with_trigger_config(scaling)
+    .build();
+```
 
 ---
 
@@ -176,10 +196,7 @@ This design enables high-performance event processing by avoiding repeated setup
 
 ### 8. Elastic Scaling & Backpressure Details
 
-Elastic scaling is governed by the [`ScalingPolicy`]. The framework automatically adjusts concurrency based on pressure and ensures backpressure via a shared semaphore.
-
-> [!NOTE]
-> **Scaling Internals**: For the mathematical pressure formula, 1-second monitoring logic, and the "Shadow Permits" implementation details, see [Internal Architecture: Trigger Scaling](../architecture/internal-overview.md#7-coretrigger_runner_rs).
+Elastic scaling is governed by the [`ScalingPolicy`]. The framework automatically adjusts concurrency based on pressure and ensures backpressure via a shared semaphore. Most applications only need the builder example above; custom host and diagnostic internals are covered in the architecture docs.
 
 ---
 

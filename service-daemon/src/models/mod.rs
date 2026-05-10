@@ -14,7 +14,7 @@ pub use diagnostics::{
 };
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{
-    BackoffController, RestartPolicy, ScalingPolicy, ScalingPolicyBuilder,
+    BackoffController, RestartPolicy, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
     SchedulingAdvisoryProfile,
 };
 pub use provider_error::ProviderError;

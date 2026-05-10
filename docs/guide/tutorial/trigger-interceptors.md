@@ -1,8 +1,11 @@
 # Trigger Middlewares (Interceptors)
 
+> [!NOTE]
+> This is maintainer-oriented reference material, not part of the beginner quick-start path.
+
 You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. That implementation lives in **interceptors**: composable middleware layers that wrap the trigger dispatch pipeline.
 
-Public interceptor registration is not exposed yet, so this chapter is an internal architecture sketch rather than a user extension guide.
+Public interceptor registration is not exposed yet, so this page is an internal architecture sketch rather than a user extension guide.
 
 ---
 
@@ -113,7 +116,7 @@ impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
 
 The compiler enforces that such an interceptor can only be installed on a `TriggerRunner<SmsPayload>`. Try to use it with a different payload type? Compilation error. No surprises at runtime.
 
-## 5. Under the Hood: `DispatchContext`
+## 5. `DispatchContext` Internals
 
 The context that flows through the chain carries everything needed for dispatch:
 
@@ -137,4 +140,4 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 
 ---
 
-[**<- Previous Step: Custom Trigger Implementation**](./tailor-made-triggers.md) | [**Next Step: Advanced Macro Usage ->**](./advanced-macros.md)
+[Back to Event Triggers](../triggers.md)

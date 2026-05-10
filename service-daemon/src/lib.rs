@@ -58,7 +58,10 @@ pub use core::context::{
     trigger_config, unshelve, wait_shutdown,
 };
 pub use core::di::{ManagedProvided, Provided, WatchableProvided};
-pub use core::logging::{DaemonLayer, init_logging, set_log_batch_size, try_init_logging};
+pub use core::logging::{
+    DaemonLayer, LogBatchSizeError, MAX_LOG_BATCH_SIZE, init_logging, set_log_batch_size,
+    try_init_logging,
+};
 pub use core::managed_state::{Mutex, RwLock, TrackedNotify, TrackedSender};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
@@ -71,8 +74,9 @@ pub use models::{
     DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
     DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot, ProviderError, ProviderInitError,
     Registry, RegistryBuilder, Result, RuntimeLaneDiagnosticsSnapshot, ScalingPolicy,
-    ScalingPolicyBuilder, SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceError,
-    ServiceId, ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage,
+    ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
+    ServiceDiagnosticsSnapshot, ServiceError, ServiceId, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)

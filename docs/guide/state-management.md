@@ -65,18 +65,9 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
 }
 ```
 
-### Advanced: capturing errors with `resolve_managed()`
+### Advanced state inspection
 
-Standard injection via `Arc<T>` or `Arc<RwLock<T>>` hides initialization errors (the daemon handles retries or shutdown). For advanced monitoring or testing, use the `resolve_managed()` associated function to capture the raw `Result`:
-
-```rust
-let result = MyProvider::resolve_managed().await;
-match result {
-    Ok(arc) => println!("Provider ready"),
-    Err(ProviderError::Retryable(msg)) => println!("Waiting for: {}", msg),
-    Err(ProviderError::Fatal(msg)) => println!("Permanent failure: {}", msg),
-}
-```
+Normal applications should use service/trigger injection and let the daemon manage provider initialization. Raw provider helper return values and `StateManager::snapshot()` preconditions are documented in [Lifecycle Management](../architecture/lifecycle-management.md#55-advanced-provider-helper-and-state-preconditions) for testing, diagnostics, and framework integrations.
 
 ## 2. Specialized Templates
 

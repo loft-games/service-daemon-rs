@@ -164,7 +164,7 @@ let policy = RestartPolicy::builder()
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
 ### 3.1. Concurrency & Elastic Scaling
-Resilience also extends to **throughput management**. For streaming triggers (e.g. `Queue`), elastic scaling is governed by a dedicated [`ScalingPolicy`] struct &mdash; separate from `RestartPolicy`. Each trigger template self-declares its scaling requirements via `TriggerHost::scaling_policy()`. Templates that do not need scaling (e.g. `Cron`, `Watch`, `Notify`) return `None` and incur zero scaling overhead. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+Resilience also extends to **throughput management**. For streaming triggers (e.g. `Queue`), elastic scaling is governed by a dedicated [`ScalingPolicy`] struct &mdash; separate from `RestartPolicy`. Scaling policy controls concurrency volume; restart policy controls retry/backoff time. Each trigger template self-declares its scaling requirements via `TriggerHost::scaling_policy()`. Templates that do not need scaling (e.g. `Cron`, `Watch`, `Notify`) return `None` and incur zero scaling overhead. Most users can rely on the defaults or override them with `ScalingPolicy::builder()`.
 
 ## 4. Managing CPU-Intensive & Blocking Tasks
 

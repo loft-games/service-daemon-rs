@@ -2,6 +2,17 @@
 
 `service-daemon-rs` is designed as a high-level framework for building resilient, modular applications using **Type-Based Decentralized Dependency Injection** and a **Unified Registry**.
 
+## Runtime Component Map
+
+At a high level, the macros wire user code into four runtime surfaces:
+
+- **Registry**: the lazy blueprint of service, trigger, and provider entries discovered from link-time slices. It does not start work by itself; it describes what the daemon can create.
+- **Runner / control plane**: the daemon-owned orchestration layer that starts priority waves, supervises generations, bridges bodies onto their declared execution lanes, applies restart policy, and handles graceful shutdown.
+- **Status Plane**: the shared observation map for service lifecycle state. User helpers such as `state()` read from this plane, while reload delivery also uses a companion token/signal path.
+- **Shelf**: daemon-scoped typed storage for data that should survive a service generation restart or reload, but not the lifetime of the whole daemon process.
+
+The sections below expand each surface into its implementation model and public boundary.
+
 ## 1. Unified Registry (Linkme)
 
 Both standard services and event-driven triggers are collected into a `SERVICE_REGISTRY`, while dependency providers are collected into a `PROVIDER_REGISTRY`. Both are managed at link time using the `linkme` crate. 
@@ -90,6 +101,7 @@ The diagnostics analyzer is internal and recommendation-first. It reads windowed
 | Isolated startup concurrency limit | Public builder knob for isolated startup allocation admission only, not a limit on running isolated body lifetime. |
 | Per-service restart override and scheduling hints | Deferred; future hints must stay within the declared mode and require a separate design. |
 | Diagnostics store, windows, evaluator, recommendation model, sampler, and lane resolver | Internal-only implementation details, not exported as public schema or command surfaces. |
+| Generation-boundary resolver regression hook | Crate-private test-only hook for proving running futures are not moved between Tokio runtimes; not a public testing API and not compiled into production builds. |
 
 ## 4. Project Structure
 
@@ -112,6 +124,7 @@ The framework is organized into specialized submodules to ensure maintainability
 - **`core/trigger_runner.rs`**: Event loop driver and interceptor pipeline.
   - **Instance Reuse**: Hosts maintain internal state across iterations.
   - **Elastic Scaling**: Asynchronous dispatch with semaphore-based backpressure.
+  - **Advanced ScalingPolicy boundary**: normal examples use `ScalingPolicy::builder()`. `ScalingPolicy::try_new(...)` exists for config parsers and integrations that must reject invalid input instead of accepting builder clamping.
 - **`core/context/`**: Task-local storage and status plane interactions.
   - **Simulation Overlay**: `MockContext` for unit testing with zero production cost.
 - **`core/managed_state.rs`**: Reactive state engine with change tracking.
@@ -150,7 +163,7 @@ graph LR
     end
 ```
 
-For practical usage and sandbox setup, see the **[Simulation Tutorial](../guide/tutorial/unit-testing.md)**.
+For practical usage and sandbox setup, see **[Testing & Troubleshooting](../guide/testing-troubleshooting.md#unit-testing-with-mockcontext-god-mode)**.
 
 ## 7. Avoiding Service Interference
 

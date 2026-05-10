@@ -1,14 +1,14 @@
 # Unit Testing & Simulation
 
-Testing background services is notoriously difficult. How do you test what happens when a database fails mid-flight? Or how your service reacts when its configuration is swapped at 2 AM?
+Testing background services is notoriously difficult. How do you test what happens when a database fails mid-flight? Or how your service reacts when its configuration changes at runtime?
 
-The `simulation` feature provides total control over the environment. For the core architectural sandbox model and interaction logic, see **[Architecture Overview](../../architecture/internal-overview.md)**.
+The `simulation` feature gives tests a controlled daemon sandbox. This chapter focuses on the common testing pattern: start only the services you care about, pre-fill state, mutate the sandbox, and assert the result.
 
 ---
 
 ## 1. Enabling the Sandbox
 
-Simulation is a feature-gated toolbox. In your `Cargo.toml`, make sure you enable it for your tests:
+Simulation is a feature-gated toolbox. In your `Cargo.toml`, enable it for tests:
 
 ```toml
 [dev-dependencies]
@@ -17,29 +17,25 @@ service_daemon = { version = "...", features = ["simulation"] }
 
 ## 2. Using `MockContext`
 
-In a simulation test, you run a **fully functional but isolated Daemon**. Instead of global auto-discovery, you use a `MockContext` to inject controlled resources and specific services into a sandbox.
+In a simulation test, you run a fully functional but isolated daemon. Instead of letting every auto-registered service run, tag the service under test and select only that tag.
 
 ```rust,ignore
 use service_daemon::prelude::*;
 use std::time::Duration;
 
-// --- 1. The service under test ---
 #[service(tags = ["sim_shelf"])]
 async fn shelf_reader_service() -> anyhow::Result<()> {
     loop {
         match state() {
             ServiceStatus::Initializing | ServiceStatus::Restoring => {
-                // Phase 1: Try to read data pre-filled by the MockContext
                 if let Some(val) = unshelve::<String>("config_key").await {
                     shelve("read_result", val).await;
                 }
                 done();
             }
             ServiceStatus::Healthy => {
-                // Phase 2: React to dynamic/mid-flight injection
                 if let Some(val) = unshelve::<String>("dynamic_key").await {
                     shelve("dynamic_result", val).await;
-                    // In a real test, we might stop or continue working
                 }
 
                 if !sleep(Duration::from_millis(100)).await {
@@ -53,7 +49,6 @@ async fn shelf_reader_service() -> anyhow::Result<()> {
     Ok(())
 }
 
-// --- 2. The God's Eye Test Suite ---
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,7 +56,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_two_phase_simulation() -> anyhow::Result<()> {
-        // Phase 1: Pre-fill some initial state (Sandbox setup)
         let (builder, handle) = MockContext::builder()
             .with_shelf::<String>("shelf_reader_service", "config_key", "initial_val".into())
             .build();
@@ -70,7 +64,6 @@ mod tests {
             .with_registry(Registry::builder().with_tag("sim_shelf").build())
             .build();
 
-        // Start the daemon in the background
         let cancel = daemon.cancel_token();
         let daemon_task = tokio::spawn(async move {
             let mut daemon = daemon;
@@ -80,20 +73,13 @@ mod tests {
             }
         });
 
-        // Verify Phase 1: service initialized and read pre-filled value
         tokio::time::sleep(Duration::from_millis(200)).await;
-        
-        // Recommended: Use the safe, lock-free get_shelf() API
         let result: Option<String> = handle.get_shelf("shelf_reader_service", "read_result");
         assert_eq!(result, Some("initial_val".into()));
 
-        // Phase 2: Mid-flight Intervention (SimulationHandle)
         handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "mid_flight_val".into());
 
-        // Verify Phase 2: service observed the dynamic mutation
         tokio::time::sleep(Duration::from_millis(200)).await;
-        
-        // Safe access across .await points
         let result: Option<String> = handle.get_shelf("shelf_reader_service", "dynamic_result");
         assert_eq!(result, Some("mid_flight_val".into()));
 
@@ -106,40 +92,32 @@ mod tests {
 
 ## 3. The `SimulationHandle`
 
-The `SimulationHandle` allows you to reach into the running sandbox and change things while the services are active. It provides a **Safe Read API** specifically designed to prevent deadlocks in tests.
+The `SimulationHandle` lets tests inspect and mutate the running sandbox without reaching into daemon internals.
 
 ### Snapshot Inspection
-These methods allow you to inspect the current state of a service or the shelf without interfering with the running daemon. 
 
 ```rust,ignore
-// Inspect shelf values
 let val: Option<String> = handle.get_shelf("svc", "key");
-
-// Inspect service status
 let status = handle.get_status(svc_id);
 
-// Check if a key exists
-if handle.has_shelf("svc", "key") { ... }
+if handle.has_shelf("svc", "key") {
+    // assert or trigger the next test step
+}
 ```
 
 ### Mutation API
-```rust,ignore
-// Mid-test: Change the status of a service to force a reload
-handle.set_status(service_id, ServiceStatus::NeedReload);
 
-// Mid-test: Inject a new value into the shelf
+```rust,ignore
+handle.set_status(service_id, ServiceStatus::NeedReload);
 handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 ```
 
 ## 4. Summary of Powers
 
-*   **Pre-populate the Shelf**: Test state recovery without waiting for a real crash.
-*   **Dynamic Injection**: Overwrite dependencies at runtime.
-*   **Status Flipping**: Force services into `NeedReload`, `Recovering`, or `ShuttingDown` to test their reaction logic.
-
-> [!NOTE]
-> **Deep Dive**: The Simulator is just one part of the story. For end-to-end testing strategies and common CI pitfalls, see [Testing & Troubleshooting](../testing-troubleshooting.md).
+- **Pre-populate the Shelf**: Test state recovery without waiting for a real crash.
+- **Dynamic Injection**: Overwrite shelf values while the daemon is running.
+- **Status Flipping**: Force services into `NeedReload`, `Recovering`, or `ShuttingDown` to test their reaction logic.
 
 ---
 
-[**<- Previous Step: Priorities & Scheduling**](./priority-orchestration.md) | [**Next Step: Under the Hood ->**](./under-the-hood.md)
+[**<- Previous Step: Priorities & Scheduling**](./priority-orchestration.md) | [**Back to Quick Start Guide ->**](./quick-start.md)

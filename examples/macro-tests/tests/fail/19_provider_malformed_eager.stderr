@@ -1,0 +1,5 @@
+error: provider attribute `eager` expects a boolean literal: eager = true or eager = false
+ --> tests/fail/19_provider_malformed_eager.rs:3:53
+  |
+3 | #[provider(UnixConnect("/tmp/service-daemon.sock"), eager = yes)]
+  |                                                     ^^^^^

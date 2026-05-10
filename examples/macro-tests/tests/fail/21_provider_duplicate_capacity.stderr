@@ -1,0 +1,5 @@
+error: duplicate provider attribute `capacity`
+ --> tests/fail/21_provider_duplicate_capacity.rs:3:42
+  |
+3 | #[provider(Queue(String), capacity = 10, capacity = 20)]
+  |                                          ^^^^^^^^

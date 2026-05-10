@@ -1,5 +1,8 @@
 # Advanced Macro Usage
 
+> [!NOTE]
+> This is advanced reference material, not part of the beginner quick-start path.
+
 The `#[service]` and `#[trigger]` macros do more than register a function -- they accept attribute arguments that drive selection, scheduling, and dispatch. This page covers the ones beyond the basics.
 
 ---
@@ -56,8 +59,8 @@ You *could* build a `ServiceDescription` manually and pass it to the daemon. But
 
 ---
 
-## End of the Quick Start
+## More Information
 
-You've gone from a heartbeat service to the macro internals and extension points. From here, the [Architecture](../../architecture/internal-overview.md) docs cover the registry and DI internals; the [User Guides](../../guide/) cover triggers, state, resilience, and diagnostics in depth.
+For the full macro implementation model, see [Macros Deep Dive](../../architecture/macros-deep-dive.md). For normal user-facing usage, return to the [README](../../../README.md) documentation section.
 
-[**<- Previous Step: Trigger Middlewares (Interceptors)**](./trigger-interceptors.md) | [**Back to the Quick Start Guide ->**](./quick-start.md)
+[Back to README](../../../README.md)

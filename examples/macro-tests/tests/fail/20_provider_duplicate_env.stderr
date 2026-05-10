@@ -1,0 +1,5 @@
+error: duplicate provider attribute `env`
+ --> tests/fail/20_provider_duplicate_env.rs:3:39
+  |
+3 | #[provider("fallback", env = "FIRST", env = "SECOND")]
+  |                                       ^^^

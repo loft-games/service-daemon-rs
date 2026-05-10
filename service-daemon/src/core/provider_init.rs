@@ -300,4 +300,42 @@ mod tests {
             })
         );
     }
+
+    #[tokio::test]
+    async fn catch_init_panic_returns_successful_value() {
+        let result = catch_init_panic("ok_provider", async { 42u32 }).await;
+
+        assert_eq!(result, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn catch_init_panic_maps_string_payload_to_fatal_error() {
+        let result = catch_init_panic::<u32, _>("panic_provider", async {
+            panic!("invalid provider configuration")
+        })
+        .await;
+
+        assert_eq!(
+            result,
+            Err(ProviderInitError::Fatal {
+                provider: "panic_provider".to_owned(),
+                message: "invalid provider configuration".to_owned(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn catch_init_panic_maps_non_string_payload_to_fatal_error() {
+        let result =
+            catch_init_panic::<u32, _>("panic_provider", async { std::panic::panic_any(42u32) })
+                .await;
+
+        assert_eq!(
+            result,
+            Err(ProviderInitError::Fatal {
+                provider: "panic_provider".to_owned(),
+                message: "provider initialization panicked with a non-string payload".to_owned(),
+            })
+        );
+    }
 }

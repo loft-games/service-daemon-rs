@@ -1,5 +1,8 @@
 # Tailor-Made Triggers
 
+> [!NOTE]
+> This is an advanced extension guide, not part of the beginner quick-start path.
+
 The framework comes with built-in triggers like `Queue`, `Cron`, and `Watch` (State).
 
 > [!NOTE]
@@ -154,4 +157,4 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 
 ---
 
-[**<- Previous Step: Under the Hood**](./under-the-hood.md) | [**Next Step: Trigger Middlewares (Interceptors) ->**](./trigger-interceptors.md)
+[Back to Event Triggers](../triggers.md)

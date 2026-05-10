@@ -1,5 +1,6 @@
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned};
+use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
 
 /// Result of extracting and categorizing function parameters.
@@ -51,56 +52,28 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
         if attr.path().is_ident("allow")
             && let syn::Meta::List(meta_list) = &attr.meta
         {
-            // Parse the token stream inside allow(...) to find sync_handler
-            let tokens = &meta_list.tokens;
-            let mut has_sync_handler = false;
-            let mut other_idents: Vec<proc_macro2::TokenStream> = Vec::new();
+            let parser = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated;
+            if let Ok(paths) = parser.parse2(meta_list.tokens.clone()) {
+                let mut has_sync_handler = false;
+                let mut remaining = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::new();
 
-            // Walk tokens: expect comma-separated identifiers
-            for token in tokens.clone().into_iter() {
-                match &token {
-                    proc_macro2::TokenTree::Ident(ident) if ident == "sync_handler" => {
+                for path in paths {
+                    if path.is_ident("sync_handler") {
                         has_sync_handler = true;
-                    }
-                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
-                        // Skip commas - we rebuild them below
-                    }
-                    other => {
-                        other_idents.push(other.clone().into());
+                    } else {
+                        remaining.push(path);
                     }
                 }
-            }
 
-            if has_sync_handler {
-                found = true;
-                // If there are remaining lints, rebuild the #[allow(...)]
-                if !other_idents.is_empty() {
-                    let rebuilt: proc_macro2::TokenStream = other_idents
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .enumerate()
-                        .flat_map(|(i, ts)| {
-                            if i > 0 {
-                                vec![
-                                    proc_macro2::TokenTree::Punct(proc_macro2::Punct::new(
-                                        ',',
-                                        proc_macro2::Spacing::Alone,
-                                    ))
-                                    .into(),
-                                    ts,
-                                ]
-                            } else {
-                                vec![ts]
-                            }
-                        })
-                        .collect();
-
-                    let new_attr: Attribute = syn::parse_quote!(#[allow(#rebuilt)]);
-                    cleaned.push(new_attr);
+                if has_sync_handler {
+                    found = true;
+                    if !remaining.is_empty() {
+                        let new_attr: Attribute = syn::parse_quote!(#[allow(#remaining)]);
+                        cleaned.push(new_attr);
+                    }
+                    // If sync_handler was the only item, drop the entire attribute
+                    continue;
                 }
-                // If sync_handler was the only item, drop the entire attribute
-                continue;
             }
         }
 
@@ -737,9 +710,55 @@ pub fn generate_wrapper_fn(
 
 #[cfg(test)]
 mod tests {
-    use super::scope_inner_visibility;
-    use quote::quote;
-    use syn::Visibility;
+    use super::{extract_sync_handler_flag, scope_inner_visibility};
+    use quote::{ToTokens, quote};
+    use syn::parse::Parser;
+    use syn::{Attribute, Visibility};
+
+    fn allow_paths(attr: &Attribute) -> Vec<String> {
+        let syn::Meta::List(meta_list) = &attr.meta else {
+            panic!("expected list attribute");
+        };
+        let parser = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated;
+        parser
+            .parse2(meta_list.tokens.clone())
+            .unwrap()
+            .into_iter()
+            .map(|path| path.to_token_stream().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn extract_sync_handler_flag_preserves_path_lints() {
+        let attrs: Vec<Attribute> = vec![
+            syn::parse_quote!(#[doc = "kept"]),
+            syn::parse_quote!(#[allow(dead_code, sync_handler, clippy::too_many_arguments)]),
+        ];
+
+        let (found, cleaned) = extract_sync_handler_flag(&attrs);
+
+        assert!(found);
+        assert_eq!(cleaned.len(), 2);
+        assert!(cleaned[0].path().is_ident("doc"));
+        assert_eq!(
+            allow_paths(&cleaned[1]),
+            vec!["dead_code", "clippy :: too_many_arguments"]
+        );
+    }
+
+    #[test]
+    fn extract_sync_handler_flag_drops_sync_handler_only_allow() {
+        let attrs: Vec<Attribute> = vec![
+            syn::parse_quote!(#[allow(sync_handler)]),
+            syn::parse_quote!(#[cfg_attr(test, allow(dead_code))]),
+        ];
+
+        let (found, cleaned) = extract_sync_handler_flag(&attrs);
+
+        assert!(found);
+        assert_eq!(cleaned.len(), 1);
+        assert!(cleaned[0].path().is_ident("cfg_attr"));
+    }
 
     #[test]
     fn scope_inner_visibility_public_stays_public() {

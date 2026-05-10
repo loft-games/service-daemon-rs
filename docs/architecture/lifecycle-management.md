@@ -182,4 +182,10 @@ Provider initialization retries reuse the existing `RestartPolicy` model.
 - `ProviderError::Retryable(...)` keeps retrying until that timeout is reached.
 - `ProviderError::Fatal(...)` skips retries and fails startup immediately.
 
+### 5.5. Advanced provider helper and state preconditions
+
+Generated provider helpers expose a low-level `resolve_managed()` path for tests, diagnostics, and framework integrations that need the raw `Result<Arc<T>, ProviderError>` before it is mapped into convenience initialization semantics. Normal services should prefer dependency injection and let the daemon own retries, fatal shutdown, and cancellation.
+
+`StateManager::snapshot()` is a convenience API for already-initialized state. It panics if called before the corresponding provider has been initialized through the daemon/provider resolution path. That panic is intentional: pre-init snapshot probing is caller misuse, not a recoverable provider-init error.
+
 [Back to README](../../README.md)

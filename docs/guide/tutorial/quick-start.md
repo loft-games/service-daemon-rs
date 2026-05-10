@@ -13,21 +13,17 @@ In this tutorial, we will walk through the progression of a real-world system:
 1.  [**Hello, Heartbeat!**](./hello-heartbeat.md) -- Your first service. We'll learn the basics of defining and running a background task.
 2.  [**Reactive Triggers**](./reactive-triggers.md) -- Events, queues, and automation. Learn how to make your system react to the world.
 3.  [**State Management & Recovery**](./state-recovery.md) -- Persistence and resilience. See how services survive failures and restore state.
-4.  [**DIY Providers**](./diy-providers.md) -- Integrating external systems like MQTT or Databases.
-5.  [**Error Handling & Retries**](./error-handling.md) -- Learn exponential backoff and the "Kill Switch" for fatal errors.
-6.  [**Priorities & Scheduling Policies**](./priority-orchestration.md) -- Managing initialization order and choosing between the shared standard runtime, the shared high-priority runtime, and isolated execution.
-7.  [**Unit Testing & Simulation**](./unit-testing.md) -- Test your logic in a controlled sandbox (MockContext).
+4.  [**DIY Providers**](./diy-providers.md) -- Integrating external systems like MQTT or databases.
+5.  [**Error Handling & Retries**](./error-handling.md) -- Learn exponential backoff and the kill switch for fatal errors.
+6.  [**Priorities & Scheduling Policies**](./priority-orchestration.md) -- Manage initialization order and choose the right execution mode.
+7.  [**Unit Testing & Simulation**](./unit-testing.md) -- Test your logic in a controlled sandbox with `MockContext`.
 
 ---
 
 ## Reading order
 
-The chapters build on each other; reading in order is recommended for the first pass. Cross-referenced topics are also reachable directly if you're looking up something specific.
+The chapters build on each other; reading in order is recommended for the first pass. This directory is the beginner tutorial path: it focuses on best-practice usage, not framework internals or maintainer extension points.
+
+After finishing the tutorial, return to the [README](../../../README.md) documentation section for complete user guides, architecture references, and maintainer material.
 
 [**Next: Hello, Heartbeat ->**](./hello-heartbeat.md)
-
-### Additional Chapters
-
--  [**Custom Trigger Implementation**](./tailor-made-triggers.md) -- Build your own trigger types from scratch.
--  [**Trigger Middlewares (Interceptors)**](./trigger-interceptors.md) -- Add custom middleware to the trigger dispatch pipeline.
--  [**Advanced Macro Usage**](./advanced-macros.md) -- Deep dive into the `#[service]` and `#[trigger]` macros.

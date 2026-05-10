@@ -21,7 +21,8 @@ pub struct SilentSyncConfig(pub i32);
 
 /// Sync fn provider with explicit opt-in - no warning generated.
 #[provider]
-#[allow(sync_handler)]
+#[allow(dead_code, sync_handler, clippy::too_many_arguments)]
+#[doc = "Intentionally synchronous provider used to verify attribute preservation."]
 pub fn silent_sync_config() -> SilentSyncConfig {
     SilentSyncConfig(99)
 }

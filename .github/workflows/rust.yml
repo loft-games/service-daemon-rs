@@ -21,6 +21,8 @@ jobs:
         run: cargo check --workspace
       - name: Rust Check All Features
         run: cargo check --workspace --all-features
+      - name: Rust Check Diagnostics Example
+        run: cargo check -p example-diagnostics
       - name: Rust Check No Default Features
         run: cargo check -p service-daemon --no-default-features
 

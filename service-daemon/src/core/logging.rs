@@ -152,6 +152,11 @@ pub struct LogQueue {
 /// `batch_size * LOG_QUEUE_BATCH_MULTIPLIER`.
 const DEFAULT_BATCH_SIZE: usize = 128;
 
+/// Maximum accepted log batch size.
+///
+/// The derived broadcast queue capacity is this value multiplied by 4.
+pub const MAX_LOG_BATCH_SIZE: usize = 1 << 20;
+
 /// Ratio of broadcast queue capacity to batch size.
 ///
 /// A multiplier of 4 means the queue can buffer 4 full drain cycles
@@ -159,10 +164,63 @@ const DEFAULT_BATCH_SIZE: usize = 128;
 /// temporary producer-consumer imbalance.
 const LOG_QUEUE_BATCH_MULTIPLIER: usize = 4;
 
+const MAX_LOG_QUEUE_CAPACITY: usize = MAX_LOG_BATCH_SIZE * LOG_QUEUE_BATCH_MULTIPLIER;
+
+/// Error returned when configuring the log batch size fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogBatchSizeError {
+    /// The requested batch size exceeds [`MAX_LOG_BATCH_SIZE`].
+    TooLarge { requested: usize, max: usize },
+    /// The log queue has already been configured or initialized.
+    AlreadyInitialized { requested: usize, active: usize },
+}
+
+impl fmt::Display for LogBatchSizeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TooLarge { requested, max } => {
+                write!(
+                    f,
+                    "log batch size {requested} exceeds maximum supported size {max}"
+                )
+            }
+            Self::AlreadyInitialized { requested, active } => {
+                write!(
+                    f,
+                    "log batch size already initialized to {active}; requested {requested}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for LogBatchSizeError {}
+
 /// Global batch size override, set via [`set_log_batch_size()`].
 /// Must be configured before the first call to `get_log_queue()` (which is
 /// triggered by `init_logging()` or the first tracing event).
 static LOG_BATCH_SIZE: OnceLock<NonZeroUsize> = OnceLock::new();
+
+fn validate_log_batch_size(batch_size: usize) -> Result<(), LogBatchSizeError> {
+    if batch_size > MAX_LOG_BATCH_SIZE {
+        return Err(LogBatchSizeError::TooLarge {
+            requested: batch_size,
+            max: MAX_LOG_BATCH_SIZE,
+        });
+    }
+    Ok(())
+}
+
+fn log_queue_capacity_for_batch_size(batch_size: usize) -> Result<usize, LogBatchSizeError> {
+    validate_log_batch_size(batch_size)?;
+    batch_size
+        .checked_mul(LOG_QUEUE_BATCH_MULTIPLIER)
+        .filter(|capacity| *capacity <= MAX_LOG_QUEUE_CAPACITY)
+        .ok_or(LogBatchSizeError::TooLarge {
+            requested: batch_size,
+            max: MAX_LOG_BATCH_SIZE,
+        })
+}
 
 /// Returns the effective batch size (user-configured or default).
 fn effective_batch_size() -> usize {
@@ -171,11 +229,50 @@ fn effective_batch_size() -> usize {
         .map_or(DEFAULT_BATCH_SIZE, |size| size.get())
 }
 
+fn set_log_batch_size_in(
+    storage: &OnceLock<NonZeroUsize>,
+    queue_initialized: bool,
+    size: NonZeroUsize,
+) -> Result<(), LogBatchSizeError> {
+    validate_log_batch_size(size.get())?;
+
+    if queue_initialized {
+        let requested = size.get();
+        let active = storage.get().map_or(DEFAULT_BATCH_SIZE, |size| size.get());
+        tracing::warn!(
+            requested,
+            active,
+            "set_log_batch_size: log queue already initialized; call ignored"
+        );
+        return Err(LogBatchSizeError::AlreadyInitialized { requested, active });
+    }
+
+    match storage.set(size) {
+        Ok(()) => Ok(()),
+        Err(size) => {
+            let requested = size.get();
+            let active = storage.get().map_or(DEFAULT_BATCH_SIZE, |size| size.get());
+            tracing::warn!(
+                requested,
+                active,
+                "set_log_batch_size: batch size already initialized; call ignored"
+            );
+            Err(LogBatchSizeError::AlreadyInitialized { requested, active })
+        }
+    }
+}
+
 /// Sets the batch processing size for the log service drain cycle.
 ///
 /// Must be called **before** `init_logging()` or `ServiceDaemon::run()` to
 /// take effect. The broadcast queue capacity is automatically derived as
 /// `batch_size * 4`.
+///
+/// # Errors
+///
+/// Returns [`LogBatchSizeError::TooLarge`] when the requested size exceeds
+/// [`MAX_LOG_BATCH_SIZE`]. Returns [`LogBatchSizeError::AlreadyInitialized`]
+/// when logging has already observed or accepted a batch size.
 ///
 /// # When to Use
 ///
@@ -192,27 +289,25 @@ fn effective_batch_size() -> usize {
 /// // Reduce batch size for a lightweight embedded daemon
 /// // Queue capacity will be 512 * 4 = 2,048 slots
 /// if let Some(batch_size) = NonZeroUsize::new(512) {
-///     set_log_batch_size(batch_size);
+///     set_log_batch_size(batch_size)?;
 /// }
 /// service_daemon::init_logging();
+/// # Ok::<(), service_daemon::LogBatchSizeError>(())
 /// ```
-pub fn set_log_batch_size(size: NonZeroUsize) {
-    // TODO(set_log_batch_size): change signature to `-> Result<(), NonZeroUsize>`
-    // in a future minor release so callers can react to a late or duplicate call.
-    if LOG_BATCH_SIZE.set(size).is_err() {
-        let active = effective_batch_size();
-        tracing::warn!(
-            requested = size.get(),
-            active,
-            "set_log_batch_size: batch size already initialized; call ignored"
-        );
-    }
+pub fn set_log_batch_size(size: NonZeroUsize) -> Result<(), LogBatchSizeError> {
+    set_log_batch_size_in(&LOG_BATCH_SIZE, LOG_QUEUE.get().is_some(), size)
 }
 
 impl Default for LogQueue {
     fn default() -> Self {
         // Capacity is derived once here and cached by the outer OnceLock<LogQueue>.
-        let capacity = effective_batch_size() * LOG_QUEUE_BATCH_MULTIPLIER;
+        let batch_size = effective_batch_size();
+        let capacity = match log_queue_capacity_for_batch_size(batch_size) {
+            Ok(capacity) => capacity,
+            Err(error) => {
+                panic!("validated log batch size produced invalid queue capacity: {error}")
+            }
+        };
         let (tx, _) = broadcast::channel(capacity);
         Self { tx }
     }
@@ -1033,6 +1128,72 @@ mod tests {
         let result = std::panic::catch_unwind(init_logging);
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn log_batch_size_accepts_documented_maximum() {
+        assert_eq!(validate_log_batch_size(MAX_LOG_BATCH_SIZE), Ok(()));
+        assert_eq!(
+            log_queue_capacity_for_batch_size(MAX_LOG_BATCH_SIZE),
+            Ok(MAX_LOG_QUEUE_CAPACITY)
+        );
+    }
+
+    #[test]
+    fn log_batch_size_rejects_values_above_documented_maximum() {
+        let requested = MAX_LOG_BATCH_SIZE + 1;
+        assert_eq!(
+            validate_log_batch_size(requested),
+            Err(LogBatchSizeError::TooLarge {
+                requested,
+                max: MAX_LOG_BATCH_SIZE,
+            })
+        );
+        assert_eq!(
+            log_queue_capacity_for_batch_size(requested),
+            Err(LogBatchSizeError::TooLarge {
+                requested,
+                max: MAX_LOG_BATCH_SIZE,
+            })
+        );
+    }
+
+    #[test]
+    fn log_queue_capacity_is_derived_from_valid_batch_size() {
+        assert_eq!(
+            log_queue_capacity_for_batch_size(DEFAULT_BATCH_SIZE),
+            Ok(DEFAULT_BATCH_SIZE * LOG_QUEUE_BATCH_MULTIPLIER)
+        );
+    }
+
+    #[test]
+    fn set_log_batch_size_in_rejects_duplicate_configuration() {
+        let storage = OnceLock::new();
+        let first = NonZeroUsize::new(256).unwrap();
+        let second = NonZeroUsize::new(512).unwrap();
+
+        assert_eq!(set_log_batch_size_in(&storage, false, first), Ok(()));
+        assert_eq!(
+            set_log_batch_size_in(&storage, false, second),
+            Err(LogBatchSizeError::AlreadyInitialized {
+                requested: 512,
+                active: 256,
+            })
+        );
+    }
+
+    #[test]
+    fn set_log_batch_size_in_rejects_late_configuration() {
+        let storage = OnceLock::new();
+        let requested = NonZeroUsize::new(512).unwrap();
+
+        assert_eq!(
+            set_log_batch_size_in(&storage, true, requested),
+            Err(LogBatchSizeError::AlreadyInitialized {
+                requested: 512,
+                active: DEFAULT_BATCH_SIZE,
+            })
+        );
     }
 
     // -----------------------------------------------------------------------

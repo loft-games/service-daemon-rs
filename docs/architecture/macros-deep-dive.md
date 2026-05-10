@@ -21,7 +21,51 @@ Triggers are specialized services registered through the same service registry. 
 - **Event Dispatch**: The host executes the user handler when events occur, managing the inversion of control.
 - **Runtime Placement**: The generated registry entry carries the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`); the daemon runner uses it to execute the service or trigger body while keeping supervision, watchers, reload, restart/backoff, and shutdown coordination on the daemon control plane.
 
-## 3. The "Macro Illusion"
+## 3. The `#[provider]` Transformation
+
+Providers generate `Provided` / `ManagedProvided` / `WatchableProvided` implementations plus ergonomic helper methods for the declared type.
+
+The supported provider attribute forms are:
+
+```rust
+#[provider]
+#[provider("fallback")]
+#[provider("fallback", env = "CONFIG_ENV")]
+#[provider(Notify)]
+#[provider(Queue(String), capacity = 128)]
+#[provider(Listen("127.0.0.1:8080"), env = "BIND_ADDR", eager = true)]
+#[provider(UnixListen("/run/app.sock"), eager = true)]
+#[provider(UnixConnect("/run/peer.sock"), env = "PEER_SOCK")]
+```
+
+Shared attributes are parsed once and rejected at compile time if duplicated:
+
+| Attribute | Accepted on | Rule |
+| :--- | :--- | :--- |
+| `env = "NAME"` | value providers and provider templates | The environment variable overrides the literal fallback when present. |
+| `capacity = N` | `Queue(...)` only | `N` must be greater than zero; value providers reject `capacity`. |
+| `eager = true` / `eager = false` | all provider forms | The value must be a boolean literal, not an identifier or expression. |
+
+Unsupported attributes keep the stable parser diagnostic that lists the supported shared attributes: `env`, `capacity`, and `eager`.
+
+Function providers are considered framework-fallible only when their return type is `Result<T, ProviderError>` or an equivalent qualified path ending in `ProviderError`. Other `Result<T, E>` shapes remain ordinary user return types and do not opt into provider-init retry/fatal semantics.
+
+### Provider Helper Return Shapes
+
+Provider helpers intentionally distinguish convenience from provider-init failure semantics:
+
+| Provider shape | `resolve()` / lock helpers | Notes |
+| :--- | :--- | :--- |
+| Infallible provider with no DI dependency | Direct `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` | Static values or initialization that cannot fail. |
+| `Notify` / `Queue` templates | Direct `Arc<T>` / lock wrappers | Framework-owned templates that are infallible after macro validation. |
+| Provider with DI dependencies | `Result<Arc<T>, ProviderInitError>` | Dependency resolution can fail, so the helper is fallible. |
+| Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
+| `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
+| Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Canonical opt-in to retryable/fatal provider-init semantics. |
+
+`resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.
+
+## 4. The "Macro Illusion"
 
 The framework rewrites shared-state types behind the scenes without breaking your IDE experience. Two pieces work together:
 
@@ -37,18 +81,18 @@ The macros recognize common import styles:
 - `Arc<T>`
 - `tokio::sync::RwLock<T>`
 
-## 4. Promotion Logic
+## 5. Promotion Logic
 - **Fast Path**: If only `Arc<T>` is used, it stays an immutable singleton with zero locking overhead.
 - **Managed Path**: If *any* service in the entire registry requests a lock (`RwLock`/`Mutex`), the provider is automatically promoted at link-time to support atomic CoW (Copy-on-Write) publishing.
 
-## 5. Shared Macro Infrastructure (`common.rs`)
+## 6. Shared Macro Infrastructure (`common.rs`)
 
 To ensure consistency between `#[service]` and `#[trigger]`, shared code is consolidated in `common.rs`:
 - **`ParamProcessor`**: A unified state machine for parsing function inputs and identifying DI dependencies (`Arc<T>`, `Arc<RwLock<T>>`).
 - **`generate_call_expr`**: A shared generator for calling user functions, handling async/sync differences and warning injection.
 - **`generate_watcher`**: A unified generator for the service/trigger reload watcher.
 
-## 6. The `#[allow(sync_handler)]` Pseudo-Lint
+## 7. The `#[allow(sync_handler)]` Pseudo-Lint
 
 ### Background
 

@@ -216,7 +216,7 @@ pub struct TriggerRunner<P: Send + Sync + 'static> {
     scaling: Option<ScalingPolicy>,
     /// Semaphore controlling the number of concurrent handler invocations.
     /// With `scaling = None`, this holds exactly 1 permit (serial mode).
-    /// With `scaling = Some(sp)`, starts at `sp.initial_concurrency`.
+    /// With `scaling = Some(sp)`, starts at `sp.initial_concurrency()`.
     semaphore: Arc<Semaphore>,
     /// Current concurrency limit (tracked separately because `Semaphore`
     /// doesn't expose its total permit count).
@@ -232,7 +232,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// exponential-backoff retry for free.
     ///
     /// When `scaling` is `Some`, the semaphore is initialized with
-    /// `scaling.initial_concurrency` permits and a background scale
+    /// `scaling.initial_concurrency()` permits and a background scale
     /// monitor is spawned. When `None`, the semaphore holds exactly
     /// 1 permit (serial dispatch, no elastic scaling).
     ///
@@ -247,7 +247,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         restart_policy: RestartPolicy,
         scaling: Option<ScalingPolicy>,
     ) -> Self {
-        let initial = scaling.map_or(1, |sp| sp.initial_concurrency);
+        let initial = scaling.map_or(1, |sp| sp.initial_concurrency());
         Self {
             name,
             service_id,
@@ -473,14 +473,15 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         idle_since: &mut Option<Instant>,
     ) {
         let Some(since) = *idle_since else { return };
-        if since.elapsed() < scaling.scale_cooldown || limit <= scaling.initial_concurrency {
+        let initial = scaling.initial_concurrency();
+        if since.elapsed() < scaling.scale_cooldown() || limit <= initial {
             return;
         }
 
         // Physically revoke excess permits by acquiring and forgetting them.
         // `forget()` permanently reduces the semaphore capacity, ensuring
         // `dispatch` cannot acquire more permits than `initial_concurrency`.
-        let to_revoke = limit - scaling.initial_concurrency;
+        let to_revoke = limit.saturating_sub(initial);
         let mut revoked = 0usize;
         for _ in 0..to_revoke {
             match semaphore.try_acquire() {
@@ -492,7 +493,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             }
         }
 
-        let new_limit = limit - revoked;
+        let new_limit = limit.saturating_sub(revoked);
         current_limit.store(new_limit, Ordering::Relaxed);
         info!(
             trigger = %trigger_name,
@@ -503,6 +504,19 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             revoked
         );
         *idle_since = None;
+    }
+
+    fn pressure_limit_for(limit: usize, threshold: usize) -> usize {
+        let numerator = (limit as u128).saturating_mul(threshold as u128);
+        let denominator = (threshold as u128).saturating_add(1);
+        let pressure_limit = numerator / denominator;
+        pressure_limit.min(usize::MAX as u128) as usize
+    }
+
+    fn next_scaled_limit(limit: usize, scaling: &ScalingPolicy) -> usize {
+        limit
+            .saturating_mul(scaling.scale_factor())
+            .min(scaling.max_concurrency())
     }
 
     /// Attempt to scale up concurrency if the pressure ratio exceeds the threshold.
@@ -517,24 +531,23 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         limit: usize,
         in_flight: usize,
     ) {
-        if limit >= scaling.max_concurrency {
+        if limit >= scaling.max_concurrency() {
             return;
         }
 
-        let threshold = scaling.scale_threshold;
-        let pressure_limit = limit * threshold / (threshold + 1);
+        let pressure_limit = Self::pressure_limit_for(limit, scaling.scale_threshold());
 
         if in_flight < pressure_limit {
             return;
         }
 
-        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
-        let added = new_limit - limit;
+        let new_limit = Self::next_scaled_limit(limit, scaling);
 
-        if added == 0 {
+        if new_limit <= limit {
             return;
         }
 
+        let added = new_limit - limit;
         semaphore.add_permits(added);
         current_limit.store(new_limit, Ordering::Relaxed);
         info!(
@@ -916,14 +929,13 @@ mod tests {
     /// to the configured `initial_concurrency`.
     #[tokio::test]
     async fn test_semaphore_limits_concurrency() {
-        let scaling = ScalingPolicy {
-            initial_concurrency: 2,
-            max_concurrency: 8,
-            ..ScalingPolicy::default()
-        };
+        let scaling = ScalingPolicy::builder()
+            .initial_concurrency(2)
+            .max_concurrency(8)
+            .build();
 
-        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency));
-        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency));
+        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency()));
+        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency()));
 
         // Acquire 2 permits -- should succeed (matches initial_concurrency)
         let _p1 = semaphore.clone().acquire_owned().await.unwrap();
@@ -942,34 +954,35 @@ mod tests {
     /// Verifies that `add_permits` correctly expands the concurrency limit.
     #[tokio::test]
     async fn test_semaphore_scale_up() {
-        let scaling = ScalingPolicy {
-            initial_concurrency: 1,
-            max_concurrency: 4,
-            scale_factor: 2,
-            ..ScalingPolicy::default()
-        };
+        let scaling = ScalingPolicy::builder()
+            .initial_concurrency(1)
+            .max_concurrency(4)
+            .scale_factor(2)
+            .build();
 
-        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency));
-        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency));
+        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency()));
+        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency()));
 
-        // Simulate scale-up: double the limit
-        let limit = current_limit.load(Ordering::Relaxed);
-        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
-        let added = new_limit - limit;
-
-        semaphore.add_permits(added);
-        current_limit.store(new_limit, Ordering::Relaxed);
+        TriggerRunner::<()>::try_scale_up(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            1,
+            1,
+        );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 2);
         assert_eq!(semaphore.available_permits(), 2); // 1 original + 1 added
 
-        // Scale up again: 2 -> 4
-        let limit = current_limit.load(Ordering::Relaxed);
-        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
-        let added = new_limit - limit;
-
-        semaphore.add_permits(added);
-        current_limit.store(new_limit, Ordering::Relaxed);
+        TriggerRunner::<()>::try_scale_up(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            2,
+            2,
+        );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 4);
         assert_eq!(semaphore.available_permits(), 4); // 2 previous + 2 added
@@ -978,23 +991,23 @@ mod tests {
     /// Verifies that scale-up respects `max_concurrency` ceiling.
     #[tokio::test]
     async fn test_scale_up_respects_max_concurrency() {
-        let scaling = ScalingPolicy {
-            initial_concurrency: 1,
-            max_concurrency: 3,
-            scale_factor: 4,
-            ..ScalingPolicy::default()
-        };
+        let scaling = ScalingPolicy::builder()
+            .initial_concurrency(1)
+            .max_concurrency(3)
+            .scale_factor(4)
+            .build();
 
-        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency));
-        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency));
+        let semaphore = Arc::new(Semaphore::new(scaling.initial_concurrency()));
+        let current_limit = Arc::new(AtomicUsize::new(scaling.initial_concurrency()));
 
-        // Scale-up: 1 * 4 = 4, but max is 3 -> clamp to 3
-        let limit = current_limit.load(Ordering::Relaxed);
-        let new_limit = (limit * scaling.scale_factor).min(scaling.max_concurrency);
-        let added = new_limit - limit;
-
-        semaphore.add_permits(added);
-        current_limit.store(new_limit, Ordering::Relaxed);
+        TriggerRunner::<()>::try_scale_up(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            1,
+            1,
+        );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 3);
         assert_eq!(semaphore.available_permits(), 3);
@@ -1004,12 +1017,11 @@ mod tests {
     /// via `try_acquire()` + `forget()`, not just a logical counter update.
     #[tokio::test]
     async fn test_scale_down_physically_revokes_permits() {
-        let scaling = ScalingPolicy {
-            initial_concurrency: 1,
-            max_concurrency: 8,
-            scale_cooldown: Duration::from_millis(10),
-            ..ScalingPolicy::default()
-        };
+        let scaling = ScalingPolicy::builder()
+            .initial_concurrency(1)
+            .max_concurrency(8)
+            .scale_cooldown(Duration::from_millis(10))
+            .build();
 
         // Simulate a scaled-up state: semaphore has 4 permits, limit = 4
         let semaphore = Arc::new(Semaphore::new(4));
@@ -1044,13 +1056,12 @@ mod tests {
     /// during scale-up.
     #[tokio::test]
     async fn test_scale_down_then_scale_up_roundtrip() {
-        let scaling = ScalingPolicy {
-            initial_concurrency: 2,
-            max_concurrency: 8,
-            scale_factor: 2,
-            scale_cooldown: Duration::from_millis(10),
-            ..ScalingPolicy::default()
-        };
+        let scaling = ScalingPolicy::builder()
+            .initial_concurrency(2)
+            .max_concurrency(8)
+            .scale_factor(2)
+            .scale_cooldown(Duration::from_millis(10))
+            .build();
 
         // Start with a scaled-up state: 4 permits
         let semaphore = Arc::new(Semaphore::new(4));
@@ -1099,8 +1110,7 @@ mod tests {
         let threshold: usize = 5;
 
         // Case 1: limit=1 -> pressure_limit = 0 -> any in_flight triggers scale
-        let limit: usize = 1;
-        let pressure_limit = limit * threshold / (threshold + 1);
+        let pressure_limit = TriggerRunner::<()>::pressure_limit_for(1, threshold);
         assert_eq!(pressure_limit, 0);
         assert!(
             1 >= pressure_limit,
@@ -1108,16 +1118,51 @@ mod tests {
         );
 
         // Case 2: limit=6 -> pressure_limit = 5 -> need 5+ in_flight to trigger
-        let limit: usize = 6;
-        let pressure_limit = limit * threshold / (threshold + 1);
+        let pressure_limit = TriggerRunner::<()>::pressure_limit_for(6, threshold);
         assert_eq!(pressure_limit, 5);
         assert!(5 >= pressure_limit, "5 of 6 should trigger scale-up");
         assert!(4 < pressure_limit, "4 of 6 should NOT trigger scale-up");
 
         // Case 3: limit=12 -> pressure_limit = 10
-        let limit: usize = 12;
-        let pressure_limit = limit * threshold / (threshold + 1);
+        let pressure_limit = TriggerRunner::<()>::pressure_limit_for(12, threshold);
         assert_eq!(pressure_limit, 10);
+    }
+
+    #[test]
+    fn pressure_calculation_handles_large_values_without_overflow() {
+        let pressure_limit = TriggerRunner::<()>::pressure_limit_for(usize::MAX, usize::MAX);
+
+        assert_eq!(pressure_limit, usize::MAX - 1);
+    }
+
+    #[test]
+    fn scale_up_calculation_saturates_at_max_concurrency() {
+        let scaling = ScalingPolicy::try_new(1, usize::MAX, usize::MAX, 1, Duration::ZERO)
+            .expect("valid extreme scaling policy should be accepted");
+
+        assert_eq!(
+            TriggerRunner::<()>::next_scaled_limit(usize::MAX - 1, &scaling),
+            usize::MAX
+        );
+    }
+
+    #[test]
+    fn scale_up_ignores_non_growing_limit_without_underflow() {
+        let scaling = ScalingPolicy::default();
+        let semaphore = Semaphore::new(0);
+        let current_limit = AtomicUsize::new(0);
+
+        TriggerRunner::<()>::try_scale_up(
+            &semaphore,
+            &current_limit,
+            &scaling,
+            "test_trigger",
+            0,
+            0,
+        );
+
+        assert_eq!(current_limit.load(Ordering::Relaxed), 0);
+        assert_eq!(semaphore.available_permits(), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1147,11 +1192,10 @@ mod tests {
     /// with `initial_concurrency` permits and store the policy.
     #[test]
     fn test_runner_with_scaling_initializes_permits() {
-        let sp = ScalingPolicy {
-            initial_concurrency: 4,
-            max_concurrency: 16,
-            ..ScalingPolicy::default()
-        };
+        let sp = ScalingPolicy::builder()
+            .initial_concurrency(4)
+            .max_concurrency(16)
+            .build();
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_with_scaling",
@@ -1165,7 +1209,7 @@ mod tests {
         assert_eq!(runner.current_limit.load(Ordering::Relaxed), 4);
         assert!(runner.scaling.is_some());
         let stored = runner.scaling.unwrap();
-        assert_eq!(stored.max_concurrency, 16);
+        assert_eq!(stored.max_concurrency(), 16);
     }
 
     /// Verify that the default ScalingPolicy (used by TopicHost) produces
@@ -1187,7 +1231,7 @@ mod tests {
         assert_eq!(runner.current_limit.load(Ordering::Relaxed), 1);
         // But scaling IS enabled
         assert!(runner.scaling.is_some());
-        assert_eq!(runner.scaling.unwrap().max_concurrency, 64);
+        assert_eq!(runner.scaling.unwrap().max_concurrency(), 64);
     }
 
     /// Verify that custom ScalingPolicy via builder integrates correctly
@@ -1214,9 +1258,9 @@ mod tests {
         assert_eq!(runner.semaphore.available_permits(), 8);
         assert_eq!(runner.current_limit.load(Ordering::Relaxed), 8);
         let stored = runner.scaling.unwrap();
-        assert_eq!(stored.scale_factor, 4);
-        assert_eq!(stored.scale_threshold, 3);
-        assert_eq!(stored.scale_cooldown, Duration::from_secs(10));
+        assert_eq!(stored.scale_factor(), 4);
+        assert_eq!(stored.scale_threshold(), 3);
+        assert_eq!(stored.scale_cooldown(), Duration::from_secs(10));
     }
 
     #[tokio::test]

@@ -893,6 +893,81 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_generation_retention_is_service_scoped_and_keeps_aggregates() {
+        let store = DiagnosticsStore::new();
+
+        for generation in 1..=1030 {
+            let handle = store.register_generation(
+                ServiceId::new(5),
+                "crashing",
+                generation,
+                RuntimeLane::Standard,
+            );
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(10),
+                Duration::from_millis(12),
+            ));
+            handle.record_exit(GenerationExitKind::Panic);
+        }
+
+        for generation in 1..=3 {
+            let handle = store.register_generation(
+                ServiceId::new(6),
+                "stable",
+                generation,
+                RuntimeLane::HighPriority,
+            );
+            handle.record_sleep_observation(completed_observation(
+                SleepObservationSource::ServiceSleep,
+                Duration::from_millis(10),
+                Duration::from_millis(11),
+            ));
+            handle.record_exit(GenerationExitKind::NormalExit);
+        }
+
+        let snapshot = store.snapshot();
+        let crashing_generations: Vec<_> = snapshot
+            .generations
+            .iter()
+            .filter(|generation| generation.service_id == ServiceId::new(5))
+            .map(|generation| generation.generation)
+            .collect();
+        let stable_generations: Vec<_> = snapshot
+            .generations
+            .iter()
+            .filter(|generation| generation.service_id == ServiceId::new(6))
+            .map(|generation| generation.generation)
+            .collect();
+
+        assert_eq!(crashing_generations.len(), 1024);
+        assert_eq!(crashing_generations.first(), Some(&7));
+        assert_eq!(crashing_generations.last(), Some(&1030));
+        assert_eq!(stable_generations, vec![1, 2, 3]);
+        assert!(store.generation_snapshot(ServiceId::new(5), 1).is_none());
+        assert!(store.generation_snapshot(ServiceId::new(5), 7).is_some());
+        assert!(store.generation_snapshot(ServiceId::new(6), 1).is_some());
+
+        let crashing_service = store.service_snapshot(ServiceId::new(5)).unwrap();
+        assert_eq!(crashing_service.current_generation, 1030);
+        assert_eq!(crashing_service.aggregate.service_sleep.completed, 1030);
+        assert_eq!(crashing_service.aggregate.lifecycle.panic, 1030);
+
+        let stable_service = store.service_snapshot(ServiceId::new(6)).unwrap();
+        assert_eq!(stable_service.current_generation, 3);
+        assert_eq!(stable_service.aggregate.service_sleep.completed, 3);
+        assert_eq!(stable_service.aggregate.lifecycle.normal_exit, 3);
+
+        let standard_lane = store.lane_snapshot(RuntimeLane::Standard);
+        assert_eq!(standard_lane.aggregate.service_sleep.completed, 1030);
+        assert_eq!(standard_lane.aggregate.lifecycle.panic, 1030);
+
+        let high_priority_lane = store.lane_snapshot(RuntimeLane::HighPriority);
+        assert_eq!(high_priority_lane.aggregate.service_sleep.completed, 3);
+        assert_eq!(high_priority_lane.aggregate.lifecycle.normal_exit, 3);
+    }
+
+    #[test]
     fn lane_observation_records_probe_without_service() {
         let store = DiagnosticsStore::new();
 

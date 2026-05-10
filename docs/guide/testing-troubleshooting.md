@@ -26,12 +26,6 @@ Integration tests verify the full lifecycle of the daemon:
 - Status transitions and shelving correctness.
 - Signal propagation and trigger execution.
 
-### Generation-Boundary Resolver Regression Tests
-
-The framework test suite includes a crate-private resolver hook used only for white-box generation-boundary regression tests. It verifies that a running future is never moved between Tokio runtimes and that any future mode-internal placement change would have to wait for a new generation.
-
-This hook is not a public testing API and is not compiled into production builds. Production and user-facing simulation keep using the scheduling declared by the service or trigger registry entry.
-
 ### Unit Testing with MockContext (God Mode)
 
 Testing background services is difficult. How do you test a database failure at 2 AM? The `simulation` feature gives you total control ("God Mode") over the environment.

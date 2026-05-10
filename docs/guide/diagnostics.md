@@ -4,7 +4,7 @@ To manage complex asynchronous systems, visibility is paramount. `service-daemon
 
 ## 1. Entering the Matrix: `DaemonLayer`
 
-The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`). Two independent SYSTEM-priority consumers process this queue:
+The `DaemonLayer` is a specialized `tracing::Layer` that captures **all** tracing events, extracts business IDs from the current Span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is automatically derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
@@ -82,12 +82,13 @@ use std::num::NonZeroUsize;
 
 use service_daemon::set_log_batch_size;
 
-// Reduce batch size for a lightweight embedded daemon
-// Queue capacity will be 512 * 4 = 2,048 slots
+// Reduce batch size for a lightweight embedded daemon.
+// Must be called BEFORE init_logging().
 if let Some(batch_size) = NonZeroUsize::new(512) {
-    set_log_batch_size(batch_size);
+    if let Err(error) = set_log_batch_size(batch_size) {
+        eprintln!("log batch size was not applied: {error}");
+    }
 }
-// Must be called BEFORE init_logging()
 service_daemon::init_logging();
 ```
 

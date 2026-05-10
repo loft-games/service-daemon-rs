@@ -323,8 +323,8 @@ mod tests {
         .await;
 
         let fetched = result.expect("should return Some");
-        assert_eq!(fetched.initial_concurrency, 8);
-        assert_eq!(fetched.max_concurrency, 32);
+        assert_eq!(fetched.initial_concurrency(), 8);
+        assert_eq!(fetched.max_concurrency(), 32);
     }
 
     /// Verify that multiple config types are independently stored and retrieved.
@@ -351,7 +351,7 @@ mod tests {
 
         in_scope(identity, resources, || async {
             let sp = trigger_config::<ScalingPolicy>().expect("ScalingPolicy should be present");
-            assert_eq!(sp.initial_concurrency, 4);
+            assert_eq!(sp.initial_concurrency(), 4);
 
             let custom =
                 trigger_config::<MyCustomConfig>().expect("MyCustomConfig should be present");

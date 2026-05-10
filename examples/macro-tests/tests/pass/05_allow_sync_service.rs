@@ -7,7 +7,8 @@ use service_daemon::{provider, service};
 pub struct MagicNumber(pub i32);
 
 #[service]
-#[allow(sync_handler)]
+#[allow(dead_code, sync_handler, clippy::too_many_arguments)]
+#[doc = "Intentionally synchronous service used to verify attribute preservation."]
 pub fn sync_service(num: Arc<MagicNumber>) -> anyhow::Result<()> {
     // This is intentionally sync -- fast, no I/O.
     println!("Magic: {}", num);

@@ -602,6 +602,23 @@ mod tests {
     }
 
     #[tokio::test]
+    #[should_panic(expected = "StateManager::snapshot() called before initialization")]
+    async fn snapshot_panics_before_initialization() {
+        let manager = StateManager::<i32>::new();
+        let _ = manager.snapshot().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_initialized_snapshot() {
+        let manager = StateManager::<i32>::new();
+        let initial = manager.resolve_snapshot(|| async { Arc::new(7) }).await;
+        let snapshot = manager.snapshot().await;
+
+        assert_eq!(*snapshot, 7);
+        assert!(Arc::ptr_eq(&initial, &snapshot));
+    }
+
+    #[tokio::test]
     async fn test_tracked_rwlock_notification() {
         let notify = Arc::new(Notify::new());
         let (tx, _rx) = watch::channel(Arc::new(0));

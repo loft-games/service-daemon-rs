@@ -1,0 +1,5 @@
+error: provider attribute `capacity` is only supported on Queue providers
+ --> tests/fail/18_provider_value_capacity.rs:3:24
+  |
+3 | #[provider("fallback", capacity = 10)]
+  |                        ^^^^^^^^
