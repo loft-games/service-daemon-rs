@@ -27,10 +27,13 @@
 use anyhow::{Error, Result};
 use chrono::Utc;
 use futures::future::BoxFuture;
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::Semaphore;
+use tokio::task::{JoinError, JoinHandle};
 use tokio::time::Instant;
 use tracing::{Instrument, info, warn};
 
@@ -46,8 +49,132 @@ use uuid::Uuid;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-type DispatchFailureSender = mpsc::UnboundedSender<anyhow::Error>;
-type DispatchFailureReceiver = mpsc::UnboundedReceiver<anyhow::Error>;
+type DispatchTaskOutcome = std::result::Result<(), TriggerDispatchFailure>;
+type InFlightDispatches = FuturesUnordered<BoxFuture<'static, DispatchTaskOutcome>>;
+
+enum TriggerLoopAction {
+    Continue,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TriggerDispatchFailureKind {
+    HandlerRetryExhausted,
+    DispatchTaskError,
+    DispatchTaskPanic,
+    DispatchTaskCancelled,
+    DispatchPermitAcquireFailed,
+    ScaleMonitorFailed,
+}
+
+impl TriggerDispatchFailureKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::HandlerRetryExhausted => "handler_retry_exhausted",
+            Self::DispatchTaskError => "dispatch_task_error",
+            Self::DispatchTaskPanic => "dispatch_task_panic",
+            Self::DispatchTaskCancelled => "dispatch_task_cancelled",
+            Self::DispatchPermitAcquireFailed => "dispatch_permit_acquire_failed",
+            Self::ScaleMonitorFailed => "scale_monitor_failed",
+        }
+    }
+}
+
+impl fmt::Display for TriggerDispatchFailureKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct TriggerDispatchFailure {
+    kind: TriggerDispatchFailureKind,
+    trigger_name: &'static str,
+    service_id: ServiceId,
+    instance_seq: Option<u64>,
+    message_id: Option<Uuid>,
+    reason: String,
+}
+
+impl TriggerDispatchFailure {
+    pub(crate) fn new(
+        kind: TriggerDispatchFailureKind,
+        trigger_name: &'static str,
+        service_id: ServiceId,
+        instance_seq: Option<u64>,
+        message_id: Option<Uuid>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            trigger_name,
+            service_id,
+            instance_seq,
+            message_id,
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn kind(&self) -> TriggerDispatchFailureKind {
+        self.kind
+    }
+
+    pub(crate) fn trigger_name(&self) -> &'static str {
+        self.trigger_name
+    }
+
+    pub(crate) fn service_id(&self) -> ServiceId {
+        self.service_id
+    }
+
+    pub(crate) fn instance_seq(&self) -> Option<u64> {
+        self.instance_seq
+    }
+
+    pub(crate) fn message_id(&self) -> Option<Uuid> {
+        self.message_id
+    }
+}
+
+impl fmt::Display for TriggerDispatchFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Trigger '{}' dispatch failed with {}: {}",
+            self.trigger_name, self.kind, self.reason
+        )?;
+        if let Some(instance_seq) = self.instance_seq {
+            write!(f, " (instance_seq={instance_seq}")?;
+            if let Some(message_id) = self.message_id {
+                write!(f, ", message_id={message_id}")?;
+            }
+            write!(f, ")")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for TriggerDispatchFailure {}
+
+struct AbortOnDropJoinHandle<T> {
+    handle: JoinHandle<T>,
+}
+
+impl<T> AbortOnDropJoinHandle<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self { handle }
+    }
+
+    async fn join(&mut self) -> std::result::Result<T, JoinError> {
+        (&mut self.handle).await
+    }
+}
+
+impl<T> Drop for AbortOnDropJoinHandle<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
 
 /// Generates a globally unique, time-ordered message ID for each trigger event.
 ///
@@ -275,49 +402,39 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         T: Send + Sync + 'static,
         H: TriggerHost<T, Payload = P>,
     {
-        // Only spawn the scale monitor if elastic scaling is enabled.
-        let mut monitor_handle = if self.scaling.is_some() {
-            Some(self.spawn_scale_monitor())
+        let mut in_flight = InFlightDispatches::new();
+        let mut scale_monitor = if self.scaling.is_some() {
+            Some(self.observe_scale_monitor(self.spawn_scale_monitor()))
         } else {
             None
         };
-        let (dispatch_failure_tx, mut dispatch_failure_rx) = mpsc::unbounded_channel();
 
         while !context::is_shutdown() {
             tokio::select! {
                 biased;
 
-                failure = dispatch_failure_rx.recv() => {
-                    if let Some(handle) = monitor_handle.take() {
-                        handle.abort();
-                    }
-                    return match failure {
-                        Some(error) => Err(error),
-                        None => Ok(()),
-                    };
+                Some(outcome) = in_flight.next() => {
+                    outcome.map_err(Error::from)?;
+                }
+                monitor_outcome = Self::poll_scale_monitor(&mut scale_monitor), if scale_monitor.is_some() => {
+                    return monitor_outcome.map_err(Error::from);
                 }
                 transition = Self::poll_next_event(host, &target, self.name) => {
                     let Some(transition) = transition else {
                         break;
                     };
 
-                    if !self
-                        .handle_transition(
-                            transition,
-                            &dispatch_failure_tx,
-                            &mut dispatch_failure_rx,
-                        )
-                        .await?
-                    {
-                        break;
+                    match self.handle_transition(transition, &mut in_flight).await? {
+                        TriggerLoopAction::Continue => {}
+                        TriggerLoopAction::Stop => {
+                            if !context::is_shutdown() {
+                                Self::drain_in_flight(&mut in_flight).await?;
+                            }
+                            break;
+                        }
                     }
                 }
             }
-        }
-
-        // Stop the scale monitor when the event loop exits
-        if let Some(handle) = monitor_handle {
-            handle.abort();
         }
 
         Ok(())
@@ -345,39 +462,51 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     }
 
     /// Dispatch the payload according to the transition type.
-    ///
-    /// Returns `true` to continue the event loop, `false` to break out.
     async fn handle_transition(
         &self,
         transition: TriggerTransition<P>,
-        dispatch_failure_tx: &DispatchFailureSender,
-        dispatch_failure_rx: &mut DispatchFailureReceiver,
-    ) -> Result<bool> {
+        in_flight: &mut InFlightDispatches,
+    ) -> Result<TriggerLoopAction> {
         match transition {
             TriggerTransition::Next(payload, pre_id) => {
-                self.dispatch(payload, pre_id, dispatch_failure_tx.clone())
-                    .await?;
-                Ok(true)
+                self.dispatch(payload, pre_id, in_flight).await?;
+                Ok(TriggerLoopAction::Continue)
             }
             TriggerTransition::Reload(payload, pre_id) => {
-                self.dispatch(payload, pre_id, dispatch_failure_tx.clone())
-                    .await?;
+                self.dispatch(payload, pre_id, in_flight).await?;
                 info!("Trigger '{}' entering reload-wait state", self.name);
-                tokio::select! {
-                    biased;
+                loop {
+                    tokio::select! {
+                        biased;
 
-                    failure = dispatch_failure_rx.recv() => match failure {
-                        Some(error) => Err(error),
-                        None => Ok(false),
-                    },
-                    _ = context::wait_shutdown() => Ok(false),
+                        Some(outcome) = in_flight.next() => {
+                            outcome.map_err(Error::from)?;
+                        }
+                        _ = context::wait_shutdown() => return Ok(TriggerLoopAction::Stop),
+                    }
                 }
             }
             TriggerTransition::Stop => {
                 info!("Trigger '{}' stopping", self.name);
-                Ok(false)
+                Ok(TriggerLoopAction::Stop)
             }
         }
+    }
+
+    async fn drain_in_flight(in_flight: &mut InFlightDispatches) -> Result<()> {
+        while let Some(outcome) = in_flight.next().await {
+            outcome.map_err(Error::from)?;
+        }
+        Ok(())
+    }
+
+    async fn poll_scale_monitor(
+        scale_monitor: &mut Option<BoxFuture<'static, DispatchTaskOutcome>>,
+    ) -> DispatchTaskOutcome {
+        scale_monitor
+            .as_mut()
+            .expect("scale monitor future must exist when polled")
+            .await
     }
 
     // -----------------------------------------------------------------------
@@ -452,6 +581,35 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     limit,
                     in_flight,
                 );
+            }
+        })
+    }
+
+    fn observe_scale_monitor(
+        &self,
+        handle: JoinHandle<()>,
+    ) -> BoxFuture<'static, DispatchTaskOutcome> {
+        let trigger_name = self.name;
+        let service_id = self.service_id;
+        Box::pin(async move {
+            let mut handle = AbortOnDropJoinHandle::new(handle);
+            match handle.join().await {
+                Ok(()) => Err(TriggerDispatchFailure::new(
+                    TriggerDispatchFailureKind::ScaleMonitorFailed,
+                    trigger_name,
+                    service_id,
+                    None,
+                    None,
+                    "scale monitor exited unexpectedly",
+                )),
+                Err(join_error) => Err(TriggerDispatchFailure::new(
+                    TriggerDispatchFailureKind::ScaleMonitorFailed,
+                    trigger_name,
+                    service_id,
+                    None,
+                    None,
+                    format!("scale monitor task failed: {join_error}"),
+                )),
             }
         })
     }
@@ -576,22 +734,25 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         &self,
         payload: P,
         identity: Option<(uuid::Uuid, ServiceId)>,
-        dispatch_failure_tx: DispatchFailureSender,
+        in_flight: &mut InFlightDispatches,
     ) -> Result<()> {
         let seq = self.instance_counter.fetch_add(1, Ordering::Relaxed);
         let (message_id, source_id) =
             identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
 
-        // Acquire a concurrency permit (backpressure point)
         let permit = self
             .semaphore
             .clone()
             .acquire_owned()
             .await
             .map_err(|error| {
-                anyhow::anyhow!(
-                    "Trigger '{}' could not acquire dispatch permit: {error}",
-                    self.name
+                TriggerDispatchFailure::new(
+                    TriggerDispatchFailureKind::DispatchPermitAcquireFailed,
+                    self.name,
+                    self.service_id,
+                    Some(seq),
+                    Some(message_id),
+                    format!("could not acquire dispatch permit: {error}"),
                 )
             })?;
 
@@ -605,54 +766,99 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             handler: self.handler.clone(),
         };
 
-        // Build the interceptor chain (must happen on the current task
-        // because interceptors are borrowed from &self)
         let chain = self.build_chain();
         let trigger_name = self.name;
+        let service_id = self.service_id;
 
-        // Use the context-aware spawn to propagate identity and resources automatically
         let dispatch_task = context::spawn_with_context(async move {
             let result = chain(ctx).await;
             drop(permit);
             result
         });
 
-        tokio::spawn(async move {
-            match dispatch_task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    let propagated =
-                        anyhow::anyhow!("Trigger '{}' dispatch task failed: {error}", trigger_name);
-                    warn!(
-                        trigger = %trigger_name,
-                        error = %propagated,
-                        "Dispatch chain completed with error"
-                    );
-                    let _ = dispatch_failure_tx.send(propagated);
-                }
-                Err(join_error) => {
-                    let propagated = if join_error.is_panic() {
-                        anyhow::anyhow!(
-                            "Trigger '{}' dispatch task panicked: {join_error}",
-                            trigger_name
-                        )
-                    } else {
-                        anyhow::anyhow!(
-                            "Trigger '{}' dispatch task was cancelled: {join_error}",
-                            trigger_name
-                        )
-                    };
-                    warn!(
-                        trigger = %trigger_name,
-                        error = %propagated,
-                        "Dispatch task did not complete normally"
-                    );
-                    let _ = dispatch_failure_tx.send(propagated);
-                }
-            }
-        });
+        in_flight.push(Self::observe_dispatch_task(
+            trigger_name,
+            service_id,
+            seq,
+            message_id,
+            dispatch_task,
+        ));
 
         Ok(())
+    }
+
+    fn observe_dispatch_task(
+        trigger_name: &'static str,
+        service_id: ServiceId,
+        instance_seq: u64,
+        message_id: Uuid,
+        handle: JoinHandle<anyhow::Result<()>>,
+    ) -> BoxFuture<'static, DispatchTaskOutcome> {
+        Box::pin(async move {
+            let mut handle = AbortOnDropJoinHandle::new(handle);
+            match handle.join().await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => match error.downcast::<TriggerDispatchFailure>() {
+                    Ok(failure) => {
+                        warn!(
+                            trigger = %failure.trigger_name(),
+                            service_id = failure.service_id().value(),
+                            instance_seq = ?failure.instance_seq(),
+                            message_id = ?failure.message_id(),
+                            trigger_failure_kind = %failure.kind().as_str(),
+                            error = %failure,
+                            "Dispatch chain completed with typed failure"
+                        );
+                        Err(failure)
+                    }
+                    Err(error) => {
+                        let failure = TriggerDispatchFailure::new(
+                            TriggerDispatchFailureKind::DispatchTaskError,
+                            trigger_name,
+                            service_id,
+                            Some(instance_seq),
+                            Some(message_id),
+                            error.to_string(),
+                        );
+                        warn!(
+                            trigger = %trigger_name,
+                            service_id = service_id.value(),
+                            instance_seq,
+                            message_id = %message_id,
+                            trigger_failure_kind = %failure.kind().as_str(),
+                            error = %failure,
+                            "Dispatch chain completed with error"
+                        );
+                        Err(failure)
+                    }
+                },
+                Err(join_error) => {
+                    let kind = if join_error.is_panic() {
+                        TriggerDispatchFailureKind::DispatchTaskPanic
+                    } else {
+                        TriggerDispatchFailureKind::DispatchTaskCancelled
+                    };
+                    let failure = TriggerDispatchFailure::new(
+                        kind,
+                        trigger_name,
+                        service_id,
+                        Some(instance_seq),
+                        Some(message_id),
+                        join_error.to_string(),
+                    );
+                    warn!(
+                        trigger = %trigger_name,
+                        service_id = service_id.value(),
+                        instance_seq,
+                        message_id = %message_id,
+                        trigger_failure_kind = %failure.kind().as_str(),
+                        error = %failure,
+                        "Dispatch task did not complete normally"
+                    );
+                    Err(failure)
+                }
+            }
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -758,9 +964,8 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
 // ---------------------------------------------------------------------------
 
 /// Log the failure, record it in the backoff controller, and wait for the
-/// computed delay. Returns `Err` if shutdown interrupts the wait, allowing
-/// the caller to propagate the original error upward.
-async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> Result<()> {
+/// computed delay. Returns `false` when reload or shutdown interrupts the wait.
+async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> bool {
     warn!(
         attempt = backoff.attempt_count() + 1,
         error = %error,
@@ -769,14 +974,14 @@ async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> 
     backoff.record_failure();
 
     if context::is_shutdown() {
-        warn!("Trigger handler retry aborted due to shutdown");
-        return Err(error);
+        warn!(error = %error, "Trigger handler retry aborted due to shutdown or reload");
+        return false;
     }
     if !context::sleep(backoff.current_delay()).await {
-        warn!("Trigger handler retry interrupted by shutdown");
-        return Err(error);
+        warn!(error = %error, "Trigger handler retry interrupted by shutdown or reload");
+        return false;
     }
-    Ok(())
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -839,7 +1044,9 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
             };
 
             if let Err(e) = next(first_ctx).await {
-                record_retry_failure(&mut backoff, e).await?;
+                if !record_retry_failure(&mut backoff, e).await {
+                    return Ok(());
+                }
             } else {
                 return Ok(());
             }
@@ -861,11 +1068,15 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                         trigger_max_retries = max,
                         "Trigger handler exceeded max retry limit, giving up"
                     );
-                    return Err(anyhow::anyhow!(
-                        "Trigger '{}' exceeded max retry limit ({} attempts)",
+                    return Err(TriggerDispatchFailure::new(
+                        TriggerDispatchFailureKind::HandlerRetryExhausted,
                         trigger_name,
-                        max
-                    ));
+                        service_id,
+                        Some(instance_seq),
+                        Some(message_id),
+                        format!("exceeded max retry limit ({max} attempts)"),
+                    )
+                    .into());
                 }
 
                 let retry_ctx = TriggerContext {
@@ -880,7 +1091,9 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                 };
 
                 if let Err(e) = (handler.clone())(retry_ctx).await {
-                    record_retry_failure(&mut backoff, e).await?;
+                    if !record_retry_failure(&mut backoff, e).await {
+                        return Ok(());
+                    }
                 } else {
                     return Ok(());
                 }
@@ -897,6 +1110,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     struct OneShotBlockingHost {
         emitted: bool,
@@ -920,6 +1134,66 @@ mod tests {
                 } else {
                     self.emitted = true;
                     TriggerTransition::Next((), None)
+                }
+            })
+        }
+    }
+
+    struct DispatchThenStopHost {
+        emitted: bool,
+        stop_emitted: Arc<Notify>,
+    }
+
+    impl TriggerHost<()> for DispatchThenStopHost {
+        type Payload = ();
+
+        fn setup(_target: Arc<()>) -> BoxFuture<'static, anyhow::Result<Self>> {
+            Box::pin(async {
+                Ok(Self {
+                    emitted: false,
+                    stop_emitted: Arc::new(Notify::new()),
+                })
+            })
+        }
+
+        fn handle_step<'a>(
+            &'a mut self,
+            _target: &'a Arc<()>,
+        ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
+            Box::pin(async move {
+                if self.emitted {
+                    self.stop_emitted.notify_one();
+                    TriggerTransition::Stop
+                } else {
+                    self.emitted = true;
+                    TriggerTransition::Next((), None)
+                }
+            })
+        }
+    }
+
+    struct OneShotReloadHost {
+        emitted: bool,
+    }
+
+    impl TriggerHost<()> for OneShotReloadHost {
+        type Payload = ();
+
+        fn setup(_target: Arc<()>) -> BoxFuture<'static, anyhow::Result<Self>> {
+            Box::pin(async { Ok(Self { emitted: false }) })
+        }
+
+        fn handle_step<'a>(
+            &'a mut self,
+            _target: &'a Arc<()>,
+        ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
+            Box::pin(async move {
+                if self.emitted {
+                    crate::core::context::wait_shutdown().await;
+                    TriggerTransition::Stop
+                } else {
+                    self.emitted = true;
+                    TriggerTransition::Reload((), None)
                 }
             })
         }
@@ -1264,7 +1538,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dispatch_failure_propagates_from_background_task() {
+    async fn dispatch_retry_exhaustion_propagates_typed_recoverable_failure() {
         use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
         use tokio_util::sync::CancellationToken;
 
@@ -1308,19 +1582,18 @@ mod tests {
         )
         .await;
 
-        let error = match result {
-            Ok(()) => panic!("run_with_host should fail when a dispatch task fails"),
-            Err(error) => error.to_string(),
-        };
-
-        assert!(
-            error.contains("exceeded max retry limit"),
-            "unexpected error: {error}"
+        let error = result.expect_err("run_with_host should fail when retry is exhausted");
+        let failure = error
+            .downcast_ref::<TriggerDispatchFailure>()
+            .expect("retry exhaustion should use typed trigger dispatch failure");
+        assert_eq!(
+            failure.kind(),
+            TriggerDispatchFailureKind::HandlerRetryExhausted
         );
     }
 
     #[tokio::test]
-    async fn test_dispatch_panic_propagates_from_background_task() {
+    async fn dispatch_panic_propagates_typed_panic_failure() {
         use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
         use tokio_util::sync::CancellationToken;
 
@@ -1364,12 +1637,228 @@ mod tests {
         )
         .await;
 
-        let error = match result {
-            Ok(()) => panic!("run_with_host should fail when a dispatch task panics"),
-            Err(error) => error.to_string(),
-        };
+        let error = result.expect_err("run_with_host should fail when dispatch panics");
+        let failure = error
+            .downcast_ref::<TriggerDispatchFailure>()
+            .expect("dispatch panic should use typed trigger dispatch failure");
+        assert_eq!(
+            failure.kind(),
+            TriggerDispatchFailureKind::DispatchTaskPanic
+        );
+    }
 
-        assert!(error.contains("panicked"), "unexpected error: {error}");
+    #[tokio::test]
+    async fn retry_interrupted_by_shutdown_is_not_reported_as_dispatch_failure() {
+        use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+        use tokio_util::sync::CancellationToken;
+
+        let handler_started = Arc::new(Notify::new());
+        let handler_started_for_handler = handler_started.clone();
+        let handler: TriggerHandler<()> = Arc::new(move |_ctx| {
+            let handler_started = handler_started_for_handler.clone();
+            Box::pin(async move {
+                handler_started.notify_one();
+                Err(anyhow::anyhow!("transient handler failure"))
+            })
+        });
+        let restart_policy = RestartPolicy::builder()
+            .initial_delay(Duration::from_secs(60))
+            .max_delay(Duration::from_secs(60))
+            .jitter_factor(0.0)
+            .build();
+        let runner = TriggerRunner::new(
+            "shutdown_interrupted_retry_trigger",
+            ServiceId::new(202),
+            handler,
+            restart_policy,
+            None,
+        );
+        let cancellation_token = CancellationToken::new();
+        let cancellation_for_scope = cancellation_token.clone();
+
+        let task = tokio::spawn(__run_service_scope(
+            ServiceIdentity::new(
+                ServiceId::new(202),
+                "shutdown_interrupted_retry_trigger",
+                cancellation_token,
+                CancellationToken::new(),
+            ),
+            DaemonResources::new(),
+            || async move {
+                let mut host = OneShotBlockingHost { emitted: false };
+                let target = Arc::new(());
+                runner
+                    .run_with_host::<(), OneShotBlockingHost>(&mut host, target)
+                    .await
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), handler_started.notified())
+            .await
+            .expect("handler should start before shutdown");
+        cancellation_for_scope.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("runner should exit after shutdown")
+            .expect("service scope task should not panic");
+        assert!(
+            result.is_ok(),
+            "shutdown-interrupted retry should exit cleanly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_transition_cancels_in_flight_dispatch_without_false_failure() {
+        use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+        use tokio_util::sync::CancellationToken;
+
+        let handler_started = Arc::new(Notify::new());
+        let handler_started_for_handler = handler_started.clone();
+        let handler: TriggerHandler<()> = Arc::new(move |_ctx| {
+            let handler_started = handler_started_for_handler.clone();
+            Box::pin(async move {
+                handler_started.notify_one();
+                futures::future::pending::<()>().await;
+                Ok(())
+            })
+        });
+        let runner = TriggerRunner::new(
+            "reload_cancels_dispatch_trigger",
+            ServiceId::new(203),
+            handler,
+            RestartPolicy::for_testing(),
+            None,
+        );
+        let reload_token = CancellationToken::new();
+        let reload_for_scope = reload_token.clone();
+
+        let task = tokio::spawn(__run_service_scope(
+            ServiceIdentity::new(
+                ServiceId::new(203),
+                "reload_cancels_dispatch_trigger",
+                CancellationToken::new(),
+                reload_token,
+            ),
+            DaemonResources::new(),
+            || async move {
+                let mut host = OneShotReloadHost { emitted: false };
+                let target = Arc::new(());
+                runner
+                    .run_with_host::<(), OneShotReloadHost>(&mut host, target)
+                    .await
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), handler_started.notified())
+            .await
+            .expect("handler should start before reload cancellation");
+        reload_for_scope.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("runner should exit after reload")
+            .expect("service scope task should not panic");
+        assert!(
+            result.is_ok(),
+            "reload-cancelled dispatch should exit cleanly: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_transition_drains_in_flight_dispatch_failure() {
+        use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+        use tokio_util::sync::CancellationToken;
+
+        let handler_started = Arc::new(Notify::new());
+        let release_handler = Arc::new(Notify::new());
+        let handler_started_for_handler = handler_started.clone();
+        let release_for_handler = release_handler.clone();
+        let handler: TriggerHandler<()> = Arc::new(move |_ctx| {
+            let handler_started = handler_started_for_handler.clone();
+            let release_handler = release_for_handler.clone();
+            Box::pin(async move {
+                handler_started.notify_one();
+                release_handler.notified().await;
+                Err(anyhow::anyhow!("late dispatch failure"))
+            })
+        });
+        let restart_policy = RestartPolicy::builder()
+            .initial_delay(Duration::from_millis(1))
+            .max_delay(Duration::from_millis(1))
+            .jitter_factor(0.0)
+            .trigger_max_retries(1)
+            .build();
+        let runner = TriggerRunner::new(
+            "stop_drains_dispatch_trigger",
+            ServiceId::new(204),
+            handler,
+            restart_policy,
+            None,
+        );
+        let stop_emitted = Arc::new(Notify::new());
+        let stop_seen = stop_emitted.clone();
+
+        let task = tokio::spawn(__run_service_scope(
+            ServiceIdentity::new(
+                ServiceId::new(204),
+                "stop_drains_dispatch_trigger",
+                CancellationToken::new(),
+                CancellationToken::new(),
+            ),
+            DaemonResources::new(),
+            || async move {
+                let mut host = DispatchThenStopHost {
+                    emitted: false,
+                    stop_emitted,
+                };
+                let target = Arc::new(());
+                runner
+                    .run_with_host::<(), DispatchThenStopHost>(&mut host, target)
+                    .await
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), handler_started.notified())
+            .await
+            .expect("handler should start before stop");
+        tokio::time::timeout(Duration::from_millis(500), stop_seen.notified())
+            .await
+            .expect("host should emit Stop before handler is released");
+        release_handler.notify_one();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("runner should finish draining stop dispatch")
+            .expect("service scope task should not panic");
+        let error = result.expect_err("normal Stop should propagate drained dispatch failure");
+        let failure = error
+            .downcast_ref::<TriggerDispatchFailure>()
+            .expect("drained dispatch failure should stay typed");
+        assert_eq!(
+            failure.kind(),
+            TriggerDispatchFailureKind::HandlerRetryExhausted
+        );
+    }
+
+    #[tokio::test]
+    async fn scale_monitor_unexpected_completion_is_observable() {
+        let handler: TriggerHandler<()> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
+        let runner = TriggerRunner::new(
+            "scale_monitor_trigger",
+            ServiceId::new(205),
+            handler,
+            RestartPolicy::for_testing(),
+            Some(ScalingPolicy::default()),
+        );
+        let monitor = tokio::spawn(async {});
+
+        let result = runner.observe_scale_monitor(monitor).await;
+        let failure = result.expect_err("scale monitor completion should be observable");
+        assert_eq!(
+            failure.kind(),
+            TriggerDispatchFailureKind::ScaleMonitorFailed
+        );
     }
 
     // -----------------------------------------------------------------------

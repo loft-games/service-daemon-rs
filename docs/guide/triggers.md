@@ -130,16 +130,18 @@ This 4-tuple identity enables structured log correlation and automated topology 
 
 ## 5. Resilience: Automatic Handler Retries
 
-Individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
+Individual trigger handler failures (returning `Err`) are automatically retried using the daemon's **Exponential Backoff** policy. A single failed attempt is treated as a message-handling problem, not as a failed service generation.
 
 ### How it works
 When a handler fails:
 1. The built-in `RetryInterceptor` catches the error and manages retry logic with a `BackoffController`.
 2. The payload is shared via `Arc` internally -- retries **never** deep-copy business data.
 3. Errors are automatically logged with structured context.
-4. Shutdown signals are respected during backoff waits -- no hanging retries.
+4. Shutdown and reload signals interrupt backoff waits cleanly -- no hanging retries and no false failure report during lifecycle cancellation.
 
-The retry logic is implemented internally; application code usually only configures the restart policy and writes idempotent handlers.
+If you set `trigger_max_retries` on `RestartPolicy`, reaching that limit means the current dispatch has been exhausted. At that point the trigger service generation reports a recoverable failure to the normal supervisor, so the existing restart/backoff/status/diagnostics path is used. Dispatch infrastructure failures, such as a spawned dispatch task panic, also flow through the supervisor; panic is recorded as a panic exit rather than as a silent log line.
+
+Application code usually only configures the restart policy and writes idempotent handlers.
 
 ### Payload Handling
 

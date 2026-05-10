@@ -85,7 +85,7 @@ The control plane runs supervisors, watchers, startup waves, reload, restart/bac
 
 During daemon construction, the final selected service list is also the source for HighPriority capacity planning. The planner counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and uses that plan only when the shared high-priority runtime is lazily created.
 
-The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models; Phase 8 may attach read-only interpretation labels, confidence, and investigation hints for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Future mode-internal placement changes, such as HighPriority runtime epoch rollover, are deferred to Phase 9 research and would need to happen through a cooperative generation boundary.
+The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models; Phase 8 may attach read-only interpretation labels, confidence, and investigation hints for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Future mode-internal placement changes, such as HighPriority runtime epoch rollover, are deferred to later research and would need to happen through a cooperative generation boundary.
 
 ### 3.1. Phase 6/7 Public Boundary
 
@@ -124,6 +124,7 @@ The framework is organized into specialized submodules to ensure maintainability
 - **`core/trigger_runner.rs`**: Event loop driver and interceptor pipeline.
   - **Instance Reuse**: Hosts maintain internal state across iterations.
   - **Elastic Scaling**: Asynchronous dispatch with semaphore-based backpressure.
+  - **Dispatch Ownership**: In-flight dispatch tasks are owned by the runner, so retry exhaustion, task errors, panics, and unexpected helper-task exits report back through the normal supervisor path instead of becoming detached log-only failures.
   - **Advanced ScalingPolicy boundary**: normal examples use `ScalingPolicy::builder()`. `ScalingPolicy::try_new(...)` exists for config parsers and integrations that must reject invalid input instead of accepting builder clamping.
 - **`core/context/`**: Task-local storage and status plane interactions.
   - **Simulation Overlay**: `MockContext` for unit testing with zero production cost.
@@ -181,7 +182,7 @@ The system uses a unified messaging layer for all cross-service events:
 - **TriggerMessage**: Encapsulates the payload with a **UUID v7** `message_id` and a `source_id` (the publishing service).
 - **TriggerContext**: Provides execution-specific identity, including the current `service_id` and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`.
 - **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI resolution.
-- **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context (Source, Message, and Instance).
+- **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context (Source, Message, and Instance). The runner also owns in-flight dispatch observation so completed failures and panics return to the service supervisor.
 - **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). Public user-defined interceptor registration is not exposed yet.
 
 [Back to README](../../README.md)

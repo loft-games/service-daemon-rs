@@ -40,13 +40,13 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 | :--- | :--- | :--- |
 | **Service** | Restarts forever; failures use backoff plus an internal storm guard, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
 | **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
-| **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
+| **Trigger dispatch** | A handler failure is retried inside the current dispatch; retry exhaustion becomes a recoverable trigger-service generation failure | Set `trigger_max_retries` on the `RestartPolicy` to bound each dispatch |
 
 **Why the difference?** Services are long-running background tasks - they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
 
 Lazy providers are different: they may initialize after startup, inside a running service. In that case, a `ProviderError::Fatal` is promoted to a daemon-wide shutdown request by the service runner, so the process can stop cleanly instead of continuing in a partially initialized state.
 
-Trigger handlers, on the other hand, process individual messages. A single poison message should not block the entire queue forever. `trigger_max_retries` acts as a safety valve to skip messages that consistently fail.
+Trigger handlers process individual events. A single handler `Err` is treated as a message-handling failure and stays inside the trigger retry pipeline. If the configured retry limit is exhausted, the trigger service generation reports a recoverable failure to the normal supervisor, which then applies the same restart/backoff/status/diagnostics path as other recoverable service failures.
 
 ### 1.3. Trigger Retry Safety Valve: `trigger_max_retries`
 
@@ -63,10 +63,10 @@ let mut daemon = ServiceDaemon::builder()
     .build();
 ```
 
-When `trigger_max_retries` is reached, the `RetryInterceptor` logs a warning and propagates the error. The default is `None` (unlimited retries).
+When `trigger_max_retries` is reached, the current dispatch is exhausted and the trigger service generation reports a recoverable failure. The supervisor then records the exit, applies restart/backoff policy, and starts the next generation when policy allows. The default is `None` (unlimited retries).
 
 > [!WARNING]
-> Do **not** use `trigger_max_retries` to control service lifecycle. If a service needs to stop permanently, return `ServiceError::Fatal` from the service function instead.
+> Do **not** use `trigger_max_retries` as a service restart-storm control. It only bounds retries for one trigger dispatch. Service-generation restarts remain governed by supervisor restart/backoff policy.
 
 ### 1.4. Fatal Errors
 

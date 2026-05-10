@@ -36,7 +36,7 @@ HighPriority capacity planning happens before runtime allocation and only reads 
 
 Scheduling analysis is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or request restarts in production. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, or shutdown behavior.
 
-A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, is deferred to Phase 9 research and would need to happen at a generation boundary inside the same declared mode.
+A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, is deferred to later research and would need to happen at a generation boundary inside the same declared mode.
 
 ### 1.1. The Signal Path (Reactive Update Flow)
 How a state change is propagated through the system to trigger a reload:
@@ -72,6 +72,8 @@ Fatal outcomes stop the current service generation without entering the retry/ba
 - Ordinary `Err(...)` and panics are different: they transition the service into `Recovering(...)` and restart with backoff.
 
 A normal `Ok(())` return is also distinct from failure recovery. The supervisor still starts a fresh generation, but it does so immediately and records success on the backoff controller instead of counting the exit as another failure.
+
+Trigger handlers run inside trigger service generations. A single handler `Err` is retried by the trigger runner; retry exhaustion and dispatch infrastructure errors are bridged back to the supervisor as recoverable generation failures. Dispatch task panics keep their panic classification, so panic lifecycle counters and backoff behavior remain consistent with ordinary service panics.
 
 Isolated startup failures are intentionally not fatal. If an isolated OS thread, private Tokio runtime, or startup bridge cannot be created, the generation is classified as an isolated startup failure and restarted through the recoverable backoff path.
 
@@ -125,9 +127,9 @@ For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdo
 
 ## 4. State Persistence (The Shelf)
 
-The "Shelf" is a global store where services can deposit data before a reload or after a crash.
-- **Isolation**: Buckets are isolated by `service_name` (`&'static str`), not by `ServiceId`. This is intentional -- Shelf data persists across restarts, while `ServiceId` may change when the Registry is rebuilt.
-- **Survival**: Unlike standard singletons, Shelf data survives the task termination and is inherited by the next "generation" of the same service.
+The "Shelf" is a daemon-scoped store where services can deposit data before a reload or after a crash.
+- **Isolation**: Buckets are isolated by `ServiceId`, so two selected services with the same Rust function name cannot share shelf state accidentally.
+- **Survival**: Unlike standard singletons, Shelf data survives generation termination and is inherited by the next generation of the same selected service.
 
 ## 5. Provider Initialization Errors
 

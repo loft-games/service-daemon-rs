@@ -136,6 +136,7 @@ Generation outcome logs include a compact summary of sleep/probe observations, r
 - Lane records expose `DiagnosticRuntimeLane`, including the internal `Control` diagnostics lane for observation-only aggregates.
 - Observation stats expose completed/interrupted counts plus total/avg/max/last drift in milliseconds.
 - Lifecycle stats expose reload, restart, backoff, rate-limited restart, termination, and exit-kind counters.
+- Trigger services use the same lifecycle counters: retry exhaustion and dispatch infrastructure errors appear as recoverable exits, while dispatch panics appear as panic exits.
 - Standard service and Standard lane records may include read-only `DiagnosticInterpretation` entries with a label, confidence, and investigation hints.
 - Snapshot reads are side-effect free: they do not emit advisory logs, mutate the diagnostics store, reload/restart services, or change body placement.
 
@@ -164,7 +165,7 @@ These recommendations are advisory. They can report:
 - Isolated resource pressure when isolated startup failures or rate-limited restarts appear.
 - Lifecycle instability when restart/backoff signals are high, which suppresses placement-like advice.
 
-The analyzer does not expose a public metrics schema and does not change the declared service scheduling mode. It is not an input to Phase 7 HighPriority worker-count planning. Future mode-internal runtime placement work, such as HighPriority runtime epoch rollover, is deferred to Phase 9 research and would need to be a generation-boundary decision inside the same declared mode.
+The analyzer does not expose a public metrics schema and does not change the declared service scheduling mode. It is not an input to Phase 7 HighPriority worker-count planning. Future mode-internal runtime placement work, such as HighPriority runtime epoch rollover, is deferred to later research and would need to be a generation-boundary decision inside the same declared mode.
 
 The default `SchedulingAdvisoryProfile` keeps this advisory loop enabled. To suppress advisory emission without changing lifecycle or body placement, configure the daemon explicitly:
 
@@ -179,6 +180,8 @@ let mut daemon = ServiceDaemon::builder()
 ### Restart and Recovery Signals
 
 When a service generation restarts after a recoverable failure, structured logs include the failure kind, configured policy delay, effective restart delay, whether the internal storm guard extended the delay, and the number of failures currently visible in the storm window. Internal lifecycle snapshots also track rate-limited restart counts and the last policy/effective delay pair.
+
+For triggers, retry exhaustion and dispatch infrastructure failures use those same restart/recovery signals. A dispatch panic is classified as a panic exit, so the `panic` counter and `last_exit_kind` distinguish it from ordinary recoverable exhaustion.
 
 Log fields remain diagnostic only. They do not change trigger retry semantics or expose internal recommendation state beyond the public snapshot read model.
 

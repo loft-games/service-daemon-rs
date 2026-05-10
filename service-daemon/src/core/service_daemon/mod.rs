@@ -986,7 +986,10 @@ impl ServiceDaemonBuilder {
         #[cfg(not(feature = "simulation"))]
         let resources = DaemonResources::new();
 
-        // Inject user-registered trigger configs into the shared resources.
+        // Inject daemon-level trigger configs into the shared resources.
+        resources
+            .trigger_configs
+            .insert(TypeId::of::<RestartPolicy>(), Box::new(self.restart_policy));
         for entry in self.trigger_configs {
             resources.trigger_configs.insert(entry.0, entry.1);
         }

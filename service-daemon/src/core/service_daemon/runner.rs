@@ -31,6 +31,7 @@ use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind, RuntimeLane,
     run_generation_runtime_probe,
 };
+use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 use crate::models::policy::RestartStormGuard;
 use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
@@ -533,12 +534,52 @@ impl ServiceSupervisor {
                         GenerationExitKind::IsolatedStartupFailure,
                     );
                 }
-                error!("Service {} failed: {:?}", self.name, e);
-                (
-                    ServiceStatus::Recovering(format!("{:?}", e)),
-                    RestartDecision::WithBackoff(RestartFailureKind::RecoverableError),
-                    GenerationExitKind::RecoverableError,
-                )
+                if let Some(trigger_failure) = e.downcast_ref::<TriggerDispatchFailure>() {
+                    let (restart_failure_kind, exit_kind) = match trigger_failure.kind() {
+                        TriggerDispatchFailureKind::DispatchTaskPanic => {
+                            (RestartFailureKind::Panic, GenerationExitKind::Panic)
+                        }
+                        TriggerDispatchFailureKind::HandlerRetryExhausted
+                        | TriggerDispatchFailureKind::DispatchTaskError
+                        | TriggerDispatchFailureKind::DispatchTaskCancelled
+                        | TriggerDispatchFailureKind::DispatchPermitAcquireFailed
+                        | TriggerDispatchFailureKind::ScaleMonitorFailed => (
+                            RestartFailureKind::RecoverableError,
+                            GenerationExitKind::RecoverableError,
+                        ),
+                    };
+                    error!(
+                        service = %self.name,
+                        service_id = %self.service_id,
+                        generation = self.generation,
+                        trigger = %trigger_failure.trigger_name(),
+                        trigger_service_id = %trigger_failure.service_id(),
+                        instance_seq = ?trigger_failure.instance_seq(),
+                        message_id = ?trigger_failure.message_id(),
+                        trigger_failure_kind = %trigger_failure.kind().as_str(),
+                        exit_kind = ?exit_kind,
+                        restart_failure_kind = ?restart_failure_kind,
+                        error = ?e,
+                        "Trigger dispatch failure ended service generation"
+                    );
+                    (
+                        ServiceStatus::Recovering(format!(
+                            "Trigger '{}' dispatch failure ({}): {}",
+                            trigger_failure.trigger_name(),
+                            trigger_failure.kind(),
+                            e
+                        )),
+                        RestartDecision::WithBackoff(restart_failure_kind),
+                        exit_kind,
+                    )
+                } else {
+                    error!("Service {} failed: {:?}", self.name, e);
+                    (
+                        ServiceStatus::Recovering(format!("{:?}", e)),
+                        RestartDecision::WithBackoff(RestartFailureKind::RecoverableError),
+                        GenerationExitKind::RecoverableError,
+                    )
+                }
             }
             Err(panic) => {
                 let panic_msg = if let Some(s) = panic.downcast_ref::<&str>() {
@@ -1945,6 +1986,86 @@ mod tests {
             RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
         ));
         assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+    }
+
+    #[tokio::test]
+    async fn trigger_dispatch_errors_use_backoff_recovery() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        let failure = TriggerDispatchFailure::new(
+            TriggerDispatchFailureKind::HandlerRetryExhausted,
+            "test_trigger",
+            ServiceId::new(1),
+            Some(7),
+            Some(uuid::Uuid::nil()),
+            "retry exhausted",
+        );
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
+
+        assert!(
+            matches!(status, ServiceStatus::Recovering(message) if message.contains("test_trigger"))
+        );
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert!(matches!(
+            restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
+        ));
+        assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+    }
+
+    #[tokio::test]
+    async fn trigger_dispatch_panics_use_panic_restart_classification() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        let failure = TriggerDispatchFailure::new(
+            TriggerDispatchFailureKind::DispatchTaskPanic,
+            "panic_trigger",
+            ServiceId::new(1),
+            Some(8),
+            Some(uuid::Uuid::nil()),
+            "dispatch panicked",
+        );
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
+
+        assert!(
+            matches!(status, ServiceStatus::Recovering(message) if message.contains("panic_trigger"))
+        );
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert!(matches!(
+            restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::Panic)
+        ));
+        assert_eq!(exit_kind, GenerationExitKind::Panic);
+    }
+
+    #[tokio::test]
+    async fn reload_overrides_trigger_dispatch_exit_kind_when_reload_token_cancelled() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+        let failure = TriggerDispatchFailure::new(
+            TriggerDispatchFailureKind::DispatchTaskError,
+            "reload_trigger",
+            ServiceId::new(1),
+            Some(9),
+            Some(uuid::Uuid::nil()),
+            "dispatch failed during reload",
+        );
+
+        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+            supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
+
+        assert!(matches!(status, ServiceStatus::Restoring));
+        assert!(should_restart);
+        assert!(!should_shutdown_daemon);
+        assert_eq!(restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_kind, GenerationExitKind::Reload);
     }
 
     #[tokio::test]

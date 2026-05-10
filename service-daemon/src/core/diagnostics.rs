@@ -858,6 +858,70 @@ mod tests {
     }
 
     #[test]
+    fn trigger_dispatch_recoverable_exit_updates_existing_lifecycle_counters() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(22);
+        let handle =
+            store.register_generation(service_id, "email_trigger", 4, RuntimeLane::Standard);
+
+        handle.record_exit(GenerationExitKind::RecoverableError);
+        handle.record_restart(
+            true,
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            false,
+        );
+
+        let generation = handle.snapshot();
+        assert_eq!(generation.aggregate.lifecycle.recoverable_error, 1);
+        assert_eq!(generation.aggregate.lifecycle.backoff_restart, 1);
+        assert_eq!(
+            generation.aggregate.lifecycle.last_exit_kind,
+            Some(GenerationExitKind::RecoverableError)
+        );
+
+        let service = store.service_snapshot(service_id).unwrap();
+        assert_eq!(service.aggregate.lifecycle.recoverable_error, 1);
+        assert_eq!(service.aggregate.lifecycle.backoff_restart, 1);
+        assert_eq!(
+            service.aggregate.lifecycle.last_exit_kind,
+            Some(GenerationExitKind::RecoverableError)
+        );
+    }
+
+    #[test]
+    fn trigger_dispatch_panic_exit_updates_panic_counter_and_last_exit_kind() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(23);
+        let handle =
+            store.register_generation(service_id, "panic_trigger", 5, RuntimeLane::Standard);
+
+        handle.record_exit(GenerationExitKind::Panic);
+        handle.record_restart(
+            true,
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            false,
+        );
+
+        let generation = handle.snapshot();
+        assert_eq!(generation.aggregate.lifecycle.panic, 1);
+        assert_eq!(generation.aggregate.lifecycle.backoff_restart, 1);
+        assert_eq!(
+            generation.aggregate.lifecycle.last_exit_kind,
+            Some(GenerationExitKind::Panic)
+        );
+
+        let service = store.service_snapshot(service_id).unwrap();
+        assert_eq!(service.aggregate.lifecycle.panic, 1);
+        assert_eq!(service.aggregate.lifecycle.backoff_restart, 1);
+        assert_eq!(
+            service.aggregate.lifecycle.last_exit_kind,
+            Some(GenerationExitKind::Panic)
+        );
+    }
+
+    #[test]
     fn diagnostics_store_retains_only_recent_generation_snapshots_per_service() {
         let store = DiagnosticsStore::new();
 

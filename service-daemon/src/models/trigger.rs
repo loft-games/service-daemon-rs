@@ -328,8 +328,8 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
             let scaling =
                 context::trigger_config::<ScalingPolicy>().or_else(|| Self::scaling_policy());
 
-            let runner =
-                TriggerRunner::new(name, service_id, handler, RestartPolicy::default(), scaling);
+            let restart_policy = context::trigger_config::<RestartPolicy>().unwrap_or_default();
+            let runner = TriggerRunner::new(name, service_id, handler, restart_policy, scaling);
 
             runner.run_with_host::<T, Self>(&mut host, target).await
         })
