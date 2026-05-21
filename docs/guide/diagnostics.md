@@ -135,16 +135,35 @@ Generation outcome logs include a compact summary of sleep/probe observations, r
 - Generation-detail records are bounded to the most recent 1024 generations per service; service and lane aggregates continue accumulating across evicted generation details.
 - Lane records expose `DiagnosticRuntimeLane`, including the internal `Control` diagnostics lane for observation-only aggregates.
 - Observation stats expose completed/interrupted counts plus total/avg/max/last drift in milliseconds.
-- Lifecycle stats expose reload, restart, backoff, rate-limited restart, termination, and exit-kind counters.
+- Lifecycle stats expose reload, restart, backoff, rate-limited restart, termination, exit-kind counters, last exit kind, last policy/effective restart delay, and last restart decision.
 - Trigger services use the same lifecycle counters: retry exhaustion and dispatch infrastructure errors appear as recoverable exits, while dispatch panics appear as panic exits.
 - Standard service and Standard lane records may include read-only `DiagnosticInterpretation` entries with a label, confidence, and investigation hints.
 - Snapshot reads are side-effect free: they do not emit advisory logs, mutate the diagnostics store, reload/restart services, or change body placement.
 
 The public snapshot is a distilled read model. It does not expose `DiagnosticsStore`, diagnostics windows, recommendation fingerprints, evaluator thresholds, or mutation paths.
 
+### Lifecycle Facts and Restart Decisions
+
+`last_exit_kind` describes why the previous recorded generation ended. `last_restart_decision` describes the most recent restart path the supervisor actually entered. Keeping these facts separate avoids making users infer restart meaning from delay values alone.
+
+- Clean `Ok(())` exits and reload restarts record `DiagnosticRestartDecisionKind::Immediate`.
+- Recoverable service errors, trigger retry exhaustion, and trigger dispatch infrastructure failures record `BackoffRecoverableError`.
+- Service panics and trigger dispatch panics record `BackoffPanic`.
+- Isolated thread/runtime/bridge startup failures record `BackoffIsolatedStartupFailure`.
+- Internal supervisor consistency failures record `BackoffInternalSupervisorError`.
+- Shutdown, fatal service errors, and provider-init terminal errors do not create a synthetic restart decision.
+
+These fields are observation facts. They do not request a restart, override `RestartPolicy`, or make recommendations executable.
+
+### Snapshot-to-Exporter Boundary
+
+Metrics exporters should be thin adapters over `DaemonDiagnosticsSnapshot`: read the snapshot, map typed fields to vendor names/units/labels, and publish without mutating daemon state. The core runtime intentionally does not ship a Prometheus or OpenTelemetry schema in this phase.
+
+Exporter adapters should treat `#[non_exhaustive]` diagnostics enums defensively, control label cardinality, and account for bounded generation-detail retention. Service and lane aggregates are suitable for cumulative export; generation-level export should be understood as a recent bounded view rather than an infinite event log.
+
 ### Read-only Diagnostic Interpretations
 
-Phase 8 adds a small interpretation layer on top of the raw counters. It is meant to help humans read Standard runtime symptoms, not to identify a definitive culprit or issue commands.
+The snapshot includes a small interpretation layer on top of the raw counters. It is meant to help humans read Standard runtime symptoms, not to identify a definitive culprit or issue commands.
 
 Interpretation labels include low-sample suppression, host-runtime wake-delay suspicion, service-local wake-delay suspicion, service impacted by Standard lane pressure, blocking-risk suspicion, wake-storm suspicion, and lifecycle instability. Each interpretation carries `DiagnosticConfidence` and `DiagnosticRecommendationHint` values such as continue observing, investigate the host runtime, check blocking work, add business tracing, consider changing the source-level declared mode in a future build, or investigate lifecycle instability first.
 
@@ -179,9 +198,9 @@ let mut daemon = ServiceDaemon::builder()
 
 ### Restart and Recovery Signals
 
-When a service generation restarts after a recoverable failure, structured logs include the failure kind, configured policy delay, effective restart delay, whether the internal storm guard extended the delay, and the number of failures currently visible in the storm window. Internal lifecycle snapshots also track rate-limited restart counts and the last policy/effective delay pair.
+When a service generation restarts after a recoverable failure, structured logs include the failure kind, restart decision kind, configured policy delay, effective restart delay, whether the internal storm guard extended the delay, and the number of failures currently visible in the storm window. Lifecycle snapshots track the same last restart decision plus rate-limited restart counts and the last policy/effective delay pair.
 
-For triggers, retry exhaustion and dispatch infrastructure failures use those same restart/recovery signals. A dispatch panic is classified as a panic exit, so the `panic` counter and `last_exit_kind` distinguish it from ordinary recoverable exhaustion.
+For triggers, retry exhaustion and dispatch infrastructure failures use those same restart/recovery signals. A dispatch panic is classified as a panic exit and a panic backoff restart decision, so the `panic` counter, `last_exit_kind`, and `last_restart_decision` distinguish it from ordinary recoverable exhaustion.
 
 Log fields remain diagnostic only. They do not change trigger retry semantics or expose internal recommendation state beyond the public snapshot read model.
 

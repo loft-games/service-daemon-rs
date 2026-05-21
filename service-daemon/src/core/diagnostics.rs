@@ -56,6 +56,21 @@ pub(crate) enum GenerationExitKind {
     IsolatedStartupFailure,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RestartDecisionKind {
+    Immediate,
+    BackoffRecoverableError,
+    BackoffPanic,
+    BackoffIsolatedStartupFailure,
+    BackoffInternalSupervisorError,
+}
+
+impl RestartDecisionKind {
+    fn uses_backoff(self) -> bool {
+        !matches!(self, Self::Immediate)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SleepObservation {
     pub source: SleepObservationSource,
@@ -219,6 +234,7 @@ pub(crate) struct LifecycleStatsSnapshot {
     pub last_policy_delay_ms: u64,
     pub last_effective_restart_delay_ms: u64,
     pub last_exit_kind: Option<GenerationExitKind>,
+    pub last_restart_decision: Option<RestartDecisionKind>,
 }
 
 #[derive(Default)]
@@ -239,6 +255,7 @@ struct LifecycleStats {
     last_policy_delay_ms: AtomicU64,
     last_effective_restart_delay_ms: AtomicU64,
     last_exit_kind: Mutex<Option<GenerationExitKind>>,
+    last_restart_decision: Mutex<Option<RestartDecisionKind>>,
 }
 
 impl LifecycleStats {
@@ -248,13 +265,13 @@ impl LifecycleStats {
 
     fn record_restart(
         &self,
-        backoff: bool,
+        decision: RestartDecisionKind,
         policy_delay: Duration,
         effective_delay: Duration,
         rate_limited: bool,
     ) {
         self.restart.fetch_add(1, Ordering::Relaxed);
-        if backoff {
+        if decision.uses_backoff() {
             self.backoff_restart.fetch_add(1, Ordering::Relaxed);
         }
         if rate_limited {
@@ -264,6 +281,7 @@ impl LifecycleStats {
             .store(duration_millis(policy_delay), Ordering::Relaxed);
         self.last_effective_restart_delay_ms
             .store(duration_millis(effective_delay), Ordering::Relaxed);
+        *lock_or_recover(&self.last_restart_decision) = Some(decision);
     }
 
     fn record_terminated(&self) {
@@ -306,6 +324,7 @@ impl LifecycleStats {
                 .last_effective_restart_delay_ms
                 .load(Ordering::Relaxed),
             last_exit_kind: *lock_or_recover(&self.last_exit_kind),
+            last_restart_decision: *lock_or_recover(&self.last_restart_decision),
         }
     }
 }
@@ -504,25 +523,25 @@ impl GenerationDiagnosticsHandle {
 
     pub(crate) fn record_restart(
         &self,
-        backoff: bool,
+        decision: RestartDecisionKind,
         policy_delay: Duration,
         effective_delay: Duration,
         rate_limited: bool,
     ) {
         self.generation.aggregate.lifecycle.record_restart(
-            backoff,
+            decision,
             policy_delay,
             effective_delay,
             rate_limited,
         );
         self.service.aggregate.lifecycle.record_restart(
-            backoff,
+            decision,
             policy_delay,
             effective_delay,
             rate_limited,
         );
         self.lane.aggregate.lifecycle.record_restart(
-            backoff,
+            decision,
             policy_delay,
             effective_delay,
             rate_limited,
@@ -835,7 +854,7 @@ mod tests {
         handle.record_reload_requested();
         handle.record_exit(GenerationExitKind::IsolatedStartupFailure);
         handle.record_restart(
-            true,
+            RestartDecisionKind::BackoffIsolatedStartupFailure,
             Duration::from_millis(250),
             Duration::from_millis(500),
             true,
@@ -855,6 +874,10 @@ mod tests {
             lifecycle.last_exit_kind,
             Some(GenerationExitKind::IsolatedStartupFailure)
         );
+        assert_eq!(
+            lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffIsolatedStartupFailure)
+        );
     }
 
     #[test]
@@ -866,7 +889,7 @@ mod tests {
 
         handle.record_exit(GenerationExitKind::RecoverableError);
         handle.record_restart(
-            true,
+            RestartDecisionKind::BackoffRecoverableError,
             Duration::from_millis(10),
             Duration::from_millis(20),
             false,
@@ -879,6 +902,10 @@ mod tests {
             generation.aggregate.lifecycle.last_exit_kind,
             Some(GenerationExitKind::RecoverableError)
         );
+        assert_eq!(
+            generation.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffRecoverableError)
+        );
 
         let service = store.service_snapshot(service_id).unwrap();
         assert_eq!(service.aggregate.lifecycle.recoverable_error, 1);
@@ -886,6 +913,16 @@ mod tests {
         assert_eq!(
             service.aggregate.lifecycle.last_exit_kind,
             Some(GenerationExitKind::RecoverableError)
+        );
+        assert_eq!(
+            service.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffRecoverableError)
+        );
+
+        let lane = store.lane_snapshot(RuntimeLane::Standard);
+        assert_eq!(
+            lane.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffRecoverableError)
         );
     }
 
@@ -898,7 +935,7 @@ mod tests {
 
         handle.record_exit(GenerationExitKind::Panic);
         handle.record_restart(
-            true,
+            RestartDecisionKind::BackoffPanic,
             Duration::from_millis(10),
             Duration::from_millis(20),
             false,
@@ -911,6 +948,10 @@ mod tests {
             generation.aggregate.lifecycle.last_exit_kind,
             Some(GenerationExitKind::Panic)
         );
+        assert_eq!(
+            generation.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffPanic)
+        );
 
         let service = store.service_snapshot(service_id).unwrap();
         assert_eq!(service.aggregate.lifecycle.panic, 1);
@@ -918,6 +959,56 @@ mod tests {
         assert_eq!(
             service.aggregate.lifecycle.last_exit_kind,
             Some(GenerationExitKind::Panic)
+        );
+        assert_eq!(
+            service.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffPanic)
+        );
+
+        let lane = store.lane_snapshot(RuntimeLane::Standard);
+        assert_eq!(
+            lane.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffPanic)
+        );
+    }
+
+    #[test]
+    fn immediate_restart_decision_updates_aggregates_without_backoff() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(24);
+        let handle =
+            store.register_generation(service_id, "clean_exit", 1, RuntimeLane::HighPriority);
+
+        handle.record_exit(GenerationExitKind::NormalExit);
+        handle.record_restart(
+            RestartDecisionKind::Immediate,
+            Duration::ZERO,
+            Duration::ZERO,
+            false,
+        );
+
+        let generation = handle.snapshot();
+        assert_eq!(generation.aggregate.lifecycle.restart, 1);
+        assert_eq!(generation.aggregate.lifecycle.backoff_restart, 0);
+        assert_eq!(
+            generation.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::Immediate)
+        );
+
+        let service = store.service_snapshot(service_id).unwrap();
+        assert_eq!(service.aggregate.lifecycle.restart, 1);
+        assert_eq!(service.aggregate.lifecycle.backoff_restart, 0);
+        assert_eq!(
+            service.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::Immediate)
+        );
+
+        let lane = store.lane_snapshot(RuntimeLane::HighPriority);
+        assert_eq!(lane.aggregate.lifecycle.restart, 1);
+        assert_eq!(lane.aggregate.lifecycle.backoff_restart, 0);
+        assert_eq!(
+            lane.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::Immediate)
         );
     }
 
@@ -973,6 +1064,12 @@ mod tests {
                 Duration::from_millis(12),
             ));
             handle.record_exit(GenerationExitKind::Panic);
+            handle.record_restart(
+                RestartDecisionKind::BackoffPanic,
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                false,
+            );
         }
 
         for generation in 1..=3 {
@@ -1016,6 +1113,11 @@ mod tests {
         assert_eq!(crashing_service.current_generation, 1030);
         assert_eq!(crashing_service.aggregate.service_sleep.completed, 1030);
         assert_eq!(crashing_service.aggregate.lifecycle.panic, 1030);
+        assert_eq!(crashing_service.aggregate.lifecycle.backoff_restart, 1030);
+        assert_eq!(
+            crashing_service.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffPanic)
+        );
 
         let stable_service = store.service_snapshot(ServiceId::new(6)).unwrap();
         assert_eq!(stable_service.current_generation, 3);
@@ -1025,6 +1127,11 @@ mod tests {
         let standard_lane = store.lane_snapshot(RuntimeLane::Standard);
         assert_eq!(standard_lane.aggregate.service_sleep.completed, 1030);
         assert_eq!(standard_lane.aggregate.lifecycle.panic, 1030);
+        assert_eq!(standard_lane.aggregate.lifecycle.backoff_restart, 1030);
+        assert_eq!(
+            standard_lane.aggregate.lifecycle.last_restart_decision,
+            Some(RestartDecisionKind::BackoffPanic)
+        );
 
         let high_priority_lane = store.lane_snapshot(RuntimeLane::HighPriority);
         assert_eq!(high_priority_lane.aggregate.service_sleep.completed, 3);
@@ -1066,6 +1173,12 @@ mod tests {
             drift: Duration::from_millis(15),
         });
         handle.record_exit(GenerationExitKind::RecoverableError);
+        handle.record_restart(
+            RestartDecisionKind::BackoffRecoverableError,
+            Duration::from_millis(10),
+            Duration::from_millis(25),
+            false,
+        );
 
         let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
         assert_eq!(snapshot.services.len(), 1);
@@ -1092,6 +1205,20 @@ mod tests {
                 .lifecycle
                 .recoverable_error,
             1
+        );
+        assert_eq!(
+            snapshot.generations[0]
+                .aggregate
+                .lifecycle
+                .last_restart_decision,
+            Some(crate::models::DiagnosticRestartDecisionKind::BackoffRecoverableError)
+        );
+        assert_eq!(
+            snapshot.services[0]
+                .aggregate
+                .lifecycle
+                .last_restart_decision,
+            Some(crate::models::DiagnosticRestartDecisionKind::BackoffRecoverableError)
         );
         assert!(
             snapshot
@@ -1201,9 +1328,19 @@ mod tests {
             ));
         }
         handle.record_exit(GenerationExitKind::RecoverableError);
-        handle.record_restart(false, Duration::ZERO, Duration::ZERO, false);
+        handle.record_restart(
+            RestartDecisionKind::Immediate,
+            Duration::ZERO,
+            Duration::ZERO,
+            false,
+        );
         handle.record_exit(GenerationExitKind::RecoverableError);
-        handle.record_restart(false, Duration::ZERO, Duration::ZERO, false);
+        handle.record_restart(
+            RestartDecisionKind::Immediate,
+            Duration::ZERO,
+            Duration::ZERO,
+            false,
+        );
 
         let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
         let labels = interpretation_labels(&snapshot.services[0].interpretations);

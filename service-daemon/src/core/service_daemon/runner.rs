@@ -28,7 +28,8 @@ use crate::ProviderInitError;
 use crate::ServiceScheduling;
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
 use crate::core::diagnostics::{
-    DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind, RuntimeLane,
+    DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
+    RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane,
     run_generation_runtime_probe,
 };
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
@@ -77,6 +78,26 @@ enum RestartFailureKind {
 enum RestartDecision {
     Immediate,
     WithBackoff(RestartFailureKind),
+}
+
+impl RestartDecision {
+    fn diagnostics_kind(self) -> DiagnosticsRestartDecisionKind {
+        match self {
+            Self::Immediate => DiagnosticsRestartDecisionKind::Immediate,
+            Self::WithBackoff(RestartFailureKind::RecoverableError) => {
+                DiagnosticsRestartDecisionKind::BackoffRecoverableError
+            }
+            Self::WithBackoff(RestartFailureKind::Panic) => {
+                DiagnosticsRestartDecisionKind::BackoffPanic
+            }
+            Self::WithBackoff(RestartFailureKind::IsolatedStartupFailure) => {
+                DiagnosticsRestartDecisionKind::BackoffIsolatedStartupFailure
+            }
+            Self::WithBackoff(RestartFailureKind::InternalSupervisorError) => {
+                DiagnosticsRestartDecisionKind::BackoffInternalSupervisorError
+            }
+        }
+    }
 }
 
 fn duration_millis(duration: Duration) -> u64 {
@@ -631,7 +652,7 @@ impl ServiceSupervisor {
     ) {
         if let Some(diagnostics) = self.generation_diagnostics.as_ref() {
             diagnostics.record_restart(
-                matches!(decision, RestartDecision::WithBackoff(_)),
+                decision.diagnostics_kind(),
                 policy_delay,
                 effective_delay,
                 rate_limited,
@@ -676,6 +697,7 @@ impl ServiceSupervisor {
             rate_limited = storm_decision.rate_limited,
             storm_window_failures = storm_decision.window_failures,
             restart_decision = ?decision,
+            restart_decision_kind = ?decision.diagnostics_kind(),
             restart_failure_kind = ?failure_kind,
             "Restarting service after backoff"
         );
@@ -879,11 +901,16 @@ impl ServiceSupervisor {
             let runtime_probe_max_drift_ms = generation_snapshot
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.aggregate.runtime_probe.max_drift_ms);
+            let runtime_lane = self
+                .generation_diagnostics
+                .as_ref()
+                .map(|diagnostics| diagnostics.runtime_lane());
 
             info!(
                 service = %self.name,
                 service_id = %self.service_id,
                 generation = self.generation,
+                runtime_lane = ?runtime_lane,
                 elapsed_ms,
                 exit_kind = ?GenerationExitKind::Shutdown,
                 sleep_completed,
@@ -944,15 +971,22 @@ impl ServiceSupervisor {
         let runtime_probe_max_drift_ms = generation_snapshot
             .as_ref()
             .map_or(0, |snapshot| snapshot.aggregate.runtime_probe.max_drift_ms);
+        let runtime_lane = self
+            .generation_diagnostics
+            .as_ref()
+            .map(|diagnostics| diagnostics.runtime_lane());
+        let restart_decision_kind = restart_decision.diagnostics_kind();
 
         info!(
             service = %self.name,
             service_id = %self.service_id,
             generation = self.generation,
+            runtime_lane = ?runtime_lane,
             next_status = ?next_status,
             should_restart,
             should_shutdown_daemon,
             restart_decision = ?restart_decision,
+            restart_decision_kind = ?restart_decision_kind,
             elapsed_ms,
             exit_kind = ?exit_kind,
             sleep_completed,
@@ -1344,8 +1378,14 @@ pub async fn stop_all_services(
 mod tests {
     use super::super::policy::RestartPolicy;
     use super::*;
-    use std::sync::LazyLock;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{LazyLock, Mutex as StdMutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::Context;
+    use tracing_subscriber::prelude::*;
 
     static WATCHER_THREAD_NAME: LazyLock<Arc<Mutex<Option<String>>>> =
         LazyLock::new(|| Arc::new(Mutex::new(None)));
@@ -1357,6 +1397,54 @@ mod tests {
         LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
     static ISOLATED_TO_STANDARD_THREADS: LazyLock<Arc<Mutex<Vec<String>>>> =
         LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
+
+    #[derive(Clone, Default)]
+    struct CapturedTraceFields {
+        events: Arc<StdMutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    #[derive(Default)]
+    struct TraceFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    impl Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{:?}", value));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_bool(&mut self, field: &Field, value: bool) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &Field, value: i64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl<S> Layer<S> for CapturedTraceFields
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(visitor.fields);
+        }
+    }
 
     fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
@@ -1865,6 +1953,192 @@ mod tests {
         })
     }
 
+    fn register_test_generation(supervisor: &mut ServiceSupervisor, generation: u64) {
+        supervisor.generation = generation;
+        supervisor.reload_token = Some(CancellationToken::new());
+        supervisor.generation_diagnostics = Some(supervisor.diagnostics.register_generation(
+            supervisor.service_id,
+            supervisor.name,
+            generation,
+            RuntimeLane::Standard,
+        ));
+    }
+
+    #[test]
+    fn restart_decision_maps_to_diagnostics_kind() {
+        assert_eq!(
+            RestartDecision::Immediate.diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::Immediate
+        );
+        assert_eq!(
+            RestartDecision::WithBackoff(RestartFailureKind::RecoverableError).diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::BackoffRecoverableError
+        );
+        assert_eq!(
+            RestartDecision::WithBackoff(RestartFailureKind::Panic).diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::BackoffPanic
+        );
+        assert_eq!(
+            RestartDecision::WithBackoff(RestartFailureKind::IsolatedStartupFailure)
+                .diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::BackoffIsolatedStartupFailure
+        );
+        assert_eq!(
+            RestartDecision::WithBackoff(RestartFailureKind::InternalSupervisorError)
+                .diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::BackoffInternalSupervisorError
+        );
+    }
+
+    #[tokio::test]
+    async fn supervisor_records_restart_decision_into_generation_diagnostics() {
+        let mut supervisor = test_supervisor(RestartPolicy::for_testing());
+        let generation = 1;
+        register_test_generation(&mut supervisor, generation);
+
+        supervisor.record_restart_decision(
+            RestartDecision::WithBackoff(RestartFailureKind::Panic),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+            true,
+        );
+
+        let generation = supervisor
+            .diagnostics
+            .generation_snapshot(supervisor.service_id, generation)
+            .expect("generation diagnostics should be present");
+        assert_eq!(generation.aggregate.lifecycle.restart, 1);
+        assert_eq!(generation.aggregate.lifecycle.backoff_restart, 1);
+        assert_eq!(generation.aggregate.lifecycle.rate_limited_restart, 1);
+        assert_eq!(generation.aggregate.lifecycle.last_policy_delay_ms, 10);
+        assert_eq!(
+            generation
+                .aggregate
+                .lifecycle
+                .last_effective_restart_delay_ms,
+            20
+        );
+        assert_eq!(
+            generation.aggregate.lifecycle.last_restart_decision,
+            Some(DiagnosticsRestartDecisionKind::BackoffPanic)
+        );
+
+        let service = supervisor
+            .diagnostics
+            .service_snapshot(supervisor.service_id)
+            .expect("service diagnostics should be present");
+        assert_eq!(
+            service.aggregate.lifecycle.last_restart_decision,
+            Some(DiagnosticsRestartDecisionKind::BackoffPanic)
+        );
+
+        let lane = supervisor.diagnostics.lane_snapshot(RuntimeLane::Standard);
+        assert_eq!(
+            lane.aggregate.lifecycle.last_restart_decision,
+            Some(DiagnosticsRestartDecisionKind::BackoffPanic)
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_restart_records_immediate_restart_decision() {
+        let mut supervisor = test_supervisor(RestartPolicy::for_testing());
+        let generation = 1;
+        register_test_generation(&mut supervisor, generation);
+
+        assert!(
+            supervisor
+                .wait_for_restart(RestartDecision::Immediate)
+                .await
+        );
+
+        let generation = supervisor
+            .diagnostics
+            .generation_snapshot(supervisor.service_id, generation)
+            .expect("generation diagnostics should be present");
+        assert_eq!(generation.aggregate.lifecycle.restart, 1);
+        assert_eq!(generation.aggregate.lifecycle.backoff_restart, 0);
+        assert_eq!(
+            generation.aggregate.lifecycle.last_restart_decision,
+            Some(DiagnosticsRestartDecisionKind::Immediate)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restart_backoff_trace_includes_correlation_fields() {
+        let mut supervisor = test_supervisor(fast_policy());
+        let generation = 7;
+        register_test_generation(&mut supervisor, generation);
+        let captured = CapturedTraceFields::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+
+        assert!(
+            supervisor
+                .wait_for_restart(RestartDecision::WithBackoff(
+                    RestartFailureKind::RecoverableError,
+                ))
+                .await
+        );
+
+        let events = captured.events.lock().unwrap();
+        let event = events
+            .iter()
+            .find(|event| event.get("restart_decision_kind").is_some())
+            .expect("restart trace event should be captured");
+        assert_eq!(event.get("service"), Some(&"test_service".to_string()));
+        assert!(event.contains_key("service_id"));
+        assert_eq!(event.get("generation"), Some(&generation.to_string()));
+        assert_eq!(
+            event.get("restart_decision_kind"),
+            Some(&"BackoffRecoverableError".to_string())
+        );
+        assert_eq!(
+            event.get("restart_failure_kind"),
+            Some(&"RecoverableError".to_string())
+        );
+        assert!(event.contains_key("policy_delay_ms"));
+        assert!(event.contains_key("effective_delay_ms"));
+        assert_eq!(event.get("rate_limited"), Some(&"false".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn generation_outcome_trace_includes_correlation_fields() {
+        let mut supervisor = test_supervisor(fast_policy());
+        let generation = 9;
+        register_test_generation(&mut supervisor, generation);
+        let captured = CapturedTraceFields::default();
+        let subscriber = tracing_subscriber::registry().with(captured.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let state = supervisor
+            .on_outcome(Ok(Err(Error::msg("transient"))))
+            .await;
+
+        assert!(matches!(state, SupervisorState::Restart(_)));
+        let events = captured.events.lock().unwrap();
+        let event = events
+            .iter()
+            .find(|event| event.get("exit_kind").is_some())
+            .unwrap_or_else(|| panic!("outcome trace event should be captured: {:?}", *events));
+        assert_eq!(event.get("service"), Some(&"test_service".to_string()));
+        assert!(event.contains_key("service_id"));
+        assert_eq!(event.get("generation"), Some(&generation.to_string()));
+        assert_eq!(
+            event.get("runtime_lane"),
+            Some(&"Some(Standard)".to_string())
+        );
+        assert_eq!(
+            event.get("exit_kind"),
+            Some(&"RecoverableError".to_string())
+        );
+        assert_eq!(
+            event.get("restart_decision_kind"),
+            Some(&"BackoffRecoverableError".to_string())
+        );
+        assert_eq!(event.get("should_restart"), Some(&"true".to_string()));
+    }
+
     #[tokio::test]
     async fn isolated_startup_errors_use_backoff_recovery() {
         let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
@@ -2123,6 +2397,55 @@ mod tests {
         assert!(supervisor.daemon_token.is_cancelled());
         assert_eq!(restart_decision, RestartDecision::Immediate);
         assert_eq!(exit_kind, GenerationExitKind::ProviderInitError);
+    }
+
+    #[tokio::test]
+    async fn fatal_service_error_records_exit_without_restart_decision() {
+        let mut supervisor = test_supervisor(RestartPolicy::for_testing());
+        let generation = 1;
+        register_test_generation(&mut supervisor, generation);
+
+        let state = supervisor
+            .on_outcome(Ok(Err(Error::new(ServiceError::Fatal(
+                "fatal".to_string(),
+            )))))
+            .await;
+
+        assert!(matches!(state, SupervisorState::Terminated));
+        let generation = supervisor
+            .diagnostics
+            .generation_snapshot(supervisor.service_id, generation)
+            .expect("generation diagnostics should be present");
+        assert_eq!(
+            generation.aggregate.lifecycle.last_exit_kind,
+            Some(GenerationExitKind::FatalServiceError)
+        );
+        assert_eq!(generation.aggregate.lifecycle.last_restart_decision, None);
+    }
+
+    #[tokio::test]
+    async fn provider_init_error_records_exit_without_restart_decision() {
+        let mut supervisor = test_supervisor(RestartPolicy::for_testing());
+        let generation = 1;
+        register_test_generation(&mut supervisor, generation);
+
+        let state = supervisor
+            .on_outcome(Ok(Err(Error::new(ProviderInitError::Cancelled {
+                provider: "config".to_string(),
+            }))))
+            .await;
+
+        assert!(matches!(state, SupervisorState::Terminated));
+        assert!(supervisor.daemon_token.is_cancelled());
+        let generation = supervisor
+            .diagnostics
+            .generation_snapshot(supervisor.service_id, generation)
+            .expect("generation diagnostics should be present");
+        assert_eq!(
+            generation.aggregate.lifecycle.last_exit_kind,
+            Some(GenerationExitKind::ProviderInitError)
+        );
+        assert_eq!(generation.aggregate.lifecycle.last_restart_decision, None);
     }
 
     #[tokio::test]

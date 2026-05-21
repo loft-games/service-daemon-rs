@@ -72,11 +72,11 @@ pub use models::{
     BackoffController, DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
     DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
     DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
-    DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot, ProviderError, ProviderInitError,
-    Registry, RegistryBuilder, Result, RuntimeLaneDiagnosticsSnapshot, ScalingPolicy,
-    ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
-    ServiceDiagnosticsSnapshot, ServiceError, ServiceId, ServiceStatus, TT, TriggerContext,
-    TriggerHandler, TriggerHost, TriggerMessage,
+    DiagnosticRestartDecisionKind, DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot,
+    ProviderError, ProviderInitError, Registry, RegistryBuilder, Result,
+    RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
+    SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceError, ServiceId, ServiceStatus,
+    TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)

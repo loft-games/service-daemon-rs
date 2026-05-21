@@ -1103,7 +1103,7 @@ mod tests {
 
         handle.record_sleep_observation(completed_service_sleep(8));
         handle.record_restart(
-            true,
+            crate::core::diagnostics::RestartDecisionKind::BackoffRecoverableError,
             std::time::Duration::from_millis(10),
             std::time::Duration::from_millis(20),
             true,

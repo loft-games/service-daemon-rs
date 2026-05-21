@@ -1,6 +1,7 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, ProviderError, Registry, RestartPolicy,
-    ServiceDaemon, ServiceDiagnosticsSnapshot, TT::*, provider, trigger,
+    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticRestartDecisionKind,
+    ProviderError, Registry, RestartPolicy, ServiceDaemon, ServiceDiagnosticsSnapshot, TT::*,
+    provider, trigger,
 };
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -144,6 +145,10 @@ async fn test_trigger_dispatch_retry_exhaustion_restarts_and_records_diagnostics
         service.aggregate.lifecycle.last_exit_kind,
         Some(DiagnosticGenerationExitKind::RecoverableError)
     );
+    assert_eq!(
+        service.aggregate.lifecycle.last_restart_decision,
+        Some(DiagnosticRestartDecisionKind::BackoffRecoverableError)
+    );
 
     Ok(())
 }
@@ -181,6 +186,10 @@ async fn test_trigger_dispatch_panic_restarts_and_records_panic_diagnostics() ->
         service.aggregate.lifecycle.last_exit_kind,
         Some(DiagnosticGenerationExitKind::Panic)
     );
+    assert_eq!(
+        service.aggregate.lifecycle.last_restart_decision,
+        Some(DiagnosticRestartDecisionKind::BackoffPanic)
+    );
 
     Ok(())
 }
@@ -215,6 +224,7 @@ async fn test_trigger_provider_dependency_init_failure_shuts_down_daemon() -> an
         service.aggregate.lifecycle.last_exit_kind,
         Some(DiagnosticGenerationExitKind::ProviderInitError)
     );
+    assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
 
     Ok(())
 }
@@ -252,6 +262,7 @@ async fn test_trigger_shutdown_with_in_flight_dispatch_does_not_record_recoverab
         service.aggregate.lifecycle.last_exit_kind,
         Some(DiagnosticGenerationExitKind::Shutdown)
     );
+    assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
 
     Ok(())
 }

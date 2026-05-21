@@ -1,4 +1,7 @@
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceStatus, provider, service};
+use service_daemon::{
+    DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceStatus, provider,
+    service,
+};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -183,6 +186,18 @@ async fn test_dependency_reload_transitions_through_need_reload_and_restoring() 
     assert!(
         RELOAD_GENERATIONS.load(Ordering::SeqCst) >= 2,
         "expected at least two generations after reload"
+    );
+
+    let service = daemon
+        .diagnostics_snapshot()
+        .services
+        .into_iter()
+        .find(|service| service.service_name == "reload_observer")
+        .expect("reload observer diagnostics should be recorded");
+    assert_eq!(service.aggregate.lifecycle.backoff_restart, 0);
+    assert_eq!(
+        service.aggregate.lifecycle.last_restart_decision,
+        Some(DiagnosticRestartDecisionKind::Immediate)
     );
 
     Ok(())

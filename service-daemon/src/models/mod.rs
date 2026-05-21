@@ -9,8 +9,8 @@ pub use diagnostics::{
     DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
     DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
     DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
-    DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot, RuntimeLaneDiagnosticsSnapshot,
-    ServiceDiagnosticsSnapshot,
+    DiagnosticRestartDecisionKind, DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot,
+    RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
 };
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{

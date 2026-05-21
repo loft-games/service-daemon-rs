@@ -85,9 +85,9 @@ The control plane runs supervisors, watchers, startup waves, reload, restart/bac
 
 During daemon construction, the final selected service list is also the source for HighPriority capacity planning. The planner counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and uses that plan only when the shared high-priority runtime is lazily created.
 
-The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models; Phase 8 may attach read-only interpretation labels, confidence, and investigation hints for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Future mode-internal placement changes, such as HighPriority runtime epoch rollover, are deferred to later research and would need to happen through a cooperative generation boundary.
+The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Future mode-internal placement changes, such as HighPriority runtime epoch rollover, are deferred to later research and would need to happen through a cooperative generation boundary.
 
-### 3.1. Phase 6/7 Public Boundary
+### 3.1. Public Boundary
 
 | Surface | Boundary |
 | :--- | :--- |
@@ -95,12 +95,14 @@ The diagnostics analyzer is internal and recommendation-first. It reads windowed
 | Macro `scheduling = ...` | Accepts only `Standard`, `HighPriority`, or `Isolated`; there is no `Auto` or `Control` user-facing mode. |
 | `ServiceEntry` | Public metadata surface, but Phase 6 does not add experimental restart policy or scheduling hint fields. |
 | `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
+| `DiagnosticLifecycleStats::last_restart_decision` | Public read-only restart-path fact; not a restart command and not a policy override. |
 | `DiagnosticInterpretation` labels, confidence, and hints | Public read-only interpretation metadata for Standard diagnostics facts; not a command surface and not a public evaluator/threshold API. |
 | `SchedulingAdvisoryProfile` | Public advisory emission control only; it does not change lifecycle, body placement, or declared scheduling. |
 | HighPriority capacity plan | Internal runtime topology decision derived from the final declared HighPriority entries; no production public worker-count override is exposed. |
 | Isolated startup concurrency limit | Public builder knob for isolated startup allocation admission only, not a limit on running isolated body lifetime. |
 | Per-service restart override and scheduling hints | Deferred; future hints must stay within the declared mode and require a separate design. |
 | Diagnostics store, windows, evaluator, recommendation model, sampler, and lane resolver | Internal-only implementation details, not exported as public schema or command surfaces. |
+| Snapshot-to-export adapters | External integration boundary; adapters own vendor metric names, units, labels, cardinality, and transport. Core does not bind Prometheus/OpenTelemetry schema here. |
 | Generation-boundary resolver regression hook | Crate-private test-only hook for proving running futures are not moved between Tokio runtimes; not a public testing API and not compiled into production builds. |
 
 ## 4. Project Structure
@@ -121,6 +123,7 @@ The framework is organized into specialized submodules to ensure maintainability
   - **DaemonLayer**: Captured via a non-blocking broadcast pipeline. It extracts multi-level causal context (UUID v7 Message ID, numeric Service ID, and Instance ID) to facilitate asynchronous tracing.
   - **Zero-Allocation Design**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs (UUIDs and numeric IDs) are handled via stack-allocated types to eliminate per-event heap overhead.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
+- **`core/diagnostics.rs`**: Internal observation store for generation, service, and lane aggregates. Public APIs receive only distilled read-only snapshots.
 - **`core/trigger_runner.rs`**: Event loop driver and interceptor pipeline.
   - **Instance Reuse**: Hosts maintain internal state across iterations.
   - **Elastic Scaling**: Asynchronous dispatch with semaphore-based backpressure.

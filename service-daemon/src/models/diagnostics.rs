@@ -132,6 +132,38 @@ impl From<internal::GenerationExitKind> for DiagnosticGenerationExitKind {
     }
 }
 
+/// Last recorded restart decision classification.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticRestartDecisionKind {
+    /// The supervisor restarted immediately without backoff.
+    Immediate,
+    /// The supervisor restarted with backoff after a recoverable error.
+    BackoffRecoverableError,
+    /// The supervisor restarted with backoff after a panic.
+    BackoffPanic,
+    /// The supervisor restarted with backoff after isolated startup failed.
+    BackoffIsolatedStartupFailure,
+    /// The supervisor restarted with backoff after an internal supervisor error.
+    BackoffInternalSupervisorError,
+}
+
+impl From<internal::RestartDecisionKind> for DiagnosticRestartDecisionKind {
+    fn from(value: internal::RestartDecisionKind) -> Self {
+        match value {
+            internal::RestartDecisionKind::Immediate => Self::Immediate,
+            internal::RestartDecisionKind::BackoffRecoverableError => Self::BackoffRecoverableError,
+            internal::RestartDecisionKind::BackoffPanic => Self::BackoffPanic,
+            internal::RestartDecisionKind::BackoffIsolatedStartupFailure => {
+                Self::BackoffIsolatedStartupFailure
+            }
+            internal::RestartDecisionKind::BackoffInternalSupervisorError => {
+                Self::BackoffInternalSupervisorError
+            }
+        }
+    }
+}
+
 /// Aggregated sleep/probe observation counters.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +237,8 @@ pub struct DiagnosticLifecycleStats {
     pub last_effective_restart_delay_ms: u64,
     /// Last recorded exit classification.
     pub last_exit_kind: Option<DiagnosticGenerationExitKind>,
+    /// Last recorded restart decision classification.
+    pub last_restart_decision: Option<DiagnosticRestartDecisionKind>,
 }
 
 impl From<internal::LifecycleStatsSnapshot> for DiagnosticLifecycleStats {
@@ -226,6 +260,7 @@ impl From<internal::LifecycleStatsSnapshot> for DiagnosticLifecycleStats {
             last_policy_delay_ms: value.last_policy_delay_ms,
             last_effective_restart_delay_ms: value.last_effective_restart_delay_ms,
             last_exit_kind: value.last_exit_kind.map(Into::into),
+            last_restart_decision: value.last_restart_decision.map(Into::into),
         }
     }
 }

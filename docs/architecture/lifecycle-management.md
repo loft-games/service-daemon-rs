@@ -83,11 +83,13 @@ Each service generation is registered in an internal diagnostics store when the 
 
 - statically declared body scheduling mode (`Standard`, `HighPriority`, or `Isolated`);
 - lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
-- reload requests, restart decisions, policy/effective restart delay, rate-limited restart flags, and termination;
+- reload requests, restart decisions, last restart decision kind, policy/effective restart delay, rate-limited restart flags, and termination;
 - service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
 - runtime heartbeat probe observations for the control plane and body execution lanes.
 
 The supervisor includes a compact per-generation summary in the outcome tracing event. The public `DaemonDiagnosticsSnapshot` exposes distilled service, generation, and lane summaries through read-only daemon/handle methods. Generation-detail snapshot retention is bounded to the most recent 1024 generations per service so crash loops do not make snapshot collection and sorting unbounded; service and lane aggregates still accumulate across evicted generation details. Standard service and Standard lane summaries can include interpretation labels, confidence, and investigation hints, but those labels are derived from snapshot facts and do not change generation lifecycle, restart/backoff, reload, shutdown, or body placement. The store, windows, evaluator, recommendation fingerprints, thresholds, and mutation paths remain internal. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
+
+`last_exit_kind` and `last_restart_decision` are intentionally separate lifecycle facts. Clean exits and reloads record an immediate restart decision; recoverable service errors and trigger retry exhaustion record recoverable backoff; service or trigger dispatch panics record panic backoff; isolated startup failures record isolated-startup backoff. Fatal service errors, provider-init terminal errors, and shutdown exits do not synthesize a restart decision because they bypass the restart loop.
 
 ### 1.5. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 
