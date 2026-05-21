@@ -1,8 +1,8 @@
-# DIY Providers
+# Custom Providers
 
 In the first chapter, we used a `#[provider]` macro on a simple struct. Real applications often need more: a database connection pool, an MQTT client, an HTTP client with custom config.
 
-For these, the struct + `Default` pattern doesn't fit -- initialization is async, fallible, or depends on configuration. Use a **Provider Function** instead.
+For these, the struct + `Default` pattern doesn't fit -- initialization is async, fallible, or depends on configuration. Use a provider function instead.
 
 ---
 
@@ -36,11 +36,11 @@ async fn mqtt_bus_provider() -> MqttBus {
 
 ## 2. Shared vs. Fresh Instances
 
-By default, every service that asks for `Arc<MqttBus>` will receive the **same instance** (Singleton-like behavior). The framework calls your function once and caches the result.
+By default, every service that asks for `Arc<MqttBus>` will receive the **same shared instance** for its effective provider scope. In ordinary apps that means the framework calls your function once and caches the result for reuse.
 
 ## 3. Using Dependencies in Providers
 
-Providers can depend on other providers! The framework handles the dependency graph for you.
+Providers can depend on other providers. The framework validates the provider dependency graph before startup.
 
 ```rust,ignore
 use service_daemon::{provider, ProviderError};
@@ -65,13 +65,27 @@ The framework provides two error types:
 *   **`ProviderError::Fatal("msg")`**: Use this for configuration errors. The daemon will fail-fast and exit immediately.
 *   **`ProviderError::Retryable("msg")`**: Use this for connectivity issues. The framework will automatically retry with exponential backoff until the `provider_init_timeout` is reached.
 
-```rust
+```rust,ignore
 use service_daemon::{provider, ProviderError};
+use std::sync::Arc;
+
+struct Url(String);
+struct MyDb;
+
+impl MyDb {
+    async fn connect(_url: &Url) -> Result<Self, std::io::Error> {
+        todo!("connect to your database")
+    }
+}
+
+fn is_transient(_error: &std::io::Error) -> bool {
+    true
+}
 
 #[provider]
 async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
     MyDb::connect(&url).await.map_err(|e| {
-        if is_transient(e) {
+        if is_transient(&e) {
             ProviderError::Retryable(format!("DB not ready: {e}"))
         } else {
             ProviderError::Fatal(format!("Invalid DB config: {e}"))
@@ -80,11 +94,11 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 }
 ```
 
-## 5. Best Practices
+## 5. Provider guidelines
 
-*   **Keep it clean**: Use Providers for *Shared Resources* (DB, MQTT, Config). Use Services for *Action* (Running the business logic).
-*   **Don't Block**: Always use `async` providers for network/disk operations.
-*   **Fail Gracefully**: Prefer `ProviderError::Retryable` for network resources, so transient unavailability at startup (DB still booting, broker not yet listening) doesn't kill your daemon.
+* Use providers for shared resources such as database pools, MQTT clients, HTTP clients, and configuration.
+* Keep network and disk initialization in `async` provider functions.
+* Return `ProviderError::Retryable` for transient startup failures so the daemon can retry within the configured provider initialization timeout.
 
 > [!TIP]
 > **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../provider-best-practices.md) guide.

@@ -1,6 +1,6 @@
 # Unit Testing & Simulation
 
-Testing background services is notoriously difficult. How do you test what happens when a database fails mid-flight? Or how your service reacts when its configuration changes at runtime?
+Testing background services requires control over lifecycle, injected state, and runtime changes.
 
 The `simulation` feature gives tests a controlled daemon sandbox. This chapter focuses on the common testing pattern: start only the services you care about, pre-fill state, mutate the sandbox, and assert the result.
 
@@ -112,7 +112,7 @@ handle.set_status(service_id, ServiceStatus::NeedReload);
 handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
 ```
 
-## 4. Summary of Powers
+## 4. Supported test controls
 
 - **Pre-populate the Shelf**: Test state recovery without waiting for a real crash.
 - **Dynamic Injection**: Overwrite shelf values while the daemon is running.

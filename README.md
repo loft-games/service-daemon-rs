@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
 The **[Quick Start Guide](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md)** walks through the framework one concept at a time:
 
-1. [**Hello, Heartbeat!**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/hello-heartbeat.md) -- Your first service.
+1. [**First Service**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/first-service.md) -- Your first service.
 2. [**Reactive Triggers**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/reactive-triggers.md) -- Events, queues, and chained handlers.
 3. [**State Management & Recovery**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/state-recovery.md) -- Persistence across restarts.
 4. [**Sequential Startup, Shutdown & Scheduling**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/priority-orchestration.md) -- Priority waves and runtime scheduling policies.
@@ -110,9 +110,9 @@ Documentation is split by audience.
 *For people studying framework design or debugging internals.*
 
 - [Internal Overview](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) -- Registry design, linkme segments, DI resolution.
-- [The Ripple Model](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/causal-tracing.md) -- Causal tracing across asynchronous trigger chains.
+- [Causal Tracing](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/causal-tracing.md) -- Causal identity across asynchronous trigger chains.
 - [Lifecycle Deep Dive](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md) -- Reload paths and supervisor internals.
-- [Macros Mechanics](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macros-deep-dive.md) -- How `#[service]` / `#[trigger]` rewrite your code.
+- [Macro Expansion](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macro-expansion.md) -- How `#[service]` / `#[trigger]` rewrite your code.
 
 For contribution workflow and maintainer-oriented development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 

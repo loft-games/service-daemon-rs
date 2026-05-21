@@ -18,7 +18,7 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 `NeedReload` is primarily a **service-observed lifecycle state** exposed by `state()`. In the runtime, dependency watchers notify the supervisor through reload signals, which cancel the current generation's reload token. Once that token is cancelled, `state()` resolves to `NeedReload` immediately for the running service. The shared Status Plane remains the durable observation surface, but reload intent is delivered first through the token/signal control path rather than requiring a separate `Healthy -> NeedReload` map write.
 
 > [!NOTE]
-> **Integrated Signal Handling**: The `ServiceSupervisor` uses a high-performance `tokio::select!` loop that integrates service execution with signal bridging. This eliminates the need for auxiliary tasks, reducing memory overhead and task switching latency while maintaining consistent responsiveness to reload and shutdown signals.
+> **Signal handling**: The `ServiceSupervisor` uses one `tokio::select!` loop for service execution and signal bridging, so reload and shutdown signals do not need separate helper tasks.
 
 ### Control Plane Runtime and Declared Body Modes
 
@@ -38,27 +38,31 @@ Scheduling analysis is intentionally limited to internal recommendations. The an
 
 A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, is deferred to later research and would need to happen at a generation boundary inside the same declared mode.
 
-### 1.1. The Signal Path (Reactive Update Flow)
-How a state change is propagated through the system to trigger a reload:
+### 1.1. The Provider Change Signal Path
+Provider reload propagation distinguishes value mutation from binding mutation:
 
 ```mermaid
 sequenceDiagram
-    participant Writer as Service A (Writer)
+    participant Writer as Service/Test Writer
     participant Guard as TrackedWriteGuard
-    participant Mgr as StateManager
+    participant Slot as Effective Provider Slot
+    participant Scope as Daemon Provider Scope
     participant Watcher as ServiceWatcher
     participant Super as ServiceSupervisor
-    
-    Writer->>Guard: Release Lock (Drop)
-    Guard->>Mgr: Update Watch Channel
-    Mgr->>Watcher: Notify Subscribers
-    Watcher->>Super: Request Reload (Service B)
-    Super->>Super: Kill Generation N
-    Super->>Super: Respawn Generation N+1
+
+    Writer->>Guard: Mutate managed value
+    Guard->>Slot: Publish value change on dirty drop/commit
+    Writer->>Scope: Or install daemon-local override/fork
+    Scope->>Watcher: Publish binding change
+    Slot->>Watcher: Publish value change
+    Watcher->>Super: Request Reload
+    Super->>Super: Terminate Generation N
+    Super->>Super: Spawn Generation N+1
 ```
 
-- **Propagation**: Every write lock release triggers a signal on a `tokio::sync::watch` channel. The `ServiceWatcher` listens to these channels and identifies which services in the Registry depend on the modified type.
-- **Minimal Perturbation**: Only services that directly or indirectly depend on the mutated type are reloaded. The rest of the system remains untouched.
+- **Value mutation**: Managed providers publish through the effective slot's `StateManager`. Root slot changes reload daemons that still inherit root; daemon-local slot changes stay inside that daemon.
+- **Binding mutation**: A daemon-local fork or simulation override changes which slot a provider type resolves to for that daemon. The binding epoch changes and dependent generations reload so the next generation resolves the new slot.
+- **Dirty tracking**: Acquiring and releasing a write lock without mutating the value does not publish a value change.
 - **Race Safety**: The `ServiceSupervisor` ensures that a reload only proceeds after the preceding generation has cleanly released its resources (e.g., ports, file handles).
 
 ### 1.2. Immediate Reloads
@@ -125,13 +129,13 @@ Calling `service_daemon::done()` manually. Recommended for complex initializatio
 For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdown()` counts as a transition to `Healthy` if the service is still in an introductory phase (`Initializing`, `Restoring`, `Recovering`).
 
 > [!TIP]
-> **Performance Optimization**: The implicit handshake is internally optimized using a task-local flag. Only the first call to these functions per service generation will interact with the central Status Plane. Subsequent calls are near-zero overhead atomic checks.
+> **Implementation note**: The implicit handshake uses a task-local flag. Only the first lifecycle utility call per generation writes to the Status Plane; later calls use the cached flag and token checks.
 
 ## 4. State Persistence (The Shelf)
 
 The "Shelf" is a daemon-scoped store where services can deposit data before a reload or after a crash.
 - **Isolation**: Buckets are isolated by `ServiceId`, so two selected services with the same Rust function name cannot share shelf state accidentally.
-- **Survival**: Unlike standard singletons, Shelf data survives generation termination and is inherited by the next generation of the same selected service.
+- **Survival**: Unlike ordinary in-memory state, Shelf data survives generation termination and is inherited by the next generation of the same selected service.
 
 ## 5. Provider Initialization Errors
 
@@ -169,13 +173,13 @@ If/when introduced, the following questions must be answered in the framework co
 
 ### 5.3. Lazy vs. Eager Provider Initialization
 
-The default behavior is **lazy** for all providers (including `Listen`).
+The default behavior is **lazy** for all providers (including `Listen`). Lazy initialization happens the first time a selected service, trigger, provider dependency, or helper call resolves that provider in its current effective scope.
 
 A provider may opt into **eager** initialization via an explicit macro parameter:
 
 - `#[provider(..., eager = true)]`
 
-Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work.
+Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers resolve through that daemon's provider scope, not by bypassing the scoped bridge. By default the daemon inherits the root provider slot; simulation overrides or internal forks can install a daemon-local slot before eager initialization, so startup seeds the local slot without polluting root state.
 
 ### 5.4. RestartPolicy reuse
 
@@ -191,5 +195,11 @@ Provider initialization retries reuse the existing `RestartPolicy` model.
 Generated provider helpers expose a low-level `resolve_managed()` path for tests, diagnostics, and framework integrations that need the raw `Result<Arc<T>, ProviderError>` before it is mapped into convenience initialization semantics. Normal services should prefer dependency injection and let the daemon own retries, fatal shutdown, and cancellation.
 
 `StateManager::snapshot()` is a convenience API for already-initialized state. It panics if called before the corresponding provider has been initialized through the daemon/provider resolution path. That panic is intentional: pre-init snapshot probing is caller misuse, not a recoverable provider-init error.
+
+### 5.6. Provider ownership boundary
+
+Generated provider resolution uses a root scope plus daemon effective scopes. Calls made outside framework context fall back to the root scope, which preserves convenient helper usage in tests and setup code. Calls made while a daemon is starting or while a service, trigger, or watcher is running use that daemon's effective provider scope.
+
+The effective binding is generation-sensitive: if a daemon-local binding changes, dependent services and triggers reload at a generation boundary. Existing generations are not silently mutated in place; the next generation resolves the new provider slot.
 
 [Back to README](../../README.md)

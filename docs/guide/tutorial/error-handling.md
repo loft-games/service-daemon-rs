@@ -125,4 +125,4 @@ let policy = RestartPolicy::builder()
 
 ---
 
-[**<- Previous Step: DIY Providers**](./diy-providers.md) | [**Next Step: Priorities & Scheduling ->**](./priority-orchestration.md)
+[**<- Previous Step: Custom Providers**](./custom-providers.md) | [**Next Step: Priorities & Scheduling ->**](./priority-orchestration.md)

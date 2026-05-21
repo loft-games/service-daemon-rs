@@ -1,38 +1,31 @@
-# The Ripple Model: Causal Tracing in Asynchronous Chains
+# Causal tracing in asynchronous chains
 
-In an event-driven system where one trigger fires another, linear span-based tracing (e.g. OpenTelemetry's parent-child spans) doesn't fully capture causality once events fan out, queue, or cross service boundaries. The framework uses a model we call **Ripple** to keep this traceable.
+In an event-driven system, one trigger handler can fan out, enqueue work, or publish follow-up events. Parent-child spans alone do not fully describe that relationship once execution crosses queues or service boundaries. `service-daemon-rs` records a small causal identity on each event so logs and diagnostics can reconstruct the chain.
 
-## 1. The Analogy: A Stone in the Water
-Imagine a stone thrown into a still pond. The stone creates ripples that spread outward, potentially reaching distant shores and causing other stones to move. 
+## 1. Event identity
 
-- **The Stone**: A `TriggerMessage` (an event).
-- **The Ripples**: Trigger handlers executing in response.
-- **The Secondary Stones**: New events published by those handlers.
+Each event carries the fields needed to identify where it came from and which handler is processing it:
 
-## 2. The Mechanics of Causality: The 4-Tuple Identity
+1. **MessageId** (`Uuid` v7): a time-ordered unique ID for the event.
+2. **SourceId** (`ServiceId` / `usize`): the service that originally published the event.
+3. **Instance identity**:
+   - **ServiceId**: the service currently handling the event.
+   - **InstanceSeq** (`u64`): a monotonic sequence number for the current trigger invocation.
 
-Every event in the framework carries a causal context that uniquely identifies its position in the ripple chain. This is represented by a 4-tuple of identity, conceptually grouped into three levels:
+Together, `ServiceId` and `InstanceSeq` form the **InstanceId**, a compact numeric identity for one trigger invocation.
 
-1.  **MessageId** (`Uuid` v7): A time-ordered, globally unique ID for the event itself.
-2.  **SourceId** (`ServiceId` / `usize`): The ID of the service that **originally** published the event (the initiator).
-3.  **Instance Identity**:
-    - **ServiceId**: The ID of the current service handling the event.
-    - **InstanceSeq** (`u64`): A monotonic sequence number for the current trigger invocation.
+## 2. Propagation
 
-Together, the `ServiceId` and `InstanceSeq` form the **InstanceId**, a 16-byte stack-allocated composite that identifies the specific execution instance without requiring heap-allocated strings.
+When a service runs, the `ServiceSupervisor` creates a `tracing::Span` with the service identity. When a trigger handler runs, the `TriggerRunner` creates a nested span with the incoming `message_id` and the current `instance_seq`. `DaemonLayer` reads those span fields and attaches them to emitted log events.
 
-### Forward Propagation
-When a service runs, the `ServiceSupervisor` creates a `tracing::Span` carrying the service's identity. When a trigger handler fires, the `TriggerRunner` creates a nested Span carrying the `message_id` (UUID) and the current `instance_seq`. Any log message emitted within these Spans is automatically decorated with the full 4-tuple by the `DaemonLayer`.
+If handler B publishes event Y while handling event X, event Y gets a new UUID v7 `message_id` and keeps the original `SourceId`. This lets diagnostics link a cascade of events back to the service that started it, even when the work crosses services or queues.
 
-### Causal Linking
-If Handler B publishes a new Event Y in response to Event X, Event Y **inherits** the `SourceId` of the original initiator (the stone), but gets its own unique UUID v7 `message_id`. This allows the **Topology Collector** to trace an entire cascade of events back to a single root cause, even if they cross multiple service boundaries and logical "waves".
+## 3. Why this matters
 
-## 3. Why this matters: The "Echo" Problem
-In traditional systems, if Service A pings Service B, which then pings Service C, the logs look like a straight line. But in our reactive model, one event might trigger 10 different handlers simultaneously. 
+The causal identity lets diagnostics:
 
-The Ripple Model allows you to:
-- **Trace the Cascade**: See all 10 side-effects of a single state change through the automated topology map.
-- **Identify the Originator**: Even if an error happens 5 hops away, the `SourceId` points directly to the service that started the chain.
-- **Zero-Allocation Tracking**: By using UUIDs and numeric components for `InstanceId`, the entire tracing pipeline carries zero heap-allocation overhead in the hot path. All context is handled by the `TracingInterceptor` pipeline, requiring zero manual boilerplate from the developer.
+- group side effects that came from the same original event;
+- identify the service that started a multi-hop chain;
+- connect logs and trigger executions without relying on string-based correlation IDs.
 
 [Back to README](../../README.md)

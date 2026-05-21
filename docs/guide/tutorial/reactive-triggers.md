@@ -82,11 +82,11 @@ async fn complex_worker(
 2.  **Decoupling**: The service sending the data doesn't need to know who is listening.
 3.  **Scalability**: You can add more cleanup handlers just by adding more `#[trigger(Notify(CleanupSignal))]` functions.
 4.  **Resilience**: If a handler fails, the framework automatically retries it with exponential backoff!
-5.  **Elastic Scaling**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and scales concurrency based on backlog pressure via `ScalingPolicy`. Other templates dispatch serially with no scaling overhead. You can override the defaults globally -- see [**Error Handling & Retries**](./error-handling.md#2-throughput-scaling-policy).
+5.  **Queue concurrency**: For streaming templates like `Queue`, the framework dispatches handlers asynchronously and adjusts concurrency based on backlog pressure via `ScalingPolicy`. Other templates dispatch serially. You can override the defaults globally -- see [**Error Handling & Retries**](./error-handling.md#2-throughput-scaling-policy).
 
 > [!TIP]
 > **Advanced Reading**: For a complete list of built-in triggers and details on custom retry policies, refer to the [Reactive Triggers Guide](../triggers.md).
 
 ---
 
-[**<- Previous Step: Hello, Heartbeat!**](./hello-heartbeat.md) | [**Next Step: State Management & Recovery ->**](./state-recovery.md)
+[**<- Previous Step: First Service**](./first-service.md) | [**Next Step: State Management & Recovery ->**](./state-recovery.md)

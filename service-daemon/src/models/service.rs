@@ -302,7 +302,7 @@ pub enum ServiceStatus {
 #[distributed_slice]
 pub static SERVICE_REGISTRY: [ServiceEntry];
 
-/// The global provider registry -- providers register themselves here via `#[provider]` macro.
+/// The link-time provider registry -- providers register themselves here via `#[provider]` macro.
 ///
 /// Each entry records the provider's type identity and its dependency parameters,
 /// enabling full dependency graph construction (including Provider->Provider edges)
@@ -334,10 +334,12 @@ pub struct ProviderEntry {
     /// Whether this provider should be initialized during daemon startup
     /// (when reachable from the selected service set).
     pub eager: bool,
-    /// Type-erased initializer that seeds the provider singleton.
+    /// Type-erased initializer that seeds the effective provider slot.
     ///
     /// Implementations are macro-generated and are expected to call into the
-    /// provider's `StateManager` to populate the snapshot cache.
+    /// scoped provider bridge so daemon startup initializes the current daemon's
+    /// effective slot, falling back to the generated root slot when no daemon
+    /// scope is active.
     pub init: fn(
         RestartPolicy,
         tokio_util::sync::CancellationToken,

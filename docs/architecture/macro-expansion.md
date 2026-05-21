@@ -1,29 +1,29 @@
-# Macros Deep Dive: The Engine of Service-Daemon
+# Macro Expansion
 
-This document explains how the procedural macros transform your code and how the "Macro Illusion" maintains IDE compatibility.
+This document explains how the procedural macros transform user code and preserve useful source spans for IDEs.
 
 ## 1. The `#[service]` Transformation
 
 When you annotate a function, the macro generates:
-1. **Logic Preservation**: The original function code remains mostly intact.
-2. **Wrapper Generation**: An `async move` block that resolves all dependencies before calling the original function.
-3. **Registry Entry**: A `static` entry collected by `linkme` with the service metadata the daemon needs at runtime.
+1. The original function, with its body preserved.
+2. An `async move` wrapper that resolves dependencies before calling the original function.
+3. A `static` registry entry collected by `linkme` with the metadata the daemon needs at runtime.
 
 > [!IMPORTANT]
 > **Distributed Registration Requirement**: Because `linkme` works at the linker level, any module containing a `#[service]` or `#[trigger]` **must** be included in your compilation tree (e.g., via `mod my_module;`). If a module is not reachable from `main.rs`, its services will not be discovered.
 
 ## 2. The `#[trigger]` Transformation
 
-Triggers are specialized services registered through the same service registry. The macro generates a **Host Wrapper** that:
-- Spawns the appropriate "Host" logic (e.g., `Notify_trigger_host`).
-- **DI Resolution**: Dependency providers are resolved **once** at trigger startup (outside the event loop), matching standard service behavior. This ensures consistent lifecycle management and prevents redundant resolutions on every event.
-- **Service-Level Integration (`Watch`)**: For `Watch` templates, the macro generates a service watcher that leverages the `ServiceDaemon`'s reload mechanism.
-- **Event Dispatch**: The host executes the user handler when events occur, managing the inversion of control.
-- **Runtime Placement**: The generated registry entry carries the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`); the daemon runner uses it to execute the service or trigger body while keeping supervision, watchers, reload, restart/backoff, and shutdown coordination on the daemon control plane.
+Triggers are specialized services registered through the same service registry. The macro-generated host wrapper:
+- Spawns the selected host logic, such as the notify host.
+- Resolves dependency providers once at trigger startup, outside the event loop, matching standard service behavior.
+- For `Watch` templates, generates a service watcher that uses the `ServiceDaemon` reload path.
+- Dispatches incoming events to the user handler.
+- Stores the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`) in the registry entry; the daemon runner uses it to place the user body while keeping supervision, watchers, reload, restart/backoff, and shutdown coordination on the daemon control plane.
 
 ## 3. The `#[provider]` Transformation
 
-Providers generate `Provided` / `ManagedProvided` / `WatchableProvided` implementations plus ergonomic helper methods for the declared type.
+Providers generate `Provided` / `ManagedProvided` / `WatchableProvided` implementations plus ergonomic helper methods for the declared type. The generated impl keeps a static root `StateManager<T>` as the compatibility slot, but all public helper methods delegate through runtime bridge functions that choose the current effective provider scope.
 
 The supported provider attribute forms are:
 
@@ -50,6 +50,17 @@ Unsupported attributes keep the stable parser diagnostic that lists the supporte
 
 Function providers are considered framework-fallible only when their return type is `Result<T, ProviderError>` or an equivalent qualified path ending in `ProviderError`. Other `Result<T, E>` shapes remain ordinary user return types and do not opt into provider-init retry/fatal semantics.
 
+### Scoped Resolution Bridge
+
+The macro-generated `Provided::resolve()`, lock helpers, `resolve_managed()`, and `WatchableProvided::changed()` do not resolve directly against the static root manager. They call internal bridge functions with that manager as the root fallback. The bridge then applies the runtime rule:
+
+1. If a daemon provider scope is active, resolve the daemon's effective slot for the provider type.
+2. If that scope has a local fork or simulation override, use the daemon-local slot.
+3. Otherwise inherit the generated root slot.
+4. If no daemon context exists, use the generated root slot directly.
+
+Service wrappers, trigger wrappers, provider dependency resolution, reachable eager initialization, and generated watch arms all use the same bridge path. The user-facing macro syntax remains `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`; scope and slot ids stay internal.
+
 ### Provider Helper Return Shapes
 
 Provider helpers intentionally distinguish convenience from provider-init failure semantics:
@@ -65,15 +76,14 @@ Provider helpers intentionally distinguish convenience from provider-init failur
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.
 
-## 4. The "Macro Illusion"
+## 4. Span-preserving tracked state
 
-The framework rewrites shared-state types behind the scenes without breaking your IDE experience. Two pieces work together:
+Generated wrappers route shared-state dependencies through tracked types while keeping source spans useful for IDEs:
 
-### Transparent Tracking
-The macros perform a "replacement" of standard types:
-- `Arc<RwLock<T>>` is transparently redirected to a tracked version that reports changes to `Watch` triggers.
-- **Span Preservation**: By using `quote_spanned!`, the macro attaches the original source code's "span" to the generated code.
-- **Intellisense Friendly**: Because of span preservation, `rust-analyzer` still sees your original types, allowing "Jump to Definition" and documentation hints to work reliably.
+### Transparent tracking
+- `Arc<RwLock<T>>` is routed to a tracked version that reports changes to `Watch` triggers.
+- **Span preservation**: `quote_spanned!` attaches the original source span to generated code.
+- **IDE behavior**: rust-analyzer can still show source-level definitions and documentation hints for the user's types.
 
 ### Qualified Path Support
 The macros recognize common import styles:
@@ -82,8 +92,8 @@ The macros recognize common import styles:
 - `tokio::sync::RwLock<T>`
 
 ## 5. Promotion Logic
-- **Fast Path**: If only `Arc<T>` is used, it stays an immutable singleton with zero locking overhead.
-- **Managed Path**: If *any* service in the entire registry requests a lock (`RwLock`/`Mutex`), the provider is automatically promoted at link-time to support atomic CoW (Copy-on-Write) publishing.
+- **Fast Path**: If only `Arc<T>` is used, the effective provider slot can serve immutable snapshots without lock overhead.
+- **Managed Path**: When a dependency resolves as `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, that effective slot uses the `StateManager` managed path, enabling dirty-tracked publishing and slot-aware `Watch` reloads.
 
 ## 6. Shared Macro Infrastructure (`common.rs`)
 

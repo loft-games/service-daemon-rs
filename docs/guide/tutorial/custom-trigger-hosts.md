@@ -1,4 +1,4 @@
-# Tailor-Made Triggers
+# Custom Trigger Hosts
 
 > [!NOTE]
 > This is an advanced extension guide, not part of the beginner quick-start path.
@@ -18,7 +18,7 @@ To create a custom trigger, you implement the **`TriggerHost<T>`** trait.
 
 Triggers are split into two parts:
 
-1. **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **conditional elastic scaling** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency, enabled only when the template declares a `ScalingPolicy` via `TriggerHost::scaling_policy()`.
+1. **Engine (Framework)**: The `TriggerRunner` handles the infinite loop, interceptor pipeline (tracing, retry with backoff), standard shutdown logic, and **optional concurrent dispatch** -- dispatching handlers asynchronously via `tokio::spawn` with semaphore-gated concurrency, enabled only when the template declares a `ScalingPolicy` via `TriggerHost::scaling_policy()`.
 2. **Policy (Your Host)**: Defines only *how to initialize* (`setup`) and *how to wait* for the next event (`handle_step`).
 
 
@@ -28,8 +28,8 @@ The framework wraps every payload in `Arc<P>` internally so that retries only cl
 
 > [!TIP]
 > **What if my data isn't `Clone`?**
-> If your payload is large or cannot implement `Clone`, wrap it in an `Arc`: `type Payload = Arc<MyData>`, and declare your handler parameter as `Arc<Arc<MyData>>` or simply use `#[payload] data: Arc<MyData>`.
-> Since `Arc` itself is always `Clone`, the retry mechanism will work as expected without touching the underlying data.
+> If your payload is large or cannot implement `Clone`, keep `type Payload = MyData` and declare the handler parameter as `#[payload] data: Arc<MyData>`.
+> Retries then clone only the shared pointer, not the underlying data.
 
 The split lets you focus on the event-waiting logic; the framework reuses one engine across every trigger type.
 
@@ -115,9 +115,9 @@ Your `handle_step` method returns an instruction to the engine:
 *   `TriggerTransition::Reload(payload)`: Dispatch event, then wait for a framework restart (ideal for state-watchers).
 *   `TriggerTransition::Stop`: Cleanly exit the loop.
 
-### Declaring Elastic Scaling
+### Declaring queue concurrency
 
-By default, custom triggers dispatch events **serially** (no scaling overhead). If your trigger is a streaming event source that benefits from concurrent handler execution, override `scaling_policy()`:
+By default, custom triggers dispatch events **serially**. If your trigger is a streaming event source that benefits from concurrent handler execution, override `scaling_policy()`:
 
 ```rust,ignore
 fn scaling_policy() -> Option<ScalingPolicy> {
@@ -125,14 +125,14 @@ fn scaling_policy() -> Option<ScalingPolicy> {
 }
 ```
 
-This enables the framework's pressure-based auto-scaler (`scale_monitor`). Users can further override your defaults via `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+This enables pressure-based concurrency adjustment (`scale_monitor`). Users can further override your defaults via `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
 
-## 3. The Ultimate Escape Hatch: `run_as_service`
+## 3. Overriding the service loop
 
-Sometimes, `handle_step` is simply not enough. If you're integrating a legacy C library with weird threading requirements, or a high-performance system that requires full control over the execution loop, you can override the **`run_as_service`** engine itself.
+If `handle_step` is not enough, for example because an integration has specific threading requirements or needs full control over the execution loop, you can override `run_as_service`.
 
 ```rust,ignore
-impl<T> TriggerHost<T> for MyUltimateHost {
+impl<T> TriggerHost<T> for MyCustomHost {
     // ...
     fn run_as_service(
         name: String,
@@ -141,8 +141,8 @@ impl<T> TriggerHost<T> for MyUltimateHost {
         token: CancellationToken, // The framework's shutdown signal
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async move {
-            // YOU are now the engine.
-            // You must handle your own loop, tracing, and shutdown checks.
+            // Custom loop owns dispatch and shutdown checks.
+            // Implement tracing manually if this loop needs it.
             while !token.is_cancelled() {
                 // ... logic ...
             }
@@ -153,7 +153,7 @@ impl<T> TriggerHost<T> for MyUltimateHost {
 ```
 
 > [!CAUTION]
-> **With great power comes great responsibility.** If you override the engine, you lose the framework's automatic traceability (monotonically increasing IDs, tracing spans), interceptor pipeline, and retry logic unless you implement them manually. Use this only as a last resort!
+> If you override the service loop, you lose the framework's automatic traceability (monotonically increasing IDs, tracing spans), interceptor pipeline, and retry logic unless you implement them manually. Use this only when `handle_step` cannot represent the integration.
 
 ---
 

@@ -139,8 +139,8 @@ pub struct LogEvent {
     pub error_chain: Option<String>,
 }
 
-/// A high-performance broadcast queue for log events.
-/// This allows multiple consumers (like LogService and potentially a DevConsole).
+/// Broadcast queue for log events.
+/// Multiple consumers, such as stderr and file logging, subscribe independently.
 pub struct LogQueue {
     pub tx: broadcast::Sender<Arc<LogEvent>>,
 }

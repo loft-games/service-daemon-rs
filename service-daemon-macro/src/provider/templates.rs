@@ -1,21 +1,20 @@
-//! Template generators for special provider types.
+//! Template generators for built-in provider forms.
 //!
 //! This module contains generators for:
 //! - Notify (Signal) template
 //! - Broadcast Queue template
 //! - Listen (TCP Listener) template
 //!
-//! Both templates share common initialization logic via [`TemplateContext`].
+//! Templates share common initialization logic via [`TemplateContext`].
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 
 use super::struct_gen::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 
-/// Checks whether any attribute in the list already contains `derive(Clone)`.
-///
-/// Uses proper AST-based parsing via `syn::punctuated::Punctuated<Path, Token![,]>`
-/// to correctly handle complex derive lists (e.g., `derive(MyMacro<A, B>, Clone)`).
+/// Parses `derive(...)` attributes and checks whether `Clone` is present.
+/// This handles derive entries with generic arguments, such as
+/// `derive(MyMacro<A, B>, Clone)`.
 fn has_clone_derive(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
         if !attr.path().is_ident("derive") {
@@ -38,7 +37,7 @@ fn has_clone_derive(attrs: &[syn::Attribute]) -> bool {
 
 /// Shared context for all template-based providers.
 ///
-/// Encapsulates the common boilerplate (singleton name generation, Clone derive
+/// Encapsulates the common boilerplate (root manager name generation, Clone derive
 /// detection, constructor, and provider capability impls) that every template
 /// needs. Individual templates only supply their struct body and convenience
 /// methods.
@@ -146,8 +145,8 @@ pub fn generate_notify_template(
         #provided_impl
 
         impl #struct_name {
-            /// Trigger this signal, waking all subscribed triggers.
-            /// Automatically generates a UUID v7 message ID for causal tracing.
+            /// Trigger this signal and wake subscribed triggers.
+            /// The tracked signal records a UUID v7 message ID for causal tracing.
             pub fn notify(&self) {
                 self.0.notify_waiters();
             }
@@ -213,7 +212,7 @@ pub fn generate_broadcast_queue_template(
 
         impl #struct_name {
             /// Push an item to this queue.
-            /// Automatically generates a UUID v7 message ID for causal tracing.
+            /// The tracked sender records a UUID v7 message ID for causal tracing.
             pub fn push(&self, item: #item_type) -> Result<usize, tokio::sync::broadcast::error::SendError<#item_type>> {
                 self.tx.send(item)
             }

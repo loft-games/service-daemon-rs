@@ -1,6 +1,6 @@
 # Concept Clarification & Pitfalls (FAQ)
 
-This central hub explains the architectural "why" behind common behaviors and traps. Use this guide when things don't work as expected or when you're unsure which design pattern to choose.
+This page explains common behaviors that are easy to misread when first using the framework.
 
 ---
 
@@ -48,22 +48,26 @@ This central hub explains the architectural "why" behind common behaviors and tr
 ## 3. Providers & State
 
 ### Providers vs. Shelf: Which to use?
-*   **Providers (Shared Objects)**: Use for managed singletons that multiple services need to access (e.g., DB Pools, shared configuration). Injected via `Arc<T>`.
+*   **Providers (Shared Objects)**: Use for managed shared objects that multiple services need to access (e.g., DB Pools, shared configuration). Injected via `Arc<T>`.
 *   **Shelf (Local Persistence)**: Use for data that belongs uniquely to one service and must survive service reloads or crashes (e.g., a current operation ID, a retry counter). This is a private, ephemeral key-value store.
 
 > [!NOTE]
 > Neither of these is a permanent database. Both are cleared when the entire process stops. For persistence across process restarts, use a real database (injected via a Provider).
 
-### The "Magic Provider" Misconception
-**Problem**: Trying to modify the macro system to add a new "default" type (like MQTT).
-**Solution**: Don't! Use the `#[provider]` attribute on an `async fn`. Magic Providers are for low-level architecture primitives only. See the [Provider Best Practices Guide](provider-best-practices.md).
+### The built-in template misconception
+**Problem**: Trying to modify the macro system to add a new default provider type such as MQTT.
+**Solution**: Use the `#[provider]` attribute on an `async fn`. Built-in templates are for low-level primitives such as signaling, queues, and socket listeners. See the [Provider Best Practices Guide](provider-best-practices.md).
 
 ---
 
 ## 4. Testing & Simulation
 
 ### Simulation is NOT a separate engine
-**Reality**: `MockContext` doesn't change how your code runs; it just provides a "test-local floor" for `resolve()` and `state()` calls. Your production code remains 100% the same.
+**Reality**: `MockContext` still runs the real `ServiceDaemon` and real service/trigger code. It swaps the daemon-owned resources under that run: isolated shelf/status state plus optional daemon-local provider overrides.
+
+### Avoid root provider pollution in tests
+**Problem**: A test calls `T::resolve()` or mutates a root provider and assumes a later daemon will see that exact test value.
+**The Fix**: Prefer `MockContext::builder().with_provider_override(...)` before startup or `SimulationHandle::override_provider(...)` during a run. Provider overrides are scoped to one simulation daemon and reload dependent generations through the normal provider watch path.
 
 ### Registry Isolation 
 **Problem**: Integrated services in one test interfere with another test.

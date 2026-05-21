@@ -89,7 +89,7 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
 ///
 /// The `#[service]` / `#[trigger]` macros place the user function inside a
 /// private `mod __*_USER_SCOPE_* { ... }` to keep imports out of the function
-/// body (import hygiene) while applying the tracked-lock "Macro Illusion".
+/// body (import hygiene) while applying tracked-lock aliases.
 ///
 /// Moving the function into a child module changes the meaning of restricted
 /// visibilities like `pub(super)` / `pub(in super::...)` / `pub(in self::...)`.
@@ -622,7 +622,7 @@ pub fn parse_scheduling_policy(ident: &syn::Ident) -> syn::Result<proc_macro2::T
     }
 }
 
-/// Generates the "Macro Illusion" user scope module.
+/// Generates the user scope module with tracked-lock aliases.
 ///
 /// Wraps the user function in a private module to provide hygiene and
 /// redirect certain types (like RwLock/Mutex) to their tracked versions.
@@ -638,7 +638,7 @@ pub fn generate_user_scope_mod(
             #[allow(unused_imports)]
             use super::*;
 
-            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
+            // Redirect RwLock/Mutex names to the framework's tracked versions.
             #[allow(unused_imports)]
             use service_daemon::{Mutex, RwLock};
 

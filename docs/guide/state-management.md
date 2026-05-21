@@ -11,7 +11,7 @@ use service_daemon::{provider, service, sleep, is_shutdown};
 use std::sync::Arc;
 use std::time::Duration;
 
-// 1. Define a Provider (Type-Safe Global State)
+// 1. Define a Provider (Type-Safe Shared State)
 #[provider(5)]
 pub struct HeartbeatInterval(pub u64);
 
@@ -27,23 +27,23 @@ pub async fn heartbeat_service(interval: Arc<HeartbeatInterval>) -> anyhow::Resu
 ```
 
 > [!TIP]
-> **Proactive Lifecycle**: `service_daemon::sleep()` is cancellation-aware. It wakes up immediately if a shutdown signal is detected, ensuring your app stops gracefully without hanging.
+> **Cancellation-aware sleep**: `service_daemon::sleep()` wakes when shutdown is requested, so services do not have to wait for the full duration before exiting.
 
 ---
 
 > [!TIP]
-> Unsure whether to use a Provider (State) or the Shelf? See the [State vs. Shelf comparison in the FAQ](pitfalls-faq.md#3-providers--state).
+> Unsure whether to use a Provider (State) or the Shelf? See the [State vs. Shelf comparison in the FAQ](faq.md#3-providers--state).
 
 `service-daemon-rs` optimizes shared state synchronization based on how your services declare their dependencies.
 
 ## 1. Snapshots & Mutability Patterns
 
-`StateManager` manages the transition between immutable singletons and mutable tracked state. It provides a **"Macro Illusion"** allowing services to interact with state via standard `RwLock` or `Mutex` interfaces, while internally managing snapshots for the reactive `Watch` system.
+`StateManager` manages the transition between immutable snapshots and mutable tracked state. Services can request standard-looking `RwLock` or `Mutex` dependencies while the framework keeps the tracked state needed by `Watch` triggers.
 
-### The Mutability Pattern (Zero-Copy CoW)
+### Snapshot and mutable state
 Declare a dependency as `Arc<RwLock<T>>` or `Arc<Mutex<T>>` to gain write access.
-- **Automatic Promotion**: The system automatedly upgrades the provider to a `TrackedRwLock` upon the first lock request.
-- **Zero-Copy Publishing**: Use `guard.publish(Arc<T>)` to replace the entire state with a new pointer. This is the **highest performance path** for large types.
+- **Automatic promotion**: The provider moves to a `TrackedRwLock` on the first lock request.
+- **Pointer replacement**: Use `guard.publish(Arc<T>)` to replace the state with a new shared value, which avoids cloning large values.
 
 > [!NOTE]
 > **Internal Mechanics**: For details on how `StateManager` manages transitions using `OnceCell` and `tokio::sync::watch`, see [Internal Architecture: State Management](../architecture/internal-overview.md#7-coremanaged_staters).
@@ -64,6 +64,12 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
     Ok(()) // Auto-commit on Drop fires only if DerefMut was invoked and commit() was not called manually
 }
 ```
+
+### Watch and reload boundaries
+
+A provider value change belongs to the provider slot that published it. In the default case, daemon scopes inherit the root slot, so a managed value mutation can reload every selected service or trigger that still depends on that root slot. If a simulation daemon or internal fork shadows that provider with a daemon-local slot, local value changes reload only that daemon's dependents.
+
+A provider binding change is different: it changes which slot a daemon uses for a provider type. The framework treats that as a generation-boundary reload, so the old generation exits and the next generation resolves the new provider slot.
 
 ### Advanced state inspection
 

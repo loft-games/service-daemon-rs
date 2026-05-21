@@ -23,7 +23,7 @@ To develop the core framework or macros, you need:
 
 - [Extending the Framework](docs/development/extending-framework.md): Adding new trigger types or provider templates.
 - [Architecture Overview](docs/architecture/internal-overview.md): Registry, DI, lifecycle, and runtime design reference.
-- [Macros Mechanics](docs/architecture/macros-deep-dive.md): How `#[service]`, `#[trigger]`, and `#[provider]` rewrite user code.
+- [Macro Expansion](docs/architecture/macro-expansion.md): How `#[service]`, `#[trigger]`, and `#[provider]` rewrite user code.
 
 ## Found a BUG?
 
@@ -34,7 +34,7 @@ To develop the core framework or macros, you need:
 ## Proposing New Features or Changes?
 
 1. Propose your suggested changes or feature requests in [Issues](https://github.com/loft-games/service-daemon-rs/issues) before starting to write code.
-2. we aim to minimize breaking changes, so major architectural adjustments should be accepted only after thorough discussion.
+2. We aim to minimize breaking changes, so major architectural adjustments should be accepted only after thorough discussion.
 3. If you're interested in extending the framework, start with the maintainer documentation above.
 
 ## Submitting Changes

@@ -300,13 +300,13 @@ pub trait TriggerInterceptor<P: Send + Sync + 'static>: Send + Sync {
 /// used to drive the event loop. It uses the interceptor architecture where each
 /// cross-cutting concern (tracing, retry) is a composable [`TriggerInterceptor`] layer.
 ///
-/// # Elastic Scaling
+/// # Queue concurrency
 ///
 /// The runner uses a [`Semaphore`] to control the number of concurrently
-/// executing handler invocations. The event loop does NOT block on handler
-/// completion -- each dispatch acquires a semaphore permit and spawns the
-/// interceptor chain as an independent `tokio::spawn` task. This allows the
-/// event loop to immediately return to `handle_step` for the next event.
+/// executing handler invocations. The event loop does not block on handler
+/// completion: each dispatch acquires a semaphore permit and spawns the
+/// interceptor chain as an independent `tokio::spawn` task. This lets the
+/// event loop return to `handle_step` for the next event.
 ///
 /// A background `scale_monitor` task periodically observes the semaphore
 /// pressure (available permits vs. total permits) and dynamically grows
@@ -356,7 +356,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     ///
     /// The built-in `TracingInterceptor` and `RetryInterceptor` are
     /// automatically registered, providing per-dispatch tracing and
-    /// exponential-backoff retry for free.
+    /// exponential-backoff retry.
     ///
     /// When `scaling` is `Some`, the semaphore is initialized with
     /// `scaling.initial_concurrency()` permits and a background scale
@@ -1103,7 +1103,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
 }
 
 // ---------------------------------------------------------------------------
-// Unit Tests -- Elastic Scaling
+// Unit Tests -- Queue concurrency
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1569,15 +1569,12 @@ mod tests {
             || async move {
                 let mut host = OneShotBlockingHost { emitted: false };
                 let target = Arc::new(());
-                match tokio::time::timeout(
+                tokio::time::timeout(
                     Duration::from_millis(500),
                     runner.run_with_host::<(), OneShotBlockingHost>(&mut host, target),
                 )
                 .await
-                {
-                    Ok(result) => result,
-                    Err(_) => panic!("dispatch failure was not propagated to run_with_host"),
-                }
+                .expect("dispatch failure was not propagated to run_with_host")
             },
         )
         .await;
@@ -1624,15 +1621,12 @@ mod tests {
             || async move {
                 let mut host = OneShotBlockingHost { emitted: false };
                 let target = Arc::new(());
-                match tokio::time::timeout(
+                tokio::time::timeout(
                     Duration::from_millis(500),
                     runner.run_with_host::<(), OneShotBlockingHost>(&mut host, target),
                 )
                 .await
-                {
-                    Ok(result) => result,
-                    Err(_) => panic!("dispatch panic was not propagated to run_with_host"),
-                }
+                .expect("dispatch panic was not propagated to run_with_host")
             },
         )
         .await;

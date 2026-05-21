@@ -11,15 +11,11 @@ use uuid::Uuid;
 
 use crate::{ProviderError, models::ServiceId};
 
-/// Manages intelligent promotion and synchronization for shared state.
+/// Manages provider snapshots and tracked mutable state.
 ///
-/// `StateManager` handles the transition between immutable singletons and
-/// mutable tracked state. It provides a "Macro Illusion" that allows services
-/// to interact with state as if it were a standard `RwLock` or `Mutex`, while
-/// internally managing snapshots and change notifications for the `Watch` trigger system.
-///
-/// T must be `Clone` to support snapshot-based reading when the state is promoted
-/// to managed (mutable) state.
+/// `StateManager` starts with immutable snapshots and can promote a provider to
+/// tracked `RwLock`/`Mutex` state when mutable injection is requested. `T` must
+/// be `Clone` so readers can receive snapshot values after promotion.
 pub struct StateManager<T: 'static + Send + Sync + Clone> {
     lock: OnceCell<Arc<TrackedRwLock<T>>>,
     snapshot_cache: OnceCell<Arc<T>>,
@@ -45,8 +41,11 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
     /// Create a new StateManager with an initial value.
     pub fn with_value(val: T) -> Self {
+        Self::with_arc(Arc::new(val))
+    }
+
+    pub(crate) fn with_arc(arc: Arc<T>) -> Self {
         let manager = Self::new();
-        let arc = Arc::new(val);
         manager.snapshot_cache.set(arc).ok();
         manager
     }
@@ -146,8 +145,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             .map(|lock| Arc::new(TrackedMutex { inner: lock }))
     }
 
-    /// Resolves as a snapshot `Arc<T>`.
-    /// Provides "Zero Lockdown" reads - never blocks even if a writer is holding the lock.
+    /// Resolves as a snapshot `Arc<T>` without waiting on the write lock.
     pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
     where
         F: FnOnce() -> Fut,
@@ -158,7 +156,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             return rx.borrow().clone();
         }
 
-        // 2. Fast Path: Plain immutable singleton
+        // 2. Fast Path: Plain immutable snapshot cache
         self.snapshot_cache.get_or_init(init).await.clone()
     }
 
@@ -405,15 +403,14 @@ fn capture_message_identity() -> (Uuid, ServiceId) {
 }
 
 // ===========================================================================
-// TrackedNotify -- Notify wrapper with automatic message_id injection
+// TrackedNotify -- Notify wrapper with message identity capture
 // ===========================================================================
 
-/// A tracked version of [`tokio::sync::Notify`] that automatically generates
-/// a UUID v7 message ID on every `notify_waiters()` / `notify_one()` call.
+/// A tracked version of [`tokio::sync::Notify`] that records a UUID v7 message
+/// ID on every `notify_waiters()` / `notify_one()` call.
 ///
-/// This is the core primitive for the "Macro Illusion" pattern: template-generated
-/// signal providers use this type, so signal emissions transparently produce
-/// causal trace IDs without user code changes.
+/// Template-generated signal providers use this type so signal emissions keep
+/// the emitting service ID and message ID for trigger tracing.
 ///
 /// # Thread Safety
 ///
@@ -487,15 +484,14 @@ impl Clone for TrackedNotify {
 }
 
 // ===========================================================================
-// TrackedSender -- broadcast::Sender wrapper with automatic message_id injection
+// TrackedSender -- broadcast::Sender wrapper with message identity capture
 // ===========================================================================
 
-/// A tracked version of [`tokio::sync::broadcast::Sender<P>`] that automatically
-/// generates a UUID v7 message ID on every `send()` call.
+/// A tracked version of [`tokio::sync::broadcast::Sender<P>`] that records a
+/// UUID v7 message ID on every `send()` call.
 ///
-/// Follows the same "Macro Illusion" pattern as [`TrackedNotify`]: queue-based
-/// providers use this type transparently via macro-generated code, so every
-/// message emission produces a causal trace ID.
+/// Queue providers use this type in generated code so message emissions keep
+/// the emitting service ID and message ID for trigger tracing.
 pub struct TrackedSender<P> {
     inner: tokio::sync::broadcast::Sender<P>,
     /// The most recently generated message ID and emitting service's ID.

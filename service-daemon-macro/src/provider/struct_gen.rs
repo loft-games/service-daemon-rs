@@ -251,7 +251,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
     let watchable_impl = quote! {
         impl service_daemon::WatchableProvided for #type_tokens {
             async fn changed() {
-                #singleton_name.changed().await
+                service_daemon::__private::provider_changed(&#singleton_name).await
             }
         }
     };
@@ -347,69 +347,65 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
 
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
-                #singleton_name
-                    .resolve_snapshot_result(|| async {
-                        let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::__private::current_cancellation_token();
-                        match service_daemon::__private::catch_init_panic(
-                            #type_name_str,
-                            async move { #framework_init_fn },
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => Err(error),
-                        }
-                    })
+                service_daemon::__private::resolve_provider_snapshot(&#singleton_name, || async {
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::__private::current_cancellation_token();
+                    match service_daemon::__private::catch_init_panic(
+                        #type_name_str,
+                        async move { #framework_init_fn },
+                    )
                     .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(error),
+                    }
+                })
+                .await
             }
         }
 
         impl service_daemon::ManagedProvided for #type_tokens {
             async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
-                #singleton_name
-                    .resolve_rwlock_result(|| async {
-                        let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::__private::current_cancellation_token();
-                        match service_daemon::__private::catch_init_panic(
-                            #type_name_str,
-                            async move { #framework_init_fn },
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => Err(error),
-                        }
-                    })
+                service_daemon::__private::resolve_provider_rwlock(&#singleton_name, || async {
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::__private::current_cancellation_token();
+                    match service_daemon::__private::catch_init_panic(
+                        #type_name_str,
+                        async move { #framework_init_fn },
+                    )
                     .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(error),
+                    }
+                })
+                .await
             }
 
             async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
-                #singleton_name
-                    .resolve_mutex_result(|| async {
-                        let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::__private::current_cancellation_token();
-                        match service_daemon::__private::catch_init_panic(
-                            #type_name_str,
-                            async move { #framework_init_fn },
-                        )
-                        .await
-                        {
-                            Ok(result) => result,
-                            Err(error) => Err(error),
-                        }
-                    })
+                service_daemon::__private::resolve_provider_mutex(&#singleton_name, || async {
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::__private::current_cancellation_token();
+                    match service_daemon::__private::catch_init_panic(
+                        #type_name_str,
+                        async move { #framework_init_fn },
+                    )
                     .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(error),
+                    }
+                })
+                .await
             }
 
             async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
-                #singleton_name
-                    .resolve_managed_result(|| async {
-                        let policy = service_daemon::RestartPolicy::default();
-                        let cancel = service_daemon::__private::current_cancellation_token();
-                        #managed_init_fn
-                    })
-                    .await
+                service_daemon::__private::resolve_provider_managed(&#singleton_name, || async {
+                    let policy = service_daemon::RestartPolicy::default();
+                    let cancel = service_daemon::__private::current_cancellation_token();
+                    #managed_init_fn
+                })
+                .await
             }
         }
 
@@ -422,16 +418,19 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                match service_daemon::__private::catch_init_panic(
-                    #type_name_str,
-                    async move { #framework_init_fn },
-                )
+                service_daemon::__private::resolve_provider_snapshot(&#singleton_name, || async {
+                    match service_daemon::__private::catch_init_panic(
+                        #type_name_str,
+                        async move { #framework_init_fn },
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(error) => Err(error),
+                    }
+                })
                 .await
-                {
-                    Ok(result) => result?,
-                    Err(error) => return Err(error),
-                };
-                Ok(())
+                .map(|_| ())
             })
         }
 
@@ -506,7 +505,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         _ => Vec::new(),
     };
 
-    // Generate unique static name for singleton.
+    // Generate unique static root manager name.
     //
     // Safety: Rust's `static` items are scoped to the enclosing module, so
     // two structs with the same name in different modules produce separate

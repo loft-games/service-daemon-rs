@@ -5,6 +5,7 @@ pub(crate) mod diagnostics;
 pub mod logging;
 pub mod managed_state;
 pub mod provider_init;
+pub(crate) mod provider_scope;
 pub mod service_daemon;
 #[cfg(feature = "diagnostics")]
 pub mod topology_collector;

@@ -6,7 +6,7 @@
 //!   *"how to wait for the next event"* and returns a [`TriggerTransition`].
 //! - **Engine** (`run_as_service` default impl --> [`TriggerRunner`]):
 //!   Manages the event loop, tracing, retry, middleware pipeline, and graceful
-//!   shutdown. Host implementors get this for free.
+//!   shutdown for host implementations.
 //!
 //! ## Extension Model
 //!
@@ -218,7 +218,7 @@ pub enum TriggerTransition<P> {
 ///   what to do next.
 /// - **Engine**: The default [`run_as_service`](TriggerHost::run_as_service)
 ///   implementation manages the event loop, tracing spans, instance IDs, and
-///   graceful shutdown. You get all of this **for free**.
+///   graceful shutdown.
 ///
 /// Override `run_as_service` only for hosts that cannot fit the
 /// `handle_step` model (e.g., `CronHost` which uses external callbacks).

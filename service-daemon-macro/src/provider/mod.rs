@@ -245,7 +245,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     };
 
-    // Singleton name uses the function name (unique within a module)
+    // Static root manager name uses the function name (unique within a module)
     let singleton_name = format_ident!(
         "__PROVIDER_SINGLETON_{}",
         fn_name.to_string().to_uppercase()

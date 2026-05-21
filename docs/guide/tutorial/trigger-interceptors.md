@@ -53,7 +53,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TimingInterceptor {
 }
 ```
 
-That's it. Three key things happened:
+The interceptor performs three steps:
 1. **Pre-processing**: We captured the start time.
 2. **Delegation**: We called `next(ctx)` to continue the chain.
 3. **Post-processing**: We logged the elapsed time.
@@ -61,7 +61,7 @@ That's it. Three key things happened:
 > [!TIP]
 > Notice the `impl<P: Send + Sync + 'static>` -- this makes the interceptor work with **any** payload type. The compiler ensures type safety within each `TriggerRunner<P>` instance.
 
-## 3. The Power of Control
+## 3. Control-flow patterns
 
 Unlike simple "before/after" hooks, interceptors have full control over the flow. Here are some patterns:
 
@@ -114,7 +114,7 @@ impl TriggerInterceptor<SmsPayload> for SmsAuditInterceptor {
 }
 ```
 
-The compiler enforces that such an interceptor can only be installed on a `TriggerRunner<SmsPayload>`. Try to use it with a different payload type? Compilation error. No surprises at runtime.
+The compiler enforces that such an interceptor can only be installed on a `TriggerRunner<SmsPayload>`. Using it with a different payload type fails at compile time before runtime dispatch.
 
 ## 5. `DispatchContext` Internals
 
@@ -131,7 +131,7 @@ pub struct DispatchContext<P> {
 }
 ```
 
-The context is passed **by value** -- each interceptor takes ownership, can read or modify fields, then passes it to `next`. This eliminates the borrow-checker headaches that would arise from `&mut` references across nested async closures.
+The context is passed **by value** -- each interceptor takes ownership, can read or modify fields, then passes it to `next`. This avoids borrow-checker issues that would arise from `&mut` references across nested async closures.
 
 ---
 

@@ -100,6 +100,10 @@ pub mod __private {
         StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
     };
     pub use crate::core::provider_init::{catch_init_panic, init_fallible};
+    pub use crate::core::provider_scope::{
+        provider_changed, resolve_provider_managed, resolve_provider_mutex,
+        resolve_provider_rwlock, resolve_provider_snapshot,
+    };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
         PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceFn, ServiceParam,

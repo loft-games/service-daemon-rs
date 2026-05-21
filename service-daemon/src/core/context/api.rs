@@ -13,12 +13,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::core::diagnostics::{SleepExitReason, SleepObservation, SleepObservationSource};
+use crate::core::provider_scope::ProviderScope;
 use crate::models::{ServiceId, ServiceStatus};
 
-/// Runs a future within the context of a service.
-///
-/// This is the internal entry point used by the `#[service]` and `#[trigger]` macros.
-/// It sets up the task-local identity and resources before executing the user's code.
+/// Runs a future with service task-local identity and resources set.
 #[doc(hidden)]
 pub async fn __run_service_scope<F, Fut>(
     identity: ServiceIdentity,
@@ -32,6 +30,17 @@ where
     CURRENT_SERVICE
         .scope(identity, CURRENT_RESOURCES.scope(resources, f()))
         .await
+}
+
+pub(crate) async fn __run_daemon_resources_scope<F, Fut>(
+    resources: Arc<DaemonResources>,
+    f: F,
+) -> Fut::Output
+where
+    F: FnOnce() -> Fut,
+    Fut: Future,
+{
+    CURRENT_RESOURCES.scope(resources, f()).await
 }
 
 /// Returns the current lifecycle status of the calling service.
@@ -114,8 +123,7 @@ pub fn done() {
 /// The value is stored in a service-isolated bucket based on the calling service's identity.
 ///
 /// # Note
-/// This function is `async` for API consistency with the rest of the context module
-/// and to allow future migration to async-aware storage backends without breaking changes.
+/// The async signature matches the other context helpers.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
     let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
         Ok(id) => id,
@@ -133,8 +141,7 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// For a non-destructive read, use [`shelve_clone`] instead.
 ///
 /// # Note
-/// This function is `async` for API consistency with the rest of the context module
-/// and to allow future migration to async-aware storage backends without breaking changes.
+/// The async signature matches the other context helpers.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
     let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
         Ok(id) => id,
@@ -163,8 +170,7 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// by `Arc<T>` values, which are the primary use case.
 ///
 /// # Note
-/// This function is `async` for API consistency with the rest of the context module
-/// and to allow future migration to async-aware storage backends without breaking changes.
+/// The async signature matches the other context helpers.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
     let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
         Ok(id) => id,
@@ -289,6 +295,12 @@ pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
     CURRENT_SERVICE
         .try_with(|id| id.cancellation_token.child_token())
         .unwrap_or_else(|_| tokio_util::sync::CancellationToken::new())
+}
+
+pub(crate) fn current_provider_scope() -> Arc<ProviderScope> {
+    CURRENT_RESOURCES
+        .try_with(|resources| resources.provider_scope.clone())
+        .unwrap_or_else(|_| ProviderScope::root())
 }
 
 /// An interruptible sleep that returns early if a shutdown or reload signal is received.
@@ -432,7 +444,48 @@ pub fn current_service_id() -> ServiceId {
 mod tests {
     use super::*;
     use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane};
+    use crate::core::provider_scope::ProviderScopeId;
     use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn current_provider_scope_falls_back_to_root_outside_service_scope() {
+        let scope = current_provider_scope();
+
+        assert_eq!(scope.id(), ProviderScopeId::root());
+    }
+
+    #[tokio::test]
+    async fn daemon_resources_scope_sets_provider_scope_without_service_identity() {
+        let resources = DaemonResources::new();
+        let expected_scope_id = resources.provider_scope.id();
+
+        let actual_scope_id =
+            __run_daemon_resources_scope(resources, || async { current_provider_scope().id() })
+                .await;
+
+        assert_eq!(actual_scope_id, expected_scope_id);
+        assert_ne!(actual_scope_id, ProviderScopeId::root());
+    }
+
+    #[tokio::test]
+    async fn current_provider_scope_uses_daemon_resources_inside_service_scope() {
+        let resources = DaemonResources::new();
+        let expected_scope_id = resources.provider_scope.id();
+        let identity = ServiceIdentity::new(
+            ServiceId::new(17),
+            "provider_scope",
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+
+        let actual_scope_id = __run_service_scope(identity, resources, || async {
+            current_provider_scope().id()
+        })
+        .await;
+
+        assert_eq!(actual_scope_id, expected_scope_id);
+        assert_ne!(actual_scope_id, ProviderScopeId::root());
+    }
 
     #[tokio::test]
     async fn spawn_with_context_falls_back_outside_service_scope() {

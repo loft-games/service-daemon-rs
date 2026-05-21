@@ -26,7 +26,9 @@ use tracing::{Instrument, error, info, warn};
 
 use crate::ProviderInitError;
 use crate::ServiceScheduling;
-use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+use crate::core::context::{
+    __run_daemon_resources_scope, __run_service_scope, DaemonResources, ServiceIdentity,
+};
 use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
     RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane,
@@ -176,7 +178,7 @@ fn run_scoped_service_generation(
             generation,
             runtime_lane = ?diagnostics.runtime_lane(),
         );
-        let identity = ServiceIdentity::new_with_diagnostics(
+        let identity = ServiceIdentity::new_generation_with_diagnostics(
             service_id,
             name,
             cancellation_token.clone(),
@@ -453,7 +455,7 @@ impl ServiceSupervisor {
                         .clone();
 
                     tokio::select! {
-                        _ = watcher() => {
+                        _ = __run_daemon_resources_scope(res.clone(), watcher) => {
                             info!("Watcher: Dependency change detected for service '{}', triggering reload", n);
                             reload_signal.notify_one();
                         }

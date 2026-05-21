@@ -14,6 +14,7 @@ use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::diagnostics::GenerationDiagnosticsHandle;
+use crate::core::provider_scope::ProviderScope;
 use crate::models::{ServiceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
@@ -57,6 +58,7 @@ pub struct DaemonResources {
     /// Users register configs via `ServiceDaemonBuilder::with_trigger_config<C>`.
     /// Templates read them via `context::trigger_config::<C>()`.
     pub trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    pub(crate) provider_scope: Arc<ProviderScope>,
 }
 
 impl DaemonResources {
@@ -68,6 +70,7 @@ impl DaemonResources {
             reload_signals: DashMap::new(),
             status_changed: tokio::sync::Notify::new(),
             trigger_configs: DashMap::new(),
+            provider_scope: ProviderScope::new_daemon_scope(),
         })
     }
 }
@@ -112,7 +115,24 @@ impl ServiceIdentity {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_diagnostics(
+        service_id: ServiceId,
+        name: &'static str,
+        cancellation_token: CancellationToken,
+        reload_token: CancellationToken,
+        diagnostics: GenerationDiagnosticsHandle,
+    ) -> Self {
+        Self::new_generation_with_diagnostics(
+            service_id,
+            name,
+            cancellation_token,
+            reload_token,
+            diagnostics,
+        )
+    }
+
+    pub(crate) fn new_generation_with_diagnostics(
         service_id: ServiceId,
         name: &'static str,
         cancellation_token: CancellationToken,

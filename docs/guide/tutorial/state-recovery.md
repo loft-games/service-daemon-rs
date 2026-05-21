@@ -196,4 +196,4 @@ This pattern enables **Reactive Architecture**: your services automatically adap
 
 ---
 
-[**<- Previous Step: Reactive Triggers**](./reactive-triggers.md) | [**Next Step: DIY Providers ->**](./diy-providers.md)
+[**<- Previous Step: Reactive Triggers**](./reactive-triggers.md) | [**Next Step: Custom Providers ->**](./custom-providers.md)

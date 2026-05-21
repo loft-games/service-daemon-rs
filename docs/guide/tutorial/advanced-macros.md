@@ -61,6 +61,6 @@ You *could* build a `ServiceDescription` manually and pass it to the daemon. But
 
 ## More Information
 
-For the full macro implementation model, see [Macros Deep Dive](../../architecture/macros-deep-dive.md). For normal user-facing usage, return to the [README](../../../README.md) documentation section.
+For the full macro implementation model, see [Macro Expansion](../../architecture/macro-expansion.md). For normal user-facing usage, return to the [README](../../../README.md) documentation section.
 
 [Back to README](../../../README.md)

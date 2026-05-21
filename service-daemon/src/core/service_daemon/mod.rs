@@ -33,7 +33,7 @@ use petgraph::{
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
-use crate::core::context::{DaemonResources, process_token};
+use crate::core::context::{__run_daemon_resources_scope, DaemonResources, process_token};
 use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_probe};
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
@@ -286,7 +286,11 @@ impl ServiceDaemon {
                     message: "provider missing from eager initialization graph".to_owned(),
                 });
             };
-            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await?;
+            let resources = self.resources.clone();
+            __run_daemon_resources_scope(resources, || async {
+                (entry.init)(self.restart_policy, self.cancellation_token.clone()).await
+            })
+            .await?;
         }
 
         Ok(())

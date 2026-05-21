@@ -1,19 +1,8 @@
-//! Testing context for service-level isolation.
+//! Test-only context helpers for running a real `ServiceDaemon` with injected
+//! shelf, status, and provider resources.
 //!
-//! This entire module is gated behind the `simulation` feature flag and is
-//! physically removed from production builds.
-//!
-//! ## Architecture: Interactive Simulation Sandbox
-//!
-//! `MockContext` acts as a **simulation sandbox factory**: it collects pre-filled
-//! resources (shelf data, status overrides) and produces a `ServiceDaemonBuilder`
-//! that spawns a fully real `ServiceDaemon` with those resources injected.
-//!
-//! After the daemon starts, a `SimulationHandle` provides "SimulationHandle" capabilities
-//! for dynamic intervention -- modifying shelf data, flipping service status, or
-//! triggering reload signals while the daemon is running.
-//!
-//! All types in this module are **strictly gated** behind `#[cfg(feature = "simulation")]`.
+//! This module is gated behind the `simulation` feature flag and is removed
+//! from production builds.
 
 use crate::core::context::identity::DaemonResources;
 use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
@@ -22,14 +11,10 @@ use crate::models::{ServiceId, ServiceStatus};
 use std::any::Any;
 use std::sync::Arc;
 
-// =============================================================================
-// SimulationHandle -- The "SimulationHandle" for dynamic intervention
-// =============================================================================
-
-/// A handle for dynamically intervening in a running simulation.
+/// A handle for updating daemon resources during a simulation run.
 ///
-/// `SimulationHandle` holds a reference to the daemon's internal `DaemonResources`
-/// (which are `Arc`-based), so mutations are immediately visible to all services.
+/// `SimulationHandle` holds `Arc`-backed daemon resources, so updates are
+/// visible to services that use the same simulation daemon.
 ///
 /// # Example
 /// ```rust,ignore
@@ -79,6 +64,20 @@ impl SimulationHandle {
         if let Some(notify) = self.resources.reload_signals.get(service_id) {
             notify.notify_one();
         }
+    }
+
+    /// Overrides a provider for this simulation daemon only.
+    ///
+    /// The override is installed into the daemon-local provider scope and is
+    /// treated as a binding mutation. Existing generations that watch this
+    /// provider will reload through the normal provider watch path.
+    pub fn override_provider<T>(&self, value: T)
+    where
+        T: 'static + Send + Sync + Clone,
+    {
+        self.resources
+            .provider_scope
+            .override_local_slot(Arc::new(value));
     }
 
     /// Returns a list of all `ServiceId`s currently visible in the status plane.
@@ -213,6 +212,21 @@ impl MockContextBuilder {
         self
     }
 
+    /// Pre-installs a provider override before the simulation daemon starts.
+    ///
+    /// The override is scoped to this sandbox's daemon resources, so eager
+    /// provider initialization and service injection see the fake value without
+    /// writing into the root provider slot.
+    pub fn with_provider_override<T>(self, value: T) -> Self
+    where
+        T: 'static + Send + Sync + Clone,
+    {
+        self.resources
+            .provider_scope
+            .override_local_slot(Arc::new(value));
+        self
+    }
+
     /// Controls whether framework logging services (`log_service`) are
     /// automatically included in the simulation registry.
     ///
@@ -227,7 +241,7 @@ impl MockContextBuilder {
     }
 
     /// Builds the `MockContext` and returns a pre-configured `ServiceDaemonBuilder`
-    /// along with a `SimulationHandle` for dynamic intervention.
+    /// along with a `SimulationHandle` for runtime updates.
     ///
     /// The returned builder:
     /// - Has `Registry` isolation enabled (empty registry, no auto-discovery).

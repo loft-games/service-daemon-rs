@@ -1,13 +1,11 @@
 // Integration tests for the `#[provider(UnixListen("..."))]` template.
 //
-// Why each test uses its own provider struct + path: provider singletons are
-// per-type statics (see generate_provided_impl). Sharing a struct across
-// tests would let the first resolve cache the result for everyone, masking
-// the very behaviors these tests are meant to exercise.
+// Each test uses its own provider struct and socket path because generated
+// provider root slots are per-type statics. Reusing a struct would let the
+// first resolve cache the result for later tests and hide the behavior under test.
 //
-// Path strategy: hardcoded relative paths under `target/`. Cargo's test cwd
-// is the crate root, so the test helper creates `target/` before binding.
-// `cargo clean` reclaims any stragglers.
+// Relative paths under `target/` keep the files inside Cargo's test cwd.
+// The helper creates the directory before binding; `cargo clean` removes leftovers.
 //
 // Windows-handoff note: this file is `#![cfg(unix)]` so on Windows it is
 // excluded entirely from compilation -- including syntactic checks. If a
