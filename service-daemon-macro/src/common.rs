@@ -366,7 +366,7 @@ impl ParamProcessor {
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
 
         self.watcher_arms.push(quote! {
-            _ = <#inner_type as service_daemon::WatchableProvided>::changed() => {}
+            watch_set.push(<#inner_type as service_daemon::WatchableProvided>::watch_dependency());
         });
 
         match wrapper {
@@ -523,9 +523,9 @@ pub fn generate_call_expr(
 
 /// Generates the watcher function and pointer for dependency change monitoring.
 ///
-/// Shared by `#[service]` and `#[trigger]`. Both pass their watcher arms
+/// Shared by `#[service]` and `#[trigger]`. Both pass their watcher builders
 /// (collected by `extract_params`); triggers should push the target's
-/// `changed()` arm to the list before calling this function.
+/// `watch_dependency()` builder before calling this function.
 ///
 /// # Returns
 /// A tuple of `(watcher_fn_tokens, watcher_ptr_tokens)`.
@@ -538,13 +538,11 @@ pub fn generate_watcher(
     if !watcher_select_arms.is_empty() {
         (
             quote! {
-                /// Auto-generated watcher -- notifies when dependencies change
-                pub fn #watcher_name() -> service_daemon::__private::futures::future::BoxFuture<'static, ()> {
-                    Box::pin(async move {
-                        service_daemon::__private::tokio::select! {
-                            #(#watcher_select_arms),*
-                        }
-                    })
+                /// Auto-generated watcher -- captures dependency baselines for a service generation
+                pub fn #watcher_name() -> service_daemon::ProviderDependencyWatchSet {
+                    let mut watch_set = service_daemon::ProviderDependencyWatchSet::new();
+                    #(#watcher_select_arms)*
+                    watch_set
                 }
             },
             quote! { Some(#watcher_name) },

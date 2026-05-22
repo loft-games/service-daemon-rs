@@ -280,8 +280,8 @@ where
 /// State-watch trigger host.
 ///
 /// Fires once with the current state snapshot, then idles via
-/// `TriggerTransition::Reload`. The framework's `ServiceWatcher` will
-/// restart us when the target provider changes.
+/// `TriggerTransition::Reload`. The generation-scoped dependency watch path
+/// restarts us when the target provider changes.
 ///
 /// # Aliases
 /// `TT::Watch`, `TT::State`.

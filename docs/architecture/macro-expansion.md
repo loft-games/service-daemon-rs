@@ -17,9 +17,9 @@ When you annotate a function, the macro generates:
 Triggers are specialized services registered through the same service registry. The macro-generated host wrapper:
 - Spawns the selected host logic, such as the notify host.
 - Resolves dependency providers once at trigger startup, outside the event loop, matching standard service behavior.
-- For `Watch` templates, generates a service watcher that uses the `ServiceDaemon` reload path.
+- For `Watch` templates, registers the target provider in the generation dependency watch set so provider changes use the `ServiceDaemon` reload path.
 - Dispatches incoming events to the user handler.
-- Stores the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`) in the registry entry; the daemon runner uses it to place the user body while keeping supervision, watchers, reload, restart/backoff, and shutdown coordination on the daemon control plane.
+- Stores the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`) in the registry entry; the daemon runner uses it to place the user body while keeping supervision, dependency-watch evaluation, reload, restart/backoff, and shutdown coordination on the daemon control plane.
 
 ## 3. The `#[provider]` Transformation
 
@@ -52,14 +52,16 @@ Function providers are considered framework-fallible only when their return type
 
 ### Scoped Resolution Bridge
 
-The macro-generated `Provided::resolve()`, lock helpers, `resolve_managed()`, and `WatchableProvided::changed()` do not resolve directly against the static root manager. They call internal bridge functions with that manager as the root fallback. The bridge then applies the runtime rule:
+The macro-generated `Provided::resolve()`, lock helpers, `resolve_managed()`, and `WatchableProvided::watch_dependency()` do not resolve or watch directly against the static root manager. They call internal bridge functions with that manager as the root fallback. The bridge then applies the runtime rule:
 
 1. If a daemon provider scope is active, resolve the daemon's effective slot for the provider type.
 2. If that scope has a local fork or simulation override, use the daemon-local slot.
 3. Otherwise inherit the generated root slot.
 4. If no daemon context exists, use the generated root slot directly.
 
-Service wrappers, trigger wrappers, provider dependency resolution, reachable eager initialization, and generated watch arms all use the same bridge path. The user-facing macro syntax remains `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`; scope and slot ids stay internal.
+Service wrappers, trigger wrappers, provider dependency resolution, reachable eager initialization, and generated dependency watch builders all use the same bridge path. The user-facing macro syntax remains `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`; scope and slot ids stay internal.
+
+Manual `WatchableProvided` implementations should return a `ProviderDependencyWatch` from `watch_dependency()` instead of exposing an async `changed()` method. Generated providers implement this by delegating to the scoped `provider_dependency_watch(...)` bridge, which captures the provider value and binding baselines when the watch handle is constructed.
 
 ### Provider Helper Return Shapes
 

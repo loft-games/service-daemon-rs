@@ -57,7 +57,10 @@ pub use core::context::{
     current_service_id, done, is_shutdown, shelve, shelve_clone, sleep, spawn_with_context, state,
     trigger_config, unshelve, wait_shutdown,
 };
-pub use core::di::{ManagedProvided, Provided, WatchableProvided};
+pub use core::di::{
+    ManagedProvided, Provided, ProviderDependencyChange, ProviderDependencyChangeReason,
+    ProviderDependencyWatch, ProviderDependencyWatchSet, WatchableProvided,
+};
 pub use core::logging::{
     DaemonLayer, LogBatchSizeError, MAX_LOG_BATCH_SIZE, init_logging, set_log_batch_size,
     try_init_logging,
@@ -95,14 +98,15 @@ pub use core::topology_collector::{export_mermaid, reset_topology, start_topolog
 pub mod __private {
     pub use std::sync::Arc;
 
+    pub use crate::ProviderDependencyWatchSet;
     pub use crate::core::context::current_cancellation_token;
     pub use crate::core::managed_state::{
         StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
     };
     pub use crate::core::provider_init::{catch_init_panic, init_fallible};
     pub use crate::core::provider_scope::{
-        provider_changed, resolve_provider_managed, resolve_provider_mutex,
-        resolve_provider_rwlock, resolve_provider_snapshot,
+        provider_changed, provider_dependency_watch, resolve_provider_managed,
+        resolve_provider_mutex, resolve_provider_rwlock, resolve_provider_snapshot,
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{

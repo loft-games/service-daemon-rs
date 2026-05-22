@@ -2,7 +2,8 @@ use parking_lot::RwLock as PlRwLock;
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{
     Notify as TokioNotify, OnceCell, RwLock as TokioRwLock,
     RwLockReadGuard as TokioRwLockReadGuard, RwLockWriteGuard as TokioRwLockWriteGuard, watch,
@@ -21,6 +22,7 @@ pub struct StateManager<T: 'static + Send + Sync + Clone> {
     snapshot_cache: OnceCell<Arc<T>>,
     watch_rx: OnceCell<watch::Receiver<Arc<T>>>,
     change_notify: OnceCell<Arc<TokioNotify>>,
+    value_epoch: OnceLock<Arc<AtomicU64>>,
 }
 
 impl<T: 'static + Send + Sync + Clone> Default for StateManager<T> {
@@ -36,6 +38,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             snapshot_cache: OnceCell::const_new(),
             watch_rx: OnceCell::const_new(),
             change_notify: OnceCell::const_new(),
+            value_epoch: OnceLock::new(),
         }
     }
 
@@ -48,6 +51,16 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         let manager = Self::new();
         manager.snapshot_cache.set(arc).ok();
         manager
+    }
+
+    fn epoch_counter(&self) -> Arc<AtomicU64> {
+        self.value_epoch
+            .get_or_init(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    pub(crate) fn value_epoch(&self) -> u64 {
+        self.epoch_counter().load(Ordering::Acquire)
     }
 
     /// Internal helper to get or initialize the shared notification handle.
@@ -75,6 +88,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
                 let val = initial_arc.clone();
                 let notify = self.get_notify().await;
+                let value_epoch = self.epoch_counter();
                 let (tx, rx) = watch::channel(initial_arc);
 
                 // Ensure watch_rx is also populated
@@ -83,6 +97,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
                 Arc::new(TrackedRwLock {
                     inner: TokioRwLock::new(val),
                     notify,
+                    value_epoch,
                     watch_tx: tx,
                 })
             })
@@ -119,6 +134,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
                 let val = initial_arc.clone();
                 let notify = self.get_notify().await;
+                let value_epoch = self.epoch_counter();
                 let (tx, rx) = watch::channel(initial_arc);
 
                 // Ensure watch_rx is also populated
@@ -127,6 +143,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
                 Ok(Arc::new(TrackedRwLock {
                     inner: TokioRwLock::new(val),
                     notify,
+                    value_epoch,
                     watch_tx: tx,
                 }))
             })
@@ -220,8 +237,29 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
     /// Returns a future that resolves when the state is modified.
     pub async fn changed(&self) {
-        let notify = self.get_notify().await;
-        notify.notified().await;
+        let observed_epoch = self.value_epoch();
+        let _ = self.changed_since(observed_epoch).await;
+    }
+
+    pub(crate) async fn changed_since(&self, observed_epoch: u64) -> u64 {
+        loop {
+            let current_epoch = self.value_epoch();
+            if current_epoch != observed_epoch {
+                return current_epoch;
+            }
+
+            let notify = self.get_notify().await;
+            let changed = notify.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+
+            let current_epoch = self.value_epoch();
+            if current_epoch != observed_epoch {
+                return current_epoch;
+            }
+
+            changed.await;
+        }
     }
 }
 
@@ -236,6 +274,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 pub struct TrackedRwLock<T: Clone> {
     inner: TokioRwLock<Arc<T>>,
     notify: Arc<TokioNotify>,
+    value_epoch: Arc<AtomicU64>,
     watch_tx: watch::Sender<Arc<T>>,
 }
 
@@ -261,8 +300,8 @@ impl<T: Clone> TrackedRwLock<T> {
         TrackedWriteGuard {
             inner: self.inner.write().await,
             notify: self.notify.clone(),
+            value_epoch: self.value_epoch.clone(),
             watch_tx: &self.watch_tx,
-            is_committed: false,
             is_dirty: false,
         }
     }
@@ -284,26 +323,31 @@ impl<T: Clone> Deref for TrackedReadGuard<'_, T> {
 /// and notify state observers.
 ///
 /// Tracks whether the data was actually mutated via `DerefMut` using an
-/// internal `is_dirty` flag. On `Drop`, auto-commit only fires if the
-/// guard is both dirty and not yet manually committed, preventing
-/// spurious wakeups and unnecessary clones.
+/// internal `is_dirty` flag. Publications clear the flag so `Drop` only emits
+/// a change when there is unpublished dirty state.
 pub struct TrackedWriteGuard<'a, T: Clone> {
     inner: TokioRwLockWriteGuard<'a, Arc<T>>,
     notify: Arc<TokioNotify>,
+    value_epoch: Arc<AtomicU64>,
     watch_tx: &'a watch::Sender<Arc<T>>,
-    is_committed: bool,
     is_dirty: bool,
 }
 
 impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
+    fn publish_current(&mut self) {
+        let new_val = (*self.inner).clone();
+        self.watch_tx.send_replace(new_val);
+        self.value_epoch.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+        self.is_dirty = false;
+    }
+
     /// Commits the current state to the snapshot channel and notifies listeners.
     /// This can be called multiple times during a single write lock.
     pub fn commit(&mut self) {
-        let new_val = (*self.inner).clone();
-        self.watch_tx.send_replace(new_val);
-        self.notify.notify_waiters();
-        self.is_committed = true;
-        self.is_dirty = true;
+        if self.is_dirty {
+            self.publish_current();
+        }
     }
 
     /// Replaces the entire state with a new Arc and commits it.
@@ -311,8 +355,9 @@ impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
     pub fn publish(&mut self, new_val: Arc<T>) {
         *self.inner = new_val.clone();
         self.watch_tx.send_replace(new_val);
+        self.value_epoch.fetch_add(1, Ordering::AcqRel);
         self.notify.notify_waiters();
-        self.is_committed = true;
+        self.is_dirty = false;
     }
 }
 
@@ -332,14 +377,8 @@ impl<T: Clone> DerefMut for TrackedWriteGuard<'_, T> {
 
 impl<T: Clone> Drop for TrackedWriteGuard<'_, T> {
     fn drop(&mut self) {
-        if self.is_dirty && !self.is_committed {
-            // Automatically commit on drop only if data was actually mutated
-            // (DerefMut was called) and not yet manually committed.
-            // This prevents spurious wakeups and unnecessary clones when
-            // a write lock is acquired but no modification occurs.
-            let new_val = (*self.inner).clone();
-            self.watch_tx.send_replace(new_val);
-            self.notify.notify_waiters();
+        if self.is_dirty {
+            self.publish_current();
         }
     }
 }
@@ -621,6 +660,7 @@ mod tests {
         let lock = TrackedRwLock {
             inner: TokioRwLock::new(Arc::new(0)),
             notify: notify.clone(),
+            value_epoch: Arc::new(AtomicU64::new(0)),
             watch_tx: tx,
         };
 
@@ -672,6 +712,7 @@ mod tests {
         let lock = TrackedRwLock {
             inner: TokioRwLock::new(Arc::new(10)),
             notify: notify.clone(),
+            value_epoch: Arc::new(AtomicU64::new(0)),
             watch_tx: tx,
         };
 
@@ -698,6 +739,7 @@ mod tests {
         let rw = Arc::new(TrackedRwLock {
             inner: TokioRwLock::new(Arc::new(0)),
             notify: notify.clone(),
+            value_epoch: Arc::new(AtomicU64::new(0)),
             watch_tx: tx,
         });
         let lock = TrackedMutex { inner: rw };
@@ -730,5 +772,90 @@ mod tests {
                 "Mutex lock with mutation should notify"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn changed_since_returns_after_already_committed_mutation() {
+        let manager = StateManager::<i32>::with_value(1);
+        let lock = manager.resolve_rwlock(|| async { Arc::new(1) }).await;
+        let observed_epoch = manager.value_epoch();
+
+        {
+            let mut guard = lock.write().await;
+            *guard = 2;
+        }
+
+        let changed_epoch = tokio::time::timeout(
+            Duration::from_millis(50),
+            manager.changed_since(observed_epoch),
+        )
+        .await
+        .expect("changed_since should return for an already advanced epoch");
+
+        assert_eq!(changed_epoch, observed_epoch + 1);
+    }
+
+    #[tokio::test]
+    async fn changed_since_waits_when_epoch_is_unchanged() {
+        let manager = StateManager::<i32>::with_value(1);
+        let observed_epoch = manager.value_epoch();
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                manager.changed_since(observed_epoch)
+            )
+            .await
+            .is_err(),
+            "changed_since should wait while the observed epoch is current"
+        );
+    }
+
+    #[tokio::test]
+    async fn value_epoch_ignores_noop_write_lock() {
+        let manager = StateManager::<i32>::with_value(1);
+        let lock = manager.resolve_rwlock(|| async { Arc::new(1) }).await;
+        let observed_epoch = manager.value_epoch();
+
+        {
+            let guard = lock.write().await;
+            let _value = *guard;
+        }
+
+        assert_eq!(manager.value_epoch(), observed_epoch);
+    }
+
+    #[tokio::test]
+    async fn value_epoch_advances_once_per_publication() {
+        let manager = StateManager::<i32>::with_value(1);
+        let lock = manager.resolve_rwlock(|| async { Arc::new(1) }).await;
+
+        assert_eq!(manager.value_epoch(), 0);
+
+        {
+            let mut guard = lock.write().await;
+            *guard = 2;
+            guard.commit();
+            assert_eq!(manager.value_epoch(), 1);
+        }
+        assert_eq!(manager.value_epoch(), 1);
+
+        {
+            let mut guard = lock.write().await;
+            guard.commit();
+        }
+        assert_eq!(manager.value_epoch(), 1);
+
+        {
+            let mut guard = lock.write().await;
+            guard.publish(Arc::new(3));
+        }
+        assert_eq!(manager.value_epoch(), 2);
+
+        {
+            let mut guard = lock.write().await;
+            *guard = 4;
+        }
+        assert_eq!(manager.value_epoch(), 3);
     }
 }

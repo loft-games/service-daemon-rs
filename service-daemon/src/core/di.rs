@@ -1,6 +1,81 @@
 use crate::core::managed_state::{Mutex, RwLock};
 use crate::{ProviderError, ProviderInitError};
+use futures::future::{BoxFuture, pending};
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::any::TypeId;
+use std::future::Future;
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderDependencyChangeReason {
+    Value,
+    Binding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderDependencyChange {
+    pub type_id: TypeId,
+    pub reason: ProviderDependencyChangeReason,
+}
+
+impl ProviderDependencyChange {
+    pub(crate) const fn new(type_id: TypeId, reason: ProviderDependencyChangeReason) -> Self {
+        Self { type_id, reason }
+    }
+}
+
+pub struct ProviderDependencyWatch {
+    changed: BoxFuture<'static, ProviderDependencyChange>,
+}
+
+impl ProviderDependencyWatch {
+    pub(crate) fn new(
+        changed: impl Future<Output = ProviderDependencyChange> + Send + 'static,
+    ) -> Self {
+        Self {
+            changed: Box::pin(changed),
+        }
+    }
+
+    pub async fn changed(self) -> ProviderDependencyChange {
+        self.changed.await
+    }
+}
+
+#[derive(Default)]
+pub struct ProviderDependencyWatchSet {
+    watches: Vec<ProviderDependencyWatch>,
+}
+
+impl ProviderDependencyWatchSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, watch: ProviderDependencyWatch) {
+        self.watches.push(watch);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.watches.is_empty()
+    }
+
+    pub async fn changed(self) -> ProviderDependencyChange {
+        if self.watches.is_empty() {
+            return pending::<ProviderDependencyChange>().await;
+        }
+
+        let mut watches = FuturesUnordered::new();
+        for watch in self.watches {
+            watches.push(watch.changed);
+        }
+
+        watches
+            .next()
+            .await
+            .expect("ProviderDependencyWatchSet should contain at least one watch")
+    }
+}
 
 /// A trait for types that can be resolved by the DI system as read-only snapshots.
 ///
@@ -63,13 +138,14 @@ pub trait ManagedProvided: Provided {
     -> impl std::future::Future<Output = std::result::Result<Arc<Self>, ProviderError>> + Send;
 }
 
-/// A trait for managed provider types that also support change notifications.
+/// A trait for managed provider types that also support dependency watching.
 ///
-/// This capability is required for `Watch(T)` triggers. The default
-/// `#[provider]` implementation waits on the current effective provider slot's
-/// value-change notification and the current daemon scope's binding-change
-/// notification. A watch therefore wakes when a managed snapshot is published,
-/// or when the daemon switches that provider type to a local override/fork.
+/// This capability is required for `Watch(T)` triggers and for service/trigger
+/// dependency reloads. The default `#[provider]` implementation captures the
+/// current effective provider slot's value epoch and binding snapshot when the
+/// watch handle is created. A watch therefore wakes when a managed snapshot is
+/// published, or when the daemon switches that provider type to a local
+/// override/fork.
 ///
 /// Current pre-release behavior: `#[provider]` does not try to defer to manual
 /// impls. If you also hand-write `WatchableProvided` for the same type, Rust
@@ -80,6 +156,6 @@ pub trait ManagedProvided: Provided {
     note = "Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `{Self}`."
 )]
 pub trait WatchableProvided: ManagedProvided {
-    /// Returns a future that resolves when the effective slot's value or binding changes.
-    fn changed() -> impl std::future::Future<Output = ()> + Send;
+    /// Captures the current dependency baseline and returns a watch handle for later awaiting.
+    fn watch_dependency() -> ProviderDependencyWatch;
 }

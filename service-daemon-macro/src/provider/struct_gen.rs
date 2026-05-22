@@ -250,8 +250,8 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
 
     let watchable_impl = quote! {
         impl service_daemon::WatchableProvided for #type_tokens {
-            async fn changed() {
-                service_daemon::__private::provider_changed(&#singleton_name).await
+            fn watch_dependency() -> service_daemon::ProviderDependencyWatch {
+                service_daemon::__private::provider_dependency_watch(&#singleton_name)
             }
         }
     };

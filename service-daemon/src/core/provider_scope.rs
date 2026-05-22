@@ -7,6 +7,9 @@ use tokio::sync::Notify as TokioNotify;
 
 use crate::ProviderError;
 use crate::core::context::api::current_provider_scope;
+use crate::core::di::{
+    ProviderDependencyChange, ProviderDependencyChangeReason, ProviderDependencyWatch,
+};
 use crate::core::managed_state::{StateManager, TrackedMutex, TrackedRwLock};
 
 const ROOT_PROVIDER_SCOPE_RAW_ID: u64 = 0;
@@ -49,10 +52,21 @@ pub(crate) struct ProviderBindingSnapshot {
     pub(crate) epoch: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderChangeKind {
     Value,
     Binding,
+}
+
+#[cfg(test)]
+impl ProviderChangeKind {
+    fn from_reason(reason: ProviderDependencyChangeReason) -> Self {
+        match reason {
+            ProviderDependencyChangeReason::Value => Self::Value,
+            ProviderDependencyChangeReason::Binding => Self::Binding,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -323,7 +337,18 @@ where
     }
 }
 
+#[cfg(test)]
 async fn provider_change<T>(root_manager: &'static StateManager<T>) -> ProviderChangeKind
+where
+    T: 'static + Send + Sync + Clone,
+{
+    let change = provider_dependency_watch(root_manager).changed().await;
+    ProviderChangeKind::from_reason(change.reason)
+}
+
+pub fn provider_dependency_watch<T>(
+    root_manager: &'static StateManager<T>,
+) -> ProviderDependencyWatch
 where
     T: 'static + Send + Sync + Clone,
 {
@@ -332,15 +357,29 @@ where
     let binding = scope.effective_binding(type_id);
 
     if let Some(local_manager) = scope.local_slot_for_binding::<T>(binding) {
-        tokio::select! {
-            _ = local_manager.changed() => ProviderChangeKind::Value,
-            _ = scope.binding_changed_from::<T>(binding) => ProviderChangeKind::Binding,
-        }
+        let observed_epoch = local_manager.value_epoch();
+        ProviderDependencyWatch::new(async move {
+            tokio::select! {
+                _ = local_manager.changed_since(observed_epoch) => {
+                    ProviderDependencyChange::new(type_id, ProviderDependencyChangeReason::Value)
+                }
+                _ = scope.binding_changed_from::<T>(binding) => {
+                    ProviderDependencyChange::new(type_id, ProviderDependencyChangeReason::Binding)
+                }
+            }
+        })
     } else {
-        tokio::select! {
-            _ = root_manager.changed() => ProviderChangeKind::Value,
-            _ = scope.binding_changed_from::<T>(binding) => ProviderChangeKind::Binding,
-        }
+        let observed_epoch = root_manager.value_epoch();
+        ProviderDependencyWatch::new(async move {
+            tokio::select! {
+                _ = root_manager.changed_since(observed_epoch) => {
+                    ProviderDependencyChange::new(type_id, ProviderDependencyChangeReason::Value)
+                }
+                _ = scope.binding_changed_from::<T>(binding) => {
+                    ProviderDependencyChange::new(type_id, ProviderDependencyChangeReason::Binding)
+                }
+            }
+        })
     }
 }
 
@@ -348,7 +387,7 @@ pub async fn provider_changed<T>(root_manager: &'static StateManager<T>)
 where
     T: 'static + Send + Sync + Clone,
 {
-    let _ = provider_change(root_manager).await;
+    let _ = provider_dependency_watch(root_manager).changed().await;
 }
 
 #[cfg(test)]
@@ -643,6 +682,83 @@ mod tests {
             .expect("binding mutation should notify")
             .expect("binding watcher task should join");
         assert_eq!(kind, ProviderChangeKind::Binding);
+    }
+
+    #[tokio::test]
+    async fn provider_dependency_watch_observes_root_value_change_before_await() {
+        let root_manager = root_manager(1);
+        let resources = crate::core::context::DaemonResources::new();
+        let root_lock = resolve_provider_rwlock(root_manager, || async {
+            Ok::<Arc<ProviderValue>, ()>(Arc::new(ProviderValue(99)))
+        })
+        .await
+        .expect("root rwlock should resolve");
+        let watch = crate::core::context::__run_daemon_resources_sync_scope(resources, || {
+            provider_dependency_watch(root_manager)
+        })
+        .await;
+
+        {
+            let mut guard = root_lock.write().await;
+            guard.0 = 2;
+        }
+
+        let change = tokio::time::timeout(std::time::Duration::from_secs(5), watch.changed())
+            .await
+            .expect("watch should observe root value change before await");
+        assert_eq!(change.type_id, TypeId::of::<ProviderValue>());
+        assert_eq!(change.reason, ProviderDependencyChangeReason::Value);
+    }
+
+    #[tokio::test]
+    async fn provider_dependency_watch_observes_binding_change_before_await() {
+        let root_manager = root_manager(1);
+        let resources = crate::core::context::DaemonResources::new();
+        let watch =
+            crate::core::context::__run_daemon_resources_sync_scope(resources.clone(), || {
+                provider_dependency_watch(root_manager)
+            })
+            .await;
+
+        resources
+            .provider_scope
+            .override_local_slot(Arc::new(ProviderValue(2)));
+
+        let change = tokio::time::timeout(std::time::Duration::from_secs(5), watch.changed())
+            .await
+            .expect("watch should observe binding change before await");
+        assert_eq!(change.type_id, TypeId::of::<ProviderValue>());
+        assert_eq!(change.reason, ProviderDependencyChangeReason::Binding);
+    }
+
+    #[tokio::test]
+    async fn provider_dependency_watch_preserves_local_override_boundary() {
+        let root_manager = root_manager(1);
+        let resources = crate::core::context::DaemonResources::new();
+        resources
+            .provider_scope
+            .override_local_slot(Arc::new(ProviderValue(2)));
+        let root_lock = resolve_provider_rwlock(root_manager, || async {
+            Ok::<Arc<ProviderValue>, ()>(Arc::new(ProviderValue(99)))
+        })
+        .await
+        .expect("root rwlock should resolve");
+        let watch = crate::core::context::__run_daemon_resources_sync_scope(resources, || {
+            provider_dependency_watch(root_manager)
+        })
+        .await;
+
+        {
+            let mut guard = root_lock.write().await;
+            guard.0 = 3;
+        }
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), watch.changed())
+                .await
+                .is_err(),
+            "local override watch should not wake for root value mutation"
+        );
     }
 
     #[tokio::test]

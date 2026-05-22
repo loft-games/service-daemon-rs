@@ -1,4 +1,3 @@
-use futures::future::BoxFuture;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -7,6 +6,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::ProviderDependencyWatchSet;
 use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::{ServiceDescription, ServiceFn, ServiceId, ServiceScheduling};
 
@@ -17,7 +17,7 @@ pub(super) struct ServiceSupervisorParts {
     pub service_id: ServiceId,
     pub name: &'static str,
     pub run: ServiceFn,
-    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub policy: RestartPolicy,
     pub scheduling: ServiceScheduling,
     pub body_lanes: BodyExecutionLanes,
@@ -113,7 +113,7 @@ pub(super) struct SpawnServiceParts {
     pub service_id: ServiceId,
     pub name: &'static str,
     pub run: ServiceFn,
-    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub policy: RestartPolicy,
     pub scheduling: ServiceScheduling,
     pub supervisor_lane: SupervisorSpawnLane,

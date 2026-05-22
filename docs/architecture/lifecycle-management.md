@@ -15,14 +15,14 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 | `ShuttingDown` | `Terminated` | Daemon shutdown signal + service cleanup |
 | (Any) | `Terminated` | `ServiceError::Fatal` or daemon teardown |
 
-`NeedReload` is primarily a **service-observed lifecycle state** exposed by `state()`. In the runtime, dependency watchers notify the supervisor through reload signals, which cancel the current generation's reload token. Once that token is cancelled, `state()` resolves to `NeedReload` immediately for the running service. The shared Status Plane remains the durable observation surface, but reload intent is delivered first through the token/signal control path rather than requiring a separate `Healthy -> NeedReload` map write.
+`NeedReload` is primarily a **service-observed lifecycle state** exposed by `state()`. In the runtime, provider dependency watches are captured per generation before the service body becomes externally observable. When the generation watch set observes a provider value or binding change, the supervisor cancels the current generation's reload token directly. Once that token is cancelled, `state()` resolves to `NeedReload` immediately for the running service. The shared Status Plane remains the durable observation surface, but reload intent is delivered first through the generation token path rather than requiring a separate `Healthy -> NeedReload` map write.
 
 > [!NOTE]
 > **Signal handling**: The `ServiceSupervisor` uses one `tokio::select!` loop for service execution and signal bridging, so reload and shutdown signals do not need separate helper tasks.
 
 ### Control Plane Runtime and Declared Body Modes
 
-Service supervisors, dependency watchers, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
+Service supervisors, dependency watch construction, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
 - `Standard`: host Tokio runtime integration through the runtime that called `ServiceDaemon::run()`.
 - `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count planned from final declared HighPriority entries.
@@ -38,32 +38,34 @@ Scheduling analysis is intentionally limited to internal recommendations. The an
 
 A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, is deferred to later research and would need to happen at a generation boundary inside the same declared mode.
 
-### 1.1. The Provider Change Signal Path
+### 1.1. Provider Dependency Watch Path
 Provider reload propagation distinguishes value mutation from binding mutation:
 
 ```mermaid
 sequenceDiagram
+    participant Super as ServiceSupervisor
+    participant WatchSet as ProviderDependencyWatchSet
     participant Writer as Service/Test Writer
     participant Guard as TrackedWriteGuard
     participant Slot as Effective Provider Slot
     participant Scope as Daemon Provider Scope
-    participant Watcher as ServiceWatcher
-    participant Super as ServiceSupervisor
 
+    Super->>WatchSet: Capture value/binding baselines for Generation N
     Writer->>Guard: Mutate managed value
-    Guard->>Slot: Publish value change on dirty drop/commit
+    Guard->>Slot: Publish value epoch on dirty drop/commit/publish
     Writer->>Scope: Or install daemon-local override/fork
-    Scope->>Watcher: Publish binding change
-    Slot->>Watcher: Publish value change
-    Watcher->>Super: Request Reload
-    Super->>Super: Terminate Generation N
+    Slot->>WatchSet: Value epoch differs from baseline
+    Scope->>WatchSet: Binding epoch differs from baseline
+    WatchSet->>Super: ProviderDependencyChange(Value/Binding)
+    Super->>Super: Cancel Generation N reload token
     Super->>Super: Spawn Generation N+1
 ```
 
-- **Value mutation**: Managed providers publish through the effective slot's `StateManager`. Root slot changes reload daemons that still inherit root; daemon-local slot changes stay inside that daemon.
+- **Value mutation**: Managed providers publish through the effective slot's `StateManager` and advance its value epoch. Root slot changes reload daemons that still inherit root; daemon-local slot changes stay inside that daemon.
 - **Binding mutation**: A daemon-local fork or simulation override changes which slot a provider type resolves to for that daemon. The binding epoch changes and dependent generations reload so the next generation resolves the new slot.
+- **Baseline capture**: Each generation constructs its `ProviderDependencyWatchSet` before the service or trigger body can become externally observable. This makes already-published changes level-triggered instead of relying on a retained notification edge.
 - **Dirty tracking**: Acquiring and releasing a write lock without mutating the value does not publish a value change.
-- **Race Safety**: The `ServiceSupervisor` ensures that a reload only proceeds after the preceding generation has cleanly released its resources (e.g., ports, file handles).
+- **Race Safety**: Provider value watches use epoch check / notification arm / re-check loops, and the supervisor races the generation body directly against the dependency watch set. A change published between startup and the first async poll is still observed.
 
 ### 1.2. Immediate Reloads
 Even if a service is in a restart backoff delay (due to a failure), the `ServiceDaemon` remains reactive. If a **Reload Signal** is received (typically due to a dependency update), the daemon will interrupt the delay and restart the service immediately with the new configuration.

@@ -1,4 +1,6 @@
-use service_daemon::{ServiceDaemon, WatchableProvided, provider, service};
+use service_daemon::{
+    ProviderDependencyChangeReason, ServiceDaemon, WatchableProvided, provider, service,
+};
 #[cfg(feature = "simulation")]
 use service_daemon::{TT::*, trigger};
 use std::sync::Arc;
@@ -453,9 +455,10 @@ async fn eager_provider_initialization_seeds_the_generated_provider_cache() {
 }
 
 #[tokio::test]
-async fn watchable_provider_changed_tracks_root_slot() -> anyhow::Result<()> {
+async fn watchable_provider_dependency_watch_tracks_root_slot() -> anyhow::Result<()> {
     let lock = WatchCharacterizationProvider::resolve_rwlock().await;
-    let changed = tokio::spawn(async { WatchCharacterizationProvider::changed().await });
+    let watch = WatchCharacterizationProvider::watch_dependency();
+    let changed = tokio::spawn(async move { watch.changed().await });
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     {
@@ -463,7 +466,8 @@ async fn watchable_provider_changed_tracks_root_slot() -> anyhow::Result<()> {
         guard.0 = 2;
     }
 
-    timeout(Duration::from_secs(5), changed).await??;
+    let change = timeout(Duration::from_secs(5), changed).await??;
+    assert_eq!(change.reason, ProviderDependencyChangeReason::Value);
     Ok(())
 }
 

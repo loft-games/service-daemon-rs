@@ -24,10 +24,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, info, warn};
 
-use crate::ProviderInitError;
 use crate::ServiceScheduling;
 use crate::core::context::{
-    __run_daemon_resources_scope, __run_service_scope, DaemonResources, ServiceIdentity,
+    __run_daemon_resources_sync_scope, __run_service_scope, DaemonResources, ServiceIdentity,
 };
 use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
@@ -39,6 +38,7 @@ use crate::models::policy::RestartStormGuard;
 use crate::models::{
     BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
 };
+use crate::{ProviderDependencyWatchSet, ProviderInitError};
 
 use super::parts::{
     BodyExecutionLane, BodyExecutionLanes, BodyLaneResolver, ServiceSupervisorParts,
@@ -373,7 +373,7 @@ struct ServiceSupervisor {
     service_id: ServiceId,
     name: &'static str,
     run: ServiceFn,
-    watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    watcher: Option<fn() -> ProviderDependencyWatchSet>,
     scheduling: ServiceScheduling,
     body_lanes: BodyExecutionLanes,
     body_lane_resolver: BodyLaneResolver,
@@ -392,6 +392,7 @@ struct ServiceSupervisor {
     generation_start: Option<Instant>,
     generation: u64,
     generation_diagnostics: Option<GenerationDiagnosticsHandle>,
+    dependency_watch_set: Option<ProviderDependencyWatchSet>,
     /// Per-generation token used to detect reload vs. normal exit.
     reload_token: Option<CancellationToken>,
 }
@@ -434,35 +435,8 @@ impl ServiceSupervisor {
             generation_start: None,
             generation: 0,
             generation_diagnostics: None,
+            dependency_watch_set: None,
             reload_token: None,
-        }
-    }
-
-    /// Spawns the dependency watcher if present.
-    fn spawn_watcher(&self) {
-        if let Some(watcher) = &self.watcher {
-            let n = self.name;
-            let sid = self.service_id;
-            let ct = self.cancellation_token.clone();
-            let res = self.resources.clone();
-            let watcher = *watcher;
-            tokio::spawn(async move {
-                while !ct.is_cancelled() {
-                    let reload_signal = res
-                        .reload_signals
-                        .entry(sid)
-                        .or_insert_with(|| Arc::new(Notify::new()))
-                        .clone();
-
-                    tokio::select! {
-                        _ = __run_daemon_resources_scope(res.clone(), watcher) => {
-                            info!("Watcher: Dependency change detected for service '{}', triggering reload", n);
-                            reload_signal.notify_one();
-                        }
-                        _ = ct.cancelled() => break,
-                    }
-                }
-            });
         }
     }
 
@@ -757,6 +731,14 @@ impl ServiceSupervisor {
         self.generation_body_lane = self.body_lanes.resolve(resolved_scheduling);
         self.generation_start = Some(Instant::now());
         self.reload_token = Some(CancellationToken::new());
+        self.dependency_watch_set = match self.watcher {
+            Some(watcher) => {
+                let watch_set =
+                    __run_daemon_resources_sync_scope(self.resources.clone(), watcher).await;
+                (!watch_set.is_empty()).then_some(watch_set)
+            }
+            None => None,
+        };
 
         info!(
             service = %self.name,
@@ -849,19 +831,51 @@ impl ServiceSupervisor {
             ),
         };
 
-        let result = tokio::select! {
-            res = &mut generation_future => res,
-            _ = reload_signal.notified() => {
-                diagnostics.record_reload_requested();
-                reload_token.cancel();
-                info!(
-                    service = %self.name,
-                    service_id = %self.service_id,
-                    generation = self.generation,
-                    body_lane = ?body_lane,
-                    "Service reload signal received, waiting for service generation to exit"
-                );
-                generation_future.await
+        let result = if let Some(watch_set) = self.dependency_watch_set.take() {
+            tokio::select! {
+                res = &mut generation_future => res,
+                change = watch_set.changed() => {
+                    diagnostics.record_reload_requested();
+                    reload_token.cancel();
+                    info!(
+                        service = %self.name,
+                        service_id = %self.service_id,
+                        generation = self.generation,
+                        body_lane = ?body_lane,
+                        dependency_type_id = ?change.type_id,
+                        dependency_change_reason = ?change.reason,
+                        "Provider dependency change detected, waiting for service generation to exit"
+                    );
+                    generation_future.await
+                }
+                _ = reload_signal.notified() => {
+                    diagnostics.record_reload_requested();
+                    reload_token.cancel();
+                    info!(
+                        service = %self.name,
+                        service_id = %self.service_id,
+                        generation = self.generation,
+                        body_lane = ?body_lane,
+                        "Service reload signal received, waiting for service generation to exit"
+                    );
+                    generation_future.await
+                }
+            }
+        } else {
+            tokio::select! {
+                res = &mut generation_future => res,
+                _ = reload_signal.notified() => {
+                    diagnostics.record_reload_requested();
+                    reload_token.cancel();
+                    info!(
+                        service = %self.name,
+                        service_id = %self.service_id,
+                        generation = self.generation,
+                        body_lane = ?body_lane,
+                        "Service reload signal received, waiting for service generation to exit"
+                    );
+                    generation_future.await
+                }
             }
         };
 
@@ -1061,8 +1075,6 @@ impl ServiceSupervisor {
 
     /// Main supervision loop -- a flat FSM driver.
     async fn run_loop(mut self) {
-        self.spawn_watcher();
-
         let mut state = SupervisorState::Starting;
         loop {
             state = match state {
@@ -1389,8 +1401,8 @@ mod tests {
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
 
-    static WATCHER_THREAD_NAME: LazyLock<Arc<Mutex<Option<String>>>> =
-        LazyLock::new(|| Arc::new(Mutex::new(None)));
+    static WATCHER_THREAD_NAME: LazyLock<Arc<StdMutex<Option<String>>>> =
+        LazyLock::new(|| Arc::new(StdMutex::new(None)));
     static WATCHER_STARTED: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
     static NO_LIVE_REMAP_THREADS: LazyLock<Arc<Mutex<Vec<String>>>> =
         LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
@@ -1533,16 +1545,14 @@ mod tests {
         })
     }
 
-    fn control_runtime_watcher() -> BoxFuture<'static, ()> {
-        Box::pin(async {
-            let thread_name = std::thread::current()
-                .name()
-                .unwrap_or("unnamed")
-                .to_string();
-            *WATCHER_THREAD_NAME.lock().await = Some(thread_name);
-            WATCHER_STARTED.notify_one();
-            futures::future::pending::<()>().await;
-        })
+    fn control_runtime_watcher() -> ProviderDependencyWatchSet {
+        let thread_name = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        *WATCHER_THREAD_NAME.lock().unwrap() = Some(thread_name);
+        WATCHER_STARTED.notify_one();
+        ProviderDependencyWatchSet::new()
     }
 
     fn fast_policy() -> RestartPolicy {
@@ -1880,7 +1890,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_service_runs_watcher_on_control_runtime() {
-        *WATCHER_THREAD_NAME.lock().await = None;
+        *WATCHER_THREAD_NAME.lock().unwrap() = None;
         let control_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .worker_threads(1)
@@ -1917,7 +1927,7 @@ mod tests {
             .expect("watcher should start on control runtime");
         let thread_name = WATCHER_THREAD_NAME
             .lock()
-            .await
+            .unwrap()
             .clone()
             .unwrap_or_else(|| "missing".to_string());
 

@@ -8,7 +8,7 @@ At a high level, the macros wire user code into five runtime surfaces:
 
 - **Registry**: the lazy blueprint of service, trigger, and provider entries discovered from link-time slices. It does not start work by itself; it describes what the daemon can create.
 - **Runner / control plane**: the daemon-owned orchestration layer that starts priority waves, supervises generations, bridges bodies onto their declared execution lanes, applies restart policy, and handles graceful shutdown.
-- **Status Plane**: the shared observation map for service lifecycle state. User helpers such as `state()` read from this plane, while reload delivery also uses a companion token/signal path.
+- **Status Plane**: the shared observation map for service lifecycle state. User helpers such as `state()` read from this plane, while reload delivery also uses a companion token/watch path.
 - **Provider Scope**: the daemon-local provider binding layer. Daemons inherit root provider slots by default and can shadow individual provider types with local forks or simulation overrides.
 - **Shelf**: daemon-scoped typed storage for data that should survive a service generation restart or reload, but not the lifetime of the whole daemon process.
 
@@ -31,7 +31,7 @@ Each entry in the registry contains a `ServiceId`. This ID is used as the primar
 `service-daemon-rs` separates provider discovery from provider ownership. `PROVIDER_REGISTRY` tells the daemon which provider definitions exist, while provider scopes decide which cached instance a daemon generation actually receives.
 
 - **Root compatibility slot**: each generated provider still owns a root `StateManager<T>` slot. Helper calls such as `T::resolve()` made outside a daemon context use this root fallback.
-- **Daemon effective scope**: service bodies, trigger bodies, dependency watchers, and reachable eager initialization resolve through the current daemon's `DaemonResources` provider scope.
+- **Daemon effective scope**: service bodies, trigger bodies, dependency watch construction, and reachable eager initialization resolve through the current daemon's `DaemonResources` provider scope.
 - **Inherited by default**: a daemon scope normally inherits the root slot, preserving the simple "one shared provider" behavior for ordinary applications.
 - **Local shadowing**: internal forks and simulation overrides install a daemon-local slot for a single provider type. That slot has its own cache, managed locks, watch notification, and binding epoch.
 - **Recursive Resolution**: provider dependencies resolve through the same effective scope, so a provider initialized for a daemon sees the same ownership boundary as the service or trigger that requested it.
@@ -39,7 +39,7 @@ Each entry in the registry contains a `ServiceId`. This ID is used as the primar
 ### 2.1. Status plane and reload signaling
 The daemon maintains a shared Status Plane for service-observable lifecycle state. A global `STATUS_CHANGED` notification wakes waiters when a service writes a new status, such as the transition from `Initializing` to `Healthy`.
 
-Reloads use a companion control path in addition to the Status Plane. Dependency watchers notify the supervisor through per-service reload signals, which cancel the current generation's reload token immediately. Inside the service, `state()` then resolves to `NeedReload` from that token-driven control path, even before or without a separate `status_plane` write.
+Reloads use a companion control path in addition to the Status Plane. Provider dependency watch sets are captured per generation before the service or trigger body becomes externally observable; a value or binding change cancels that generation's reload token directly. Inside the service, `state()` then resolves to `NeedReload` from that token-driven control path, even before or without a separate `status_plane` write.
 
 ## 3. High-Level System Flow
 

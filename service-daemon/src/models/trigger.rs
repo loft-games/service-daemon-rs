@@ -178,8 +178,8 @@ pub type TriggerHandler<P> = Arc<
 ///
 /// - [`Next`](TriggerTransition::Next): Dispatch the payload and loop again.
 /// - [`Reload`](TriggerTransition::Reload): Dispatch the payload, then idle
-///   until the framework's `ServiceWatcher` restarts us (leveraging the
-///   existing service reload mechanism).
+///   until the generation-scoped dependency watch path restarts us through
+///   the service reload mechanism.
 /// - [`Stop`](TriggerTransition::Stop): Exit the event loop cleanly.
 #[non_exhaustive]
 pub enum TriggerTransition<P> {
@@ -191,8 +191,9 @@ pub enum TriggerTransition<P> {
     /// Deliver the payload, then idle until the framework restarts us.
     ///
     /// Used by state-watch triggers: fire once with the current snapshot,
-    /// then wait. When the target provider changes, the `ServiceWatcher`
-    /// will abort this instance and spawn a fresh one with updated state.
+    /// then wait. When the target provider changes, the generation-scoped
+    /// dependency watch path aborts this instance and spawns a fresh one with
+    /// updated state.
     /// The optional `(Uuid, ServiceId)` carries a pre-generated message identity.
     Reload(P, Option<(Uuid, ServiceId)>),
 
@@ -308,8 +309,8 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// 2. Calls `handle_step` in a `tokio::select!` with shutdown monitoring.
     /// 3. Dispatches payloads through a middleware-instrumented handler pipeline.
     /// 4. Issues monotonically increasing instance sequence IDs.
-    /// 5. On `Reload`, idles via `wait_shutdown()` so the framework's
-    ///    `ServiceWatcher` can restart us when dependencies change.
+    /// 5. On `Reload`, idles via `wait_shutdown()` so the generation-scoped
+    ///    dependency watch path can restart us when dependencies change.
     ///
     /// Override this only for hosts that cannot fit the `setup` + `handle_step`
     /// model.

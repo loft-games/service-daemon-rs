@@ -43,6 +43,16 @@ where
     CURRENT_RESOURCES.scope(resources, f()).await
 }
 
+pub(crate) async fn __run_daemon_resources_sync_scope<F, T>(
+    resources: Arc<DaemonResources>,
+    f: F,
+) -> T
+where
+    F: FnOnce() -> T,
+{
+    CURRENT_RESOURCES.scope(resources, async move { f() }).await
+}
+
 /// Returns the current lifecycle status of the calling service.
 pub fn state() -> ServiceStatus {
     let id = match CURRENT_SERVICE.try_with(|id| id.clone()) {

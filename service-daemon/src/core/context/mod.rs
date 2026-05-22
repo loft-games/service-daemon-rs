@@ -23,7 +23,7 @@ pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
-pub(crate) use api::__run_daemon_resources_scope;
+pub(crate) use api::{__run_daemon_resources_scope, __run_daemon_resources_sync_scope};
 pub use api::{
     __run_service_scope, current_cancellation_token, current_service_id, done, is_shutdown, shelve,
     shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve, wait_shutdown,

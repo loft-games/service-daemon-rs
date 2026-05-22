@@ -1,3 +1,4 @@
+use crate::ProviderDependencyWatchSet;
 use crate::models::{ProviderInitError, RestartPolicy};
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
@@ -211,7 +212,7 @@ pub struct ServiceEntry {
     pub module: &'static str,
     pub params: &'static [ServiceParam],
     pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
-    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub priority: u8,
     /// Execution scheduling and isolation policy.
     pub scheduling: ServiceScheduling,
