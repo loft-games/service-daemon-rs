@@ -153,6 +153,8 @@ The public snapshot is a distilled read model. It does not expose `DiagnosticsSt
 - Internal supervisor consistency failures record `BackoffInternalSupervisorError`.
 - Shutdown, fatal service errors, and provider-init terminal errors do not create a synthetic restart decision.
 
+Provider-init terminal errors remain coarse in the public snapshot (`ProviderInitError` as the lifecycle exit kind). Internal tracing may include additive provider-init fields such as the generated wrapper boundary and failure kind, but those fields are diagnostic facts only: they do not expose retry controls, mutate providers, or change daemon shutdown behavior.
+
 These fields are observation facts. They do not request a restart, override `RestartPolicy`, or make recommendations executable.
 
 ### Snapshot-to-Exporter Boundary

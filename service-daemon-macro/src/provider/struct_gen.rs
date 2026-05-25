@@ -350,14 +350,18 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 service_daemon::__private::resolve_provider_snapshot(&#singleton_name, || async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::__private::current_cancellation_token();
+                    let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
+                        #type_name_str,
+                        service_daemon::__private::ProviderInitBoundaryKind::SnapshotResolve,
+                    );
                     match service_daemon::__private::catch_init_panic(
                         #type_name_str,
                         async move { #framework_init_fn },
                     )
                     .await
                     {
-                        Ok(result) => result,
-                        Err(error) => Err(error),
+                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
                     }
                 })
                 .await
@@ -369,14 +373,18 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 service_daemon::__private::resolve_provider_rwlock(&#singleton_name, || async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::__private::current_cancellation_token();
+                    let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
+                        #type_name_str,
+                        service_daemon::__private::ProviderInitBoundaryKind::RwLockResolve,
+                    );
                     match service_daemon::__private::catch_init_panic(
                         #type_name_str,
                         async move { #framework_init_fn },
                     )
                     .await
                     {
-                        Ok(result) => result,
-                        Err(error) => Err(error),
+                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
                     }
                 })
                 .await
@@ -386,14 +394,18 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 service_daemon::__private::resolve_provider_mutex(&#singleton_name, || async {
                     let policy = service_daemon::RestartPolicy::default();
                     let cancel = service_daemon::__private::current_cancellation_token();
+                    let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
+                        #type_name_str,
+                        service_daemon::__private::ProviderInitBoundaryKind::MutexResolve,
+                    );
                     match service_daemon::__private::catch_init_panic(
                         #type_name_str,
                         async move { #framework_init_fn },
                     )
                     .await
                     {
-                        Ok(result) => result,
-                        Err(error) => Err(error),
+                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
                     }
                 })
                 .await
@@ -419,14 +431,18 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
                 service_daemon::__private::resolve_provider_snapshot(&#singleton_name, || async {
+                    let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
+                        #type_name_str,
+                        service_daemon::__private::ProviderInitBoundaryKind::EagerInit,
+                    );
                     match service_daemon::__private::catch_init_panic(
                         #type_name_str,
                         async move { #framework_init_fn },
                     )
                     .await
                     {
-                        Ok(result) => result,
-                        Err(error) => Err(error),
+                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
                     }
                 })
                 .await

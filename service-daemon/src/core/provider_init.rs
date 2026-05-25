@@ -7,7 +7,84 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderInitBoundaryKind {
+    SnapshotResolve,
+    RwLockResolve,
+    MutexResolve,
+    EagerInit,
+}
+
+impl ProviderInitBoundaryKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SnapshotResolve => "snapshot_resolve",
+            Self::RwLockResolve => "rwlock_resolve",
+            Self::MutexResolve => "mutex_resolve",
+            Self::EagerInit => "eager_init",
+        }
+    }
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProviderInitBoundaryContext {
+    provider: &'static str,
+    boundary: ProviderInitBoundaryKind,
+}
+
+impl ProviderInitBoundaryContext {
+    pub const fn new(provider: &'static str, boundary: ProviderInitBoundaryKind) -> Self {
+        Self { provider, boundary }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProviderInitFailureKind {
+    Fatal,
+    Timeout,
+    Cancelled,
+}
+
+impl ProviderInitFailureKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fatal => "fatal",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+fn classify_provider_init_error(error: &ProviderInitError) -> ProviderInitFailureKind {
+    match error {
+        ProviderInitError::Fatal { .. } => ProviderInitFailureKind::Fatal,
+        ProviderInitError::Timeout { .. } => ProviderInitFailureKind::Timeout,
+        ProviderInitError::Cancelled { .. } => ProviderInitFailureKind::Cancelled,
+    }
+}
+
+#[doc(hidden)]
+pub fn provider_init_boundary<T>(
+    context: ProviderInitBoundaryContext,
+    result: Result<T, ProviderInitError>,
+) -> Result<T, ProviderInitError> {
+    if let Err(error) = &result {
+        let failure_kind = classify_provider_init_error(error);
+        debug!(
+            provider = context.provider,
+            provider_init_boundary = context.boundary.as_str(),
+            provider_init_failure_kind = failure_kind.as_str(),
+            error = %error,
+            "Provider init boundary classified error"
+        );
+    }
+
+    result
+}
 
 /// Initialize a fallible provider with backoff + timeout.
 ///
@@ -167,6 +244,49 @@ mod tests {
             wave_stop_timeout: Duration::from_millis(10),
             trigger_max_retries: None,
         }
+    }
+
+    #[test]
+    fn provider_init_error_classification_distinguishes_runtime_shapes() {
+        assert_eq!(
+            classify_provider_init_error(&ProviderInitError::Fatal {
+                provider: "fatal_provider".to_owned(),
+                message: "fatal".to_owned(),
+            }),
+            ProviderInitFailureKind::Fatal
+        );
+        assert_eq!(
+            classify_provider_init_error(&ProviderInitError::Timeout {
+                provider: "timeout_provider".to_owned(),
+                timeout: Duration::from_millis(20),
+                last_error: "retryable".to_owned(),
+            }),
+            ProviderInitFailureKind::Timeout
+        );
+        assert_eq!(
+            classify_provider_init_error(&ProviderInitError::Cancelled {
+                provider: "cancelled_provider".to_owned(),
+            }),
+            ProviderInitFailureKind::Cancelled
+        );
+    }
+
+    #[test]
+    fn provider_init_boundary_preserves_result_shape() {
+        let context = ProviderInitBoundaryContext::new(
+            "boundary_provider",
+            ProviderInitBoundaryKind::SnapshotResolve,
+        );
+        assert_eq!(provider_init_boundary(context, Ok::<u32, _>(7)), Ok(7));
+
+        let fatal = ProviderInitError::Fatal {
+            provider: "boundary_provider".to_owned(),
+            message: "fatal".to_owned(),
+        };
+        assert_eq!(
+            provider_init_boundary::<u32>(context, Err(fatal.clone())),
+            Err(fatal)
+        );
     }
 
     #[tokio::test]

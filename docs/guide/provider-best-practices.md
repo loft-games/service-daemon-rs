@@ -134,7 +134,27 @@ pub struct WebListener;
 
 ---
 
-## 5. Helper APIs Are Usually Not the Main Path
+## 5. Choosing `ProviderError::Fatal` vs `ProviderError::Retryable`
+
+Use `ProviderError` only from provider functions that intentionally opt into framework-owned initialization semantics by returning `Result<T, ProviderError>`.
+
+Return `ProviderError::Fatal` when retrying cannot make progress without an operator or configuration change:
+
+- required credentials or configuration are malformed;
+- a local filesystem or permission problem is deterministic;
+- a peer contract is incompatible with the current binary.
+
+Return `ProviderError::Retryable` when the same initialization may succeed soon without changing code or configuration:
+
+- a dependent process is still starting;
+- a socket or port is temporarily unavailable during rolling restart;
+- a short network or service discovery outage is expected to clear.
+
+Retryable provider errors are bounded by `RestartPolicy::provider_init_timeout`. Once that timeout expires, the framework reports a `ProviderInitError::Timeout`; it does not convert cancellation or timeout into a generic fatal error. Normal service code should still receive providers through DI rather than catching these initialization errors itself.
+
+---
+
+## 6. Helper APIs Are Usually Not the Main Path
 
 Most applications should not call provider helper methods directly. Declare providers, inject `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` into services or triggers, and let the daemon own initialization, retry, cancellation, and reload behavior.
 
@@ -144,7 +164,7 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 
 ---
 
-## 6. Common Misconceptions
+## 7. Common Misconceptions
 
 * **"I need a built-in template for my DB"**: No. Use an `async fn` provider that returns your connection pool.
 * **"Built-in templates are faster"**: No. They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are shorthand for common primitives.
@@ -153,7 +173,7 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 
 ---
 
-## 7. Summary Table
+## 8. Summary Table
 
 | Goal | Best Approach |
 | :--- | :--- |

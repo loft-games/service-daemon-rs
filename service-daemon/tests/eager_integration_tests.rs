@@ -1,7 +1,10 @@
 use service_daemon::{ProviderError, ProviderInitError, ServiceDaemon, provider, service};
-use std::sync::Arc;
+use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+
+const PARSE_ENV_NAME: &str = "SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_PARSE_1E57D782";
 
 static EAGER_INIT_CALLED: AtomicBool = AtomicBool::new(false);
 static EAGER_FAILURE_INIT_CALLED: AtomicBool = AtomicBool::new(false);
@@ -16,6 +19,40 @@ static TRANSITIVE_SERVICE_SAW_EAGER_DEP: AtomicBool = AtomicBool::new(false);
 static SIMULATION_EAGER_INIT_CALLED: AtomicBool = AtomicBool::new(false);
 #[cfg(feature = "simulation")]
 static SIMULATION_EAGER_FAILURE_INIT_CALLED: AtomicBool = AtomicBool::new(false);
+static ENV_VAR_LOCK: Mutex<()> = Mutex::new(());
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+fn set_test_env(key: &'static str, value: &'static str) -> EnvVarGuard {
+    let lock = ENV_VAR_LOCK
+        .lock()
+        .unwrap_or_else(|err| panic!("env var test lock poisoned: {err}"));
+    let previous = std::env::var_os(key);
+    unsafe {
+        std::env::set_var(key, value);
+    }
+    EnvVarGuard {
+        key,
+        previous,
+        _lock: lock,
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct EagerToken(pub String);
@@ -59,6 +96,10 @@ async fn failing_stub_service(_token: Arc<FailingEagerToken>) -> anyhow::Result<
     eager = true
 )]
 pub struct MissingEnvToken(pub String);
+
+#[derive(Clone, Debug)]
+#[provider(env = "SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_PARSE_1E57D782")]
+pub struct ParseEnvToken(pub u16);
 
 #[service(tags = ["stub_for_missing_env_failure_test"])]
 async fn missing_env_stub_service(_token: Arc<MissingEnvToken>) -> anyhow::Result<()> {
@@ -251,6 +292,53 @@ async fn test_missing_env_public_helper_returns_fatal_error() {
             );
         }
         other => panic!("Expected missing env Fatal, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_parse_env_public_helpers_preserve_error_boundary() {
+    let _guard = set_test_env(PARSE_ENV_NAME, "not-a-u16");
+
+    let snapshot_result = ParseEnvToken::resolve().await;
+    match snapshot_result {
+        Err(ProviderInitError::Fatal { provider, message }) => {
+            assert_eq!(provider, "ParseEnvToken");
+            assert!(
+                message.contains(PARSE_ENV_NAME),
+                "expected parse env name in Fatal message, got: {}",
+                message
+            );
+            assert!(
+                message.contains("cannot be parsed"),
+                "expected parse failure in Fatal message, got: {}",
+                message
+            );
+        }
+        other => panic!("Expected parse env Fatal, got {:?}", other),
+    }
+
+    let rwlock_result = ParseEnvToken::resolve_rwlock().await;
+    assert!(matches!(
+        rwlock_result,
+        Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
+    ));
+
+    let mutex_result = ParseEnvToken::resolve_mutex().await;
+    assert!(matches!(
+        mutex_result,
+        Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
+    ));
+
+    let managed_result = ParseEnvToken::resolve_managed().await;
+    match managed_result {
+        Err(ProviderError::Fatal(message)) => {
+            assert!(
+                message.contains(PARSE_ENV_NAME),
+                "expected parse env name in raw ProviderError, got: {}",
+                message
+            );
+        }
+        other => panic!("Expected raw managed ProviderError::Fatal, got {:?}", other),
     }
 }
 

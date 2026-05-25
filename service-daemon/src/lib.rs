@@ -103,7 +103,10 @@ pub mod __private {
     pub use crate::core::managed_state::{
         StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
     };
-    pub use crate::core::provider_init::{catch_init_panic, init_fallible};
+    pub use crate::core::provider_init::{
+        ProviderInitBoundaryContext, ProviderInitBoundaryKind, catch_init_panic, init_fallible,
+        provider_init_boundary,
+    };
     pub use crate::core::provider_scope::{
         provider_changed, provider_dependency_watch, resolve_provider_managed,
         resolve_provider_mutex, resolve_provider_rwlock, resolve_provider_snapshot,

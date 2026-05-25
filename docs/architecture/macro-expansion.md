@@ -78,6 +78,12 @@ Provider helpers intentionally distinguish convenience from provider-init failur
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.
 
+### Provider Init Boundary
+
+Generated convenience helpers keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The match is not template noise: each branch now passes through a centralized provider-init boundary helper that preserves the existing `ProviderInitError` shape while attaching diagnostic context such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
+
+Do not collapse this generated boundary to `?` as a cosmetic cleanup. If the runtime boundary gains richer classification later, the macro should continue delegating to a centralized helper rather than duplicating wrapper-specific translation logic in each generated branch.
+
 ## 4. Span-preserving tracked state
 
 Generated wrappers route shared-state dependencies through tracked types while keeping source spans useful for IDEs:

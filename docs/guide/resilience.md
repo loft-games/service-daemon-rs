@@ -89,14 +89,18 @@ async fn license_checker() -> anyhow::Result<()> {
 
 ## 2. Initialization Resilience: Providers
 
-When a provider's initialization fails, the daemon distinguishes transient errors (retried with backoff) from fatal errors (abort startup). The two paths are explicit and chosen by the provider via the `ProviderError` it returns.
+When a provider's initialization fails, the daemon distinguishes transient errors from terminal provider-init boundary failures. User provider functions opt into this behavior by returning `Result<T, ProviderError>`; framework-generated providers can also produce `ProviderInitError` for required environment variables, parse failures, dependency-provider failures, panic translation, timeout, cancellation, and eager dependency-graph defense errors.
 
 ### 2.1. Provider Error Mapping: Retryable vs Fatal
 
 When a provider fails to initialize, it can influence the daemon's behavior by returning specific error variants:
 
-- **Retryable**: The daemon will retry the initialization using the global `RestartPolicy`. Useful for transient issues like temporary network partitions.
-- **Fatal**: The daemon will immediately stop the startup process and shutdown. Useful for configuration errors (e.g., invalid connection string).
+- **Retryable**: the daemon retries initialization with provider-init backoff until `RestartPolicy::provider_init_timeout` expires. If the timeout expires, the terminal boundary error is `ProviderInitError::Timeout`.
+- **Fatal**: the daemon does not retry the provider. The terminal boundary error is `ProviderInitError::Fatal`, and the supervisor requests daemon shutdown for lazy failures or aborts startup for eager failures.
+
+Provider retry/backoff is separate from service-generation restart/backoff. A provider-init terminal error bypasses the normal service restart loop; it is recorded as a provider-init lifecycle exit and does not synthesize a restart decision.
+
+Cancellation also remains distinct: if daemon shutdown cancels provider initialization, the framework reports `ProviderInitError::Cancelled` rather than rewriting it as fatal.
 
 ### 2.2. Smart Listen Strategy (`Listen` Template)
 
