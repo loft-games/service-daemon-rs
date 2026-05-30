@@ -1,0 +1,62 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/rust
+{
+    "name": "service-daemon-rs",
+    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+    // https://mcr.microsoft.com/en-us/artifact/mar/devcontainers/rust/tags
+    "image": "mcr.microsoft.com/devcontainers/rust:2-1-bookworm",
+
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "webfreak.debug",
+                "rust-lang.rust-analyzer",
+                "qwtel.sqlite-viewer",
+                "oderwat.indent-rainbow",
+                "aaron-bond.better-comments",
+                "intellsmi.comment-translate",
+                "streetsidesoftware.code-spell-checker"
+            ]
+        }
+    },
+
+    // Use 'mounts' to make the cargo cache persistent in a Docker Volume.
+    // "mounts": [
+    //     {
+    //         "source": "devcontainer-cargo-cache-${devcontainerId}",
+    //         "target": "/usr/local/cargo",
+    //         "type": "volume"
+    //     },
+    //     { "source": "${localEnv:HOME}/.ssh", "target": "/home/vscode/.ssh", "type": "bind" },
+    //     { "source": "${localEnv:HOME}/.gnupg", "target": "/home/vscode/.gnupg", "type": "bind" }
+    // ],
+    // "runArgs": [
+    //     "--userns=keep-id"
+    // ],
+
+    // Features to add to the dev container. More info: https://containers.dev/features.
+    "features": {
+        "ghcr.io/devcontainers/features/git:1": {
+            "ppa": true
+        }
+    },
+
+    // Use 'forwardPorts' to make a list of ports inside the container available locally.
+    // "forwardPorts": [8080],
+
+    // Use 'postCreateCommand' to run commands after the container is created.
+    "postCreateCommand": "rustc --version",
+
+    // Configure tool-specific properties.
+    // "customizations": {},
+    "containerEnv": {
+        // "HOME": "/home/vscode",
+        "RUST_LOG": "debug"
+    },
+
+    // curl "https://api.cloudflare.com/client/v4/user/tokens/verify" \
+    // -H "Authorization: Bearer ${CF_SECRET}"
+
+    // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+    "remoteUser": "vscode"
+}
