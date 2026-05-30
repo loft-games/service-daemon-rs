@@ -283,10 +283,12 @@ pub fn generate_listen_template(
 
     let type_tokens = quote! { #struct_name };
     let framework_init_fn = quote! {
-        service_daemon::__private::init_fallible(
+        service_daemon::__private::init_fallible_with_source(
             #struct_name_str,
             policy,
             cancel,
+            service_daemon::__private::ProviderInitSourceKind::SystemIoFatal,
+            service_daemon::__private::ProviderInitSourceKind::SystemIoRetryable,
             move || async move { #struct_name::try_new() },
         )
         .await
@@ -575,10 +577,12 @@ pub fn generate_unix_listen_template(
     // Framework path: init_fallible wraps the closure with backoff, total
     // timeout, and cancellation -- we just supply the failable operation.
     let framework_init_fn = quote! {
-        service_daemon::__private::init_fallible(
+        service_daemon::__private::init_fallible_with_source(
             #struct_name_str,
             policy,
             cancel,
+            service_daemon::__private::ProviderInitSourceKind::SystemIoFatal,
+            service_daemon::__private::ProviderInitSourceKind::SystemIoRetryable,
             move || async move { #struct_name::try_new() },
         )
         .await
@@ -777,10 +781,12 @@ pub fn generate_unix_connect_template(
     // returned Arc<Self> caches only the path; subsequent try_connect()
     // calls open fresh streams.
     let framework_init_fn = quote! {
-        service_daemon::__private::init_fallible(
+        service_daemon::__private::init_fallible_with_source(
             #struct_name_str,
             policy,
             cancel,
+            service_daemon::__private::ProviderInitSourceKind::SystemIoFatal,
+            service_daemon::__private::ProviderInitSourceKind::SystemIoRetryable,
             move || async move { #struct_name::try_new().await },
         )
         .await

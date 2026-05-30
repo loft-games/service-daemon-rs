@@ -80,9 +80,9 @@ Provider helpers intentionally distinguish convenience from provider-init failur
 
 ### Provider Init Boundary
 
-Generated convenience helpers keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The match is not template noise: each branch now passes through a centralized provider-init boundary helper that preserves the existing `ProviderInitError` shape while attaching diagnostic context such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
+Generated convenience helpers keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The match is not template noise: the normal branch now accepts hidden `ProviderInitFailure` values carrying source kinds such as env parse, dependency provider failure, user fatal, retry timeout, or system I/O; the panic branch tags the converted fatal error as `panic`. The boundary then returns the same public `ProviderInitError` shape while emitting diagnostic fields such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
 
-Do not collapse this generated boundary to `?` as a cosmetic cleanup. If the runtime boundary gains richer classification later, the macro should continue delegating to a centralized helper rather than duplicating wrapper-specific translation logic in each generated branch.
+Do not collapse this generated boundary to `?` as a cosmetic cleanup. If the runtime boundary gains more source classes later, the macro should continue delegating to centralized helpers rather than duplicating wrapper-specific translation logic in each generated branch.
 
 ## 4. Span-preserving tracked state
 

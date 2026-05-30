@@ -35,6 +35,10 @@ use tokio::signal::unix::{SignalKind, signal};
 use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
 use crate::core::context::{__run_daemon_resources_scope, DaemonResources, process_token};
 use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_probe};
+use crate::core::provider_init::{
+    ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
+    ProviderInitSourceKind, provider_init_failure_into_error,
+};
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
@@ -264,12 +268,19 @@ impl ServiceDaemon {
                     .iter()
                     .find_map(|(tid, p)| (*tid == graph[err.node_id()]).then_some(p.name))
                     .unwrap_or("<unknown>");
-                return Err(ProviderInitError::Fatal {
-                    provider: offending.to_owned(),
-                    message: "Circular provider dependency reached eager_init; \
+                return Err(provider_init_failure_into_error(
+                    ProviderInitBoundaryContext::new(
+                        offending,
+                        ProviderInitBoundaryKind::FrameworkValidation,
+                    ),
+                    ProviderInitFailure::fatal(
+                        offending,
+                        "Circular provider dependency reached eager_init; \
                               this should have been caught by validate_dependency_graph"
-                        .to_owned(),
-                });
+                            .to_owned(),
+                        ProviderInitSourceKind::FrameworkGraphValidation,
+                    ),
+                ));
             }
         };
 
@@ -281,10 +292,17 @@ impl ServiceDaemon {
                 continue;
             }
             let Some(entry) = providers_by_id.get(&tid).copied() else {
-                return Err(ProviderInitError::Fatal {
-                    provider: "<unknown>".to_owned(),
-                    message: "provider missing from eager initialization graph".to_owned(),
-                });
+                return Err(provider_init_failure_into_error(
+                    ProviderInitBoundaryContext::new(
+                        "<unknown>",
+                        ProviderInitBoundaryKind::FrameworkValidation,
+                    ),
+                    ProviderInitFailure::fatal(
+                        "<unknown>",
+                        "provider missing from eager initialization graph".to_owned(),
+                        ProviderInitSourceKind::FrameworkEagerInit,
+                    ),
+                ));
             };
             let resources = self.resources.clone();
             __run_daemon_resources_scope(resources, || async {
@@ -1116,14 +1134,21 @@ fn validate_dependency_graph<'a>(
                 .map(|n| graph[n])
                 .collect();
 
-            Err(ProviderInitError::Fatal {
-                provider: cycle_label.to_owned(),
-                message: format!(
-                    "Circular dependency detected in provider dependency graph. \
-                     Cycle involves '{cycle_label}', related nodes: {involved:?}. \
-                     This would deadlock at runtime; review the #[provider] chain for these types."
+            Err(provider_init_failure_into_error(
+                ProviderInitBoundaryContext::new(
+                    cycle_label,
+                    ProviderInitBoundaryKind::FrameworkValidation,
                 ),
-            })
+                ProviderInitFailure::fatal(
+                    cycle_label,
+                    format!(
+                        "Circular dependency detected in provider dependency graph. \
+                         Cycle involves '{cycle_label}', related nodes: {involved:?}. \
+                         This would deadlock at runtime; review the #[provider] chain for these types."
+                    ),
+                    ProviderInitSourceKind::FrameworkGraphValidation,
+                ),
+            ))
         }
     }
 }

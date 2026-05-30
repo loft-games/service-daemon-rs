@@ -360,8 +360,14 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     )
                     .await
                     {
-                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
-                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
+                        Ok(result) => service_daemon::__private::provider_init_failure_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_failure_boundary(
+                            provider_init_context,
+                            Err(service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::Panic,
+                                error,
+                            )),
+                        ),
                     }
                 })
                 .await
@@ -383,8 +389,14 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     )
                     .await
                     {
-                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
-                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
+                        Ok(result) => service_daemon::__private::provider_init_failure_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_failure_boundary(
+                            provider_init_context,
+                            Err(service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::Panic,
+                                error,
+                            )),
+                        ),
                     }
                 })
                 .await
@@ -404,8 +416,14 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     )
                     .await
                     {
-                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
-                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
+                        Ok(result) => service_daemon::__private::provider_init_failure_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_failure_boundary(
+                            provider_init_context,
+                            Err(service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::Panic,
+                                error,
+                            )),
+                        ),
                     }
                 })
                 .await
@@ -441,8 +459,14 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     )
                     .await
                     {
-                        Ok(result) => service_daemon::__private::provider_init_boundary(provider_init_context, result),
-                        Err(error) => service_daemon::__private::provider_init_boundary(provider_init_context, Err(error)),
+                        Ok(result) => service_daemon::__private::provider_init_failure_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_failure_boundary(
+                            provider_init_context,
+                            Err(service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::Panic,
+                                error,
+                            )),
+                        ),
                     }
                 })
                 .await
@@ -763,13 +787,14 @@ fn generate_required_env_constructor(
         }
     } else {
         quote! {
-            service_daemon::ProviderInitError::Fatal {
-                provider: #struct_name_str.to_owned(),
-                message: format!(
+            service_daemon::__private::ProviderInitFailure::fatal(
+                #struct_name_str,
+                format!(
                     "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
                     #env_str, #struct_name_str, #env_str
                 ),
-            }
+                service_daemon::__private::ProviderInitSourceKind::EnvironmentMissing,
+            )
         }
     };
 
@@ -789,13 +814,14 @@ fn generate_required_env_constructor(
         }
     } else {
         quote! {
-            service_daemon::ProviderInitError::Fatal {
-                provider: #struct_name_str.to_owned(),
-                message: format!(
+            service_daemon::__private::ProviderInitFailure::fatal(
+                #struct_name_str,
+                format!(
                     "Environment variable '{}' for provider '{}' cannot be parsed: {}",
                     #env_str, #struct_name_str, e
                 ),
-            }
+                service_daemon::__private::ProviderInitSourceKind::EnvironmentParse,
+            )
         }
     };
 
@@ -856,7 +882,12 @@ fn generate_constructor(
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
+                                        .await
+                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                            e,
+                                        ))?
                                 }
                             }
                         }
@@ -869,7 +900,12 @@ fn generate_constructor(
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?
+                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
+                                        .await
+                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                            e,
+                                        ))?
                                 }
                             }
                         }
@@ -880,7 +916,12 @@ fn generate_constructor(
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::Provided>::resolve().await?
+                                    #field_name: <#inner_type as service_daemon::Provided>::resolve()
+                                        .await
+                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                            e,
+                                        ))?
                                 }
                             }
                         }

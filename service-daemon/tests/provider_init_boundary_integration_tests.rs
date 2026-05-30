@@ -1,11 +1,18 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, ProviderError, Registry, RestartPolicy, ServiceDaemon, TT::*,
-    provider, service, trigger,
+    DiagnosticGenerationExitKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
+    ServiceDaemon, TT::*, provider, service, trigger,
 };
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard, Once};
 use std::time::Duration;
 use tokio::time::timeout;
+use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
+use tracing_subscriber::Layer;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::prelude::*;
 
 static DEPENDENCY_FATAL_CALLED: AtomicBool = AtomicBool::new(false);
 static DEPENDENCY_FATAL_PARENT_ENTERED: AtomicBool = AtomicBool::new(false);
@@ -15,6 +22,132 @@ static DEPENDENCY_TIMEOUT_PARENT_ENTERED: AtomicBool = AtomicBool::new(false);
 static DEPENDENCY_TIMEOUT_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
 static WATCH_TARGET_PROVIDER_CALLED: AtomicBool = AtomicBool::new(false);
 static WATCH_TARGET_TRIGGER_ENTERED: AtomicBool = AtomicBool::new(false);
+
+const TRACE_PARSE_ENV_NAME: &str = "SERVICE_DAEMON_RS_TEST_PHASE16_SOURCE_PARSE_3A889E90";
+
+static TRACE_INIT: Once = Once::new();
+static TRACE_CAPTURE: LazyLock<CapturedTraceFields> = LazyLock::new(CapturedTraceFields::default);
+static TRACE_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
+static ENV_VAR_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
+
+#[derive(Clone, Default)]
+struct CapturedTraceFields {
+    events: Arc<StdMutex<Vec<BTreeMap<String, String>>>>,
+}
+
+#[derive(Default)]
+struct TraceFieldVisitor {
+    fields: BTreeMap<String, String>,
+}
+
+impl Visit for TraceFieldVisitor {
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.fields
+            .insert(field.name().to_string(), format!("{value:?}"));
+    }
+
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
+    }
+}
+
+impl<S> Layer<S> for CapturedTraceFields
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        let mut visitor = TraceFieldVisitor::default();
+        event.record(&mut visitor);
+        self.events
+            .lock()
+            .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+            .push(visitor.fields);
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+fn set_test_env(key: &'static str, value: &'static str) -> EnvVarGuard {
+    let lock = ENV_VAR_LOCK
+        .lock()
+        .unwrap_or_else(|err| panic!("env var test lock poisoned: {err}"));
+    let previous = std::env::var_os(key);
+    unsafe {
+        std::env::set_var(key, value);
+    }
+    EnvVarGuard {
+        key,
+        previous,
+        _lock: lock,
+    }
+}
+
+fn install_trace_capture() {
+    TRACE_INIT.call_once(|| {
+        let subscriber = tracing_subscriber::registry().with(TRACE_CAPTURE.clone());
+        tracing::subscriber::set_global_default(subscriber)
+            .unwrap_or_else(|_| panic!("trace capture subscriber should install once"));
+        tracing::callsite::rebuild_interest_cache();
+    });
+}
+
+fn clear_trace_events() {
+    TRACE_CAPTURE
+        .events
+        .lock()
+        .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+        .clear();
+}
+
+fn trace_events() -> Vec<BTreeMap<String, String>> {
+    TRACE_CAPTURE
+        .events
+        .lock()
+        .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+        .clone()
+}
+
+fn assert_trace_source(kind: &str) {
+    let events = trace_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| { event.get("provider_init_source_kind") == Some(&kind.to_owned()) }),
+        "expected provider_init_source_kind={kind}, got events: {events:?}"
+    );
+}
 
 #[derive(Clone, Default)]
 pub struct FatalLeafProvider;
@@ -89,6 +222,18 @@ async fn watch_target_failure_trigger(_target: Arc<FailingWatchTarget>) -> anyho
     Ok(())
 }
 
+#[derive(Clone, Debug)]
+#[provider(env = "SERVICE_DAEMON_RS_TEST_PHASE16_SOURCE_PARSE_3A889E90")]
+pub struct TraceParseEnvToken(pub u16);
+
+#[derive(Clone, Default)]
+pub struct PanicSourceProvider;
+
+#[provider]
+async fn panic_source_provider() -> PanicSourceProvider {
+    panic!("phase16 typed source panic")
+}
+
 fn phase16_policy() -> RestartPolicy {
     RestartPolicy::builder()
         .initial_delay(Duration::from_millis(5))
@@ -128,6 +273,54 @@ fn assert_provider_init_exit(daemon: &ServiceDaemon, service_name: &str) {
         Some(DiagnosticGenerationExitKind::ProviderInitError)
     );
     assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_required_env_parse_emits_environment_parse_source() {
+    let _trace_guard = TRACE_LOCK.lock().await;
+    install_trace_capture();
+    clear_trace_events();
+    let _env_guard = set_test_env(TRACE_PARSE_ENV_NAME, "not-a-u16");
+
+    let result = TraceParseEnvToken::resolve().await;
+
+    assert!(matches!(
+        result,
+        Err(ProviderInitError::Fatal { provider, .. }) if provider == "TraceParseEnvToken"
+    ));
+    assert_trace_source("environment_parse");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_dependency_provider_failure_emits_dependency_source() {
+    let _trace_guard = TRACE_LOCK.lock().await;
+    install_trace_capture();
+    clear_trace_events();
+    DEPENDENCY_FATAL_CALLED.store(false, Ordering::SeqCst);
+    DEPENDENCY_FATAL_PARENT_ENTERED.store(false, Ordering::SeqCst);
+
+    let result = FatalParentProvider::resolve().await;
+
+    assert!(DEPENDENCY_FATAL_CALLED.load(Ordering::SeqCst));
+    assert!(!DEPENDENCY_FATAL_PARENT_ENTERED.load(Ordering::SeqCst));
+    assert!(matches!(result, Err(ProviderInitError::Fatal { .. })));
+    assert_trace_source("user_provider_fatal");
+    assert_trace_source("dependency_provider");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_provider_panic_emits_panic_source() {
+    let _trace_guard = TRACE_LOCK.lock().await;
+    install_trace_capture();
+    clear_trace_events();
+
+    let result = <PanicSourceProvider as service_daemon::Provided>::resolve().await;
+
+    assert!(matches!(
+        result,
+        Err(ProviderInitError::Fatal { provider, .. }) if provider == "PanicSourceProvider"
+    ));
+    assert_trace_source("panic");
 }
 
 #[tokio::test]

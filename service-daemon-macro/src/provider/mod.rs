@@ -174,7 +174,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
             match wrapper {
                 Some(WrapperKind::ArcRwLock(_, _)) => {
                     framework_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
+                            .await
+                            .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                e,
+                            ))?;
                     });
                     managed_resolve_tokens.push(quote! {
                         let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
@@ -184,7 +189,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
                 }
                 Some(WrapperKind::ArcMutex(_, _)) => {
                     framework_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
+                            .await
+                            .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                e,
+                            ))?;
                     });
                     managed_resolve_tokens.push(quote! {
                         let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
@@ -194,7 +204,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
                 }
                 Some(WrapperKind::Arc(_)) => {
                     framework_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
+                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve()
+                            .await
+                            .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                e,
+                            ))?;
                     });
                     managed_resolve_tokens.push(quote! {
                         let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_managed().await?;
