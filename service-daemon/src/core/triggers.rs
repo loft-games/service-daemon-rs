@@ -311,6 +311,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    #[derive(Clone)]
+    struct TestQueueTarget<P>
+    where
+        P: Clone + Send + Sync + 'static,
+    {
+        sender: TrackedSender<P>,
+    }
+
+    impl<P> TestQueueTarget<P>
+    where
+        P: Clone + Send + Sync + 'static,
+    {
+        fn new(capacity: NonZeroUsize) -> Self {
+            Self {
+                sender: TrackedSender::new(capacity),
+            }
+        }
+    }
+
+    impl<P> Deref for TestQueueTarget<P>
+    where
+        P: Clone + Send + Sync + 'static,
+    {
+        type Target = TrackedSender<P>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.sender
+        }
+    }
+
+    impl<P> Provided for TestQueueTarget<P>
+    where
+        P: Clone + Send + Sync + 'static,
+    {
+        fn resolve()
+        -> impl std::future::Future<
+            Output = std::result::Result<Arc<Self>, crate::ProviderInitError>,
+        > + Send {
+            async { unreachable!("TopicHost unit tests pass constructed targets directly") }
+        }
+    }
 
     /// Build a `TopicHost` the same way `<TopicHost as TriggerHost<T>>::setup`
     /// does internally, bypassing the `Provided` trait bound that requires a
@@ -324,6 +368,48 @@ mod tests {
             receiver: Box::new(rx),
             receiver_type: TypeId::of::<Arc<Mutex<broadcast::Receiver<P>>>>(),
         }
+    }
+
+    #[tokio::test]
+    async fn topic_host_setup_handle_step_round_trips_broadcast_payload() -> Result<()> {
+        let capacity = NonZeroUsize::new(4).expect("capacity should be non-zero");
+        let target = Arc::new(TestQueueTarget::<String>::new(capacity));
+        let mut host =
+            <TopicHost as TriggerHost<TestQueueTarget<String>>>::setup(target.clone()).await?;
+
+        target
+            .send("topic payload".to_owned())
+            .expect("topic receiver should be subscribed");
+
+        let transition = tokio::time::timeout(
+            Duration::from_secs(1),
+            <TopicHost as TriggerHost<TestQueueTarget<String>>>::handle_step(&mut host, &target),
+        )
+        .await
+        .expect("TopicHost handle_step should receive the broadcast payload");
+
+        match transition {
+            TriggerTransition::Next(payload, identity) => {
+                assert_eq!(payload, "topic payload");
+                assert!(identity.is_some());
+            }
+            TriggerTransition::Reload(_, _) => panic!("TopicHost should not return Reload"),
+            TriggerTransition::Stop => panic!("TopicHost should not stop while queue is open"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "TopicHost payload type mismatch")]
+    async fn topic_host_handle_step_panics_with_named_invariant_when_payload_type_changes() {
+        let capacity = NonZeroUsize::new(4).expect("capacity should be non-zero");
+        let sender_i32 = TrackedSender::<i32>::new(capacity);
+        let mut host = make_topic_host_for(&sender_i32);
+        let target_string = Arc::new(TestQueueTarget::<String>::new(capacity));
+
+        <TopicHost as TriggerHost<TestQueueTarget<String>>>::handle_step(&mut host, &target_string)
+            .await;
     }
 
     /// `TopicHost` must capture a concrete `TypeId` at setup time so that a

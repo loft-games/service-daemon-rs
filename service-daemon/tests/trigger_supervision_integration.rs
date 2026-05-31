@@ -13,6 +13,7 @@ use tokio::time::timeout;
 static RETRY_EXHAUSTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static PANIC_DISPATCH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static TRIGGER_FATAL_PROVIDER_CALLED: AtomicBool = AtomicBool::new(false);
+static TOPIC_HOST_QUEUE_SMOKE_RECEIVED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_INFLIGHT_STARTED: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
 
 #[provider(Notify)]
@@ -74,6 +75,20 @@ async fn shutdown_inflight_trigger() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[provider(Queue(String))]
+pub struct TopicHostSmokeQueue;
+
+#[trigger(
+    Queue(TopicHostSmokeQueue),
+    tags = ["__test_topic_host_queue_smoke__"]
+)]
+async fn topic_host_queue_smoke_trigger(payload: String) -> anyhow::Result<()> {
+    if payload == "topic-host-queue-smoke" {
+        TOPIC_HOST_QUEUE_SMOKE_RECEIVED.store(true, Ordering::SeqCst);
+    }
+    Ok(())
+}
+
 fn phase9_policy() -> RestartPolicy {
     RestartPolicy::builder()
         .initial_delay(Duration::from_millis(10))
@@ -110,6 +125,59 @@ where
     })
     .await
     .map_err(Into::into)
+}
+
+#[tokio::test]
+async fn test_topic_host_queue_trigger_dispatches_payload_without_downcast_panic()
+-> anyhow::Result<()> {
+    TOPIC_HOST_QUEUE_SMOKE_RECEIVED.store(false, Ordering::SeqCst);
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__test_topic_host_queue_smoke__")
+                .build(),
+        )
+        .with_restart_policy(phase9_policy())
+        .build();
+    let cancel = daemon.cancel_token();
+    daemon.run().await;
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if TopicHostSmokeQueue::resolve().await.receiver_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    TopicHostSmokeQueue::resolve()
+        .await
+        .push("topic-host-queue-smoke".to_owned())
+        .expect("TopicHost smoke queue should have an active receiver");
+
+    timeout(Duration::from_secs(3), async {
+        while !TOPIC_HOST_QUEUE_SMOKE_RECEIVED.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    cancel.cancel();
+    timeout(Duration::from_secs(5), daemon.wait()).await??;
+
+    let service = daemon
+        .diagnostics_snapshot()
+        .services
+        .into_iter()
+        .find(|service| service.service_name == "topic_host_queue_smoke_trigger")
+        .expect("trigger diagnostics should be recorded");
+    assert_eq!(service.aggregate.lifecycle.recoverable_error, 0);
+    assert_eq!(service.aggregate.lifecycle.panic, 0);
+
+    Ok(())
 }
 
 #[tokio::test]
