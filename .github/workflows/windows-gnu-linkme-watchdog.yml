@@ -50,6 +50,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   expected-to-fail:
     name: XFAIL without workaround (alert when it starts passing)
