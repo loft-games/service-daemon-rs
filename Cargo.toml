@@ -13,5 +13,6 @@ members = [
     "examples/diagnostics",
     "examples/scheduling",
     "examples/unix-domain-socket",
+    "examples/web-api",
 ]
 resolver = "2"
