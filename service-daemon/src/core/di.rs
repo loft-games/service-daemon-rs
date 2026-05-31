@@ -70,10 +70,10 @@ impl ProviderDependencyWatchSet {
             watches.push(watch.changed);
         }
 
-        watches
-            .next()
-            .await
-            .expect("ProviderDependencyWatchSet should contain at least one watch")
+        match watches.next().await {
+            Some(change) => change,
+            None => pending::<ProviderDependencyChange>().await,
+        }
     }
 }
 
