@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.36", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.102"

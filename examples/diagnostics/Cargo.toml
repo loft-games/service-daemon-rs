@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = ["diagnostics"] }
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-tracing = "0.1"
-uuid = "1.7"
+tokio = { version = "1.52.3", features = ["full"] }
+anyhow = "1.0.102"
+tracing = "0.1.44"
+uuid = "1.23.2"

@@ -11,12 +11,12 @@ memory-analysis = []
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.43", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
-pastey = "0.2.2"
-libc = "0.2"
-tokio-util = "0.7"
-dashmap = "6"
-futures = "0.3"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.102"
+pastey = "0.2.3"
+libc = "0.2.186"
+tokio-util = "0.7.18"
+dashmap = "6.2.1"
+futures = "0.3.32"

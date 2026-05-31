@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Public Diagnostics Snapshot**: Added read-only diagnostics snapshots with lifecycle facts, restart decisions, runtime-lane observations, bounded generation details, and Standard-lane interpretation hints.
+- **Scheduling Advisory Controls**: Added `SchedulingAdvisoryProfile` so applications can suppress advisory diagnostics without changing lifecycle or body placement.
+- **Provider Scope Ownership**: Added daemon-scoped provider ownership, binding epochs, and simulation override behavior so reload propagation can distinguish root, local, and override bindings.
+
+### Changed
+
+- **Provider Initialization Boundaries**: Clarified `ProviderError` versus `ProviderInitError`, preserved provider-init source classification in tracing/tests, and kept fatal, timeout, cancellation, panic, and dependency-provider failures distinct.
+- **Scheduling Runtime**: Split supervision/control-plane work from service and trigger body execution lanes, added HighPriority worker-count selection from final registry entries, and kept advisory analysis read-only.
+- **Trigger Supervision**: Improved trigger dispatch observability so retry exhaustion, infrastructure errors, panics, reload, and shutdown produce distinct lifecycle/restart signals.
+- **Logging Initialization**: Made logging initialization safe to call repeatedly and tightened log batch-size validation.
+
+### Fixed
+
+- **Provider Reload Scope**: Made provider dependency reload generation-scoped so binding/value changes reload the affected generation without leaking across daemon boundaries.
+- **Public API Boundaries**: Reduced accidental public surface area and tightened macro/runtime checks for invalid parameters and unsupported capacity values.
+- **Panic Path Reduction**: Reworked several public-facing error paths to return structured errors instead of relying on panic behavior.
+- **Shelf Isolation**: Isolated shelf status by `ServiceId` so duplicate Rust function names selected into different service entries do not share persisted generation state.
+
 ## [0.1.0-alpha.4] - 2026-05-07
 
 ### Added
