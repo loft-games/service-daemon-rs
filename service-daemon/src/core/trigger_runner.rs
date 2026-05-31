@@ -26,7 +26,7 @@
 
 use anyhow::{Error, Result};
 use chrono::Utc;
-use futures::future::BoxFuture;
+use futures::future::{BoxFuture, pending};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::fmt;
 use std::sync::Arc;
@@ -403,11 +403,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         H: TriggerHost<T, Payload = P>,
     {
         let mut in_flight = InFlightDispatches::new();
-        let mut scale_monitor = if self.scaling.is_some() {
-            Some(self.observe_scale_monitor(self.spawn_scale_monitor()))
-        } else {
-            None
-        };
+        let mut scale_monitor = self.scale_monitor_future();
 
         while !context::is_shutdown() {
             tokio::select! {
@@ -416,7 +412,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 Some(outcome) = in_flight.next() => {
                     outcome.map_err(Error::from)?;
                 }
-                monitor_outcome = Self::poll_scale_monitor(&mut scale_monitor), if scale_monitor.is_some() => {
+                monitor_outcome = &mut scale_monitor => {
                     return monitor_outcome.map_err(Error::from);
                 }
                 transition = Self::poll_next_event(host, &target, self.name) => {
@@ -500,13 +496,11 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         Ok(())
     }
 
-    async fn poll_scale_monitor(
-        scale_monitor: &mut Option<BoxFuture<'static, DispatchTaskOutcome>>,
-    ) -> DispatchTaskOutcome {
-        scale_monitor
-            .as_mut()
-            .expect("scale monitor future must exist when polled")
-            .await
+    fn scale_monitor_future(&self) -> BoxFuture<'static, DispatchTaskOutcome> {
+        match self.scaling {
+            Some(scaling) => self.observe_scale_monitor(self.spawn_scale_monitor(scaling)),
+            None => Box::pin(pending::<DispatchTaskOutcome>()),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -534,17 +528,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// New permits are added via `Semaphore::add_permits()`; shrinking is
     /// deferred -- we simply stop adding new permits and let the natural
     /// permit release bring the effective concurrency down.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called when `self.scaling` is `None`. Callers must check
-    /// `self.scaling.is_some()` before calling.
-    fn spawn_scale_monitor(&self) -> tokio::task::JoinHandle<()> {
+    fn spawn_scale_monitor(&self, scaling: ScalingPolicy) -> tokio::task::JoinHandle<()> {
         let semaphore = self.semaphore.clone();
         let current_limit = self.current_limit.clone();
-        let scaling = self
-            .scaling
-            .expect("spawn_scale_monitor requires Some(ScalingPolicy)");
         let trigger_name = self.name;
 
         tokio::spawn(async move {
