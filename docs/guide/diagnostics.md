@@ -114,7 +114,7 @@ This is particularly useful for debugging complex "cascading" triggers where one
 
 ## 3. Runtime Pressure Baseline
 
-The daemon keeps a runtime-pressure baseline for diagnostics. Phase 6 exposes a distilled read-only snapshot from that baseline while keeping the internal store, windows, evaluator, and recommendation model private.
+The daemon keeps a runtime-pressure baseline for diagnostics. Public APIs expose a distilled read-only snapshot from that baseline, while the store, windows, evaluator, and recommendation model remain private.
 
 Two low-level signals feed this baseline:
 
@@ -123,7 +123,7 @@ Two low-level signals feed this baseline:
 
 The logical lanes are reported separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics/control-plane lane, not a user-facing `ServiceScheduling` option. `Standard` represents the host runtime body lane rather than the supervisor/control runtime.
 
-HighPriority runtime capacity is planned from the daemon's final declared `HighPriority` service/trigger entries before the runtime is lazily created. The plan is read-only operational context: pressure probes and advisory recommendations can warn about lane saturation, but they do not resize the worker count, reload services, restart services, trigger rollover, or move work across modes.
+HighPriority runtime capacity is derived from the daemon's final declared `HighPriority` service/trigger entries before the runtime is lazily created. The resulting worker count is read-only operational context: pressure probes and advisory recommendations can warn about lane saturation, but they do not resize the worker count, reload services, restart services, trigger rollover, or move work across modes.
 
 Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
 
@@ -159,7 +159,7 @@ These fields are observation facts. They do not request a restart, override `Res
 
 ### Snapshot-to-Exporter Boundary
 
-Metrics exporters should be thin adapters over `DaemonDiagnosticsSnapshot`: read the snapshot, map typed fields to vendor names/units/labels, and publish without mutating daemon state. The core runtime intentionally does not ship a Prometheus or OpenTelemetry schema in this phase.
+Metrics exporters should be thin adapters over `DaemonDiagnosticsSnapshot`: read the snapshot, map typed fields to vendor names/units/labels, and publish without mutating daemon state. The core runtime intentionally does not ship a Prometheus or OpenTelemetry schema here.
 
 Exporter adapters should treat `#[non_exhaustive]` diagnostics enums defensively, control label cardinality, and account for bounded generation-detail retention. Service and lane aggregates are suitable for cumulative export; generation-level export should be understood as a recent bounded view rather than an infinite event log.
 
@@ -167,7 +167,7 @@ Exporter adapters should treat `#[non_exhaustive]` diagnostics enums defensively
 
 The snapshot includes a small interpretation layer on top of the raw counters. It is meant to help humans read Standard runtime symptoms, not to identify a definitive culprit or issue commands.
 
-Interpretation labels include low-sample suppression, host-runtime wake-delay suspicion, service-local wake-delay suspicion, service impacted by Standard lane pressure, blocking-risk suspicion, wake-storm suspicion, and lifecycle instability. Each interpretation carries `DiagnosticConfidence` and `DiagnosticRecommendationHint` values such as continue observing, investigate the host runtime, check blocking work, add business tracing, consider changing the source-level declared mode in a future build, or investigate lifecycle instability first.
+Interpretation labels include low-sample suppression, host-runtime wake-delay suspicion, service-local wake-delay suspicion, service impacted by Standard lane pressure, blocking-risk suspicion, wake-storm suspicion, and lifecycle instability. Each interpretation carries `DiagnosticConfidence` and `DiagnosticRecommendationHint` values such as continue observing, investigate the host runtime, check blocking work, add business tracing, consider changing the source-level declared mode in a later code change, or investigate lifecycle instability first.
 
 The Standard lane uses runtime heartbeat probe drift to label host-runtime wake delay and wake-storm symptoms. Declared Standard services use their own `service_daemon::sleep()` drift and lifecycle counters to label service-local wake delay, Standard lane impact, blocking risk, wake storm, or lifecycle instability. Lifecycle instability takes precedence over placement-like hints because repeated restarts, panics, fatal errors, or provider init failures are stronger signals than wake-delay interpretation.
 
@@ -186,7 +186,7 @@ These recommendations are advisory. They can report:
 - Isolated resource pressure when isolated startup failures or rate-limited restarts appear.
 - Lifecycle instability when restart/backoff signals are high, which suppresses placement-like advice.
 
-The analyzer does not expose a public metrics schema and does not change the declared service scheduling mode. It is not an input to Phase 7 HighPriority worker-count planning. Future mode-internal runtime placement work, such as HighPriority runtime epoch rollover, is deferred to later research and would need to be a generation-boundary decision inside the same declared mode.
+The analyzer does not expose a public metrics schema, does not change the declared service scheduling mode, and does not feed HighPriority worker-count selection. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract; if added, they must happen at a generation boundary inside the same declared mode.
 
 The default `SchedulingAdvisoryProfile` keeps this advisory loop enabled. To suppress advisory emission without changing lifecycle or body placement, configure the daemon explicitly:
 

@@ -86,9 +86,9 @@ graph TD
 
 The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, and the advisory analyzer on the daemon-owned control runtime. User service and trigger bodies execute on their statically declared mode (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
 
-During daemon construction, the final selected service list is also the source for HighPriority capacity planning. The planner counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and uses that plan only when the shared high-priority runtime is lazily created.
+During daemon construction, the final selected service list is also the source for HighPriority worker-count selection. The daemon counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and applies the result only when the shared high-priority runtime is lazily created.
 
-The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Future mode-internal placement changes, such as HighPriority runtime epoch rollover, are deferred to later research and would need to happen through a cooperative generation boundary.
+The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract and must happen through a cooperative generation boundary.
 
 ### 3.1. Public Boundary
 
@@ -96,7 +96,7 @@ The diagnostics analyzer is internal and recommendation-first. It reads windowed
 | :--- | :--- |
 | `ServiceScheduling::{Standard, HighPriority, Isolated}` | Public static execution contract generated into the registry; runtime and public APIs do not override it across modes. |
 | Macro `scheduling = ...` | Accepts only `Standard`, `HighPriority`, or `Isolated`; there is no `Auto` or `Control` user-facing mode. |
-| `ServiceEntry` | Public metadata surface, but Phase 6 does not add experimental restart policy or scheduling hint fields. |
+| `ServiceEntry` | Public metadata surface. It does not carry experimental restart policy or scheduling hint fields. |
 | `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
 | Provider root fallback | Public helper behavior for `T::resolve()` outside daemon context; it is a convenience path, not the owner of every daemon's effective provider binding. |
 | Daemon provider scope / slot ids / binding epochs | Internal ownership model used for cache scope and reload propagation. IDs are not exposed as stable public API. |
@@ -106,7 +106,7 @@ The diagnostics analyzer is internal and recommendation-first. It reads windowed
 | `SchedulingAdvisoryProfile` | Public advisory emission control only; it does not change lifecycle, body placement, or declared scheduling. |
 | HighPriority capacity plan | Internal runtime topology decision derived from the final declared HighPriority entries; no production public worker-count override is exposed. |
 | Isolated startup concurrency limit | Public builder knob for isolated startup allocation admission only, not a limit on running isolated body lifetime. |
-| Per-service restart override and scheduling hints | Deferred; future hints must stay within the declared mode and require a separate design. |
+| Per-service restart override and scheduling hints | Not exposed; any such API needs a separate design and must stay within the declared mode. |
 | Diagnostics store, windows, evaluator, recommendation model, sampler, and lane resolver | Internal-only implementation details, not exported as public schema or command surfaces. |
 | Snapshot-to-export adapters | External integration boundary; adapters own vendor metric names, units, labels, cardinality, and transport. Core does not bind Prometheus/OpenTelemetry schema here. |
 | Generation-boundary resolver regression hook | Crate-private test-only hook for proving running futures are not moved between Tokio runtimes; not a public testing API and not compiled into production builds. |

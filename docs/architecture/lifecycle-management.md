@@ -25,18 +25,18 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 Service supervisors, dependency watch construction, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
 - `Standard`: host Tokio runtime integration through the runtime that called `ServiceDaemon::run()`.
-- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count planned from final declared HighPriority entries.
+- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count derived from final declared HighPriority entries.
 - `Isolated`: a private OS thread and private Tokio runtime for each generation body.
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
 
-HighPriority capacity planning happens before runtime allocation and only reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the planned worker count. Pressure diagnostics remain advisory and do not rebuild or resize the runtime after creation.
+HighPriority worker-count selection happens before runtime allocation and only reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the selected worker count. Pressure diagnostics remain advisory and do not rebuild or resize the runtime after creation.
 
 ### Scheduling Advisory and Generation Boundaries
 
 Scheduling analysis is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or request restarts in production. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, or shutdown behavior.
 
-A running Tokio future cannot be moved between runtimes. Future mode-internal placement work, such as HighPriority runtime epoch rollover, is deferred to later research and would need to happen at a generation boundary inside the same declared mode.
+A running Tokio future cannot be moved between runtimes. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract; if added, they must happen at a generation boundary inside the same declared mode.
 
 ### 1.1. Provider Dependency Watch Path
 Provider reload propagation distinguishes value mutation from binding mutation:
@@ -164,11 +164,9 @@ A Provider is considered **fallible** if its definition explicitly returns:
 
 `ProviderInitError` is the framework orchestration boundary. It also covers framework-owned sources that user providers do not construct directly: required environment variable failures, environment parse failures, provider dependency failures, initialization timeout, cancellation, panic translation, and dependency-graph defense errors. Lazy provider-init failures are handled by the supervisor as daemon-wide boundary failures; eager failures stop startup before dependent services become externally observable.
 
-#### FUTURE: Degraded providers
+#### Unsupported: degraded providers
 
-Future versions may extend `ProviderError` with additional semantics (e.g. a `Degraded` outcome), but this is **not implemented yet**.
-
-If/when introduced, the following questions must be answered in the framework contract before enabling it:
+`ProviderError` currently has no degraded-service outcome. If such a mode is added later, the framework contract must first answer:
 
 - Does the daemon continue startup, and what is the readiness/health behaviour?
 - How do services observe (and react to) the degraded state without pushing complexity into business code?

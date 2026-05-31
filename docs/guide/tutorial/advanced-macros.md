@@ -46,9 +46,9 @@ The macros generate a `ServiceEntry` struct at compile time. This struct is publ
 
 You can use this to build **Internal Discovery Systems** or **Health Check Dashboards** that automatically list all services in the binary without manual hardcoding.
 
-## 3. Customizing Macro Outputs (Future-Proofing)
+## 3. Service Metadata Boundaries
 
-Because the project uses `linkme`, the registration happens at the binary level. Use the tag system for service metadata such as ownership (e.g., `tags = ["owner:billing"]`). Per-service restart policy overrides, scheduling hints, and experimental scheduling fields are not part of the Phase 6 `ServiceEntry` contract.
+Because the project uses `linkme`, the registration happens at the binary level. Use the tag system for service metadata such as ownership (e.g., `tags = ["owner:billing"]`). `ServiceEntry` does not carry per-service restart overrides, scheduling hints, or experimental scheduling fields; keep those concerns in explicitly designed APIs rather than overloading registry metadata.
 
 ## 4. Why stick with the Macros?
 
