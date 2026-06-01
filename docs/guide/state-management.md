@@ -147,10 +147,15 @@ pub struct ApiListener;
 // In your service:
 #[service(priority = ServicePriority::EXTERNAL)]
 pub async fn web_server(listener: Arc<ApiListener>) -> anyhow::Result<()> {
-    let l = listener.get(); // Clones the FD into a tokio listener
-    axum::serve(l, my_app).await.map_err(Into::into)
+    let listener = listener.get()?; // Clones the FD into a tokio listener
+    axum::serve(listener, my_app)
+        .with_graceful_shutdown(service_daemon::wait_shutdown())
+        .await
+        .map_err(Into::into)
 }
 ```
+
+For a complete Web API reference that combines an Axum HTTP service, explicit CORS policy, `utoipa-axum` OpenAPI routing, response envelopes, graceful shutdown, and a maintenance trigger, see `examples/web-api` (`cargo run -p example-web-api`).
 
 ### Signal & Queues
 - **Notify**: Wraps `tokio::sync::Notify`. Ideal for manual triggers.

@@ -80,6 +80,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **triggers** | Decoupled event-driven handlers (Cron, Queue, Watch) | `cargo run -p example-triggers` |
 | **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
 | **diagnostics** | Behavioral Topology and Mermaid export (`diagnostics` feature) | `cargo run -p example-diagnostics` |
+| **web-api** | Axum HTTP API with explicit CORS, OpenAPI docs, request envelopes, graceful shutdown, and maintenance triggers | `cargo run -p example-web-api` |
 | **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
 | **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
