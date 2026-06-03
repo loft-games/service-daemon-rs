@@ -14,5 +14,6 @@ members = [
     "examples/scheduling",
     "examples/unix-domain-socket",
     "examples/web-api",
+    "examples/controller-bridge",
 ]
 resolver = "2"
