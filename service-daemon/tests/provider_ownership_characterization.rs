@@ -411,7 +411,7 @@ async fn run_tagged_daemon_until_observed(tag: &'static str, observed: &AtomicUs
 }
 
 #[tokio::test]
-async fn external_provider_resolve_uses_one_root_static_cache() {
+async fn external_provider_resolve_uses_one_root_static_cache() -> anyhow::Result<()> {
     let first = ExternalRootProvider::resolve().await;
     let second = ExternalRootProvider::resolve().await;
 
@@ -419,6 +419,7 @@ async fn external_provider_resolve_uses_one_root_static_cache() {
     assert_eq!(first.0, 1);
     assert_eq!(second.0, 1);
     assert_eq!(EXTERNAL_ROOT_PROVIDER_INITS.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 #[tokio::test]
@@ -509,7 +510,7 @@ async fn simulation_daemons_share_root_provider_cache_by_default() {
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
-async fn simulation_pre_run_provider_override_is_daemon_local() {
+async fn simulation_pre_run_provider_override_is_daemon_local() -> anyhow::Result<()> {
     use service_daemon::{MockContext, Registry};
 
     SIMULATION_PRE_RUN_OVERRIDE_INITS.store(0, Ordering::SeqCst);
@@ -574,11 +575,12 @@ async fn simulation_pre_run_provider_override_is_daemon_local() {
     )
     .await;
     assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
-async fn simulation_runtime_provider_override_reloads_dependent_service() {
+async fn simulation_runtime_provider_override_reloads_dependent_service() -> anyhow::Result<()> {
     use service_daemon::{MockContext, Registry};
 
     SIMULATION_RUNTIME_OVERRIDE_INITS.store(0, Ordering::SeqCst);
@@ -632,11 +634,12 @@ async fn simulation_runtime_provider_override_reloads_dependent_service() {
 
     let root = SimulationRuntimeOverrideProvider::resolve().await;
     assert_eq!(root.0, 1);
+    Ok(())
 }
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
-async fn root_value_mutation_does_not_reload_daemon_after_local_override() {
+async fn root_value_mutation_does_not_reload_daemon_after_local_override() -> anyhow::Result<()> {
     use service_daemon::{MockContext, Registry};
 
     SIMULATION_FORK_ROOT_INITS.store(0, Ordering::SeqCst);
@@ -689,6 +692,7 @@ async fn root_value_mutation_does_not_reload_daemon_after_local_override() {
     assert_eq!(SIMULATION_FORK_FIRST_VALUE.load(Ordering::SeqCst), 42);
     assert_eq!(SIMULATION_FORK_SECOND_VALUE.load(Ordering::SeqCst), 0);
     assert_eq!(SIMULATION_FORK_OBSERVATIONS.load(Ordering::SeqCst), 1);
+    Ok(())
 }
 
 #[cfg(feature = "simulation")]

@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Provider Macro Contract**: Reworked `#[provider]` item parsing around `syn::Item`, added explicit diagnostics for unsupported provider items and unsafe provider functions, and tightened function-provider `Result<T, ProviderError>` handling so same-named custom error types are rejected.
+- **Generated Provider Helpers**: Kept helper return shapes tied to declared fallibility: direct helpers for infallible and framework-owned providers, `Result<_, ProviderInitError>` helpers for env, socket, dependency-injected, and `ProviderError` providers, with direct-helper panic diagnostics that include provider origin, definition location, helper callsite, module path, and the original provider-init error.
 - **Provider Initialization Boundaries**: Clarified `ProviderError` versus `ProviderInitError`, preserved provider-init source classification in tracing/tests, and kept fatal, timeout, cancellation, panic, and dependency-provider failures distinct.
 - **Scheduling Runtime**: Split supervision/control-plane work from service and trigger body execution lanes, added HighPriority worker-count selection from final registry entries, and kept advisory analysis read-only.
 - **Trigger Supervision**: Improved trigger dispatch observability so retry exhaustion, infrastructure errors, panics, reload, and shutdown produce distinct lifecycle/restart signals.

@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 
 static INTEGRATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn reset_shared_controller_state() {
-    reset_controller_event_stats().await;
+async fn reset_shared_controller_state() -> anyhow::Result<()> {
+    reset_controller_event_stats().await?;
     {
         let lock = ControllerStatus::resolve_rwlock().await;
         let mut guard = lock.write().await;
@@ -30,6 +30,7 @@ async fn reset_shared_controller_state() {
         .await
         .replace_connection(DeviceConnection::scripted())
         .await;
+    Ok(())
 }
 
 async fn wait_until<F, Fut>(
@@ -57,7 +58,7 @@ where
 async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::Result<()> {
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     let _ = service_daemon::try_init_logging();
-    reset_shared_controller_state().await;
+    reset_shared_controller_state().await?;
 
     let mut daemon = ServiceDaemon::builder()
         .with_restart_policy(RestartPolicy::for_testing())
@@ -69,7 +70,7 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
         "completed controller script",
         Duration::from_secs(2),
         || async {
-            let stats = controller_event_stats_snapshot().await;
+            let stats = controller_event_stats_snapshot().await?;
             Ok(stats.measurements == 3
                 && stats.interruptions == 1
                 && stats.recoveries == 1
@@ -82,7 +83,7 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
         "closed controller status watch",
         Duration::from_secs(2),
         || async {
-            let stats = controller_event_stats_snapshot().await;
+            let stats = controller_event_stats_snapshot().await?;
             let status = ControllerStatus::resolve().await;
             let last_status = stats.last_status.as_ref();
             Ok(status.state == ConnectionState::Closed
@@ -94,7 +95,7 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
     cancel.cancel();
     daemon.wait().await?;
 
-    let stats = controller_event_stats_snapshot().await;
+    let stats = controller_event_stats_snapshot().await?;
     assert_eq!(stats.measurements, 3);
     assert_eq!(stats.interruptions, 1);
     assert_eq!(stats.recoveries, 1);
@@ -124,7 +125,7 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
 async fn command_queue_correlates_reply_through_daemon_topology() -> anyhow::Result<()> {
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     let _ = service_daemon::try_init_logging();
-    reset_shared_controller_state().await;
+    reset_shared_controller_state().await?;
     ConnectionHandle::resolve()
         .await
         .replace_connection(DeviceConnection::new(Default::default()))
@@ -173,7 +174,7 @@ async fn command_queue_correlates_reply_through_daemon_topology() -> anyhow::Res
         }))
         .await;
     wait_until("command reply stat", Duration::from_secs(2), || async {
-        let stats = controller_event_stats_snapshot().await;
+        let stats = controller_event_stats_snapshot().await?;
         Ok(stats.command_replies == 1)
     })
     .await?;
@@ -323,21 +324,21 @@ async fn connection_layer_handles_split_frames_and_reconnect_observability() -> 
 async fn repeated_daemon_runs_start_from_fresh_scripted_connection() -> anyhow::Result<()> {
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     for _ in 0..2 {
-        reset_shared_controller_state().await;
+        reset_shared_controller_state().await?;
         let mut daemon = ServiceDaemon::builder()
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
         daemon.run().await;
         wait_until("completed repeated run", Duration::from_secs(2), || async {
-            let stats = controller_event_stats_snapshot().await;
+            let stats = controller_event_stats_snapshot().await?;
             Ok(stats.completions == 1)
         })
         .await?;
         cancel.cancel();
         daemon.wait().await?;
 
-        let stats = controller_event_stats_snapshot().await;
+        let stats = controller_event_stats_snapshot().await?;
         assert_eq!(stats.measurements, 3);
         assert_eq!(stats.completions, 1);
     }

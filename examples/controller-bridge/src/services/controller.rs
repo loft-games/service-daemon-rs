@@ -92,17 +92,18 @@ impl ControllerEventStatsSnapshot {
     }
 }
 
-pub async fn reset_controller_event_stats() {
+pub async fn reset_controller_event_stats() -> anyhow::Result<()> {
     let lock = ControllerEventStatsSnapshot::resolve_rwlock().await;
     let mut guard = lock.write().await;
     *guard = ControllerEventStatsSnapshot::default();
+    Ok(())
 }
 
-pub async fn controller_event_stats_snapshot() -> ControllerEventStatsSnapshot {
-    ControllerEventStatsSnapshot::resolve()
+pub async fn controller_event_stats_snapshot() -> anyhow::Result<ControllerEventStatsSnapshot> {
+    Ok(ControllerEventStatsSnapshot::resolve()
         .await
         .as_ref()
-        .clone()
+        .clone())
 }
 
 pub async fn record_controller_event(event: Arc<ControllerEvent>) -> anyhow::Result<()> {
@@ -111,7 +112,7 @@ pub async fn record_controller_event(event: Arc<ControllerEvent>) -> anyhow::Res
         let mut guard = lock.write().await;
         guard.record_event(&event);
     }
-    publish_controller_status(&event).await;
+    publish_controller_status(&event).await?;
     info!(?event, "controller event handled");
     Ok(())
 }
@@ -180,7 +181,7 @@ pub async fn send_controller_command_with_timeout(
     Ok(())
 }
 
-async fn publish_controller_status(event: &ControllerEvent) {
+async fn publish_controller_status(event: &ControllerEvent) -> anyhow::Result<()> {
     let lock = ControllerStatus::resolve_rwlock().await;
     let mut guard = lock.write().await;
     guard.updated_count += 1;
@@ -203,6 +204,7 @@ async fn publish_controller_status(event: &ControllerEvent) {
             guard.state = ConnectionState::Closed;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]

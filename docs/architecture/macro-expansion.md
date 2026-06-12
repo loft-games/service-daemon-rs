@@ -48,7 +48,9 @@ Shared attributes are parsed once and rejected at compile time if duplicated:
 
 Unsupported attributes keep the stable parser diagnostic that lists the supported shared attributes: `env`, `capacity`, and `eager`.
 
-Function providers are considered framework-fallible only when their return type is `Result<T, ProviderError>` or an equivalent qualified path ending in `ProviderError`. Other `Result<T, E>` shapes remain ordinary user return types and do not opt into provider-init retry/fatal semantics.
+Function providers opt into framework fallibility only with `Result<T, ProviderError>` or an equivalent path ending in `ProviderError`. The error type must resolve to `service_daemon::ProviderError`: either directly, through an imported `ProviderError`, or through a type alias named `ProviderError`. Same-named custom types fail type checking at the provider return.
+
+Other `Result<T, E>` provider returns are rejected by the macro. To provide a non-framework result value, wrap it in a local provider type.
 
 ### Scoped Resolution Bridge
 
@@ -65,12 +67,13 @@ Manual `WatchableProvided` implementations should return a `ProviderDependencyWa
 
 ### Provider Helper Return Shapes
 
-Provider helpers intentionally distinguish convenience from provider-init failure semantics:
+Provider helper signatures are part of the macro public contract and depend on declared fallibility:
 
 | Provider shape | `resolve()` / lock helpers | Notes |
 | :--- | :--- | :--- |
-| Infallible provider with no DI dependency | Direct `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` | Static values or initialization that cannot fail. |
-| `Notify` / `Queue` templates | Direct `Arc<T>` / lock wrappers | Framework-owned templates that are infallible after macro validation. |
+| Infallible provider with no DI dependency | Direct `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` | No declared fallible init path. Boundary errors are reported as direct-helper panics with provider type, origin, provider definition location, helper callsite, module path, helper name, and the original provider-init error. |
+| Infallible function provider with no DI dependency | Direct `Arc<T>` / lock wrappers | User panics are caught at the provider-init boundary and re-raised through the same direct-helper diagnostic. |
+| `Notify` / `Queue` templates | Direct `Arc<T>` / lock wrappers | Framework-owned templates are infallible after macro validation. Queue capacity is a compile-time diagnostic. |
 | Provider with DI dependencies | `Result<Arc<T>, ProviderInitError>` | Dependency resolution can fail, so the helper is fallible. |
 | Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
 | `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
@@ -80,9 +83,11 @@ Provider helpers intentionally distinguish convenience from provider-init failur
 
 ### Provider Init Boundary
 
-Generated convenience helpers keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The match is not template noise: the normal branch now accepts hidden `ProviderInitFailure` values carrying source kinds such as env parse, dependency provider failure, user fatal, retry timeout, or system I/O; the panic branch tags the converted fatal error as `panic`. The boundary then returns the same public `ProviderInitError` shape while emitting diagnostic fields such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
+Generated provider impls keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The normal branch preserves hidden `ProviderInitFailure` source kinds such as env parse, dependency provider failure, user fatal, retry timeout, or system I/O. The panic branch tags the converted fatal error as `panic`. The public error remains `ProviderInitError`, with diagnostics keyed by boundary names such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
 
-Do not collapse this generated boundary to `?` as a cosmetic cleanup. If the runtime boundary gains more source classes later, the macro should continue delegating to centralized helpers rather than duplicating wrapper-specific translation logic in each generated branch.
+Fallible helpers expose `ProviderInitError` directly. Direct-return helpers are generated only for providers without a declared fallible path. If one receives an error from the shared boundary, it panics with the helper name, provider type, `#[provider]` origin, provider definition location, helper callsite, module path, and original error. The re-raised panic is span-tagged to the provider definition, not to a macro crate source line.
+
+Do not collapse this boundary to `?`; that would drop source classification. Keep wrapper-specific translation centralized in the runtime helpers.
 
 ## 4. Span-preserving tracked state
 

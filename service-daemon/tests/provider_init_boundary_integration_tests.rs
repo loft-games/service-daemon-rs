@@ -1,11 +1,14 @@
+use futures::FutureExt;
 use service_daemon::{
     DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
     DiagnosticProviderFailureKind, DiagnosticProviderFailureRuntimePhase,
     DiagnosticProviderFailureSourceKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
     ServiceDaemon, TT::*, provider, service, trigger,
 };
+use std::any::Any;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard, Once};
 use std::time::Duration;
@@ -277,6 +280,16 @@ fn assert_provider_init_exit(daemon: &ServiceDaemon, service_name: &str) {
     assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
 }
 
+fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(message) => (*message).to_owned(),
+            Err(_) => "non-string panic payload".to_owned(),
+        },
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn test_required_env_parse_emits_environment_parse_source() {
     let _trace_guard = TRACE_LOCK.lock().await;
@@ -323,6 +336,43 @@ async fn test_provider_panic_emits_panic_source() {
         Err(ProviderInitError::Fatal { provider, .. }) if provider == "PanicSourceProvider"
     ));
     assert_trace_source("panic");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_infallible_helper_panic_message_points_to_provider_definition() {
+    let payload = match AssertUnwindSafe(PanicSourceProvider::resolve())
+        .catch_unwind()
+        .await
+    {
+        Ok(_) => panic!("direct helper should panic after provider init panic"),
+        Err(payload) => payload,
+    };
+    let message = panic_payload_message(payload);
+
+    assert!(
+        message.contains("provider `PanicSourceProvider` failed in direct helper `resolve`"),
+        "panic message should name the provider type and generated helper: {message}"
+    );
+    assert!(
+        message.contains("provider_origin=#[provider] function panic_source_provider"),
+        "panic message should point to the provider function: {message}"
+    );
+    assert!(
+        message.contains(
+            "provider_defined_at=service-daemon/tests/provider_init_boundary_integration_tests.rs:"
+        ),
+        "panic message should include the provider definition file: {message}"
+    );
+    assert!(
+        message.contains(
+            "helper_called_at=service-daemon/tests/provider_init_boundary_integration_tests.rs:"
+        ),
+        "panic message should include the direct helper callsite: {message}"
+    );
+    assert!(
+        message.contains("phase16 typed source panic"),
+        "panic message should preserve the original user panic text: {message}"
+    );
 }
 
 #[tokio::test]

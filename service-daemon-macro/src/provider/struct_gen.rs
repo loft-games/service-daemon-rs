@@ -206,13 +206,13 @@ impl TupleStructInfo {
     }
 }
 
-/// Controls which inherent helper surface is generated for a provider.
+/// Return shape for generated provider helpers.
+#[derive(Clone, Copy)]
 pub(super) enum HelperStyle {
     Infallible,
     Fallible,
 }
 
-/// Input bundle for generating provider capability impls and helper methods.
 pub(super) struct ProvidedImplConfig<'a> {
     pub type_tokens: &'a proc_macro2::TokenStream,
     pub singleton_name: &'a syn::Ident,
@@ -222,6 +222,7 @@ pub(super) struct ProvidedImplConfig<'a> {
     pub framework_init_fn: &'a proc_macro2::TokenStream,
     pub managed_init_fn: &'a proc_macro2::TokenStream,
     pub helper_style: HelperStyle,
+    pub provider_origin: String,
 }
 
 /// Generates the provider capability trait impls and convenience methods
@@ -237,6 +238,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         framework_init_fn,
         managed_init_fn,
         helper_style,
+        provider_origin,
     } = config;
     // Use quote_spanned! so that if the type is missing Clone/Send/Sync,
     // the compiler error points to the user's struct definition or fn return
@@ -272,74 +274,108 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             .replace(|c: char| !c.is_alphanumeric(), "_")
     );
 
-    let helper_impl = if matches!(helper_style, HelperStyle::Infallible) {
-        let resolve_msg = format!(
-            "Infallible provider convenience resolve() unexpectedly failed for '{}'. Use the explicit fallible provider path if this provider can fail.",
-            type_name_str
-        );
-        let resolve_rwlock_msg = format!(
-            "Infallible provider convenience resolve_rwlock() unexpectedly failed for '{}'. Use the explicit fallible provider path if this provider can fail.",
-            type_name_str
-        );
-        let resolve_mutex_msg = format!(
-            "Infallible provider convenience resolve_mutex() unexpectedly failed for '{}'. Use the explicit fallible provider path if this provider can fail.",
-            type_name_str
-        );
+    let provider_origin_lit = syn::LitStr::new(&provider_origin, user_span);
+    let provider_definition_site = quote_spanned! { user_span =>
+        (file!(), line!(), column!())
+    };
+    let invariant_panic = |helper_name: &'static str| {
         quote! {
-            impl #type_tokens {
-                /// Resolves an immutable snapshot for this provider.
-                pub async fn resolve() -> std::sync::Arc<Self> {
-                    <Self as service_daemon::Provided>::resolve()
-                        .await
-                        .expect(#resolve_msg)
-                }
-
-                /// Resolves a tracked RwLock for this provider.
-                pub async fn resolve_rwlock() -> std::sync::Arc<service_daemon::RwLock<Self>> {
-                    <Self as service_daemon::ManagedProvided>::resolve_rwlock()
-                        .await
-                        .expect(#resolve_rwlock_msg)
-                }
-
-                /// Resolves a tracked Mutex for this provider.
-                pub async fn resolve_mutex() -> std::sync::Arc<service_daemon::Mutex<Self>> {
-                    <Self as service_daemon::ManagedProvided>::resolve_mutex()
-                        .await
-                        .expect(#resolve_mutex_msg)
-                }
-
-                /// Resolves the raw managed result for this provider.
-                pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
-                    <Self as service_daemon::ManagedProvided>::resolve_managed().await
-                }
-            }
-        }
-    } else {
-        quote! {
-            impl #type_tokens {
-                /// Resolves an immutable snapshot for this provider.
-                pub async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
-                    <Self as service_daemon::Provided>::resolve().await
-                }
-
-                /// Resolves a tracked RwLock for this provider.
-                pub async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
-                    <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
-                }
-
-                /// Resolves a tracked Mutex for this provider.
-                pub async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
-                    <Self as service_daemon::ManagedProvided>::resolve_mutex().await
-                }
-
-                /// Resolves the raw managed result for this provider.
-                pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
-                    <Self as service_daemon::ManagedProvided>::resolve_managed().await
-                }
+            |error| {
+                panic!(
+                    "service-daemon provider `{}` failed in direct helper `{}`. provider_origin={}, provider_defined_at={}:{}:{}, helper_called_at={}:{}:{}, module={}, error={}. Direct helpers are generated only for providers with no declared fallible initialization path; use `Result<T, service_daemon::ProviderError>` if initialization can fail.",
+                    #type_name_str,
+                    #helper_name,
+                    #provider_origin_lit,
+                    provider_definition_site.0,
+                    provider_definition_site.1,
+                    provider_definition_site.2,
+                    helper_callsite.file(),
+                    helper_callsite.line(),
+                    helper_callsite.column(),
+                    module_path!(),
+                    error,
+                )
             }
         }
     };
 
+    let resolve_panic = invariant_panic("resolve");
+    let resolve_rwlock_panic = invariant_panic("resolve_rwlock");
+    let resolve_mutex_panic = invariant_panic("resolve_mutex");
+
+    let helper_impl = match helper_style {
+        HelperStyle::Infallible => {
+            quote! {
+                impl #type_tokens {
+                    /// Resolves an immutable snapshot for this provider.
+                    #[track_caller]
+                    pub fn resolve() -> impl std::future::Future<Output = std::sync::Arc<Self>> + Send {
+                        let provider_definition_site = #provider_definition_site;
+                        let helper_callsite = std::panic::Location::caller();
+                        async move {
+                            <Self as service_daemon::Provided>::resolve()
+                                .await
+                                .unwrap_or_else(#resolve_panic)
+                        }
+                    }
+
+                    /// Resolves a tracked RwLock for this provider.
+                    #[track_caller]
+                    pub fn resolve_rwlock() -> impl std::future::Future<Output = std::sync::Arc<service_daemon::RwLock<Self>>> + Send {
+                        let provider_definition_site = #provider_definition_site;
+                        let helper_callsite = std::panic::Location::caller();
+                        async move {
+                            <Self as service_daemon::ManagedProvided>::resolve_rwlock()
+                                .await
+                                .unwrap_or_else(#resolve_rwlock_panic)
+                        }
+                    }
+
+                    /// Resolves a tracked Mutex for this provider.
+                    #[track_caller]
+                    pub fn resolve_mutex() -> impl std::future::Future<Output = std::sync::Arc<service_daemon::Mutex<Self>>> + Send {
+                        let provider_definition_site = #provider_definition_site;
+                        let helper_callsite = std::panic::Location::caller();
+                        async move {
+                            <Self as service_daemon::ManagedProvided>::resolve_mutex()
+                                .await
+                                .unwrap_or_else(#resolve_mutex_panic)
+                        }
+                    }
+
+                    /// Resolves the raw managed result for this provider.
+                    pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                        <Self as service_daemon::ManagedProvided>::resolve_managed().await
+                    }
+                }
+            }
+        }
+        HelperStyle::Fallible => {
+            quote! {
+                impl #type_tokens {
+                    /// Resolves an immutable snapshot for this provider.
+                    pub async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
+                        <Self as service_daemon::Provided>::resolve().await
+                    }
+
+                    /// Resolves a tracked RwLock for this provider.
+                    pub async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
+                        <Self as service_daemon::ManagedProvided>::resolve_rwlock().await
+                    }
+
+                    /// Resolves a tracked Mutex for this provider.
+                    pub async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
+                        <Self as service_daemon::ManagedProvided>::resolve_mutex().await
+                    }
+
+                    /// Resolves the raw managed result for this provider.
+                    pub async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                        <Self as service_daemon::ManagedProvided>::resolve_managed().await
+                    }
+                }
+            }
+        }
+    };
     quote! {
         #bounds_assertion
 
@@ -556,11 +592,10 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         struct_name.to_string().to_uppercase()
     );
 
-    // Use the shared Provided impl generator
     let type_tokens = quote! { #struct_name };
     let eager = args.eager;
     let helper_style = struct_provider_helper_style(fields, &tuple_info, &args);
-
+    let provider_origin = format!("#[provider] struct {struct_name}");
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
@@ -570,6 +605,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style,
+        provider_origin,
     });
 
     let expanded = quote! {

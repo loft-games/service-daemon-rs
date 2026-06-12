@@ -1,0 +1,8 @@
+error: #[provider] function Result error type must be service_daemon::ProviderError
+
+         = help: Use Result<T, service_daemon::ProviderError> for provider-init retry/fatal semantics, or wrap non-framework Result values in a local provider type
+
+  --> tests/fail/25_provider_result_non_provider_error.rs:12:68
+   |
+12 | async fn ordinary_result_provider() -> Result<OrdinaryResultValue, OtherError> {
+   |                                                                    ^^^^^^^^^^

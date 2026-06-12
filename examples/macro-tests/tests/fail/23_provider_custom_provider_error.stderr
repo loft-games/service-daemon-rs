@@ -1,0 +1,61 @@
+error[E0271]: expected `{async block@$DIR/tests/fail/23_provider_custom_provider_error.rs:11:1: 11:12}` to be a future that resolves to `Result<_, ProviderError>`, but it resolves to `Result<FallibleConfig, ProviderError>`
+  --> tests/fail/23_provider_custom_provider_error.rs:11:1
+   |
+11 | #[provider]
+   | ^^^^^^^^^^^ expected `service_daemon::ProviderError`, found `ProviderError`
+   |
+   = note: `ProviderError` and `service_daemon::ProviderError` have similar names, but are actually distinct types
+note: `ProviderError` is defined in the current crate
+  --> tests/fail/23_provider_custom_provider_error.rs:9:1
+   |
+ 9 | pub struct ProviderError;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+note: `service_daemon::ProviderError` is defined in crate `service_daemon`
+  --> $WORKSPACE/service-daemon/src/models/provider_error.rs
+   |
+   | pub enum ProviderError {
+   | ^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `service_daemon::__private::init_fallible`
+  --> $WORKSPACE/service-daemon/src/core/provider_init.rs
+   |
+   | pub async fn init_fallible<T, Init, Fut>(
+   |              ------------- required by a bound in this function
+...
+   |     Fut: Future<Output = Result<T, ProviderError>> + Send,
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `init_fallible`
+   = note: this error originates in the attribute macro `provider` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `?` couldn't convert the error to `service_daemon::ProviderError`
+  --> tests/fail/23_provider_custom_provider_error.rs:11:11
+   |
+11 | #[provider]
+   | ----------^
+   | |         |
+   | |         the trait `From<ProviderError>` is not implemented for `service_daemon::ProviderError`
+   | this can't be annotated with `?` because it has type `Result<_, ProviderError>`
+   |
+note: `ProviderError` needs to implement `Into<service_daemon::ProviderError>`
+  --> tests/fail/23_provider_custom_provider_error.rs:9:1
+   |
+ 9 | pub struct ProviderError;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
+   = note: this error originates in the attribute macro `provider` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0308]: mismatched types
+  --> tests/fail/23_provider_custom_provider_error.rs:12:63
+   |
+12 | async fn fallible_config_provider() -> Result<FallibleConfig, ProviderError> {
+   |                                                               ^^^^^^^^^^^^^ expected `service_daemon::ProviderError`, found `ProviderError`
+   |
+   = note: `ProviderError` and `service_daemon::ProviderError` have similar names, but are actually distinct types
+note: `ProviderError` is defined in the current crate
+  --> tests/fail/23_provider_custom_provider_error.rs:9:1
+   |
+ 9 | pub struct ProviderError;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+note: `service_daemon::ProviderError` is defined in crate `service_daemon`
+  --> $WORKSPACE/service-daemon/src/models/provider_error.rs
+   |
+   | pub enum ProviderError {
+   | ^^^^^^^^^^^^^^^^^^^^^^

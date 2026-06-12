@@ -1,0 +1,8 @@
+error: #[provider] fn cannot be unsafe
+
+         = help: Move unsafe operations behind a safe provider function boundary
+
+ --> tests/fail/24_provider_unsafe_fn.rs:9:11
+  |
+9 | pub async unsafe fn unsafe_config_provider() -> UnsafeConfig {
+  |           ^^^^^^

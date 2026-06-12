@@ -1,6 +1,6 @@
-error: #[provider] can only be applied to struct or async fn items
+error: #[provider] can only be applied to struct or function items
 
-         = help: Use #[provider] on a struct definition or an async function
+         = help: Use #[provider] on a struct definition or a function returning the provider type
          = note: Example: #[provider(8080)] pub struct Port(pub i32);
 
   --> tests/fail/04_provider_on_enum.rs:9:1

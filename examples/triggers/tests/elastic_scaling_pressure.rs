@@ -98,7 +98,7 @@ pub async fn pressure_handler(_payload: String) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn elastic_scaling_increases_concurrency_under_pressure() {
+async fn elastic_scaling_increases_concurrency_under_pressure() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
         .with_test_writer()
@@ -116,9 +116,11 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
 
     let producer = tokio::spawn(async move {
         for i in 0..50 {
-            let _ = PressureQueue::resolve().await.push(format!("msg-{}", i));
+            let queue = PressureQueue::resolve().await;
+            let _ = queue.push(format!("msg-{}", i));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        Ok::<(), anyhow::Error>(())
     });
 
     wait_until("queue pressure should increase handler concurrency", || {
@@ -131,7 +133,7 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
     tokio::time::timeout(Duration::from_secs(5), producer)
         .await
         .expect("pressure producer did not finish in time")
-        .expect("pressure producer task panicked");
+        .expect("pressure producer task panicked")?;
 
     tokio::time::timeout(Duration::from_secs(5), daemon.wait())
         .await
@@ -152,4 +154,6 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
         "expected queue pressure to increase concurrency beyond 1, peak={peak}, completed={completed}"
     );
     assert!(completed > 0, "expected at least one completed handler");
+
+    Ok(())
 }

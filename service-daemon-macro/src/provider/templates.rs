@@ -62,6 +62,7 @@ impl<'a> TemplateContext<'a> {
         attrs: &'a [syn::Attribute],
         eager: bool,
         helper_style: HelperStyle,
+        provider_origin: String,
     ) -> Self {
         let singleton_name = format_ident!(
             "__PROVIDER_SINGLETON_{}",
@@ -95,6 +96,7 @@ impl<'a> TemplateContext<'a> {
             framework_init_fn: &framework_init_fn,
             managed_init_fn: &managed_init_fn,
             helper_style,
+            provider_origin,
         });
 
         Self {
@@ -114,7 +116,14 @@ pub fn generate_notify_template(
     attrs: &[syn::Attribute],
     eager: bool,
 ) -> TokenStream {
-    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, HelperStyle::Infallible);
+    let ctx = TemplateContext::new(
+        struct_name,
+        vis,
+        attrs,
+        eager,
+        HelperStyle::Infallible,
+        format!("#[provider(Notify)] struct {struct_name}"),
+    );
     let TemplateContext {
         struct_name,
         vis,
@@ -171,7 +180,14 @@ pub fn generate_broadcast_queue_template(
     eager: bool,
 ) -> TokenStream {
     let capacity = capacity.get();
-    let ctx = TemplateContext::new(struct_name, vis, attrs, eager, HelperStyle::Infallible);
+    let ctx = TemplateContext::new(
+        struct_name,
+        vis,
+        attrs,
+        eager,
+        HelperStyle::Infallible,
+        format!("#[provider(Queue)] struct {struct_name}"),
+    );
     let TemplateContext {
         struct_name,
         vis,
@@ -192,7 +208,7 @@ pub fn generate_broadcast_queue_template(
             fn default() -> Self {
                 const CAPACITY: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(#capacity) {
                     Some(capacity) => capacity,
-                    None => panic!("Queue provider capacity must be greater than zero"),
+                    None => std::num::NonZeroUsize::MIN,
                 };
 
                 Self {
@@ -306,6 +322,7 @@ pub fn generate_listen_template(
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
+        provider_origin: format!("#[provider(Listen)] struct {struct_name}"),
     });
 
     let expanded = quote! {
@@ -601,6 +618,7 @@ pub fn generate_unix_listen_template(
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
+        provider_origin: format!("#[provider(UnixListen)] struct {struct_name}"),
     });
 
     let expanded = quote! {
@@ -805,6 +823,7 @@ pub fn generate_unix_connect_template(
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
+        provider_origin: format!("#[provider(UnixConnect)] struct {struct_name}"),
     });
 
     let expanded = quote! {

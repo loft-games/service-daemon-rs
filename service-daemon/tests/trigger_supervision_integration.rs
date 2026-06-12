@@ -176,8 +176,9 @@ async fn test_topic_host_queue_trigger_dispatches_payload_without_downcast_panic
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        Ok::<(), service_daemon::ProviderInitError>(())
     })
-    .await?;
+    .await??;
 
     TopicHostSmokeQueue::resolve()
         .await
