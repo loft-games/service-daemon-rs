@@ -117,6 +117,299 @@ pub enum DiagnosticGenerationExitKind {
     IsolatedStartupFailure,
 }
 
+/// Shutdown boundary where the runtime applied a bounded wait.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticShutdownBoundaryKind {
+    /// Per-generation isolated OS thread join after the outcome bridge resolved.
+    IsolatedRuntimeJoin,
+    /// Trigger in-flight dispatch drain during shutdown.
+    TriggerDispatchDrain,
+}
+
+impl From<internal::ShutdownBoundaryKind> for DiagnosticShutdownBoundaryKind {
+    fn from(value: internal::ShutdownBoundaryKind) -> Self {
+        match value {
+            internal::ShutdownBoundaryKind::IsolatedRuntimeJoin => Self::IsolatedRuntimeJoin,
+            internal::ShutdownBoundaryKind::TriggerDispatchDrain => Self::TriggerDispatchDrain,
+        }
+    }
+}
+
+/// Result of a bounded shutdown boundary.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticShutdownBoundaryResultKind {
+    /// The boundary completed before its timeout.
+    Completed,
+    /// The boundary timed out and residual work was recorded.
+    TimedOut,
+    /// The boundary observed a panic while waiting.
+    Panicked,
+}
+
+impl From<internal::ShutdownBoundaryResultKind> for DiagnosticShutdownBoundaryResultKind {
+    fn from(value: internal::ShutdownBoundaryResultKind) -> Self {
+        match value {
+            internal::ShutdownBoundaryResultKind::Completed => Self::Completed,
+            internal::ShutdownBoundaryResultKind::TimedOut => Self::TimedOut,
+            internal::ShutdownBoundaryResultKind::Panicked => Self::Panicked,
+        }
+    }
+}
+
+/// Runtime action taken after a shutdown boundary result.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticShutdownResidualActionKind {
+    /// No residual action was required.
+    None,
+    /// Residual work was recorded and shutdown continued.
+    RecordedAndDetached,
+}
+
+impl From<internal::ShutdownResidualActionKind> for DiagnosticShutdownResidualActionKind {
+    fn from(value: internal::ShutdownResidualActionKind) -> Self {
+        match value {
+            internal::ShutdownResidualActionKind::None => Self::None,
+            internal::ShutdownResidualActionKind::RecordedAndDetached => Self::RecordedAndDetached,
+        }
+    }
+}
+
+/// Last observed bounded shutdown boundary outcome.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticShutdownBoundaryOutcome {
+    /// Boundary that was observed.
+    pub boundary: DiagnosticShutdownBoundaryKind,
+    /// Result of the bounded wait.
+    pub result: DiagnosticShutdownBoundaryResultKind,
+    /// Runtime residual action after observing the result.
+    pub action: DiagnosticShutdownResidualActionKind,
+    /// Completed work count reported by the boundary.
+    pub completed: u64,
+    /// Failed work count reported by the boundary.
+    pub failed: u64,
+    /// Residual work count reported by the boundary.
+    pub residual: u64,
+}
+
+impl From<internal::ShutdownBoundaryOutcomeSnapshot> for DiagnosticShutdownBoundaryOutcome {
+    fn from(value: internal::ShutdownBoundaryOutcomeSnapshot) -> Self {
+        Self {
+            boundary: value.boundary.into(),
+            result: value.result.into(),
+            action: value.action.into(),
+            completed: value.completed,
+            failed: value.failed,
+            residual: value.residual,
+        }
+    }
+}
+
+/// Runtime phase where a provider failure was observed.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticProviderFailureRuntimePhase {
+    /// The runtime phase was unavailable.
+    Unknown,
+    /// Startup eager provider initialization.
+    StartupEagerInit,
+    /// Service generation dependency resolution.
+    ServiceGenerationResolve,
+    /// Reload generation dependency resolution.
+    ReloadGenerationResolve,
+    /// Trigger dispatch dependency resolution.
+    TriggerDispatchResolve,
+    /// Framework validation before user work runs.
+    FrameworkValidation,
+}
+
+impl From<internal::ProviderFailureRuntimePhase> for DiagnosticProviderFailureRuntimePhase {
+    fn from(value: internal::ProviderFailureRuntimePhase) -> Self {
+        match value {
+            internal::ProviderFailureRuntimePhase::Unknown => Self::Unknown,
+            internal::ProviderFailureRuntimePhase::StartupEagerInit => Self::StartupEagerInit,
+            internal::ProviderFailureRuntimePhase::ServiceGenerationResolve => {
+                Self::ServiceGenerationResolve
+            }
+            internal::ProviderFailureRuntimePhase::ReloadGenerationResolve => {
+                Self::ReloadGenerationResolve
+            }
+            internal::ProviderFailureRuntimePhase::TriggerDispatchResolve => {
+                Self::TriggerDispatchResolve
+            }
+            internal::ProviderFailureRuntimePhase::FrameworkValidation => Self::FrameworkValidation,
+        }
+    }
+}
+
+/// Provider access boundary where a failure was observed.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticProviderFailureBoundaryKind {
+    /// Snapshot `Arc<T>` resolve path.
+    SnapshotResolve,
+    /// Managed `Arc<RwLock<T>>` resolve path.
+    RwLockResolve,
+    /// Managed `Arc<Mutex<T>>` resolve path.
+    MutexResolve,
+    /// Eager provider initialization path.
+    EagerInit,
+    /// Framework validation path.
+    FrameworkValidation,
+}
+
+impl From<internal::ProviderFailureBoundaryKind> for DiagnosticProviderFailureBoundaryKind {
+    fn from(value: internal::ProviderFailureBoundaryKind) -> Self {
+        match value {
+            internal::ProviderFailureBoundaryKind::SnapshotResolve => Self::SnapshotResolve,
+            internal::ProviderFailureBoundaryKind::RwLockResolve => Self::RwLockResolve,
+            internal::ProviderFailureBoundaryKind::MutexResolve => Self::MutexResolve,
+            internal::ProviderFailureBoundaryKind::EagerInit => Self::EagerInit,
+            internal::ProviderFailureBoundaryKind::FrameworkValidation => Self::FrameworkValidation,
+        }
+    }
+}
+
+/// Typed source that produced a provider failure.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticProviderFailureSourceKind {
+    /// User provider returned `ProviderError::Fatal`.
+    UserProviderFatal,
+    /// User provider kept returning retryable errors until timeout.
+    UserProviderRetryableTimeout,
+    /// Required environment variable was missing.
+    EnvironmentMissing,
+    /// Environment variable parsing failed.
+    EnvironmentParse,
+    /// A dependency provider failed.
+    DependencyProvider,
+    /// Provider initialization panicked.
+    Panic,
+    /// Provider initialization was cancelled.
+    Cancelled,
+    /// Provider initialization attempt timed out.
+    Timeout,
+    /// Framework provider graph validation failed.
+    FrameworkGraphValidation,
+    /// Framework eager initialization bookkeeping failed.
+    FrameworkEagerInit,
+    /// System I/O failed fatally.
+    SystemIoFatal,
+    /// System I/O failed retryably until timeout.
+    SystemIoRetryable,
+    /// The source was unavailable.
+    Unknown,
+}
+
+impl From<internal::ProviderFailureSourceKind> for DiagnosticProviderFailureSourceKind {
+    fn from(value: internal::ProviderFailureSourceKind) -> Self {
+        match value {
+            internal::ProviderFailureSourceKind::UserProviderFatal => Self::UserProviderFatal,
+            internal::ProviderFailureSourceKind::UserProviderRetryableTimeout => {
+                Self::UserProviderRetryableTimeout
+            }
+            internal::ProviderFailureSourceKind::EnvironmentMissing => Self::EnvironmentMissing,
+            internal::ProviderFailureSourceKind::EnvironmentParse => Self::EnvironmentParse,
+            internal::ProviderFailureSourceKind::DependencyProvider => Self::DependencyProvider,
+            internal::ProviderFailureSourceKind::Panic => Self::Panic,
+            internal::ProviderFailureSourceKind::Cancelled => Self::Cancelled,
+            internal::ProviderFailureSourceKind::Timeout => Self::Timeout,
+            internal::ProviderFailureSourceKind::FrameworkGraphValidation => {
+                Self::FrameworkGraphValidation
+            }
+            internal::ProviderFailureSourceKind::FrameworkEagerInit => Self::FrameworkEagerInit,
+            internal::ProviderFailureSourceKind::SystemIoFatal => Self::SystemIoFatal,
+            internal::ProviderFailureSourceKind::SystemIoRetryable => Self::SystemIoRetryable,
+            internal::ProviderFailureSourceKind::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// Provider failure shape observed at a boundary.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticProviderFailureKind {
+    /// Fatal provider initialization error.
+    Fatal,
+    /// Provider initialization timeout.
+    Timeout,
+    /// Provider initialization cancellation.
+    Cancelled,
+}
+
+impl From<internal::ProviderFailureKind> for DiagnosticProviderFailureKind {
+    fn from(value: internal::ProviderFailureKind) -> Self {
+        match value {
+            internal::ProviderFailureKind::Fatal => Self::Fatal,
+            internal::ProviderFailureKind::Timeout => Self::Timeout,
+            internal::ProviderFailureKind::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Retry details retained for provider timeout diagnostics.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticProviderFailureRetry {
+    /// Retryable attempts observed before timeout.
+    pub attempts: u32,
+    /// Elapsed time in milliseconds before the failure was recorded.
+    pub elapsed_ms: u64,
+    /// Last retry delay in milliseconds.
+    pub last_delay_ms: Option<u64>,
+    /// Bounded recent retryable errors.
+    pub recent_errors: Vec<String>,
+}
+
+impl From<internal::ProviderFailureRetryDiagnosticsSnapshot> for DiagnosticProviderFailureRetry {
+    fn from(value: internal::ProviderFailureRetryDiagnosticsSnapshot) -> Self {
+        Self {
+            attempts: value.attempts,
+            elapsed_ms: value.elapsed_ms,
+            last_delay_ms: value.last_delay_ms,
+            recent_errors: value.recent_errors,
+        }
+    }
+}
+
+/// Provider failure context retained in diagnostics snapshots.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticProviderFailure {
+    /// Provider type name registered by the macro.
+    pub provider: &'static str,
+    /// Runtime phase where the failure happened.
+    pub phase: DiagnosticProviderFailureRuntimePhase,
+    /// Provider access boundary where the failure happened.
+    pub boundary: DiagnosticProviderFailureBoundaryKind,
+    /// Typed failure source.
+    pub source: DiagnosticProviderFailureSourceKind,
+    /// Coarse failure kind.
+    pub failure_kind: DiagnosticProviderFailureKind,
+    /// Retry timeout details, when available.
+    pub retry: Option<DiagnosticProviderFailureRetry>,
+    /// Human-readable error string.
+    pub error: String,
+}
+
+impl From<internal::ProviderFailureSnapshot> for DiagnosticProviderFailure {
+    fn from(value: internal::ProviderFailureSnapshot) -> Self {
+        Self {
+            provider: value.provider,
+            phase: value.phase.into(),
+            boundary: value.boundary.into(),
+            source: value.source.into(),
+            failure_kind: value.failure_kind.into(),
+            retry: value.retry.map(Into::into),
+            error: value.error,
+        }
+    }
+}
+
 impl From<internal::GenerationExitKind> for DiagnosticGenerationExitKind {
     fn from(value: internal::GenerationExitKind) -> Self {
         match value {
@@ -265,9 +558,65 @@ impl From<internal::LifecycleStatsSnapshot> for DiagnosticLifecycleStats {
     }
 }
 
-/// Observation and lifecycle aggregates for one diagnostics record.
+/// Aggregated bounded shutdown boundary counters.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticShutdownBoundaryStats {
+    /// Boundaries that completed before timeout.
+    pub completed: u64,
+    /// Boundaries that timed out.
+    pub timed_out: u64,
+    /// Boundaries that observed a panic.
+    pub panicked: u64,
+    /// Total residual work reported by timed-out boundaries.
+    pub residual: u64,
+    /// Last bounded shutdown boundary outcome.
+    pub last_outcome: Option<DiagnosticShutdownBoundaryOutcome>,
+}
+
+impl From<internal::ShutdownBoundaryStatsSnapshot> for DiagnosticShutdownBoundaryStats {
+    fn from(value: internal::ShutdownBoundaryStatsSnapshot) -> Self {
+        Self {
+            completed: value.completed,
+            timed_out: value.timed_out,
+            panicked: value.panicked,
+            residual: value.residual,
+            last_outcome: value.last_outcome.map(Into::into),
+        }
+    }
+}
+
+/// Aggregated provider failure counters for one diagnostics record.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticProviderFailureStats {
+    /// Total provider failures observed for this record.
+    pub total: u64,
+    /// Fatal provider failures.
+    pub fatal: u64,
+    /// Timeout provider failures.
+    pub timeout: u64,
+    /// Cancelled provider initializations.
+    pub cancelled: u64,
+    /// Last provider failure observed for this record.
+    pub last_failure: Option<DiagnosticProviderFailure>,
+}
+
+impl From<internal::ProviderFailureStatsSnapshot> for DiagnosticProviderFailureStats {
+    fn from(value: internal::ProviderFailureStatsSnapshot) -> Self {
+        Self {
+            total: value.total,
+            fatal: value.fatal,
+            timeout: value.timeout,
+            cancelled: value.cancelled,
+            last_failure: value.last_failure.map(Into::into),
+        }
+    }
+}
+
+/// Observation and lifecycle aggregates for one diagnostics record.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticAggregateStats {
     /// `service_daemon::sleep()` observations from service or trigger bodies.
     pub service_sleep: DiagnosticObservationStats,
@@ -275,6 +624,10 @@ pub struct DiagnosticAggregateStats {
     pub runtime_probe: DiagnosticObservationStats,
     /// Lifecycle outcome counters.
     pub lifecycle: DiagnosticLifecycleStats,
+    /// Bounded shutdown boundary outcomes.
+    pub shutdown_boundary: DiagnosticShutdownBoundaryStats,
+    /// Provider failure context observed within this record.
+    pub provider_failure: DiagnosticProviderFailureStats,
 }
 
 impl From<internal::DiagnosticsAggregateSnapshot> for DiagnosticAggregateStats {
@@ -283,6 +636,8 @@ impl From<internal::DiagnosticsAggregateSnapshot> for DiagnosticAggregateStats {
             service_sleep: value.service_sleep.into(),
             runtime_probe: value.runtime_probe.into(),
             lifecycle: value.lifecycle.into(),
+            shutdown_boundary: value.shutdown_boundary.into(),
+            provider_failure: value.provider_failure.into(),
         }
     }
 }
@@ -387,6 +742,8 @@ pub struct DaemonDiagnosticsSnapshot {
     pub services: Vec<ServiceDiagnosticsSnapshot>,
     /// Generation-level summaries.
     pub generations: Vec<GenerationDiagnosticsSnapshot>,
+    /// Recent provider failure contexts observed by the daemon.
+    pub provider_failures: Vec<DiagnosticProviderFailure>,
     /// Logical runtime lane summaries, including internal `Control` diagnostics.
     pub lanes: Vec<RuntimeLaneDiagnosticsSnapshot>,
 }
@@ -403,6 +760,11 @@ impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
                 })
                 .collect(),
             generations: value.generations.into_iter().map(Into::into).collect(),
+            provider_failures: value
+                .provider_failures
+                .into_iter()
+                .map(Into::into)
+                .collect(),
             lanes: value.lanes.into_iter().map(Into::into).collect(),
         }
     }

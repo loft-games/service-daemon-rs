@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -57,6 +58,97 @@ pub(crate) enum GenerationExitKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownBoundaryKind {
+    IsolatedRuntimeJoin,
+    TriggerDispatchDrain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownBoundaryResultKind {
+    Completed,
+    TimedOut,
+    Panicked,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownResidualActionKind {
+    None,
+    RecordedAndDetached,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ShutdownBoundaryOutcomeSnapshot {
+    pub boundary: ShutdownBoundaryKind,
+    pub result: ShutdownBoundaryResultKind,
+    pub action: ShutdownResidualActionKind,
+    pub completed: u64,
+    pub failed: u64,
+    pub residual: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderFailureRuntimePhase {
+    Unknown,
+    StartupEagerInit,
+    ServiceGenerationResolve,
+    ReloadGenerationResolve,
+    TriggerDispatchResolve,
+    FrameworkValidation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderFailureBoundaryKind {
+    SnapshotResolve,
+    RwLockResolve,
+    MutexResolve,
+    EagerInit,
+    FrameworkValidation,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderFailureSourceKind {
+    UserProviderFatal,
+    UserProviderRetryableTimeout,
+    EnvironmentMissing,
+    EnvironmentParse,
+    DependencyProvider,
+    Panic,
+    Cancelled,
+    Timeout,
+    FrameworkGraphValidation,
+    FrameworkEagerInit,
+    SystemIoFatal,
+    SystemIoRetryable,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderFailureKind {
+    Fatal,
+    Timeout,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderFailureRetryDiagnosticsSnapshot {
+    pub attempts: u32,
+    pub elapsed_ms: u64,
+    pub last_delay_ms: Option<u64>,
+    pub recent_errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderFailureSnapshot {
+    pub provider: &'static str,
+    pub phase: ProviderFailureRuntimePhase,
+    pub boundary: ProviderFailureBoundaryKind,
+    pub source: ProviderFailureSourceKind,
+    pub failure_kind: ProviderFailureKind,
+    pub retry: Option<ProviderFailureRetryDiagnosticsSnapshot>,
+    pub error: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestartDecisionKind {
     Immediate,
     BackoffRecoverableError,
@@ -82,6 +174,7 @@ pub(crate) struct SleepObservation {
 
 const RUNTIME_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 const RETAINED_GENERATIONS_PER_SERVICE: usize = 1024;
+const RETAINED_PROVIDER_FAILURES: usize = 128;
 
 pub(crate) async fn run_lane_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
@@ -334,6 +427,8 @@ pub(crate) struct DiagnosticsAggregateSnapshot {
     pub service_sleep: ObservationStatsSnapshot,
     pub runtime_probe: ObservationStatsSnapshot,
     pub lifecycle: LifecycleStatsSnapshot,
+    pub shutdown_boundary: ShutdownBoundaryStatsSnapshot,
+    pub provider_failure: ProviderFailureStatsSnapshot,
 }
 
 #[derive(Default)]
@@ -341,6 +436,8 @@ struct DiagnosticsAggregate {
     service_sleep: ObservationStats,
     runtime_probe: ObservationStats,
     lifecycle: LifecycleStats,
+    shutdown_boundary: ShutdownBoundaryStats,
+    provider_failure: ProviderFailureStats,
 }
 
 impl DiagnosticsAggregate {
@@ -362,6 +459,90 @@ impl DiagnosticsAggregate {
             service_sleep: self.service_sleep.snapshot(),
             runtime_probe: self.runtime_probe.snapshot(),
             lifecycle: self.lifecycle.snapshot(),
+            shutdown_boundary: self.shutdown_boundary.snapshot(),
+            provider_failure: self.provider_failure.snapshot(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShutdownBoundaryStatsSnapshot {
+    pub completed: u64,
+    pub timed_out: u64,
+    pub panicked: u64,
+    pub residual: u64,
+    pub last_outcome: Option<ShutdownBoundaryOutcomeSnapshot>,
+}
+
+#[derive(Default)]
+struct ShutdownBoundaryStats {
+    completed: AtomicU64,
+    timed_out: AtomicU64,
+    panicked: AtomicU64,
+    residual: AtomicU64,
+    last_outcome: Mutex<Option<ShutdownBoundaryOutcomeSnapshot>>,
+}
+
+impl ShutdownBoundaryStats {
+    fn record(&self, outcome: ShutdownBoundaryOutcomeSnapshot) {
+        match outcome.result {
+            ShutdownBoundaryResultKind::Completed => &self.completed,
+            ShutdownBoundaryResultKind::TimedOut => &self.timed_out,
+            ShutdownBoundaryResultKind::Panicked => &self.panicked,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+        self.residual.fetch_add(outcome.residual, Ordering::Relaxed);
+        *lock_or_recover(&self.last_outcome) = Some(outcome);
+    }
+
+    fn snapshot(&self) -> ShutdownBoundaryStatsSnapshot {
+        ShutdownBoundaryStatsSnapshot {
+            completed: self.completed.load(Ordering::Relaxed),
+            timed_out: self.timed_out.load(Ordering::Relaxed),
+            panicked: self.panicked.load(Ordering::Relaxed),
+            residual: self.residual.load(Ordering::Relaxed),
+            last_outcome: *lock_or_recover(&self.last_outcome),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderFailureStatsSnapshot {
+    pub total: u64,
+    pub fatal: u64,
+    pub timeout: u64,
+    pub cancelled: u64,
+    pub last_failure: Option<ProviderFailureSnapshot>,
+}
+
+#[derive(Default)]
+struct ProviderFailureStats {
+    total: AtomicU64,
+    fatal: AtomicU64,
+    timeout: AtomicU64,
+    cancelled: AtomicU64,
+    last_failure: Mutex<Option<ProviderFailureSnapshot>>,
+}
+
+impl ProviderFailureStats {
+    fn record(&self, failure: &ProviderFailureSnapshot) {
+        self.total.fetch_add(1, Ordering::Relaxed);
+        match failure.failure_kind {
+            ProviderFailureKind::Fatal => &self.fatal,
+            ProviderFailureKind::Timeout => &self.timeout,
+            ProviderFailureKind::Cancelled => &self.cancelled,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+        *lock_or_recover(&self.last_failure) = Some(failure.clone());
+    }
+
+    fn snapshot(&self) -> ProviderFailureStatsSnapshot {
+        ProviderFailureStatsSnapshot {
+            total: self.total.load(Ordering::Relaxed),
+            fatal: self.fatal.load(Ordering::Relaxed),
+            timeout: self.timeout.load(Ordering::Relaxed),
+            cancelled: self.cancelled.load(Ordering::Relaxed),
+            last_failure: lock_or_recover(&self.last_failure).clone(),
         }
     }
 }
@@ -485,6 +666,7 @@ pub(crate) struct RuntimeLaneSnapshot {
 pub(crate) struct DiagnosticsSnapshot {
     pub services: Vec<ServiceDiagnosticsSnapshot>,
     pub generations: Vec<GenerationDiagnosticsSnapshot>,
+    pub provider_failures: Vec<ProviderFailureSnapshot>,
     pub lanes: Vec<RuntimeLaneSnapshot>,
 }
 
@@ -554,6 +736,18 @@ impl GenerationDiagnosticsHandle {
         self.lane.aggregate.lifecycle.record_terminated();
     }
 
+    pub(crate) fn record_shutdown_boundary(&self, outcome: ShutdownBoundaryOutcomeSnapshot) {
+        self.generation.aggregate.shutdown_boundary.record(outcome);
+        self.service.aggregate.shutdown_boundary.record(outcome);
+        self.lane.aggregate.shutdown_boundary.record(outcome);
+    }
+
+    pub(crate) fn record_provider_failure(&self, failure: &ProviderFailureSnapshot) {
+        self.generation.aggregate.provider_failure.record(failure);
+        self.service.aggregate.provider_failure.record(failure);
+        self.lane.aggregate.provider_failure.record(failure);
+    }
+
     pub(crate) fn snapshot(&self) -> GenerationDiagnosticsSnapshot {
         self.generation.snapshot()
     }
@@ -562,6 +756,7 @@ impl GenerationDiagnosticsHandle {
 pub(crate) struct DiagnosticsStore {
     services: DashMap<ServiceId, Arc<ServiceDiagnostics>>,
     generations: DashMap<(ServiceId, u64), Arc<GenerationDiagnostics>>,
+    provider_failures: Mutex<VecDeque<ProviderFailureSnapshot>>,
     control: Arc<LaneDiagnostics>,
     standard: Arc<LaneDiagnostics>,
     high_priority: Arc<LaneDiagnostics>,
@@ -573,6 +768,7 @@ impl Default for DiagnosticsStore {
         Self {
             services: DashMap::new(),
             generations: DashMap::new(),
+            provider_failures: Mutex::new(VecDeque::new()),
             control: Arc::new(LaneDiagnostics::new(RuntimeLane::Control)),
             standard: Arc::new(LaneDiagnostics::new(RuntimeLane::Standard)),
             high_priority: Arc::new(LaneDiagnostics::new(RuntimeLane::HighPriority)),
@@ -623,6 +819,14 @@ impl DiagnosticsStore {
             .record_observation(observation);
     }
 
+    pub(crate) fn record_provider_failure(&self, failure: ProviderFailureSnapshot) {
+        let mut failures = lock_or_recover(&self.provider_failures);
+        if failures.len() == RETAINED_PROVIDER_FAILURES {
+            failures.pop_front();
+        }
+        failures.push_back(failure);
+    }
+
     #[cfg(test)]
     pub(crate) fn service_snapshot(
         &self,
@@ -667,6 +871,10 @@ impl DiagnosticsStore {
         DiagnosticsSnapshot {
             services,
             generations,
+            provider_failures: lock_or_recover(&self.provider_failures)
+                .iter()
+                .cloned()
+                .collect(),
             lanes: vec![
                 self.control.snapshot(),
                 self.standard.snapshot(),
@@ -1225,6 +1433,43 @@ mod tests {
                 .lanes
                 .iter()
                 .any(|lane| { lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Control })
+        );
+    }
+
+    #[test]
+    fn public_snapshot_projects_shutdown_boundary_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let handle =
+            store.register_generation(ServiceId::new(15), "shutdown", 1, RuntimeLane::Isolated);
+
+        handle.record_shutdown_boundary(ShutdownBoundaryOutcomeSnapshot {
+            boundary: ShutdownBoundaryKind::IsolatedRuntimeJoin,
+            result: ShutdownBoundaryResultKind::TimedOut,
+            action: ShutdownResidualActionKind::RecordedAndDetached,
+            completed: 0,
+            failed: 0,
+            residual: 1,
+        });
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let service_boundary = &snapshot.services[0].aggregate.shutdown_boundary;
+        let generation_boundary = &snapshot.generations[0].aggregate.shutdown_boundary;
+        let isolated_lane = snapshot
+            .lanes
+            .iter()
+            .find(|lane| lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Isolated)
+            .expect("isolated lane should be present");
+
+        assert_eq!(service_boundary.timed_out, 1);
+        assert_eq!(service_boundary.residual, 1);
+        assert_eq!(generation_boundary.timed_out, 1);
+        assert_eq!(isolated_lane.aggregate.shutdown_boundary.timed_out, 1);
+        assert_eq!(
+            service_boundary
+                .last_outcome
+                .expect("last shutdown boundary should be projected")
+                .boundary,
+            crate::models::DiagnosticShutdownBoundaryKind::IsolatedRuntimeJoin
         );
     }
 

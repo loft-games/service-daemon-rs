@@ -1,4 +1,8 @@
-use service_daemon::{ProviderError, ProviderInitError, ServiceDaemon, provider, service};
+use service_daemon::{
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
+    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind, ProviderError,
+    ProviderInitError, ServiceDaemon, provider, service,
+};
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -275,6 +279,26 @@ async fn test_async_fn_eager_init_failure_triggers_shutdown() {
     daemon.run().await;
     assert!(EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
     assert!(daemon.cancel_token().is_cancelled());
+
+    let diagnostics = daemon.diagnostics_snapshot();
+    let failure = diagnostics
+        .provider_failures
+        .iter()
+        .find(|failure| failure.provider == "FailingEagerToken")
+        .expect("eager provider failure should be projected");
+    assert_eq!(
+        failure.phase,
+        DiagnosticProviderFailureRuntimePhase::StartupEagerInit
+    );
+    assert_eq!(
+        failure.boundary,
+        DiagnosticProviderFailureBoundaryKind::EagerInit
+    );
+    assert_eq!(
+        failure.source,
+        DiagnosticProviderFailureSourceKind::UserProviderFatal
+    );
+    assert_eq!(failure.failure_kind, DiagnosticProviderFailureKind::Fatal);
 }
 
 #[tokio::test]

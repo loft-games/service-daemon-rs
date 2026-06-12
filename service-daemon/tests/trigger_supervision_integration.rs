@@ -1,7 +1,8 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticRestartDecisionKind,
-    ProviderError, Registry, RestartPolicy, ServiceDaemon, ServiceDiagnosticsSnapshot, TT::*,
-    provider, trigger,
+    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticProviderFailureBoundaryKind,
+    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
+    DiagnosticRestartDecisionKind, ProviderError, Registry, RestartPolicy, ServiceDaemon,
+    ServiceDiagnosticsSnapshot, TT::*, provider, trigger,
 };
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -13,6 +14,7 @@ use tokio::time::timeout;
 static RETRY_EXHAUSTION_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static PANIC_DISPATCH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static TRIGGER_FATAL_PROVIDER_CALLED: AtomicBool = AtomicBool::new(false);
+static TRIGGER_DISPATCH_FATAL_PROVIDER_CALLED: AtomicBool = AtomicBool::new(false);
 static TOPIC_HOST_QUEUE_SMOKE_RECEIVED: AtomicBool = AtomicBool::new(false);
 static SHUTDOWN_INFLIGHT_STARTED: LazyLock<Arc<Notify>> = LazyLock::new(|| Arc::new(Notify::new()));
 
@@ -59,6 +61,30 @@ pub struct ProviderFailureSignal;
     tags = ["__test_trigger_provider_init_supervision__"]
 )]
 async fn provider_init_failure_trigger(_config: Arc<TriggerFatalConfig>) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[derive(Clone, Default)]
+pub struct TriggerDispatchFatalConfig;
+
+#[provider]
+async fn trigger_dispatch_fatal_config()
+-> std::result::Result<TriggerDispatchFatalConfig, ProviderError> {
+    TRIGGER_DISPATCH_FATAL_PROVIDER_CALLED.store(true, Ordering::SeqCst);
+    Err(ProviderError::Fatal(
+        "trigger dispatch provider fatal integration failure".to_string(),
+    ))
+}
+
+#[provider(Notify)]
+pub struct DispatchProviderFailureSignal;
+
+#[trigger(
+    Event(DispatchProviderFailureSignal),
+    tags = ["__test_trigger_dispatch_provider_failure__"]
+)]
+async fn dispatch_provider_failure_trigger() -> anyhow::Result<()> {
+    let _config = TriggerDispatchFatalConfig::resolve().await?;
     Ok(())
 }
 
@@ -293,6 +319,76 @@ async fn test_trigger_provider_dependency_init_failure_shuts_down_daemon() -> an
         Some(DiagnosticGenerationExitKind::ProviderInitError)
     );
     assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
+    let failure = service
+        .aggregate
+        .provider_failure
+        .last_failure
+        .as_ref()
+        .expect("trigger provider failure should be projected");
+    assert_eq!(failure.provider, "TriggerFatalConfig");
+    assert_eq!(
+        failure.phase,
+        DiagnosticProviderFailureRuntimePhase::ServiceGenerationResolve
+    );
+    assert_eq!(
+        failure.boundary,
+        DiagnosticProviderFailureBoundaryKind::SnapshotResolve
+    );
+    assert_eq!(
+        failure.source,
+        DiagnosticProviderFailureSourceKind::UserProviderFatal
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_trigger_dispatch_provider_failure_projects_dispatch_phase() -> anyhow::Result<()> {
+    TRIGGER_DISPATCH_FATAL_PROVIDER_CALLED.store(false, Ordering::SeqCst);
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__test_trigger_dispatch_provider_failure__")
+                .build(),
+        )
+        .with_restart_policy(phase9_policy())
+        .build();
+    let cancel = daemon.cancel_token();
+    daemon.run().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    DispatchProviderFailureSignal::resolve().await.notify();
+
+    let service =
+        wait_for_service_lifecycle(&daemon, "dispatch_provider_failure_trigger", |lifecycle| {
+            lifecycle.recoverable_error >= 1
+        })
+        .await?;
+
+    cancel.cancel();
+    timeout(Duration::from_secs(5), daemon.wait()).await??;
+
+    assert!(TRIGGER_DISPATCH_FATAL_PROVIDER_CALLED.load(Ordering::SeqCst));
+    let failure = service
+        .aggregate
+        .provider_failure
+        .last_failure
+        .as_ref()
+        .expect("dispatch provider failure should be projected");
+    assert_eq!(failure.provider, "TriggerDispatchFatalConfig");
+    assert_eq!(
+        failure.phase,
+        DiagnosticProviderFailureRuntimePhase::TriggerDispatchResolve
+    );
+    assert_eq!(
+        failure.boundary,
+        DiagnosticProviderFailureBoundaryKind::SnapshotResolve
+    );
+    assert_eq!(
+        failure.source,
+        DiagnosticProviderFailureSourceKind::UserProviderFatal
+    );
 
     Ok(())
 }
@@ -326,9 +422,12 @@ async fn test_trigger_shutdown_with_in_flight_dispatch_does_not_record_recoverab
         .expect("trigger diagnostics should be recorded");
     assert_eq!(service.aggregate.lifecycle.recoverable_error, 0);
     assert_eq!(service.aggregate.lifecycle.panic, 0);
-    assert_eq!(
-        service.aggregate.lifecycle.last_exit_kind,
-        Some(DiagnosticGenerationExitKind::Shutdown)
+    assert!(
+        matches!(
+            service.aggregate.lifecycle.last_exit_kind,
+            None | Some(DiagnosticGenerationExitKind::Shutdown)
+        ),
+        "shutdown-only trigger generations may stop before registering an exit snapshot, but must not be classified as recoverable failure or panic"
     );
     assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
 

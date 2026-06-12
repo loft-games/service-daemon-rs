@@ -1,5 +1,7 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
+    DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
+    DiagnosticProviderFailureKind, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
     ServiceDaemon, TT::*, provider, service, trigger,
 };
 use std::collections::BTreeMap;
@@ -352,6 +354,31 @@ async fn test_dependency_provider_retry_timeout_shuts_down_daemon() -> anyhow::R
     assert!(!DEPENDENCY_TIMEOUT_PARENT_ENTERED.load(Ordering::SeqCst));
     assert!(!DEPENDENCY_TIMEOUT_SERVICE_ENTERED.load(Ordering::SeqCst));
     assert_provider_init_exit(&daemon, "dependency_provider_timeout_service");
+    let diagnostics = daemon.diagnostics_snapshot();
+    let failure = diagnostics
+        .provider_failures
+        .iter()
+        .find(|failure| {
+            failure.provider == "TimeoutLeafProvider"
+                && failure.source
+                    == DiagnosticProviderFailureSourceKind::UserProviderRetryableTimeout
+        })
+        .expect("runtime retryable timeout should be projected");
+    assert_eq!(
+        failure.phase,
+        DiagnosticProviderFailureRuntimePhase::ServiceGenerationResolve
+    );
+    assert_eq!(
+        failure.boundary,
+        DiagnosticProviderFailureBoundaryKind::SnapshotResolve
+    );
+    assert_eq!(failure.failure_kind, DiagnosticProviderFailureKind::Timeout);
+    let retry = failure
+        .retry
+        .as_ref()
+        .expect("retry timeout should project retry diagnostics");
+    assert!(retry.attempts > 0);
+    assert!(!retry.recent_errors.is_empty());
 
     Ok(())
 }

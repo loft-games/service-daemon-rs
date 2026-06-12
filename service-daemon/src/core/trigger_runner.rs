@@ -38,6 +38,11 @@ use tokio::time::Instant;
 use tracing::{Instrument, info, warn};
 
 use crate::core::context;
+use crate::core::diagnostics::{
+    ShutdownBoundaryKind, ShutdownBoundaryOutcomeSnapshot, ShutdownBoundaryResultKind,
+    ShutdownResidualActionKind,
+};
+use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
 use crate::models::policy::{BackoffController, RestartPolicy, ScalingPolicy};
 use crate::models::service::ServiceId;
 use crate::models::trigger::{
@@ -55,6 +60,41 @@ type InFlightDispatches = FuturesUnordered<BoxFuture<'static, DispatchTaskOutcom
 enum TriggerLoopAction {
     Continue,
     Stop,
+}
+
+const DEFAULT_TRIGGER_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TriggerDrainOutcome {
+    completed: usize,
+    failed: usize,
+    timed_out: bool,
+    residual: usize,
+}
+
+impl TriggerDrainOutcome {
+    fn diagnostics_outcome(self) -> ShutdownBoundaryOutcomeSnapshot {
+        let (result, action) = if self.timed_out {
+            (
+                ShutdownBoundaryResultKind::TimedOut,
+                ShutdownResidualActionKind::RecordedAndDetached,
+            )
+        } else {
+            (
+                ShutdownBoundaryResultKind::Completed,
+                ShutdownResidualActionKind::None,
+            )
+        };
+
+        ShutdownBoundaryOutcomeSnapshot {
+            boundary: ShutdownBoundaryKind::TriggerDispatchDrain,
+            result,
+            action,
+            completed: self.completed as u64,
+            failed: self.failed as u64,
+            residual: self.residual as u64,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -404,20 +444,66 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     {
         let mut in_flight = InFlightDispatches::new();
         let mut scale_monitor = self.scale_monitor_future();
+        let mut drain_timeout: BoxFuture<'static, TriggerDrainOutcome> =
+            Box::pin(pending::<TriggerDrainOutcome>());
+        let mut shutdown_draining = false;
+        let mut shutdown_drain_completed = 0;
+        let mut shutdown_drain_failed = 0;
 
-        while !context::is_shutdown() {
+        loop {
             tokio::select! {
                 biased;
 
                 Some(outcome) = in_flight.next() => {
-                    outcome.map_err(Error::from)?;
+                    match outcome {
+                        Ok(()) => {
+                            if shutdown_draining {
+                                shutdown_drain_completed += 1;
+                            }
+                        }
+                        Err(failure) => {
+                            if shutdown_draining {
+                                shutdown_drain_failed += 1;
+                                Self::record_drain_outcome(TriggerDrainOutcome {
+                                    completed: shutdown_drain_completed,
+                                    failed: shutdown_drain_failed,
+                                    timed_out: false,
+                                    residual: in_flight.len(),
+                                });
+                            }
+                            return Err(Error::from(failure));
+                        }
+                    }
+                    if shutdown_draining && in_flight.is_empty() {
+                        Self::record_drain_outcome(TriggerDrainOutcome {
+                            completed: shutdown_drain_completed,
+                            failed: shutdown_drain_failed,
+                            timed_out: false,
+                            residual: 0,
+                        });
+                        break;
+                    }
+                }
+                mut drain_outcome = &mut drain_timeout, if shutdown_draining => {
+                    drain_outcome.completed = shutdown_drain_completed;
+                    drain_outcome.failed = shutdown_drain_failed;
+                    Self::record_drain_timeout(self.name, drain_outcome);
+                    Self::record_drain_outcome(drain_outcome);
+                    break;
                 }
                 monitor_outcome = &mut scale_monitor => {
                     return monitor_outcome.map_err(Error::from);
                 }
-                transition = Self::poll_next_event(host, &target, self.name) => {
+                transition = Self::poll_next_event(host, &target, self.name), if !shutdown_draining => {
                     let Some(transition) = transition else {
-                        break;
+                        if in_flight.is_empty() {
+                            break;
+                        }
+                        shutdown_draining = true;
+                        shutdown_drain_completed = 0;
+                        shutdown_drain_failed = 0;
+                        drain_timeout = Self::shutdown_drain_timeout(in_flight.len());
+                        continue;
                     };
 
                     match self.handle_transition(transition, &mut in_flight).await? {
@@ -449,11 +535,13 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         H: TriggerHost<T, Payload = P>,
     {
         tokio::select! {
-            t = host.handle_step(target) => Some(t),
+            biased;
+
             _ = context::wait_shutdown() => {
                 info!("Trigger '{}' received shutdown, exiting", name);
                 None
             }
+            t = host.handle_step(target) => Some(t),
         }
     }
 
@@ -494,6 +582,42 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             outcome.map_err(Error::from)?;
         }
         Ok(())
+    }
+
+    fn shutdown_drain_timeout(residual: usize) -> BoxFuture<'static, TriggerDrainOutcome> {
+        Self::shutdown_drain_timeout_for(residual, DEFAULT_TRIGGER_SHUTDOWN_DRAIN_TIMEOUT)
+    }
+
+    fn shutdown_drain_timeout_for(
+        residual: usize,
+        timeout: Duration,
+    ) -> BoxFuture<'static, TriggerDrainOutcome> {
+        Box::pin(async move {
+            tokio::time::sleep(timeout).await;
+            TriggerDrainOutcome {
+                completed: 0,
+                failed: 0,
+                timed_out: true,
+                residual,
+            }
+        })
+    }
+
+    fn record_drain_timeout(trigger_name: &str, outcome: TriggerDrainOutcome) {
+        warn!(
+            trigger = %trigger_name,
+            completed = outcome.completed,
+            failed = outcome.failed,
+            timed_out = outcome.timed_out,
+            residual = outcome.residual,
+            "Trigger shutdown drain timed out with residual dispatches"
+        );
+    }
+
+    fn record_drain_outcome(outcome: TriggerDrainOutcome) {
+        if let Some(diagnostics) = context::current_generation_diagnostics() {
+            diagnostics.record_shutdown_boundary(outcome.diagnostics_outcome());
+        }
     }
 
     fn scale_monitor_future(&self) -> BoxFuture<'static, DispatchTaskOutcome> {
@@ -757,7 +881,11 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let service_id = self.service_id;
 
         let dispatch_task = context::spawn_with_context(async move {
-            let result = chain(ctx).await;
+            let result = with_provider_runtime_phase(
+                ProviderRuntimePhase::TriggerDispatchResolve,
+                chain(ctx),
+            )
+            .await;
             drop(permit);
             result
         });
@@ -1819,6 +1947,121 @@ mod tests {
             failure.kind(),
             TriggerDispatchFailureKind::HandlerRetryExhausted
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_in_flight_dispatch_before_exit() {
+        use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+        use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio_util::sync::CancellationToken;
+
+        let handler_started = Arc::new(Notify::new());
+        let release_handler = Arc::new(Notify::new());
+        let handler_finished = Arc::new(AtomicBool::new(false));
+
+        let handler_started_for_handler = handler_started.clone();
+        let release_for_handler = release_handler.clone();
+        let handler_finished_for_handler = handler_finished.clone();
+        let handler: TriggerHandler<()> = Arc::new(move |_ctx| {
+            let handler_started = handler_started_for_handler.clone();
+            let release_handler = release_for_handler.clone();
+            let handler_finished = handler_finished_for_handler.clone();
+            Box::pin(async move {
+                handler_started.notify_one();
+                release_handler.notified().await;
+                handler_finished.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        let runner = TriggerRunner::new(
+            "shutdown_drains_dispatch_trigger",
+            ServiceId::new(206),
+            handler,
+            RestartPolicy::for_testing(),
+            None,
+        );
+        let cancellation_token = CancellationToken::new();
+        let cancellation_for_scope = cancellation_token.clone();
+        let diagnostics = DiagnosticsStore::new();
+        let diagnostics_handle = diagnostics.register_generation(
+            ServiceId::new(206),
+            "shutdown_drains_dispatch_trigger",
+            1,
+            RuntimeLane::Standard,
+        );
+
+        let task = tokio::spawn(__run_service_scope(
+            ServiceIdentity::new_with_diagnostics(
+                ServiceId::new(206),
+                "shutdown_drains_dispatch_trigger",
+                cancellation_token,
+                CancellationToken::new(),
+                diagnostics_handle,
+            ),
+            DaemonResources::new(),
+            || async move {
+                let mut host = OneShotBlockingHost { emitted: false };
+                let target = Arc::new(());
+                runner
+                    .run_with_host::<(), OneShotBlockingHost>(&mut host, target)
+                    .await
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(500), handler_started.notified())
+            .await
+            .expect("handler should start before shutdown");
+        cancellation_for_scope.cancel();
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "runner should wait for in-flight dispatch during shutdown drain"
+        );
+
+        release_handler.notify_one();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("runner should exit after drained dispatch completes")
+            .expect("service scope task should not panic");
+        assert!(
+            result.is_ok(),
+            "drained shutdown should exit cleanly: {result:?}"
+        );
+        assert!(handler_finished.load(Ordering::SeqCst));
+
+        let snapshot: crate::models::DaemonDiagnosticsSnapshot = diagnostics.snapshot().into();
+        let generation = snapshot
+            .generations
+            .iter()
+            .find(|generation| generation.service_id == ServiceId::new(206))
+            .expect("trigger generation diagnostics should be projected");
+        let boundary = generation
+            .aggregate
+            .shutdown_boundary
+            .last_outcome
+            .expect("trigger drain outcome should be recorded");
+        assert_eq!(
+            boundary.boundary,
+            crate::models::DiagnosticShutdownBoundaryKind::TriggerDispatchDrain
+        );
+        assert_eq!(
+            boundary.result,
+            crate::models::DiagnosticShutdownBoundaryResultKind::Completed
+        );
+        assert_eq!(boundary.completed, 1);
+        assert_eq!(boundary.residual, 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_timeout_reports_residual_dispatches() {
+        let outcome = TriggerRunner::<()>::shutdown_drain_timeout_for(3, Duration::ZERO).await;
+
+        assert!(outcome.timed_out);
+        assert_eq!(outcome.residual, 3);
+        assert_eq!(outcome.completed, 0);
+        assert_eq!(outcome.failed, 0);
     }
 
     #[tokio::test]

@@ -136,6 +136,9 @@ Generation outcome logs include a compact summary of sleep/probe observations, r
 - Lane records expose `DiagnosticRuntimeLane`, including the internal `Control` diagnostics lane for observation-only aggregates.
 - Observation stats expose completed/interrupted counts plus total/avg/max/last drift in milliseconds.
 - Lifecycle stats expose reload, restart, backoff, rate-limited restart, termination, exit-kind counters, last exit kind, last policy/effective restart delay, and last restart decision.
+- Shutdown boundary stats expose bounded shutdown outcomes for isolated runtime join and trigger dispatch drain, including completed/timed-out/panicked counters, residual work, and the last boundary outcome/action.
+- Provider failure stats expose provider-init terminal failures in service, generation, and lane aggregates, including failure kind counters, source kind counters, runtime phase counters, resolve boundary counters, retry diagnostics presence, and last observed provider failure facts.
+- Daemon-level snapshots retain a bounded recent `provider_failures` list with provider name, runtime phase, resolve boundary, source kind, failure kind, error summary, and retry diagnostics when available.
 - Trigger services use the same lifecycle counters: retry exhaustion and dispatch infrastructure errors appear as recoverable exits, while dispatch panics appear as panic exits.
 - Standard service and Standard lane records may include read-only `DiagnosticInterpretation` entries with a label, confidence, and investigation hints.
 - Snapshot reads are side-effect free: they do not emit advisory logs, mutate the diagnostics store, reload/restart services, or change body placement.
@@ -153,7 +156,7 @@ The public snapshot is a distilled read model. It does not expose `DiagnosticsSt
 - Internal supervisor consistency failures record `BackoffInternalSupervisorError`.
 - Shutdown, fatal service errors, and provider-init terminal errors do not create a synthetic restart decision.
 
-Provider-init terminal errors remain coarse in the public snapshot (`ProviderInitError` as the lifecycle exit kind). Internal tracing may include additive provider-init fields such as the generated wrapper boundary, typed source kind, and failure kind, but those fields are diagnostic facts only: they do not expose retry controls, mutate providers, or change daemon shutdown behavior.
+Provider-init terminal errors remain coarse in lifecycle/status summaries (`ProviderInitError` as the lifecycle exit kind), while provider failure diagnostics are available as structured snapshot facts. They include runtime phase, generated wrapper boundary, typed source kind, failure kind, and retry-timeout details (`attempts`, elapsed time, last delay, and a bounded recent-error list). Those fields are diagnostic facts only: they do not expose retry controls, mutate providers, or change daemon shutdown behavior.
 
 These fields are observation facts. They do not request a restart, override `RestartPolicy`, or make recommendations executable.
 

@@ -74,12 +74,18 @@ pub use models::trigger::TriggerTransition;
 pub use models::{
     BackoffController, DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
     DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
-    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
-    DiagnosticRestartDecisionKind, DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot,
-    ProviderError, ProviderInitError, Registry, RegistryBuilder, Result,
-    RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
-    SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceError, ServiceId, ServiceStatus,
-    TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
+    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
+    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
+    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
+    DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot, ProviderError,
+    ProviderInitError, Registry, RegistryBuilder, Result, RuntimeLaneDiagnosticsSnapshot,
+    ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
+    ServiceDiagnosticsSnapshot, ServiceError, ServiceId, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)
@@ -105,8 +111,9 @@ pub mod __private {
     };
     pub use crate::core::provider_init::{
         ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
-        ProviderInitSourceKind, catch_init_panic, init_fallible, init_fallible_with_source,
-        provider_init_boundary, provider_init_failure_boundary, provider_init_failure_into_error,
+        ProviderInitSourceKind, ProviderRuntimePhase, catch_init_panic, init_fallible,
+        init_fallible_with_source, provider_init_boundary, provider_init_failure_boundary,
+        provider_init_failure_into_error, with_provider_runtime_phase,
     };
     pub use crate::core::provider_scope::{
         provider_changed, provider_dependency_watch, resolve_provider_managed,

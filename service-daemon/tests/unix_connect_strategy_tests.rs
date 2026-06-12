@@ -8,7 +8,7 @@
 
 use service_daemon::{ManagedProvided, RestartPolicy, ServiceDaemon, provider, service};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     LazyLock, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
@@ -29,12 +29,25 @@ static ENV_VAR_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 const ENV_EAGER_ENV_VAR: &str = "SERVICE_DAEMON_RS_UNIX_CONNECT_ENV_EAGER_PATH_8E16B4A9";
 const ENV_EAGER_PATH: &str = "target/sd-uds-connect-env-eager-env.sock";
 const ENV_EAGER_FALLBACK_PATH: &str = "target/sd-uds-connect-env-eager-fallback.sock";
+const RETRY_ENV_VAR: &str = "SERVICE_DAEMON_RS_UNIX_CONNECT_RETRY_PATH_4D39F2C1";
 
 fn cleanup_path(path: &str) {
     match std::fs::remove_file(path) {
         Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => eprintln!("cleanup_path({}) failed: {} (ignored in test)", path, e),
+    }
+}
+
+fn cleanup_pathbuf(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "cleanup_path({}) failed: {} (ignored in test)",
+            path.display(),
+            e
+        ),
     }
 }
 
@@ -64,7 +77,7 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn set_test_env(key: &'static str, value: &'static str) -> EnvVarGuard {
+fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
     let lock = ENV_VAR_LOCK.lock().expect("env var test lock poisoned");
     let previous = std::env::var_os(key);
     // Rust 2024 marks environment mutation unsafe because it is process-global.
@@ -86,6 +99,31 @@ fn prepare_socket_path(path: &'static str) -> PathGuard {
     }
     cleanup_path(path);
     PathGuard(path)
+}
+
+struct OwnedPathGuard(PathBuf);
+impl Drop for OwnedPathGuard {
+    fn drop(&mut self) {
+        cleanup_pathbuf(&self.0);
+    }
+}
+
+fn unique_socket_path(name: &str) -> PathBuf {
+    PathBuf::from("target").join(format!(
+        "service-daemon-rs-{name}-{}-{}.sock",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("unnamed")
+    ))
+}
+
+fn prepare_owned_socket_path(path: PathBuf) -> OwnedPathGuard {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("Failed to create socket test directory");
+    }
+    cleanup_pathbuf(&path);
+    OwnedPathGuard(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +157,10 @@ async fn test_unix_connect_succeeds_when_server_ready() {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-#[provider(UnixConnect("target/sd-uds-connect-retry.sock"))]
+#[provider(
+    UnixConnect("target/sd-uds-connect-retry.sock"),
+    env = "SERVICE_DAEMON_RS_UNIX_CONNECT_RETRY_PATH_4D39F2C1"
+)]
 pub struct RetryClient;
 
 #[derive(Debug)]
@@ -257,14 +298,19 @@ async fn test_unix_connect_env_overrides_fallback_and_eager_runs_before_service_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_retries_on_connection_refused() {
-    let path = "target/sd-uds-connect-retry.sock";
-    let _guard = prepare_socket_path(path);
+    let path = unique_socket_path("connect-retry");
+    let path_string = path
+        .to_str()
+        .expect("test socket path must be valid UTF-8")
+        .to_owned();
+    let _env_var = set_test_env(RETRY_ENV_VAR, &path_string);
+    let _guard = prepare_owned_socket_path(path.clone());
 
     // Spawn a delayed peer that binds 200ms after the test starts. The
     // template's first probe will hit NotFound (Retryable); the framework
     // backs off and retries; by the time the second probe runs, the peer
     // should be up.
-    let delayed_path = path.to_owned();
+    let delayed_path = path.clone();
     let peer_handle = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let listener = std::os::unix::net::UnixListener::bind(&delayed_path)

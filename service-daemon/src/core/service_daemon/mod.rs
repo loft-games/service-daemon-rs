@@ -37,7 +37,8 @@ use crate::core::context::{__run_daemon_resources_scope, DaemonResources, proces
 use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_probe};
 use crate::core::provider_init::{
     ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
-    ProviderInitSourceKind, provider_init_failure_into_error,
+    ProviderInitSourceKind, ProviderRuntimePhase, provider_init_failure_into_error,
+    with_provider_runtime_phase,
 };
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
@@ -269,8 +270,9 @@ impl ServiceDaemon {
                     .find_map(|(tid, p)| (*tid == graph[err.node_id()]).then_some(p.name))
                     .unwrap_or("<unknown>");
                 return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::new(
+                    ProviderInitBoundaryContext::with_phase(
                         offending,
+                        ProviderRuntimePhase::FrameworkValidation,
                         ProviderInitBoundaryKind::FrameworkValidation,
                     ),
                     ProviderInitFailure::fatal(
@@ -293,8 +295,9 @@ impl ServiceDaemon {
             }
             let Some(entry) = providers_by_id.get(&tid).copied() else {
                 return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::new(
+                    ProviderInitBoundaryContext::with_phase(
                         "<unknown>",
+                        ProviderRuntimePhase::StartupEagerInit,
                         ProviderInitBoundaryKind::FrameworkValidation,
                     ),
                     ProviderInitFailure::fatal(
@@ -306,7 +309,11 @@ impl ServiceDaemon {
             };
             let resources = self.resources.clone();
             __run_daemon_resources_scope(resources, || async {
-                (entry.init)(self.restart_policy, self.cancellation_token.clone()).await
+                with_provider_runtime_phase(
+                    ProviderRuntimePhase::StartupEagerInit,
+                    (entry.init)(self.restart_policy, self.cancellation_token.clone()),
+                )
+                .await
             })
             .await?;
         }
@@ -1004,9 +1011,12 @@ impl ServiceDaemonBuilder {
         let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
 
         #[cfg(feature = "simulation")]
-        let resources = self.resources.unwrap_or_else(DaemonResources::new);
+        let resources = self.resources.unwrap_or_else(|| {
+            DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()))
+        });
         #[cfg(not(feature = "simulation"))]
-        let resources = DaemonResources::new();
+        let resources = DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()));
+        let diagnostics = resources.diagnostics.clone();
 
         // Inject daemon-level trigger configs into the shared resources.
         resources
@@ -1029,7 +1039,7 @@ impl ServiceDaemonBuilder {
             scheduling_advisory_profile: self.scheduling_advisory_profile,
             external_cancel_token: self.external_cancel_token,
             resources,
-            diagnostics: Arc::new(DiagnosticsStore::new()),
+            diagnostics,
             isolated_startup_permits: Arc::new(Semaphore::new(
                 self.isolated_startup_concurrency_limit,
             )),
@@ -1135,8 +1145,9 @@ fn validate_dependency_graph<'a>(
                 .collect();
 
             Err(provider_init_failure_into_error(
-                ProviderInitBoundaryContext::new(
+                ProviderInitBoundaryContext::with_phase(
                     cycle_label,
+                    ProviderRuntimePhase::FrameworkValidation,
                     ProviderInitBoundaryKind::FrameworkValidation,
                 ),
                 ProviderInitFailure::fatal(

@@ -28,6 +28,7 @@ pub use api::{
     __run_service_scope, current_cancellation_token, current_service_id, done, is_shutdown, shelve,
     shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
 };
+pub(crate) use api::{current_daemon_diagnostics, current_generation_diagnostics};
 
 #[cfg(feature = "simulation")]
 pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};

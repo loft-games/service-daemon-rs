@@ -30,9 +30,11 @@ use crate::core::context::{
 };
 use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
-    RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane,
+    RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane, ShutdownBoundaryKind,
+    ShutdownBoundaryOutcomeSnapshot, ShutdownBoundaryResultKind, ShutdownResidualActionKind,
     run_generation_runtime_probe,
 };
+use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 use crate::models::policy::RestartStormGuard;
 use crate::models::{
@@ -66,6 +68,53 @@ enum SupervisorState {
     Restart(RestartDecision),
     /// Terminal state -- exit the supervision loop.
     Terminated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerationResultKind {
+    NormalExit,
+    RecoverableError,
+    Panic,
+    FatalServiceError,
+    ProviderInitError,
+    Reload,
+    IsolatedStartupFailure,
+}
+
+impl GenerationResultKind {
+    fn diagnostics_exit_kind(self) -> GenerationExitKind {
+        match self {
+            Self::NormalExit => GenerationExitKind::NormalExit,
+            Self::RecoverableError => GenerationExitKind::RecoverableError,
+            Self::Panic => GenerationExitKind::Panic,
+            Self::FatalServiceError => GenerationExitKind::FatalServiceError,
+            Self::ProviderInitError => GenerationExitKind::ProviderInitError,
+            Self::Reload => GenerationExitKind::Reload,
+            Self::IsolatedStartupFailure => GenerationExitKind::IsolatedStartupFailure,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct GenerationSignalFacts {
+    reload_requested: bool,
+    shutdown_requested: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GenerationExitRecord {
+    next_status: ServiceStatus,
+    should_restart: bool,
+    should_shutdown_daemon: bool,
+    restart_decision: RestartDecision,
+    result: GenerationResultKind,
+    signals: GenerationSignalFacts,
+}
+
+impl GenerationExitRecord {
+    fn exit_kind(&self) -> GenerationExitKind {
+        self.result.diagnostics_exit_kind()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +153,52 @@ impl RestartDecision {
 
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+const DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IsolatedThreadJoinOutcome {
+    Joined,
+    TimedOut,
+    Panicked,
+}
+
+impl IsolatedThreadJoinOutcome {
+    fn diagnostics_outcome(self) -> ShutdownBoundaryOutcomeSnapshot {
+        let (result, action, residual) = match self {
+            Self::Joined => (
+                ShutdownBoundaryResultKind::Completed,
+                ShutdownResidualActionKind::None,
+                0,
+            ),
+            Self::TimedOut => (
+                ShutdownBoundaryResultKind::TimedOut,
+                ShutdownResidualActionKind::RecordedAndDetached,
+                1,
+            ),
+            Self::Panicked => (
+                ShutdownBoundaryResultKind::Panicked,
+                ShutdownResidualActionKind::None,
+                0,
+            ),
+        };
+
+        ShutdownBoundaryOutcomeSnapshot {
+            boundary: ShutdownBoundaryKind::IsolatedRuntimeJoin,
+            result,
+            action,
+            completed: u64::from(matches!(self, Self::Joined)),
+            failed: u64::from(matches!(self, Self::Panicked)),
+            residual,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IsolatedRuntimeHandle {
+    outcome_rx: tokio::sync::oneshot::Receiver<ServiceGenerationOutcome>,
+    thread_join: std::thread::JoinHandle<()>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,6 +273,11 @@ fn run_scoped_service_generation(
             generation,
             runtime_lane = ?diagnostics.runtime_lane(),
         );
+        let phase = if reload_token.is_cancelled() {
+            ProviderRuntimePhase::ReloadGenerationResolve
+        } else {
+            ProviderRuntimePhase::ServiceGenerationResolve
+        };
         let identity = ServiceIdentity::new_generation_with_diagnostics(
             service_id,
             name,
@@ -187,9 +287,11 @@ fn run_scoped_service_generation(
         );
 
         __run_service_scope(identity, resources, || async move {
-            AssertUnwindSafe(run(cancellation_token).instrument(span))
-                .catch_unwind()
-                .await
+            with_provider_runtime_phase(
+                phase,
+                AssertUnwindSafe(run(cancellation_token).instrument(span)).catch_unwind(),
+            )
+            .await
         })
         .await
     })
@@ -263,6 +365,22 @@ fn run_body_service_generation(
     })
 }
 
+async fn bounded_join_isolated_thread(
+    thread_join: std::thread::JoinHandle<()>,
+    timeout: Duration,
+) -> IsolatedThreadJoinOutcome {
+    match tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || thread_join.join()),
+    )
+    .await
+    {
+        Ok(Ok(Ok(()))) => IsolatedThreadJoinOutcome::Joined,
+        Ok(Ok(Err(_))) | Ok(Err(_)) => IsolatedThreadJoinOutcome::Panicked,
+        Err(_) => IsolatedThreadJoinOutcome::TimedOut,
+    }
+}
+
 fn run_isolated_service_generation(
     parts: ServiceGenerationParts,
     startup_permits: Arc<Semaphore>,
@@ -303,8 +421,9 @@ fn run_isolated_service_generation(
         let (tx, rx) = tokio::sync::oneshot::channel();
         let thread_name = format!("svc-{}", name);
         let thread_name_for_error = thread_name.clone();
+        let diagnostics = parts.diagnostics.clone();
 
-        match std::thread::Builder::new()
+        let isolated_handle = match std::thread::Builder::new()
             .name(thread_name)
             .spawn(move || {
                 let outcome = match tokio::runtime::Builder::new_current_thread()
@@ -345,23 +464,57 @@ fn run_isolated_service_generation(
                 };
                 let _ = tx.send(outcome);
             }) {
-            Ok(_) => match rx.await {
-                Ok(outcome) => outcome,
-                Err(err) => isolated_generation_error(
-                    name,
-                    IsolatedStartupFailureKind::BridgeClosed,
-                    format!("thread exited before reporting outcome: {}", err),
-                ),
+            Ok(thread_join) => IsolatedRuntimeHandle {
+                outcome_rx: rx,
+                thread_join,
             },
+            Err(err) => {
+                return isolated_generation_error(
+                    name,
+                    IsolatedStartupFailureKind::ThreadSpawn,
+                    format!(
+                        "failed to spawn thread '{}': {}",
+                        thread_name_for_error, err
+                    ),
+                );
+            }
+        };
+
+        let IsolatedRuntimeHandle {
+            outcome_rx,
+            thread_join,
+        } = isolated_handle;
+
+        let outcome = match outcome_rx.await {
+            Ok(outcome) => outcome,
             Err(err) => isolated_generation_error(
                 name,
-                IsolatedStartupFailureKind::ThreadSpawn,
-                format!(
-                    "failed to spawn thread '{}': {}",
-                    thread_name_for_error, err
-                ),
+                IsolatedStartupFailureKind::BridgeClosed,
+                format!("thread exited before reporting outcome: {}", err),
+            ),
+        };
+
+        let join_outcome =
+            bounded_join_isolated_thread(thread_join, DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT).await;
+        diagnostics.record_shutdown_boundary(join_outcome.diagnostics_outcome());
+
+        match join_outcome {
+            IsolatedThreadJoinOutcome::Joined => {}
+            IsolatedThreadJoinOutcome::TimedOut => warn!(
+                service = %name,
+                service_id = %service_id,
+                generation,
+                "Isolated service thread join timed out after outcome bridge completed"
+            ),
+            IsolatedThreadJoinOutcome::Panicked => warn!(
+                service = %name,
+                service_id = %service_id,
+                generation,
+                "Isolated service thread panicked while joining after outcome bridge completed"
             ),
         }
+
+        outcome
     })
 }
 
@@ -456,31 +609,36 @@ impl ServiceSupervisor {
         }
     }
 
-    /// Handles the outcome of a service execution.
-    /// Returns the next lifecycle status, whether a restart should happen,
-    /// whether the daemon should shut down, what kind of restart policy to apply,
-    /// and the internal diagnostics exit classification.
+    /// Handles the outcome of a service execution and preserves lifecycle signals
+    /// as facts instead of letting reload/shutdown overwrite the generation result.
     fn handle_outcome(
         &self,
         result: ServiceGenerationOutcome,
         reload_token: &CancellationToken,
-    ) -> (
-        ServiceStatus,
-        bool,
-        bool,
-        RestartDecision,
-        GenerationExitKind,
-    ) {
+    ) -> GenerationExitRecord {
         let mut should_restart = true;
         let mut should_shutdown_daemon = false;
+        let signals = GenerationSignalFacts {
+            reload_requested: reload_token.is_cancelled(),
+            shutdown_requested: self.cancellation_token.is_cancelled(),
+        };
 
-        let (next_status, restart_decision, mut exit_kind) = match result {
+        let (next_status, restart_decision, result) = match result {
             Ok(Ok(_)) => {
                 warn!("Service {} exited normally", self.name);
+                let result = if signals.reload_requested {
+                    GenerationResultKind::Reload
+                } else {
+                    GenerationResultKind::NormalExit
+                };
                 (
-                    ServiceStatus::Initializing,
+                    if signals.reload_requested {
+                        ServiceStatus::Restoring
+                    } else {
+                        ServiceStatus::Initializing
+                    },
                     RestartDecision::Immediate,
-                    GenerationExitKind::NormalExit,
+                    result,
                 )
             }
             Ok(Err(e)) => {
@@ -492,13 +650,14 @@ impl ServiceSupervisor {
                         self.name, svc_err
                     );
                     should_restart = false;
-                    return (
-                        ServiceStatus::Terminated,
+                    return GenerationExitRecord {
+                        next_status: ServiceStatus::Terminated,
                         should_restart,
-                        false,
-                        RestartDecision::Immediate,
-                        GenerationExitKind::FatalServiceError,
-                    );
+                        should_shutdown_daemon: false,
+                        restart_decision: RestartDecision::Immediate,
+                        result: GenerationResultKind::FatalServiceError,
+                        signals,
+                    };
                 }
                 if let Some(provider_init_err) = e.downcast_ref::<ProviderInitError>() {
                     error!(
@@ -508,13 +667,14 @@ impl ServiceSupervisor {
                     should_restart = false;
                     should_shutdown_daemon = true;
                     self.daemon_token.cancel();
-                    return (
-                        ServiceStatus::Terminated,
+                    return GenerationExitRecord {
+                        next_status: ServiceStatus::Terminated,
                         should_restart,
                         should_shutdown_daemon,
-                        RestartDecision::Immediate,
-                        GenerationExitKind::ProviderInitError,
-                    );
+                        restart_decision: RestartDecision::Immediate,
+                        result: GenerationResultKind::ProviderInitError,
+                        signals,
+                    };
                 }
                 if let Some(startup_err) = e.downcast_ref::<IsolatedGenerationStartupError>() {
                     error!(
@@ -523,18 +683,21 @@ impl ServiceSupervisor {
                         error = ?e,
                         "Service isolated startup failed"
                     );
-                    return (
-                        ServiceStatus::Recovering(format!("{:?}", e)),
+                    return GenerationExitRecord {
+                        next_status: ServiceStatus::Recovering(format!("{:?}", e)),
                         should_restart,
                         should_shutdown_daemon,
-                        RestartDecision::WithBackoff(RestartFailureKind::IsolatedStartupFailure),
-                        GenerationExitKind::IsolatedStartupFailure,
-                    );
+                        restart_decision: RestartDecision::WithBackoff(
+                            RestartFailureKind::IsolatedStartupFailure,
+                        ),
+                        result: GenerationResultKind::IsolatedStartupFailure,
+                        signals,
+                    };
                 }
                 if let Some(trigger_failure) = e.downcast_ref::<TriggerDispatchFailure>() {
-                    let (restart_failure_kind, exit_kind) = match trigger_failure.kind() {
+                    let (restart_failure_kind, result) = match trigger_failure.kind() {
                         TriggerDispatchFailureKind::DispatchTaskPanic => {
-                            (RestartFailureKind::Panic, GenerationExitKind::Panic)
+                            (RestartFailureKind::Panic, GenerationResultKind::Panic)
                         }
                         TriggerDispatchFailureKind::HandlerRetryExhausted
                         | TriggerDispatchFailureKind::DispatchTaskError
@@ -542,7 +705,7 @@ impl ServiceSupervisor {
                         | TriggerDispatchFailureKind::DispatchPermitAcquireFailed
                         | TriggerDispatchFailureKind::ScaleMonitorFailed => (
                             RestartFailureKind::RecoverableError,
-                            GenerationExitKind::RecoverableError,
+                            GenerationResultKind::RecoverableError,
                         ),
                     };
                     error!(
@@ -554,7 +717,8 @@ impl ServiceSupervisor {
                         instance_seq = ?trigger_failure.instance_seq(),
                         message_id = ?trigger_failure.message_id(),
                         trigger_failure_kind = %trigger_failure.kind().as_str(),
-                        exit_kind = ?exit_kind,
+                        exit_kind = ?result.diagnostics_exit_kind(),
+                        reload_requested = signals.reload_requested,
                         restart_failure_kind = ?restart_failure_kind,
                         error = ?e,
                         "Trigger dispatch failure ended service generation"
@@ -567,14 +731,14 @@ impl ServiceSupervisor {
                             e
                         )),
                         RestartDecision::WithBackoff(restart_failure_kind),
-                        exit_kind,
+                        result,
                     )
                 } else {
                     error!("Service {} failed: {:?}", self.name, e);
                     (
                         ServiceStatus::Recovering(format!("{:?}", e)),
                         RestartDecision::WithBackoff(RestartFailureKind::RecoverableError),
-                        GenerationExitKind::RecoverableError,
+                        GenerationResultKind::RecoverableError,
                     )
                 }
             }
@@ -586,37 +750,26 @@ impl ServiceSupervisor {
                 } else {
                     "Unknown panic".to_string()
                 };
-                error!("Service {} panicked: {}", self.name, panic_msg);
+                error!(
+                    reload_requested = signals.reload_requested,
+                    "Service {} panicked: {}", self.name, panic_msg
+                );
                 (
                     ServiceStatus::Recovering(format!("Panic: {}", panic_msg)),
                     RestartDecision::WithBackoff(RestartFailureKind::Panic),
-                    GenerationExitKind::Panic,
+                    GenerationResultKind::Panic,
                 )
             }
         };
 
-        if reload_token.is_cancelled() {
-            info!(
-                "Supervisor: Service {} exited after reload signal",
-                self.name
-            );
-            exit_kind = GenerationExitKind::Reload;
-            return (
-                ServiceStatus::Restoring,
-                true,
-                false,
-                RestartDecision::Immediate,
-                exit_kind,
-            );
-        }
-
-        (
+        GenerationExitRecord {
             next_status,
             should_restart,
             should_shutdown_daemon,
             restart_decision,
-            exit_kind,
-        )
+            result,
+            signals,
+        }
     }
 
     fn record_restart_decision(
@@ -961,8 +1114,8 @@ impl ServiceSupervisor {
             ));
         };
 
-        let (next_status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            self.handle_outcome(result, reload_token);
+        let exit_record = self.handle_outcome(result, reload_token);
+        let exit_kind = exit_record.exit_kind();
 
         let generation_snapshot = self.generation_diagnostics.as_ref().map(|diagnostics| {
             diagnostics.record_exit(exit_kind);
@@ -991,20 +1144,23 @@ impl ServiceSupervisor {
             .generation_diagnostics
             .as_ref()
             .map(|diagnostics| diagnostics.runtime_lane());
-        let restart_decision_kind = restart_decision.diagnostics_kind();
+        let restart_decision_kind = exit_record.restart_decision.diagnostics_kind();
 
         info!(
             service = %self.name,
             service_id = %self.service_id,
             generation = self.generation,
             runtime_lane = ?runtime_lane,
-            next_status = ?next_status,
-            should_restart,
-            should_shutdown_daemon,
-            restart_decision = ?restart_decision,
+            next_status = ?exit_record.next_status,
+            should_restart = exit_record.should_restart,
+            should_shutdown_daemon = exit_record.should_shutdown_daemon,
+            restart_decision = ?exit_record.restart_decision,
             restart_decision_kind = ?restart_decision_kind,
             elapsed_ms,
             exit_kind = ?exit_kind,
+            generation_result = ?exit_record.result,
+            reload_requested = exit_record.signals.reload_requested,
+            shutdown_requested = exit_record.signals.shutdown_requested,
             sleep_completed,
             sleep_interrupted,
             sleep_drift_total_ms,
@@ -1014,21 +1170,23 @@ impl ServiceSupervisor {
             "Service generation outcome processed"
         );
 
-        if should_shutdown_daemon {
+        if exit_record.should_shutdown_daemon {
             self.daemon_token.cancel();
         }
 
-        if !should_restart {
+        if !exit_record.should_restart {
             info!("Service {} marked as fatal, not restarting", self.name);
             return self.terminate();
         }
         self.resources
             .status_plane
-            .insert(self.service_id, next_status);
+            .insert(self.service_id, exit_record.next_status.clone());
         self.resources.status_changed.notify_waiters();
 
-        if matches!(restart_decision, RestartDecision::WithBackoff(_))
-            && let Some(gen_start) = self.generation_start
+        if matches!(
+            exit_record.restart_decision,
+            RestartDecision::WithBackoff(_)
+        ) && let Some(gen_start) = self.generation_start
         {
             let elapsed = gen_start.elapsed();
             self.backoff.maybe_reset(elapsed);
@@ -1036,7 +1194,7 @@ impl ServiceSupervisor {
                 .maybe_reset(elapsed, self.backoff.policy().reset_after);
         }
 
-        SupervisorState::Restart(restart_decision)
+        SupervisorState::Restart(exit_record.restart_decision)
     }
 
     /// **Restart** -- apply the chosen restart policy before looping back to `Starting`.
@@ -2170,27 +2328,79 @@ mod tests {
         });
         let reload_token = CancellationToken::new();
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(
-                isolated_generation_error(
-                    "isolated_startup",
-                    IsolatedStartupFailureKind::ThreadSpawn,
-                    "failed to spawn thread 'svc-isolated_startup'".to_string(),
-                ),
-                &reload_token,
-            );
+        let exit_record = supervisor.handle_outcome(
+            isolated_generation_error(
+                "isolated_startup",
+                IsolatedStartupFailureKind::ThreadSpawn,
+                "failed to spawn thread 'svc-isolated_startup'".to_string(),
+            ),
+            &reload_token,
+        );
 
         assert!(matches!(
-            status,
-            ServiceStatus::Recovering(message) if message.contains("failed to spawn thread")
+            exit_record.next_status,
+            ServiceStatus::Recovering(ref message) if message.contains("failed to spawn thread")
         ));
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
         assert!(matches!(
-            restart_decision,
+            exit_record.restart_decision,
             RestartDecision::WithBackoff(RestartFailureKind::IsolatedStartupFailure)
         ));
-        assert_eq!(exit_kind, GenerationExitKind::IsolatedStartupFailure);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::IsolatedStartupFailure
+        );
+    }
+
+    #[tokio::test]
+    async fn isolated_thread_bounded_join_reports_joined() {
+        let thread_join = std::thread::spawn(|| {});
+
+        let outcome = bounded_join_isolated_thread(thread_join, Duration::from_secs(1)).await;
+
+        assert_eq!(outcome, IsolatedThreadJoinOutcome::Joined);
+    }
+
+    #[tokio::test]
+    async fn isolated_thread_bounded_join_reports_panic() {
+        let thread_join = std::thread::spawn(|| panic!("join panic"));
+
+        let outcome = bounded_join_isolated_thread(thread_join, Duration::from_secs(1)).await;
+
+        assert_eq!(outcome, IsolatedThreadJoinOutcome::Panicked);
+    }
+
+    #[tokio::test]
+    async fn isolated_thread_bounded_join_reports_timeout_residual() {
+        let thread_join = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(200)));
+        let started = Instant::now();
+
+        let outcome = bounded_join_isolated_thread(thread_join, Duration::from_millis(5)).await;
+
+        assert_eq!(outcome, IsolatedThreadJoinOutcome::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "bounded join should return promptly and leave the late thread as residual work"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    #[test]
+    fn isolated_thread_join_outcome_maps_to_shutdown_boundary_diagnostics() {
+        let timeout = IsolatedThreadJoinOutcome::TimedOut.diagnostics_outcome();
+        assert_eq!(timeout.boundary, ShutdownBoundaryKind::IsolatedRuntimeJoin);
+        assert_eq!(timeout.result, ShutdownBoundaryResultKind::TimedOut);
+        assert_eq!(
+            timeout.action,
+            ShutdownResidualActionKind::RecordedAndDetached
+        );
+        assert_eq!(timeout.residual, 1);
+
+        let panic = IsolatedThreadJoinOutcome::Panicked.diagnostics_outcome();
+        assert_eq!(panic.result, ShutdownBoundaryResultKind::Panicked);
+        assert_eq!(panic.failed, 1);
+        assert_eq!(panic.residual, 0);
     }
 
     #[tokio::test]
@@ -2237,17 +2447,23 @@ mod tests {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
+        let exit_record =
             supervisor.handle_outcome(Ok(Err(Error::msg("transient"))), &reload_token);
 
-        assert!(matches!(status, ServiceStatus::Recovering(_)));
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
         assert!(matches!(
-            restart_decision,
+            exit_record.next_status,
+            ServiceStatus::Recovering(_)
+        ));
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert!(matches!(
+            exit_record.restart_decision,
             RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
         ));
-        assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::RecoverableError
+        );
     }
 
     #[tokio::test]
@@ -2255,23 +2471,28 @@ mod tests {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(
-                Ok(Err(Error::new(ServiceError::runtime_io(
-                    "clone TCP listener",
-                    std::io::Error::other("descriptor unavailable"),
-                )))),
-                &reload_token,
-            );
+        let exit_record = supervisor.handle_outcome(
+            Ok(Err(Error::new(ServiceError::runtime_io(
+                "clone TCP listener",
+                std::io::Error::other("descriptor unavailable"),
+            )))),
+            &reload_token,
+        );
 
-        assert!(matches!(status, ServiceStatus::Recovering(_)));
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
         assert!(matches!(
-            restart_decision,
+            exit_record.next_status,
+            ServiceStatus::Recovering(_)
+        ));
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert!(matches!(
+            exit_record.restart_decision,
             RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
         ));
-        assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::RecoverableError
+        );
     }
 
     #[tokio::test]
@@ -2287,19 +2508,21 @@ mod tests {
             "retry exhausted",
         );
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
+        let exit_record = supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
 
         assert!(
-            matches!(status, ServiceStatus::Recovering(message) if message.contains("test_trigger"))
+            matches!(exit_record.next_status, ServiceStatus::Recovering(ref message) if message.contains("test_trigger"))
         );
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
         assert!(matches!(
-            restart_decision,
+            exit_record.restart_decision,
             RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
         ));
-        assert_eq!(exit_kind, GenerationExitKind::RecoverableError);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::RecoverableError
+        );
     }
 
     #[tokio::test]
@@ -2315,23 +2538,75 @@ mod tests {
             "dispatch panicked",
         );
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
+        let exit_record = supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
 
         assert!(
-            matches!(status, ServiceStatus::Recovering(message) if message.contains("panic_trigger"))
+            matches!(exit_record.next_status, ServiceStatus::Recovering(ref message) if message.contains("panic_trigger"))
         );
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
         assert!(matches!(
-            restart_decision,
+            exit_record.restart_decision,
             RestartDecision::WithBackoff(RestartFailureKind::Panic)
         ));
-        assert_eq!(exit_kind, GenerationExitKind::Panic);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::Panic);
     }
 
     #[tokio::test]
-    async fn reload_overrides_trigger_dispatch_exit_kind_when_reload_token_cancelled() {
+    async fn reload_requested_and_recoverable_error_are_recorded_as_parallel_facts() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+
+        let exit_record = supervisor.handle_outcome(
+            Ok(Err(Error::msg("transient during reload"))),
+            &reload_token,
+        );
+
+        assert!(exit_record.signals.reload_requested);
+        assert!(matches!(
+            exit_record.next_status,
+            ServiceStatus::Recovering(_)
+        ));
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert!(matches!(
+            exit_record.restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
+        ));
+        assert_eq!(exit_record.result, GenerationResultKind::RecoverableError);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::RecoverableError
+        );
+    }
+
+    #[tokio::test]
+    async fn reload_requested_and_panic_are_recorded_as_parallel_facts() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+
+        let exit_record =
+            supervisor.handle_outcome(Err(Box::new("panic during reload")), &reload_token);
+
+        assert!(exit_record.signals.reload_requested);
+        assert!(matches!(
+            exit_record.next_status,
+            ServiceStatus::Recovering(_)
+        ));
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert!(matches!(
+            exit_record.restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::Panic)
+        ));
+        assert_eq!(exit_record.result, GenerationResultKind::Panic);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::Panic);
+    }
+
+    #[tokio::test]
+    async fn reload_requested_and_trigger_dispatch_failure_are_recorded_as_parallel_facts() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
         reload_token.cancel();
@@ -2344,14 +2619,24 @@ mod tests {
             "dispatch failed during reload",
         );
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
+        let exit_record = supervisor.handle_outcome(Ok(Err(Error::new(failure))), &reload_token);
 
-        assert!(matches!(status, ServiceStatus::Restoring));
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
-        assert_eq!(restart_decision, RestartDecision::Immediate);
-        assert_eq!(exit_kind, GenerationExitKind::Reload);
+        assert!(exit_record.signals.reload_requested);
+        assert!(matches!(
+            exit_record.next_status,
+            ServiceStatus::Recovering(_)
+        ));
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert!(matches!(
+            exit_record.restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::RecoverableError)
+        ));
+        assert_eq!(exit_record.result, GenerationResultKind::RecoverableError);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::RecoverableError
+        );
     }
 
     #[tokio::test]
@@ -2359,17 +2644,19 @@ mod tests {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(Err(Box::new("boom")), &reload_token);
+        let exit_record = supervisor.handle_outcome(Err(Box::new("boom")), &reload_token);
 
-        assert!(matches!(status, ServiceStatus::Recovering(_)));
-        assert!(should_restart);
-        assert!(!should_shutdown_daemon);
         assert!(matches!(
-            restart_decision,
+            exit_record.next_status,
+            ServiceStatus::Recovering(_)
+        ));
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert!(matches!(
+            exit_record.restart_decision,
             RestartDecision::WithBackoff(RestartFailureKind::Panic)
         ));
-        assert_eq!(exit_kind, GenerationExitKind::Panic);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::Panic);
     }
 
     #[tokio::test]
@@ -2377,17 +2664,19 @@ mod tests {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(
-                Ok(Err(Error::new(ServiceError::Fatal("fatal".to_string())))),
-                &reload_token,
-            );
+        let exit_record = supervisor.handle_outcome(
+            Ok(Err(Error::new(ServiceError::Fatal("fatal".to_string())))),
+            &reload_token,
+        );
 
-        assert!(matches!(status, ServiceStatus::Terminated));
-        assert!(!should_restart);
-        assert!(!should_shutdown_daemon);
-        assert_eq!(restart_decision, RestartDecision::Immediate);
-        assert_eq!(exit_kind, GenerationExitKind::FatalServiceError);
+        assert!(matches!(exit_record.next_status, ServiceStatus::Terminated));
+        assert!(!exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::FatalServiceError
+        );
     }
 
     #[tokio::test]
@@ -2395,20 +2684,22 @@ mod tests {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
 
-        let (status, should_restart, should_shutdown_daemon, restart_decision, exit_kind) =
-            supervisor.handle_outcome(
-                Ok(Err(Error::new(ProviderInitError::Cancelled {
-                    provider: "config".to_string(),
-                }))),
-                &reload_token,
-            );
+        let exit_record = supervisor.handle_outcome(
+            Ok(Err(Error::new(ProviderInitError::Cancelled {
+                provider: "config".to_string(),
+            }))),
+            &reload_token,
+        );
 
-        assert!(matches!(status, ServiceStatus::Terminated));
-        assert!(!should_restart);
-        assert!(should_shutdown_daemon);
+        assert!(matches!(exit_record.next_status, ServiceStatus::Terminated));
+        assert!(!exit_record.should_restart);
+        assert!(exit_record.should_shutdown_daemon);
         assert!(supervisor.daemon_token.is_cancelled());
-        assert_eq!(restart_decision, RestartDecision::Immediate);
-        assert_eq!(exit_kind, GenerationExitKind::ProviderInitError);
+        assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
+        assert_eq!(
+            exit_record.exit_kind(),
+            GenerationExitKind::ProviderInitError
+        );
     }
 
     #[tokio::test]

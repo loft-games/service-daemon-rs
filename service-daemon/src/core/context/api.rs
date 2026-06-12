@@ -12,7 +12,10 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::core::diagnostics::{SleepExitReason, SleepObservation, SleepObservationSource};
+use crate::core::diagnostics::{
+    DiagnosticsStore, GenerationDiagnosticsHandle, SleepExitReason, SleepObservation,
+    SleepObservationSource,
+};
 use crate::core::provider_scope::ProviderScope;
 use crate::models::{ServiceId, ServiceStatus};
 
@@ -378,6 +381,19 @@ fn record_service_sleep_observation(
             drift,
         });
     }
+}
+
+pub(crate) fn current_generation_diagnostics() -> Option<GenerationDiagnosticsHandle> {
+    CURRENT_SERVICE
+        .try_with(|id| id.diagnostics.clone())
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn current_daemon_diagnostics() -> Option<Arc<DiagnosticsStore>> {
+    CURRENT_RESOURCES
+        .try_with(|resources| resources.diagnostics.clone())
+        .ok()
 }
 
 // ---------------------------------------------------------------------------

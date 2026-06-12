@@ -8,8 +8,14 @@ pub mod trigger;
 pub use diagnostics::{
     DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
     DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
-    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticRecommendationHint,
-    DiagnosticRestartDecisionKind, DiagnosticRuntimeLane, GenerationDiagnosticsSnapshot,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
+    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
+    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
+    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
+    DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot,
     RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
 };
 pub use error::{ProviderInitError, Result, ServiceError};
