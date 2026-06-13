@@ -656,11 +656,7 @@ impl ServiceDaemon {
         self.shutdown_control_runtime();
 
         #[cfg(feature = "diagnostics")]
-        if let Some(mermaid) = super::topology_collector::export_mermaid() {
-            println!("\n=== BEHAVIORAL TOPOLOGY (MERMAID) ===\n");
-            println!("{}\n", mermaid);
-            println!("====================================\n");
-        }
+        emit_shutdown_topology();
 
         info!("ServiceDaemon stopped.");
     }
@@ -1164,14 +1160,37 @@ fn validate_dependency_graph<'a>(
     }
 }
 
+#[cfg(feature = "diagnostics")]
+fn emit_shutdown_topology() {
+    if let Some(mermaid) = super::topology_collector::export_mermaid() {
+        tracing::info!(
+            target: "service_daemon::diagnostics",
+            topology_mermaid = %mermaid,
+            "behavioral topology exported during shutdown"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{ServiceEntry, ServiceParam};
     use crate::{TT::*, provider, service, trigger};
+    #[cfg(feature = "diagnostics")]
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU32, Ordering};
+    #[cfg(feature = "diagnostics")]
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
     use tracing::debug;
+    #[cfg(feature = "diagnostics")]
+    use tracing::field::{Field, Visit};
+    #[cfg(feature = "diagnostics")]
+    use tracing_subscriber::Layer;
+    #[cfg(feature = "diagnostics")]
+    use tracing_subscriber::layer::Context;
+    #[cfg(feature = "diagnostics")]
+    use tracing_subscriber::prelude::*;
 
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {
@@ -1222,6 +1241,46 @@ mod tests {
             id: ServiceId::new(id),
             entry,
             cancellation_token: CancellationToken::new(),
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[derive(Clone, Default)]
+    struct CapturedTraceFields {
+        events: Arc<StdMutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[derive(Default)]
+    struct TraceFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    #[cfg(feature = "diagnostics")]
+    impl Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    impl<S> Layer<S> for CapturedTraceFields
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+                .push(visitor.fields);
         }
     }
 
@@ -1402,6 +1461,45 @@ mod tests {
         };
 
         validate_dependency_graph(&[], [&a, &b]).expect("linear chain must validate");
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn shutdown_topology_is_emitted_as_tracing_event() {
+        crate::core::topology_collector::reset_topology();
+        crate::core::topology_collector::record_topology_edge_for_test(
+            ServiceId::new(0),
+            ServiceId::new(1),
+        );
+
+        let capture = CapturedTraceFields::default();
+        let events = capture.events.clone();
+        let subscriber = tracing_subscriber::registry().with(capture);
+
+        tracing::subscriber::with_default(subscriber, emit_shutdown_topology);
+
+        let events = events
+            .lock()
+            .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+            .clone();
+        let topology_event = events
+            .iter()
+            .find(|event| event.get("topology_mermaid").is_some())
+            .unwrap_or_else(|| panic!("expected topology_mermaid event, got: {events:?}"));
+        let mermaid = topology_event
+            .get("topology_mermaid")
+            .expect("topology event should carry Mermaid text");
+
+        assert!(
+            mermaid.contains("graph LR"),
+            "Mermaid topology should be carried as a tracing field, got: {mermaid}"
+        );
+        assert_eq!(
+            topology_event.get("message").map(String::as_str),
+            Some("behavioral topology exported during shutdown")
+        );
+
+        crate::core::topology_collector::reset_topology();
     }
 
     #[test]

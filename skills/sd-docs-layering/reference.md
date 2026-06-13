@@ -34,6 +34,9 @@ here, not in `tutorial/`.
 
 - `extending-framework.md` — adding new trigger hosts, extending macro behavior,
   the seams a maintainer works against.
+- `release-validation.md` — release validation map: feature-to-test/example
+  matrix, dependency baseline, linkme platform smoke coverage, example layers,
+  and maintainer release checklist.
 
 ## `docs/architecture/` — internal mechanics
 
@@ -57,5 +60,6 @@ docs tree but the entry point for *how* to contribute docs and code.
 | A next step in the beginner journey | `docs/guide/tutorial/` (+ link in `quick-start.md`) |
 | A focused user how-to on one capability | `docs/guide/<topic>.md` |
 | Guidance for someone extending the framework | `docs/development/` |
+| Release validation, feature matrix, linkme smoke coverage, dependency baseline, or example responsibility layers | `docs/development/release-validation.md` |
 | An explanation of an internal mechanism | `docs/architecture/` |
 | A process/workflow rule | `docs/CONTRIBUTING.md` |

@@ -25,6 +25,9 @@ Conventions for adding a new example crate to this repo. Examples demonstrate
   `examples/triggers/src/services.rs`.
 - **No source business semantics.** Don't port real product logic into an example;
   extract just the framework wiring it would exercise.
+- Classify every example in the release-validation layer before treating it as a
+  contract: tutorial path, feature verification, macro compile verification,
+  pressure/analysis, or adoption reference.
 
 ## Error handling in examples
 
@@ -48,6 +51,7 @@ Use the explicit form whenever `?` would obscure what the supervisor observes.
 ## Companions
 
 - `reference.md` — full crate skeleton, module layout, the two error-handling
-  idioms (`ServiceError::runtime_io`), and the workspace-members requirement.
+  idioms (`ServiceError::runtime_io`), workspace-members requirement, and
+  example responsibility layers.
 - `pitfalls.md` — the authoring traps (unlisted member, swallowed errors,
   domain leakage, wrong metadata).

@@ -16,6 +16,14 @@ single contract; change them together.
 reason. Removing it (or the crate-level allowance) breaks the build under the 2024
 edition. Keep the allowance scoped to the slice declarations.
 
+## Treating linkme support as one platform contract
+
+`linkme` may support an OS family while individual linker/object-format paths
+behave differently. Windows GNU has a known section-GC workaround path; Windows
+MSVC, macOS, and Linux GNU are positive smoke paths. Keep those expectations in
+CI and `docs/development/release-validation.md` separate. Linux musl is the first
+optional platform to evaluate; do not expand this into every target triple.
+
 ## Editing the parser and codegen as one blob
 
 The modules deliberately split parsing (`parser.rs`) from emission (`codegen.rs` /

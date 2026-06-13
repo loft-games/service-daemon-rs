@@ -116,6 +116,11 @@ Documentation is split by audience.
 - [Lifecycle Deep Dive](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md) -- Reload paths and supervisor internals.
 - [Macro Expansion](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macro-expansion.md) -- How `#[service]` / `#[trigger]` rewrite your code.
 
+### Maintainer Notes
+For contributors maintaining release validation and framework internals.
+
+- [Release Validation](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/release-validation.md) -- Feature-to-test matrix, linkme platform smoke coverage, dependency baseline, and example layers.
+
 For contribution workflow and maintainer-oriented development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 
 ---

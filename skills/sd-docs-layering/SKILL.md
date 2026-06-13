@@ -25,8 +25,12 @@ Ask, in order:
    `docs/guide/tutorial/`. New chapters slot into the `quick-start.md` chapter list.
 2. *Is the reader a user looking up one capability they already know exists?* →
    `docs/guide/<topic>.md`.
-3. *Is the reader extending the framework (new trigger host, macro behavior)?* →
-   `docs/development/extending-framework.md`.
+3. *Is the reader extending the framework or maintaining release validation
+   checks?* → `docs/development/`.
+   - Extension mechanics go in `docs/development/extending-framework.md`.
+   - Feature matrices, dependency baselines, linkme platform smoke coverage,
+     example layers, and release checklists go in
+     `docs/development/release-validation.md`.
 4. *Is this internal mechanism explanation, not something a user calls?* →
    `docs/architecture/`.
 

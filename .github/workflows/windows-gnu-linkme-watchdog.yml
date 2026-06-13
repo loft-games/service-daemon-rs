@@ -21,20 +21,21 @@
 #   * linkme on crates.io (check for newer releases):
 #     https://crates.io/crates/linkme
 #
-# This workflow exists to notice the day the workaround stops being needed --
-# presumably after a rustc/LLVM/linkme upstream fix lands -- so we can retire
-# the flag (and any .cargo/config.toml carrying it) instead of leaving it in
-# perpetuity. It runs two jobs:
+# This workflow is a best-effort watchdog, not a release gate. It detects when
+# the workaround stops being needed, likely after a rustc/LLVM/linkme upstream
+# fix, so the linker flag (and any .cargo/config.toml carrying it) can be
+# removed. It runs two jobs:
 #
 #   * `expected-to-fail`: no workaround. Expects the smoke test to *fail*.
-#     If it ever passes, the job fails with a loud notice -> investigate
-#     issue #25 above; if closed/fixed, retire this workflow.
+#     If it ever passes, the job fails so maintainers can check issue #25; if
+#     it is closed/fixed, retire this workflow.
 #   * `with-workaround`: applies `-Wl,--no-gc-sections` via RUSTFLAGS. Expects
 #     the smoke test to pass. If it ever fails, the workaround itself has
 #     regressed and we need to investigate.
 #
 # The workflow runs on PR/push plus a weekly cron so upstream fixes are noticed
-# even in weeks with no repo activity.
+# even in weeks with no repo activity. Positive linkme smoke coverage for other
+# platform families (Linux GNU, Windows MSVC, macOS) lives in rust.yml.
 
 name: Windows GNU linkme watchdog
 

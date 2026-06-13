@@ -199,6 +199,15 @@ pub fn reset_topology() {
 }
 
 #[cfg(test)]
+pub(crate) fn record_topology_edge_for_test(source: ServiceId, target: ServiceId) {
+    let state = get_state().clone();
+    let mut guard = state
+        .write()
+        .unwrap_or_else(|err| panic!("topology state lock poisoned: {err}"));
+    *guard.edges.entry(Edge { source, target }).or_insert(0) += 1;
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;

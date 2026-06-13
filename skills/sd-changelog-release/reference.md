@@ -54,14 +54,29 @@ ones that have entries. Keep order consistent within a release.
 Not every commit earns a changelog line — internal-only changes (docs, tests,
 chores) typically don't appear.
 
-## 5. SemVer in pre-1.0 alpha
+## 5. Release-validation changes that need entries
+
+Even if a change is mostly docs/CI/test, add `[Unreleased]` entries when it
+changes or fixes a maintainer-facing release contract:
+
+| Surface | Changelog treatment |
+| :--- | :--- |
+| Diagnostics automatic topology export | `Changed` if stdout/tracing/export behavior changes. |
+| File logging initialization failure | `Changed` if fail-fast/degrade/panic semantics change or are locked by tests/docs. |
+| Linkme platform smoke coverage | `Changed` when Linux GNU, Windows GNU, Windows MSVC, macOS, or other platform watchdog expectations change. |
+| Release validation map | `Added` when `docs/development/release-validation.md` or equivalent maintainer validation docs are introduced. |
+
+Do not add `cargo audit` / `cargo deny` wording unless those tools are actually
+introduced into CI or the release checklist.
+
+## 6. SemVer in pre-1.0 alpha
 
 While `0.y.z`, the public API is not yet stable. This project encodes its
 iterations as `0.1.0-alpha.N`; cutting the next release increments `N`. A move to
 `0.1.0` (no pre-release) or `0.2.0` is a deliberate milestone decision, not an
 automatic step.
 
-## 6. Release checklist
+## 7. Release checklist
 
 1. `git tag | sort -V` — know the current frontier.
 2. Review `[Unreleased]`; pick the next version per SemVer.
@@ -69,3 +84,8 @@ automatic step.
    `[Unreleased]` above it.
 4. Commit (`chore(release): v<version>` or similar Conventional Commit).
 5. `git tag v<version>`.
+
+For release-validation changes, also consult
+`docs/development/release-validation.md` and verify the listed check/test/clippy
+commands plus linkme platform smoke expectations. Windows GNU remains a
+best-effort watchdog, not a release gate.

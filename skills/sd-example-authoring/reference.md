@@ -73,7 +73,23 @@ bare `?` would hide what the framework observes (restart/backoff classification)
 - **Omit:** real product/business logic. An example reproduces the *shape* a real
   feature would take in the framework, never the feature itself.
 
-## 5. Contributor workflow
+## 5. Example responsibility layers
+
+Keep `docs/development/release-validation.md` aligned with this classification:
+
+| Layer | Examples | Responsibility |
+| :--- | :--- | :--- |
+| Tutorial path | `minimal`, `complete`, `triggers`, `simulation` | Teach the basic service, lifecycle, trigger, and test patterns. |
+| Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket` | Keep non-default or focused framework features compiling and runnable. |
+| Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
+| Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
+| Adoption reference | `web-api`, `controller-bridge` | Show realistic integration shapes without turning every detail into a framework contract. |
+
+When adding or reworking an example, update the release-validation map if its
+layer or responsibility changes. Do not treat every example as a production
+compatibility promise.
+
+## 6. Contributor workflow
 
 Before opening a PR (`docs/CONTRIBUTING.md`):
 

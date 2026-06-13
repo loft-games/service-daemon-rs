@@ -29,6 +29,22 @@ Both slices are re-exported for consumers at `service-daemon/src/lib.rs:117` and
 `service-daemon/src/models/mod.rs:22` (`SERVICE_REGISTRY`, `PROVIDER_REGISTRY`,
 `ServiceEntry`, `ProviderEntry`, `ServiceFn`, `ServiceParam`).
 
+### Linkme platform contract monitoring
+
+The runtime depends on these `linkme` distributed slices surviving the link step.
+Keep the release-validation map aligned with the CI smoke coverage:
+
+| Platform family | Expected coverage |
+| :--- | :--- |
+| Linux GNU | Positive release-mode `linkme_smoke` in `rust.yml`. |
+| Windows GNU | Best-effort watchdog with XFAIL without workaround plus positive with workaround. |
+| Windows MSVC | Positive release-mode `linkme_smoke` in `rust.yml`. |
+| macOS host target | Positive release-mode `linkme_smoke` in `rust.yml`. |
+
+Linux musl is the next optional platform to evaluate because Alpine/musl
+deployments are common. Add it only after confirming CI target/linker stability.
+Do not mirror every Rust target triple; prefer OS/linker/object-format families.
+
 ## 2. Inspecting generated code
 
 ```bash

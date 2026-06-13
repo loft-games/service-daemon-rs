@@ -39,6 +39,11 @@ Commits follow Conventional Commits, which map cleanly: `feat:` → **Added**,
 `fix:` → **Fixed**, `refactor:`/`perf:` → **Changed**, a breaking change → a
 version bump plus a **Changed**/**Removed** note.
 
+Add a changelog entry when release-validation work changes visible behavior or
+maintainer release gates. Record diagnostics output contract changes, file
+logging failure semantics, linkme platform smoke coverage, and new release
+validation documentation under `[Unreleased]`.
+
 ## Cutting a release
 
 1. Decide the version from the accumulated `[Unreleased]` entries (SemVer; pre-1.0
@@ -50,7 +55,8 @@ version bump plus a **Changed**/**Removed** note.
 ## Companions
 
 - `reference.md` — the exact file structure, current version history, the
-  Conventional-Commits → section mapping, and the release checklist.
+  Conventional-Commits → section mapping, release checklist, and
+  release-validation entry rules.
 - `pitfalls.md` — the traps (editing a frozen release, wrong section, version/tag
   mismatch, dating before tagging).
 

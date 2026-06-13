@@ -62,6 +62,13 @@ use service_daemon::{FileLogConfig, enable_file_logging};
 enable_file_logging(FileLogConfig::new("logs", "my-app"));
 ```
 
+If the file appender cannot be initialized, for example because the configured
+path is not writable or is not a directory, the file logging service logs a
+warning and degrades to console logging only. It does not fail daemon startup
+and does not hot-restart the SYSTEM logging service. Deployments that require
+audit-grade file persistence should validate the log directory with an external
+startup check or operational probe.
+
 Custom rotation and retention can be configured via the struct fields:
 
 ```rust
@@ -109,6 +116,13 @@ if let Some(mermaid) = export_mermaid() {
     println!("System Topology:\n{}", mermaid);
 }
 ```
+
+On daemon shutdown, the framework also emits any collected topology through a
+`tracing::info!` event with a `topology_mermaid` field. It does not write the
+automatic export directly to stdout; the configured subscriber, console logger,
+or file logger decides where that event is rendered. The topology can reveal
+service names and causal relationships, so route it through the same log controls
+as other diagnostics.
 
 This is particularly useful for debugging complex "cascading" triggers where one event leads to a chain of reactions.
 
