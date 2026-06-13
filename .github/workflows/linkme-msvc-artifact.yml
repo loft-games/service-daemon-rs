@@ -2,10 +2,6 @@ name: Linkme MSVC Artifact
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ "develop" ]
-    paths:
-      - ".github/workflows/linkme-msvc-artifact.yml"
 
 permissions:
   contents: read
@@ -88,7 +84,7 @@ jobs:
             Tee-Object -FilePath "$artifact/llvm-objdump-t.txt"
           & $objdump -p $binary.FullName 2>&1 |
             Tee-Object -FilePath "$artifact/llvm-objdump-p.txt"
-          & $objdump -s -j .linkme $binary.FullName 2>&1 |
+          & $objdump -s -j .linkme_ $binary.FullName 2>&1 |
             Tee-Object -FilePath "$artifact/llvm-objdump-linkme-section.txt"
 
           exit 0

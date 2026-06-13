@@ -85,10 +85,12 @@ require_macho_registry_sections() {
   fi
 }
 
-require_windows_registry_section() {
-  if ! grep -Eq '(^|[[:space:]])\.linkme' <<<"$sections"; then
-    echo "Missing PE/COFF linkme registry section marker in ${binary}" >&2
-    echo "Expected a .linkme section marker in llvm-objdump -h output" >&2
+require_windows_registry_sections() {
+  local count
+  count="$(grep -Ec '(^|[[:space:]])\.linkme_' <<<"$sections" || true)"
+  if [[ "$count" -lt 2 ]]; then
+    echo "Missing PE/COFF linkme registry section markers in ${binary}" >&2
+    echo "Expected at least two .linkme_ section markers; found ${count}" >&2
     exit 1
   fi
 }
@@ -111,7 +113,7 @@ case "$inspect_target" in
     # PE image section names are short, so final executables may not preserve
     # the full .linkme_<REGISTRY> contribution name or local static symbols.
     # The smoke test itself verifies test-local entries.
-    require_windows_registry_section
+    require_windows_registry_sections
     require_symbol_markers=false
     ;;
   *-unknown-illumos | *-pc-solaris | *-sun-solaris)
