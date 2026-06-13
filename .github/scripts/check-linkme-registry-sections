@@ -93,16 +93,26 @@ require_windows_registry_section() {
   fi
 }
 
+require_test_local_entry_symbols() {
+  require_pattern "$symbols" '__SERVICE_ENTRY_LINKME_SMOKE_SERVICE' "test-local service registry entry"
+  require_pattern "$symbols" '__PROVIDER_ENTRY_LINKMESMOKECONFIG' "test-local provider registry entry"
+}
+
+require_symbol_markers=true
+
 case "$inspect_target" in
   *-apple-darwin)
     # linkme hashes Mach-O section names, so they do not contain SERVICE_REGISTRY
-    # or PROVIDER_REGISTRY. The test-local symbols below verify the entries.
+    # or PROVIDER_REGISTRY. The smoke test itself verifies test-local entries.
     require_macho_registry_sections
+    require_symbol_markers=false
     ;;
   *-pc-windows-* | *-windows-*)
     # PE image section names are short, so final executables may not preserve
-    # the full .linkme_<REGISTRY> contribution name in section headers.
+    # the full .linkme_<REGISTRY> contribution name or local static symbols.
+    # The smoke test itself verifies test-local entries.
     require_windows_registry_section
+    require_symbol_markers=false
     ;;
   *-unknown-illumos | *-pc-solaris | *-sun-solaris)
     require_registry_marker 'set_linkme[^[:space:]]*SERVICE_REGISTRY' "SERVICE_REGISTRY linkme section marker"
@@ -113,7 +123,9 @@ case "$inspect_target" in
     require_registry_marker 'linkme[^[:space:]]*PROVIDER_REGISTRY' "PROVIDER_REGISTRY linkme section marker"
     ;;
 esac
-require_pattern "$symbols" '__SERVICE_ENTRY_LINKME_SMOKE_SERVICE' "test-local service registry entry"
-require_pattern "$symbols" '__PROVIDER_ENTRY_LINKMESMOKECONFIG' "test-local provider registry entry"
 
-echo "Verified linkme registry section/symbol markers in ${binary}"
+if [[ "$require_symbol_markers" == true ]]; then
+  require_test_local_entry_symbols
+fi
+
+echo "Verified linkme registry markers in ${binary}"

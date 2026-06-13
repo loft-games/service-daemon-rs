@@ -1,0 +1,116 @@
+name: Linkme MSVC Artifact
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    name: Capture Windows MSVC linkme smoke artifact
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust (x86_64-pc-windows-msvc)
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc llvm-tools-preview
+
+      - name: Prepare artifact directory
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/linkme-msvc | Out-Null
+          rustc -vV | Tee-Object -FilePath artifacts/linkme-msvc/rustc-vV.txt
+          cargo -V | Tee-Object -FilePath artifacts/linkme-msvc/cargo-version.txt
+          rustup show | Tee-Object -FilePath artifacts/linkme-msvc/rustup-show.txt
+
+      - name: Run linkme smoke
+        id: smoke
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          cargo test --target x86_64-pc-windows-msvc --release `
+            -p service-daemon --test linkme_smoke -- --nocapture `
+            2>&1 | Tee-Object -FilePath artifacts/linkme-msvc/cargo-test-linkme-smoke.txt
+          exit $LASTEXITCODE
+
+      - name: Capture binary and objdump output
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $artifact = "artifacts/linkme-msvc"
+          $deps = "target/x86_64-pc-windows-msvc/release/deps"
+
+          if (Test-Path $deps) {
+            Get-ChildItem $deps -Filter "linkme_smoke-*" |
+              Copy-Item -Destination $artifact -Force
+
+            Get-ChildItem $deps -Filter "linkme_smoke-*" |
+              Select-Object FullName, Length, LastWriteTime |
+              Format-List |
+              Out-File "$artifact/linkme-smoke-files.txt" -Encoding utf8
+          } else {
+            "Missing deps directory: $deps" |
+              Out-File "$artifact/linkme-smoke-files.txt" -Encoding utf8
+          }
+
+          $binary = Get-ChildItem $deps -Filter "linkme_smoke-*.exe" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if ($null -eq $binary) {
+            "Could not find linkme_smoke test binary under $deps" |
+              Out-File "$artifact/no-binary-found.txt" -Encoding utf8
+            exit 0
+          }
+
+          Get-FileHash $binary.FullName |
+            Format-List |
+            Out-File "$artifact/linkme-smoke-exe-sha256.txt" -Encoding utf8
+
+          $hostLine = rustc -vV | Select-String '^host:'
+          $hostTriple = $hostLine.ToString().Split(':', 2)[1].Trim()
+          $sysroot = rustc --print sysroot
+          $objdump = Join-Path $sysroot "lib/rustlib/$hostTriple/bin/llvm-objdump.exe"
+
+          "binary=$($binary.FullName)" | Out-File "$artifact/objdump-input.txt" -Encoding utf8
+          "objdump=$objdump" | Out-File "$artifact/objdump-tool.txt" -Encoding utf8
+
+          & $objdump -h $binary.FullName 2>&1 |
+            Tee-Object -FilePath "$artifact/llvm-objdump-h.txt"
+          & $objdump -t $binary.FullName 2>&1 |
+            Tee-Object -FilePath "$artifact/llvm-objdump-t.txt"
+          & $objdump -p $binary.FullName 2>&1 |
+            Tee-Object -FilePath "$artifact/llvm-objdump-p.txt"
+          & $objdump -s -j .linkme $binary.FullName 2>&1 |
+            Tee-Object -FilePath "$artifact/llvm-objdump-linkme-section.txt"
+
+          exit 0
+
+      - name: Run registry inspection
+        id: inspect
+        if: always()
+        shell: bash
+        continue-on-error: true
+        run: |
+          bash .github/scripts/check-linkme-registry-sections x86_64-pc-windows-msvc \
+            2>&1 | tee artifacts/linkme-msvc/check-linkme-registry-sections.txt
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload linkme MSVC artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linkme-msvc-artifact-${{ github.run_id }}
+          path: artifacts/linkme-msvc
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Fail when capture checks failed
+        if: steps.smoke.outcome == 'failure' || steps.inspect.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "linkme MSVC capture completed, but smoke or inspection failed. Download the artifact for analysis." >&2
+          exit 1
