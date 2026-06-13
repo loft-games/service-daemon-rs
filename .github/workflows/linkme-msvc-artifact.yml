@@ -1,7 +1,11 @@
 name: Linkme MSVC Artifact
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+  push:
+    branches: [ "develop" ]
+    paths:
+      - ".github/workflows/linkme-msvc-artifact.yml"
 
 permissions:
   contents: read
