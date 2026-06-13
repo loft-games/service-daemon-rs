@@ -46,24 +46,23 @@ separate compatibility review, not a release-validation cleanup.
 ## Linkme Platform Contract Monitoring
 
 `linkme` registration is core runtime infrastructure: services, triggers, and
-providers are discovered through distributed slices. The smoke test is:
+providers are discovered through distributed slices. Positive platform jobs run
+the smoke test and inspect the resulting test binary:
 
 ```bash
 cargo test -p service-daemon --release --test linkme_smoke
+bash .github/scripts/check-linkme-registry-sections host
 ```
 
 Required platform signals:
 
 | Platform family | CI shape | Meaning |
 | :--- | :--- | :--- |
-| Linux GNU | Positive release smoke in `rust.yml`. | Baseline ELF/Linux path. |
+| Linux GNU | Positive release smoke plus registry section/symbol inspection in `rust.yml`. | Baseline ELF/Linux path. |
 | Windows GNU | XFAIL without workaround plus positive with workaround in `windows-gnu-linkme-watchdog.yml`. | Known problematic MinGW section-GC path; best-effort signal only, not a release gate. |
-| Windows MSVC | Positive release smoke in `rust.yml`. | COFF/MSVC path must keep preserving distributed slices. |
-| macOS host target | Positive release smoke in `rust.yml`. | Mach-O path must keep preserving distributed slices. |
-
-Linux musl is the next optional platform to evaluate because Alpine/musl
-deployment is common. Add `x86_64-unknown-linux-musl` only after confirming that
-GitHub Actions can install the target and provide a stable linker environment.
+| Windows MSVC | Positive release smoke plus registry section/symbol inspection in `rust.yml`. | COFF/MSVC path must keep preserving distributed slices. |
+| macOS host target | Positive release smoke plus registry section/symbol inspection in `rust.yml`. | Mach-O path must keep preserving distributed slices. |
+| Linux musl | Positive release smoke plus registry section/symbol inspection in `rust.yml`. | Alpine/musl deployments must keep preserving distributed slices. |
 
 Do not mirror every Rust target triple. CPU architecture is not the primary
 release-validation risk; prefer OS/linker/object-format coverage families.

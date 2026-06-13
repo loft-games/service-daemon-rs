@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${1:-host}"
+if [[ "$target" == "host" || -z "$target" ]]; then
+  deps_dir="target/release/deps"
+else
+  deps_dir="target/${target}/release/deps"
+fi
+
+binary=""
+for path in "$deps_dir"/linkme_smoke-* "$deps_dir"/linkme_smoke-*.exe; do
+  [[ -f "$path" ]] || continue
+  [[ "$path" != *.d ]] || continue
+  if [[ -z "$binary" || "$path" -nt "$binary" ]]; then
+    binary="$path"
+  fi
+done
+
+if [[ -z "$binary" ]]; then
+  echo "Could not find linkme_smoke test binary under ${deps_dir}" >&2
+  exit 1
+fi
+
+objdump="${LLVM_OBJDUMP:-}"
+if [[ -z "$objdump" ]]; then
+  host="$(rustc -vV | sed -n 's/^host: //p')"
+  sysroot="$(rustc --print sysroot)"
+  objdump="${sysroot}/lib/rustlib/${host}/bin/llvm-objdump"
+  if [[ ! -x "$objdump" && -x "${objdump}.exe" ]]; then
+    objdump="${objdump}.exe"
+  fi
+fi
+if [[ ! -x "$objdump" ]]; then
+  objdump="$(command -v llvm-objdump || true)"
+fi
+if [[ -z "$objdump" || ! -x "$objdump" ]]; then
+  echo "llvm-objdump not found; install rustup component llvm-tools-preview" >&2
+  exit 1
+fi
+
+sections="$("$objdump" -h "$binary" || true)"
+symbols="$("$objdump" -t "$binary")"
+
+require_pattern() {
+  local haystack="$1"
+  local pattern="$2"
+  local label="$3"
+  if ! grep -Eq "$pattern" <<<"$haystack"; then
+    echo "Missing ${label} in ${binary}" >&2
+    echo "Expected pattern: ${pattern}" >&2
+    exit 1
+  fi
+}
+
+require_registry_marker() {
+  local pattern="$1"
+  local label="$2"
+  if grep -Eq "$pattern" <<<"$sections"; then
+    return
+  fi
+  require_pattern "$symbols" "$pattern" "$label"
+}
+
+require_registry_marker 'linkme[^[:space:]]*SERVICE_REGISTRY' "SERVICE_REGISTRY linkme section marker"
+require_registry_marker 'linkme[^[:space:]]*PROVIDER_REGISTRY' "PROVIDER_REGISTRY linkme section marker"
+require_pattern "$symbols" '__SERVICE_ENTRY_LINKME_SMOKE_SERVICE' "test-local service registry entry"
+require_pattern "$symbols" '__PROVIDER_ENTRY_LINKMESMOKECONFIG' "test-local provider registry entry"
+
+echo "Verified linkme registry section/symbol markers in ${binary}"

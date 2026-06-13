@@ -34,8 +34,9 @@
 #     regressed and we need to investigate.
 #
 # The workflow runs on PR/push plus a weekly cron so upstream fixes are noticed
-# even in weeks with no repo activity. Positive linkme smoke coverage for other
-# platform families (Linux GNU, Windows MSVC, macOS) lives in rust.yml.
+# even in weeks with no repo activity. Positive linkme smoke and registry
+# section/symbol coverage for other platform families (Linux GNU, Linux musl,
+# Windows MSVC, macOS) lives in rust.yml.
 
 name: Windows GNU linkme watchdog
 
@@ -95,8 +96,11 @@ jobs:
       - name: Install Rust (x86_64-pc-windows-gnu)
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: llvm-tools-preview
           targets: x86_64-pc-windows-gnu
       - name: Run linkme_smoke with --no-gc-sections
         run: |
           cargo test --target x86_64-pc-windows-gnu --release \
             -p service-daemon --test linkme_smoke
+      - name: Inspect linkme registry sections with --no-gc-sections
+        run: bash .github/scripts/check-linkme-registry-sections x86_64-pc-windows-gnu

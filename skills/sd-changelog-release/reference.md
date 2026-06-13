@@ -63,7 +63,7 @@ changes or fixes a maintainer-facing release contract:
 | :--- | :--- |
 | Diagnostics automatic topology export | `Changed` if stdout/tracing/export behavior changes. |
 | File logging initialization failure | `Changed` if fail-fast/degrade/panic semantics change or are locked by tests/docs. |
-| Linkme platform smoke coverage | `Changed` when Linux GNU, Windows GNU, Windows MSVC, macOS, or other platform watchdog expectations change. |
+| Linkme platform smoke coverage | `Changed` when Linux GNU, Linux musl, Windows GNU, Windows MSVC, macOS, binary section checks, or other platform watchdog expectations change. |
 | Release validation map | `Added` when `docs/development/release-validation.md` or equivalent maintainer validation docs are introduced. |
 
 Do not add `cargo audit` / `cargo deny` wording unless those tools are actually

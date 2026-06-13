@@ -19,10 +19,11 @@ edition. Keep the allowance scoped to the slice declarations.
 ## Treating linkme support as one platform contract
 
 `linkme` may support an OS family while individual linker/object-format paths
-behave differently. Windows GNU has a known section-GC workaround path; Windows
-MSVC, macOS, and Linux GNU are positive smoke paths. Keep those expectations in
-CI and `docs/development/release-validation.md` separate. Linux musl is the first
-optional platform to evaluate; do not expand this into every target triple.
+behave differently. Windows GNU has a known section-GC workaround path; Linux
+GNU, Linux musl, Windows MSVC, and macOS are positive smoke paths. Keep runtime
+registry assertions and binary registry section/symbol checks in CI, and keep
+those expectations in `docs/development/release-validation.md` separate. Do not
+expand this into every target triple.
 
 ## Editing the parser and codegen as one blob
 

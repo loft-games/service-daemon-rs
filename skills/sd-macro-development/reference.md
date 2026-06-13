@@ -36,13 +36,12 @@ Keep the release-validation map aligned with the CI smoke coverage:
 
 | Platform family | Expected coverage |
 | :--- | :--- |
-| Linux GNU | Positive release-mode `linkme_smoke` in `rust.yml`. |
+| Linux GNU | Positive release-mode `linkme_smoke` plus registry section/symbol inspection in `rust.yml`. |
+| Linux musl | Positive release-mode `linkme_smoke` plus registry section/symbol inspection in `rust.yml`. |
 | Windows GNU | Best-effort watchdog with XFAIL without workaround plus positive with workaround. |
-| Windows MSVC | Positive release-mode `linkme_smoke` in `rust.yml`. |
-| macOS host target | Positive release-mode `linkme_smoke` in `rust.yml`. |
+| Windows MSVC | Positive release-mode `linkme_smoke` plus registry section/symbol inspection in `rust.yml`. |
+| macOS host target | Positive release-mode `linkme_smoke` plus registry section/symbol inspection in `rust.yml`. |
 
-Linux musl is the next optional platform to evaluate because Alpine/musl
-deployments are common. Add it only after confirming CI target/linker stability.
 Do not mirror every Rust target triple; prefer OS/linker/object-format families.
 
 ## 2. Inspecting generated code

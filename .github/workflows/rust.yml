@@ -58,6 +58,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-latest
+            target: host
+            target_arg: ""
+            label: Linux GNU
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             target_arg: --target x86_64-pc-windows-msvc
@@ -66,6 +70,10 @@ jobs:
             target: host
             target_arg: ""
             label: macOS
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            target_arg: --target x86_64-unknown-linux-musl
+            label: Linux musl
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -73,12 +81,18 @@ jobs:
         if: matrix.target != 'host'
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: llvm-tools-preview
           targets: ${{ matrix.target }}
       - name: Install Rust (host)
         if: matrix.target == 'host'
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
       - name: Linkme smoke (${{ matrix.label }})
         run: cargo test ${{ matrix.target_arg }} --release -p service-daemon --test linkme_smoke
+      - name: Inspect linkme registry sections (${{ matrix.label }})
+        shell: bash
+        run: bash .github/scripts/check-linkme-registry-sections "${{ matrix.target }}"
 
   fmt:
     name: Format

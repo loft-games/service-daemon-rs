@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Diagnostics Topology Export**: Changed automatic shutdown topology export from direct stdout printing to a structured `tracing::info!` event carrying the Mermaid text in `topology_mermaid`.
-- **Linkme Platform Monitoring**: Added positive release-mode linkme smoke coverage for Windows MSVC and macOS, while keeping Windows GNU as a best-effort XFAIL/workaround watchdog and tracking Linux musl as the next optional platform to evaluate.
+- **Linkme Platform Monitoring**: Added positive release-mode linkme smoke and registry section/symbol inspection for Linux GNU, Linux musl, Windows MSVC, and macOS, while keeping Windows GNU as a best-effort XFAIL/workaround watchdog.
 - **File Logging Contract**: Documented and tested file logging initialization failure as a warning plus console-only degradation instead of daemon startup failure.
 - **Provider Macro Contract**: Reworked `#[provider]` item parsing around `syn::Item`, added explicit diagnostics for unsupported provider items and unsafe provider functions, and tightened function-provider `Result<T, ProviderError>` handling so same-named custom error types are rejected.
 - **Generated Provider Helpers**: Kept helper return shapes tied to declared fallibility: direct helpers for infallible and framework-owned providers, `Result<_, ProviderInitError>` helpers for env, socket, dependency-injected, and `ProviderError` providers, with direct-helper panic diagnostics that include provider origin, definition location, helper callsite, module path, and the original provider-init error.
