@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+toolchain="${1:-stable}"
+target="${2:-host}"
+component="${3:-llvm-tools-preview}"
+max_attempts="${RUSTUP_INSTALL_RETRIES:-5}"
+
+if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+  echo "RUSTUP_INSTALL_RETRIES must be a positive integer; got '${max_attempts}'" >&2
+  exit 1
+fi
+
+install_args=(toolchain install "$toolchain" --profile minimal --no-self-update)
+
+if [[ -n "$component" && "$component" != "-" ]]; then
+  install_args+=(--component "$component")
+fi
+
+if [[ -n "$target" && "$target" != "host" ]]; then
+  install_args+=(--target "$target")
+fi
+
+attempt=1
+while true; do
+  echo "Installing Rust toolchain (${attempt}/${max_attempts}): rustup ${install_args[*]}"
+  if rustup "${install_args[@]}"; then
+    rustup default "$toolchain"
+    break
+  fi
+
+  if [[ "$attempt" -ge "$max_attempts" ]]; then
+    echo "rustup toolchain install failed after ${max_attempts} attempts" >&2
+    exit 1
+  fi
+
+  sleep_seconds=$((attempt * 20))
+  echo "rustup install failed; retrying in ${sleep_seconds}s" >&2
+  sleep "$sleep_seconds"
+  attempt=$((attempt + 1))
+done
