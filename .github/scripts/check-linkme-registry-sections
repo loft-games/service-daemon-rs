@@ -85,11 +85,24 @@ require_macho_registry_sections() {
   fi
 }
 
+require_windows_registry_section() {
+  if ! grep -Eq '(^|[[:space:]])\.linkme' <<<"$sections"; then
+    echo "Missing PE/COFF linkme registry section marker in ${binary}" >&2
+    echo "Expected a .linkme section marker in llvm-objdump -h output" >&2
+    exit 1
+  fi
+}
+
 case "$inspect_target" in
   *-apple-darwin)
     # linkme hashes Mach-O section names, so they do not contain SERVICE_REGISTRY
     # or PROVIDER_REGISTRY. The test-local symbols below verify the entries.
     require_macho_registry_sections
+    ;;
+  *-pc-windows-* | *-windows-*)
+    # PE image section names are short, so final executables may not preserve
+    # the full .linkme_<REGISTRY> contribution name in section headers.
+    require_windows_registry_section
     ;;
   *-unknown-illumos | *-pc-solaris | *-sun-solaris)
     require_registry_marker 'set_linkme[^[:space:]]*SERVICE_REGISTRY' "SERVICE_REGISTRY linkme section marker"
