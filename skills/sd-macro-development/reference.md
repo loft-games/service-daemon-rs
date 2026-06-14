@@ -51,7 +51,7 @@ cargo expand -p example-complete   # see the wrappers + distributed_slice entrie
 ```
 
 `example-complete` exercises services, triggers, and providers together, so its
-expansion is the canonical place to read what the macros produce. Expand after any
+expansion is the reference point for reading what the macros produce. Expand after any
 codegen change to confirm the output is what you intended.
 
 ## 3. Compile-time macro tests (`examples/macro-tests`, trybuild)

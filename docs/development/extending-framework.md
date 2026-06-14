@@ -74,6 +74,7 @@ Provider templates (like `Notify` or `Queue`) generate specialized struct bodies
 
 The trigger runner uses an internal composable, onion-model middleware layer.
 Public interceptor registration is not exposed yet; treat these types as runtime internals unless a builder-level registration API is added.
+The implementation is split across `service-daemon/src/core/trigger_runner/dispatch.rs` and `interceptors.rs`; see [Development Trigger Interceptors](trigger-interceptors.md) for the internal reference.
 
 1. **Implementation**: Built-in interceptors define `intercept(ctx, next)`.
 2. **Registration**: The runner installs framework-owned interceptors during construction.

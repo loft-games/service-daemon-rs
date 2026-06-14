@@ -16,8 +16,8 @@ ordered lessons. A new beginner lesson goes here **and** is linked from
 - `priority-orchestration.md` — priority waves + runtime scheduling.
 - `error-handling.md` — fallible flows.
 - `custom-providers.md` — provider authoring on the learning path.
-- `custom-trigger-hosts.md`, `trigger-interceptors.md`, `advanced-macros.md`,
-  `unit-testing.md` — later, more advanced chapters.
+- `custom-trigger-hosts.md`, `advanced-macros.md`, `unit-testing.md` — later,
+  more advanced chapters.
 
 ## `docs/guide/` — topical user reference
 
@@ -34,6 +34,8 @@ here, not in `tutorial/`.
 
 - `extending-framework.md` — adding new trigger hosts, extending macro behavior,
   the seams a maintainer works against.
+- `trigger-interceptors.md` — internal trigger dispatch interceptor pipeline and
+  extension patterns.
 - `release-validation.md` — release validation map: feature-to-test/example
   matrix, dependency baseline, linkme platform smoke coverage, example layers,
   and maintainer release checklist.

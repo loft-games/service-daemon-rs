@@ -15,7 +15,7 @@ pub mod simulation;
 // Re-exports for backward compatibility
 // -----------------------------------------------------------------------------
 
-// Identity types (used by runner.rs, service_daemon, macros)
+// Identity types (used by runner modules, service_daemon, macros)
 // These re-exports are used by tests and by simulation_tests
 pub(crate) use identity::process_token;
 #[cfg(test)]

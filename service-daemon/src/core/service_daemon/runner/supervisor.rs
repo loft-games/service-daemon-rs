@@ -1,63 +1,35 @@
-//! Service runner logic for spawning, supervising, and stopping services.
-//!
-//! The core abstraction is [`ServiceSupervisor`], which manages a single
-//! service's lifecycle using an explicit **Finite State Machine (FSM)**.
-//! The FSM transitions through the following states:
-//!
-//! ```text
-//!   Starting --> Running --> Outcome --> Restart --> Starting (loop)
-//!      |            |           |                        |
-//!      +------------+-----------+-- Terminated <---------+
-//! ```
-
-use anyhow::{Error, Result};
-use futures::FutureExt;
-use futures::future::BoxFuture;
-use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
-use std::fmt;
-use std::panic::AssertUnwindSafe;
+use anyhow::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, Notify, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, error, info, warn};
+use tracing::{error, info, warn};
 
 use crate::ServiceScheduling;
-use crate::core::context::{
-    __run_daemon_resources_sync_scope, __run_service_scope, DaemonResources, ServiceIdentity,
-};
+use crate::core::context::{__run_daemon_resources_sync_scope, DaemonResources};
 use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
-    RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane, ShutdownBoundaryKind,
-    ShutdownBoundaryOutcomeSnapshot, ShutdownBoundaryResultKind, ShutdownResidualActionKind,
-    run_generation_runtime_probe,
+    RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane,
 };
-use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 use crate::models::policy::RestartStormGuard;
-use crate::models::{
-    BackoffController, ServiceDescription, ServiceError, ServiceFn, ServiceId, ServiceStatus,
-};
+use crate::models::{BackoffController, ServiceError, ServiceFn, ServiceId, ServiceStatus};
 use crate::{ProviderDependencyWatchSet, ProviderInitError};
 
-use super::parts::{
+use super::super::parts::{
     BodyExecutionLane, BodyExecutionLanes, BodyLaneResolver, ServiceSupervisorParts,
-    SpawnAllServicesParts, SpawnServiceParts, SupervisorSpawnLane,
+    SpawnServiceParts, SupervisorSpawnLane,
 };
-
-type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
-
-// ---------------------------------------------------------------------------
-// Supervisor FSM State
-// ---------------------------------------------------------------------------
+use super::generation::{
+    IsolatedGenerationStartupError, ServiceGenerationOutcome, ServiceGenerationParts,
+    run_body_service_generation, run_isolated_service_generation,
+};
 
 /// Represents the discrete states of the service supervision lifecycle.
 ///
 /// Each variant maps to a dedicated handler method on [`ServiceSupervisor`],
 /// keeping the control flow flat and each concern isolated.
-enum SupervisorState {
+pub(super) enum SupervisorState {
     /// Prepare resources for a new service generation (status, identity, spans).
     Starting,
     /// The service future is actively executing; monitor for completion or signals.
@@ -71,7 +43,7 @@ enum SupervisorState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GenerationResultKind {
+pub(super) enum GenerationResultKind {
     NormalExit,
     RecoverableError,
     Panic,
@@ -82,7 +54,7 @@ enum GenerationResultKind {
 }
 
 impl GenerationResultKind {
-    fn diagnostics_exit_kind(self) -> GenerationExitKind {
+    pub(super) fn diagnostics_exit_kind(self) -> GenerationExitKind {
         match self {
             Self::NormalExit => GenerationExitKind::NormalExit,
             Self::RecoverableError => GenerationExitKind::RecoverableError,
@@ -96,29 +68,29 @@ impl GenerationResultKind {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct GenerationSignalFacts {
-    reload_requested: bool,
-    shutdown_requested: bool,
+pub(super) struct GenerationSignalFacts {
+    pub(super) reload_requested: bool,
+    pub(super) shutdown_requested: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct GenerationExitRecord {
-    next_status: ServiceStatus,
-    should_restart: bool,
-    should_shutdown_daemon: bool,
-    restart_decision: RestartDecision,
-    result: GenerationResultKind,
-    signals: GenerationSignalFacts,
+pub(super) struct GenerationExitRecord {
+    pub(super) next_status: ServiceStatus,
+    pub(super) should_restart: bool,
+    pub(super) should_shutdown_daemon: bool,
+    pub(super) restart_decision: RestartDecision,
+    pub(super) result: GenerationResultKind,
+    pub(super) signals: GenerationSignalFacts,
 }
 
 impl GenerationExitRecord {
-    fn exit_kind(&self) -> GenerationExitKind {
+    pub(super) fn exit_kind(&self) -> GenerationExitKind {
         self.result.diagnostics_exit_kind()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestartFailureKind {
+pub(super) enum RestartFailureKind {
     RecoverableError,
     Panic,
     IsolatedStartupFailure,
@@ -126,13 +98,13 @@ enum RestartFailureKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RestartDecision {
+pub(super) enum RestartDecision {
     Immediate,
     WithBackoff(RestartFailureKind),
 }
 
 impl RestartDecision {
-    fn diagnostics_kind(self) -> DiagnosticsRestartDecisionKind {
+    pub(super) fn diagnostics_kind(self) -> DiagnosticsRestartDecisionKind {
         match self {
             Self::Immediate => DiagnosticsRestartDecisionKind::Immediate,
             Self::WithBackoff(RestartFailureKind::RecoverableError) => {
@@ -154,404 +126,40 @@ impl RestartDecision {
 fn duration_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
-
-const DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IsolatedThreadJoinOutcome {
-    Joined,
-    TimedOut,
-    Panicked,
-}
-
-impl IsolatedThreadJoinOutcome {
-    fn diagnostics_outcome(self) -> ShutdownBoundaryOutcomeSnapshot {
-        let (result, action, residual) = match self {
-            Self::Joined => (
-                ShutdownBoundaryResultKind::Completed,
-                ShutdownResidualActionKind::None,
-                0,
-            ),
-            Self::TimedOut => (
-                ShutdownBoundaryResultKind::TimedOut,
-                ShutdownResidualActionKind::RecordedAndDetached,
-                1,
-            ),
-            Self::Panicked => (
-                ShutdownBoundaryResultKind::Panicked,
-                ShutdownResidualActionKind::None,
-                0,
-            ),
-        };
-
-        ShutdownBoundaryOutcomeSnapshot {
-            boundary: ShutdownBoundaryKind::IsolatedRuntimeJoin,
-            result,
-            action,
-            completed: u64::from(matches!(self, Self::Joined)),
-            failed: u64::from(matches!(self, Self::Panicked)),
-            residual,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct IsolatedRuntimeHandle {
-    outcome_rx: tokio::sync::oneshot::Receiver<ServiceGenerationOutcome>,
-    thread_join: std::thread::JoinHandle<()>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum IsolatedStartupFailureKind {
-    ThreadSpawn,
-    RuntimeBuild,
-    BridgeClosed,
-    StartupGateCancelled,
-}
-
-#[derive(Debug)]
-struct IsolatedGenerationStartupError {
-    service_name: &'static str,
-    kind: IsolatedStartupFailureKind,
-    message: String,
-}
-
-impl fmt::Display for IsolatedGenerationStartupError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "isolated service generation for '{}' failed during {:?}: {}",
-            self.service_name, self.kind, self.message
-        )
-    }
-}
-
-impl std::error::Error for IsolatedGenerationStartupError {}
-
-fn isolated_generation_error(
-    name: &'static str,
-    kind: IsolatedStartupFailureKind,
-    message: String,
-) -> ServiceGenerationOutcome {
-    Ok(Err(Error::new(IsolatedGenerationStartupError {
-        service_name: name,
-        kind,
-        message,
-    })))
-}
-
-struct ServiceGenerationParts {
-    service_id: ServiceId,
-    name: &'static str,
-    generation: u64,
-    run: ServiceFn,
-    cancellation_token: CancellationToken,
-    reload_token: CancellationToken,
-    resources: Arc<DaemonResources>,
-    diagnostics: GenerationDiagnosticsHandle,
-}
-
-fn run_scoped_service_generation(
-    parts: ServiceGenerationParts,
-) -> BoxFuture<'static, ServiceGenerationOutcome> {
-    Box::pin(async move {
-        let ServiceGenerationParts {
-            service_id,
-            name,
-            generation,
-            run,
-            cancellation_token,
-            reload_token,
-            resources,
-            diagnostics,
-        } = parts;
-        let span = tracing::info_span!(
-            "service",
-            name = %name,
-            service_id = %service_id,
-            service_id_num = service_id.value(),
-            generation,
-            runtime_lane = ?diagnostics.runtime_lane(),
-        );
-        let phase = if reload_token.is_cancelled() {
-            ProviderRuntimePhase::ReloadGenerationResolve
-        } else {
-            ProviderRuntimePhase::ServiceGenerationResolve
-        };
-        let identity = ServiceIdentity::new_generation_with_diagnostics(
-            service_id,
-            name,
-            cancellation_token.clone(),
-            reload_token,
-            diagnostics,
-        );
-
-        __run_service_scope(identity, resources, || async move {
-            with_provider_runtime_phase(
-                phase,
-                AssertUnwindSafe(run(cancellation_token).instrument(span)).catch_unwind(),
-            )
-            .await
-        })
-        .await
-    })
-}
-
-struct BodyTaskAbortGuard {
-    handle: JoinHandle<ServiceGenerationOutcome>,
-    abort_on_drop: bool,
-}
-
-impl BodyTaskAbortGuard {
-    fn new(handle: JoinHandle<ServiceGenerationOutcome>) -> Self {
-        Self {
-            handle,
-            abort_on_drop: true,
-        }
-    }
-
-    async fn join(mut self) -> Result<ServiceGenerationOutcome, tokio::task::JoinError> {
-        let result = (&mut self.handle).await;
-        self.abort_on_drop = false;
-        result
-    }
-}
-
-impl Drop for BodyTaskAbortGuard {
-    fn drop(&mut self) {
-        if self.abort_on_drop {
-            self.handle.abort();
-        }
-    }
-}
-
-fn run_body_service_generation(
-    parts: ServiceGenerationParts,
-    runtime: tokio::runtime::Handle,
-) -> BoxFuture<'static, ServiceGenerationOutcome> {
-    Box::pin(async move {
-        let name = parts.name;
-        let service_id = parts.service_id;
-        let generation = parts.generation;
-        let handle = runtime.spawn(run_scoped_service_generation(parts));
-        let guard = BodyTaskAbortGuard::new(handle);
-
-        match guard.join().await {
-            Ok(outcome) => outcome,
-            Err(err) if err.is_panic() => {
-                error!(
-                    service = %name,
-                    service_id = %service_id,
-                    generation,
-                    error = ?err,
-                    "Service body task panicked outside scoped generation"
-                );
-                Err(err.into_panic())
-            }
-            Err(err) => {
-                warn!(
-                    service = %name,
-                    service_id = %service_id,
-                    generation,
-                    error = ?err,
-                    "Service body task ended before reporting outcome"
-                );
-                Ok(Err(Error::msg(format!(
-                    "service '{}' body task ended before reporting outcome: {}",
-                    name, err
-                ))))
-            }
-        }
-    })
-}
-
-async fn bounded_join_isolated_thread(
-    thread_join: std::thread::JoinHandle<()>,
-    timeout: Duration,
-) -> IsolatedThreadJoinOutcome {
-    match tokio::time::timeout(
-        timeout,
-        tokio::task::spawn_blocking(move || thread_join.join()),
-    )
-    .await
-    {
-        Ok(Ok(Ok(()))) => IsolatedThreadJoinOutcome::Joined,
-        Ok(Ok(Err(_))) | Ok(Err(_)) => IsolatedThreadJoinOutcome::Panicked,
-        Err(_) => IsolatedThreadJoinOutcome::TimedOut,
-    }
-}
-
-fn run_isolated_service_generation(
-    parts: ServiceGenerationParts,
-    startup_permits: Arc<Semaphore>,
-) -> BoxFuture<'static, ServiceGenerationOutcome> {
-    Box::pin(async move {
-        let name = parts.name;
-        let service_id = parts.service_id;
-        let generation = parts.generation;
-        let cancellation_token = parts.cancellation_token.clone();
-        let reload_token = parts.reload_token.clone();
-        let permit = tokio::select! {
-            permit = startup_permits.acquire_owned() => match permit {
-                Ok(permit) => permit,
-                Err(err) => {
-                    return isolated_generation_error(
-                        name,
-                        IsolatedStartupFailureKind::StartupGateCancelled,
-                        format!("isolated startup gate closed: {}", err),
-                    );
-                }
-            },
-            _ = cancellation_token.cancelled() => {
-                return isolated_generation_error(
-                    name,
-                    IsolatedStartupFailureKind::StartupGateCancelled,
-                    "shutdown while waiting for isolated startup permit".to_string(),
-                );
-            }
-            _ = reload_token.cancelled() => {
-                return isolated_generation_error(
-                    name,
-                    IsolatedStartupFailureKind::StartupGateCancelled,
-                    "reload while waiting for isolated startup permit".to_string(),
-                );
-            }
-        };
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let thread_name = format!("svc-{}", name);
-        let thread_name_for_error = thread_name.clone();
-        let diagnostics = parts.diagnostics.clone();
-
-        let isolated_handle = match std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                let outcome = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => {
-                        drop(permit);
-                        let probe_diagnostics = parts.diagnostics.clone();
-                        runtime.block_on(async move {
-                            let probe_token = CancellationToken::new();
-                            let probe_handle = tokio::spawn(run_generation_runtime_probe(
-                                probe_diagnostics,
-                                probe_token.clone(),
-                            ));
-                            let outcome = run_scoped_service_generation(parts).await;
-                            probe_token.cancel();
-                            if let Err(err) = probe_handle.await {
-                                warn!(
-                                    service = %name,
-                                    service_id = %service_id,
-                                    generation,
-                                    error = ?err,
-                                    "Isolated runtime probe task ended unexpectedly"
-                                );
-                            }
-                            outcome
-                        })
-                    }
-                    Err(err) => {
-                        drop(permit);
-                        isolated_generation_error(
-                            name,
-                            IsolatedStartupFailureKind::RuntimeBuild,
-                            format!("failed to create private tokio runtime: {}", err),
-                        )
-                    }
-                };
-                let _ = tx.send(outcome);
-            }) {
-            Ok(thread_join) => IsolatedRuntimeHandle {
-                outcome_rx: rx,
-                thread_join,
-            },
-            Err(err) => {
-                return isolated_generation_error(
-                    name,
-                    IsolatedStartupFailureKind::ThreadSpawn,
-                    format!(
-                        "failed to spawn thread '{}': {}",
-                        thread_name_for_error, err
-                    ),
-                );
-            }
-        };
-
-        let IsolatedRuntimeHandle {
-            outcome_rx,
-            thread_join,
-        } = isolated_handle;
-
-        let outcome = match outcome_rx.await {
-            Ok(outcome) => outcome,
-            Err(err) => isolated_generation_error(
-                name,
-                IsolatedStartupFailureKind::BridgeClosed,
-                format!("thread exited before reporting outcome: {}", err),
-            ),
-        };
-
-        let join_outcome =
-            bounded_join_isolated_thread(thread_join, DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT).await;
-        diagnostics.record_shutdown_boundary(join_outcome.diagnostics_outcome());
-
-        match join_outcome {
-            IsolatedThreadJoinOutcome::Joined => {}
-            IsolatedThreadJoinOutcome::TimedOut => warn!(
-                service = %name,
-                service_id = %service_id,
-                generation,
-                "Isolated service thread join timed out after outcome bridge completed"
-            ),
-            IsolatedThreadJoinOutcome::Panicked => warn!(
-                service = %name,
-                service_id = %service_id,
-                generation,
-                "Isolated service thread panicked while joining after outcome bridge completed"
-            ),
-        }
-
-        outcome
-    })
-}
-
 /// Supervises a single service's lifecycle, including restarts and signal handling.
 ///
 /// Internally driven by a [`SupervisorState`] FSM -- see module-level docs.
-struct ServiceSupervisor {
+pub(super) struct ServiceSupervisor {
     // -- Immutable service identity --
-    service_id: ServiceId,
-    name: &'static str,
-    run: ServiceFn,
-    watcher: Option<fn() -> ProviderDependencyWatchSet>,
-    scheduling: ServiceScheduling,
-    body_lanes: BodyExecutionLanes,
-    body_lane_resolver: BodyLaneResolver,
-    generation_body_lane: Option<BodyExecutionLane>,
-    generation_scheduling: Option<ServiceScheduling>,
-    backoff: BackoffController,
-    restart_storm: RestartStormGuard,
-    resources: Arc<DaemonResources>,
-    diagnostics: Arc<DiagnosticsStore>,
-    isolated_startup_permits: Arc<Semaphore>,
-    cancellation_token: CancellationToken,
-    daemon_token: CancellationToken,
+    pub(super) service_id: ServiceId,
+    pub(super) name: &'static str,
+    pub(super) run: ServiceFn,
+    pub(super) watcher: Option<fn() -> ProviderDependencyWatchSet>,
+    pub(super) scheduling: ServiceScheduling,
+    pub(super) body_lanes: BodyExecutionLanes,
+    pub(super) body_lane_resolver: BodyLaneResolver,
+    pub(super) generation_body_lane: Option<BodyExecutionLane>,
+    pub(super) generation_scheduling: Option<ServiceScheduling>,
+    pub(super) backoff: BackoffController,
+    pub(super) restart_storm: RestartStormGuard,
+    pub(super) resources: Arc<DaemonResources>,
+    pub(super) diagnostics: Arc<DiagnosticsStore>,
+    pub(super) isolated_startup_permits: Arc<Semaphore>,
+    pub(super) cancellation_token: CancellationToken,
+    pub(super) daemon_token: CancellationToken,
 
     // -- Per-generation mutable context (set during `on_starting`) --
     /// Tracks how long the current generation has been running.
-    generation_start: Option<Instant>,
-    generation: u64,
-    generation_diagnostics: Option<GenerationDiagnosticsHandle>,
-    dependency_watch_set: Option<ProviderDependencyWatchSet>,
+    pub(super) generation_start: Option<Instant>,
+    pub(super) generation: u64,
+    pub(super) generation_diagnostics: Option<GenerationDiagnosticsHandle>,
+    pub(super) dependency_watch_set: Option<ProviderDependencyWatchSet>,
     /// Per-generation token used to detect reload vs. normal exit.
-    reload_token: Option<CancellationToken>,
+    pub(super) reload_token: Option<CancellationToken>,
 }
 
 impl ServiceSupervisor {
-    fn new(parts: ServiceSupervisorParts) -> Self {
+    pub(super) fn new(parts: ServiceSupervisorParts) -> Self {
         let ServiceSupervisorParts {
             service_id,
             name,
@@ -611,7 +219,7 @@ impl ServiceSupervisor {
 
     /// Handles the outcome of a service execution and preserves lifecycle signals
     /// as facts instead of letting reload/shutdown overwrite the generation result.
-    fn handle_outcome(
+    pub(super) fn handle_outcome(
         &self,
         result: ServiceGenerationOutcome,
         reload_token: &CancellationToken,
@@ -772,7 +380,7 @@ impl ServiceSupervisor {
         }
     }
 
-    fn record_restart_decision(
+    pub(super) fn record_restart_decision(
         &self,
         decision: RestartDecision,
         policy_delay: Duration,
@@ -792,7 +400,7 @@ impl ServiceSupervisor {
     /// Waits for the restart delay, allowing early exit on reload or cancellation.
     /// Returns `true` if restart should proceed, `false` if shutdown was requested.
     /// Immediate restarts after a clean exit or reload do not advance the backoff counter.
-    async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
+    pub(super) async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
         let RestartDecision::WithBackoff(failure_kind) = decision else {
             self.record_restart_decision(decision, Duration::ZERO, Duration::ZERO, false);
             self.backoff.record_success();
@@ -859,7 +467,7 @@ impl ServiceSupervisor {
     /// **Starting** -- prepare resources for a new service generation.
     ///
     /// If shutdown was already requested, transition directly to `Terminated`.
-    async fn on_starting(&mut self) -> SupervisorState {
+    pub(super) async fn on_starting(&mut self) -> SupervisorState {
         if self.cancellation_token.is_cancelled() {
             info!(
                 "Service {} received shutdown signal, exiting gracefully",
@@ -1039,7 +647,7 @@ impl ServiceSupervisor {
     ///
     /// Decides whether the service should restart (--> `Restart`) or stop
     /// permanently (--> `Terminated`).
-    async fn on_outcome(&mut self, result: ServiceGenerationOutcome) -> SupervisorState {
+    pub(super) async fn on_outcome(&mut self, result: ServiceGenerationOutcome) -> SupervisorState {
         let elapsed_ms = self
             .generation_start
             .map(|start| duration_millis(start.elapsed()));
@@ -1232,7 +840,7 @@ impl ServiceSupervisor {
     }
 
     /// Main supervision loop -- a flat FSM driver.
-    async fn run_loop(mut self) {
+    pub(super) async fn run_loop(mut self) {
         let mut state = SupervisorState::Starting;
         loop {
             state = match state {
@@ -1245,97 +853,8 @@ impl ServiceSupervisor {
         }
     }
 }
-
-/// Helper for wave-based service management.
-struct ServiceWave<'a> {
-    services: Vec<&'a ServiceDescription>,
-    priority: u8,
-}
-
-impl<'a> ServiceWave<'a> {
-    /// Groups services by priority into waves.
-    fn from_services(services: &'a [ServiceDescription]) -> BTreeMap<u8, ServiceWave<'a>> {
-        let mut waves: BTreeMap<u8, Vec<&'a ServiceDescription>> = BTreeMap::new();
-        for service in services {
-            waves.entry(service.priority()).or_default().push(service);
-        }
-        waves
-            .into_iter()
-            .map(|(priority, svcs)| {
-                (
-                    priority,
-                    ServiceWave {
-                        services: svcs,
-                        priority,
-                    },
-                )
-            })
-            .collect()
-    }
-
-    /// Waits for all services in this wave to become healthy.
-    ///
-    /// Returns early if the `daemon_token` is cancelled, allowing the daemon
-    /// to skip waiting during shutdown.
-    async fn wait_for_healthy(
-        &self,
-        resources: &Arc<DaemonResources>,
-        timeout: Duration,
-        daemon_token: &CancellationToken,
-    ) {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            // Early exit if daemon shutdown was requested
-            if daemon_token.is_cancelled() {
-                info!(
-                    "Wave priority {} startup interrupted by shutdown signal, skipping health check",
-                    self.priority
-                );
-                return;
-            }
-
-            // Create notification future BEFORE checking the status to avoid lost notifications
-            let notification = resources.status_changed.notified();
-
-            let mut all_healthy = true;
-            for service in &self.services {
-                let status = resources
-                    .status_plane
-                    .get(&service.id)
-                    .map(|r| r.value().clone());
-                if status != Some(ServiceStatus::Healthy) {
-                    all_healthy = false;
-                    break;
-                }
-            }
-
-            if all_healthy {
-                return;
-            }
-
-            // Wait for any status change, or a short periodic wake-up (defense in depth)
-            tokio::select! {
-                _ = notification => {}
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
-                _ = daemon_token.cancelled() => {
-                    info!(
-                        "Wave priority {} startup interrupted by shutdown signal",
-                        self.priority
-                    );
-                    return;
-                }
-            }
-        }
-
-        warn!(
-            "Wave priority {} did not reach 'Healthy' status within {:?}, proceeding anyway",
-            self.priority, timeout
-        );
-    }
-}
-
 /// Spawn a single service with the given restart policy.
-pub async fn spawn_service(parts: SpawnServiceParts) {
+pub(super) async fn spawn_service(parts: SpawnServiceParts) {
     let SpawnServiceParts {
         service_id,
         name,
@@ -1376,183 +895,24 @@ pub async fn spawn_service(parts: SpawnServiceParts) {
 
     running_tasks.lock().await.insert(service_id, handle);
 }
-
-/// Spawn all registered services using wave-based priorities.
-///
-/// This starts services in descending order of their `priority` value.
-/// Services with high priority (e.g. SYSTEM = 100) start first.
-///
-/// The `daemon_token` is threaded through to `wait_for_healthy` so that
-/// the wave startup sequence can be interrupted immediately if the daemon
-/// receives a shutdown signal during startup.
-pub async fn spawn_all_services(parts: SpawnAllServicesParts) {
-    let SpawnAllServicesParts {
-        services,
-        restart_policy,
-        running_tasks,
-        resources,
-        diagnostics,
-        isolated_startup_permits,
-        control_runtime,
-        standard_runtime,
-        high_priority_runtime,
-        daemon_token,
-    } = parts;
-
-    info!("Beginning wave-based startup sequence...");
-
-    let body_lanes = BodyExecutionLanes {
-        standard: standard_runtime,
-        high_priority: high_priority_runtime,
-    };
-    let waves = ServiceWave::from_services(&services);
-
-    // Process waves in descending order of priority
-    for (priority, wave) in waves.into_iter().rev() {
-        // Skip remaining waves if shutdown was requested
-        if daemon_token.is_cancelled() {
-            info!("Startup sequence interrupted by shutdown signal, skipping remaining waves");
-            break;
-        }
-
-        info!(
-            "Starting wave priority {} ({} services)...",
-            priority,
-            wave.services.len()
-        );
-
-        for service in &wave.services {
-            if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
-                && body_lanes.high_priority.is_none()
-            {
-                error!(
-                    service = %service.name(),
-                    service_id = %service.id,
-                    "HighPriority service is missing the shared high-priority runtime"
-                );
-                resources
-                    .status_plane
-                    .insert(service.id, ServiceStatus::Terminated);
-                resources.status_changed.notify_waiters();
-                daemon_token.cancel();
-                return;
-            }
-
-            spawn_service(SpawnServiceParts {
-                service_id: service.id,
-                name: service.name(),
-                run: service.entry.wrapper,
-                watcher: service.entry.watcher,
-                policy: restart_policy,
-                scheduling: service.entry.scheduling,
-                supervisor_lane: SupervisorSpawnLane::Control(control_runtime.clone()),
-                body_lanes: body_lanes.clone(),
-                body_lane_resolver: BodyLaneResolver::default(),
-                running_tasks: running_tasks.clone(),
-                resources: resources.clone(),
-                diagnostics: diagnostics.clone(),
-                isolated_startup_permits: isolated_startup_permits.clone(),
-                cancellation_token: service.cancellation_token.clone(),
-                daemon_token: daemon_token.clone(),
-            })
-            .await;
-        }
-
-        // Wait for services to become healthy using configurable timeout
-        wave.wait_for_healthy(&resources, restart_policy.wave_spawn_timeout, &daemon_token)
-            .await;
-    }
-
-    info!("All startup waves initiated.");
-}
-
-/// Stop all running services gracefully using wave-based priorities.
-///
-/// This stops services in ascending order of their `priority` value.
-/// Services with the same priority are shut down concurrently.
-pub async fn stop_all_services(
-    services: &[ServiceDescription],
-    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
-    resources: Arc<DaemonResources>,
-    daemon_token: CancellationToken,
-    grace_period: Duration,
-) {
-    info!("Beginning wave-based graceful shutdown...");
-
-    let waves = ServiceWave::from_services(services);
-
-    // Process waves in ascending order of priority
-    for (priority, wave) in waves {
-        info!(
-            "Shutting down wave priority {} ({} services)...",
-            priority,
-            wave.services.len()
-        );
-
-        // 1. Parallel Signal: Cancel all services in this wave
-        for service in &wave.services {
-            service.cancellation_token.cancel();
-            resources
-                .status_plane
-                .insert(service.id, ServiceStatus::ShuttingDown);
-            resources.status_changed.notify_waiters();
-        }
-
-        // 2. Parallel Wait: Wait for all services in this wave to finish
-        let mut join_handles = Vec::new();
-        for service in wave.services {
-            let sid = service.id;
-            let name = service.name();
-            let handle_opt = {
-                let mut guard = running_tasks.lock().await;
-                guard.remove(&sid)
-            };
-            if let Some(handle) = handle_opt {
-                join_handles.push((sid, name, handle));
-            }
-        }
-
-        let resources_for_shutdown = resources.clone();
-        let mut shutdown_futures = Vec::new();
-        for (sid, name, mut handle) in join_handles {
-            let res = resources_for_shutdown.clone();
-            shutdown_futures.push(async move {
-                info!("Waiting for service '{}' to stop...", name);
-                tokio::select! {
-                    res_join = &mut handle => {
-                        match res_join {
-                            Ok(()) => info!("Service '{}' stopped gracefully", name),
-                            Err(e) => warn!("Service '{}' panicked during shutdown: {:?}", name, e),
-                        }
-                    }
-                    _ = tokio::time::sleep(grace_period) => {
-                        warn!(
-                    "Service '{}' did not stop within grace period, forcing abort",
-                    name
-                        );
-                        handle.abort();
-                        let _ = handle.await;
-                    }
-                }
-                res.status_plane.insert(sid, ServiceStatus::Terminated);
-                res.status_changed.notify_waiters();
-            });
-        }
-        futures::future::join_all(shutdown_futures).await;
-    }
-
-    // Finally, cancel the daemon's own token to signal completion if anyone is watching it
-    daemon_token.cancel();
-    info!("All shutdown waves completed. ServiceDaemon stopped.");
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::policy::RestartPolicy;
+    use super::super::generation::{
+        BodyTaskAbortGuard, IsolatedStartupFailureKind, IsolatedThreadJoinOutcome,
+        bounded_join_isolated_thread, isolated_generation_error,
+    };
     use super::*;
-    use std::collections::BTreeMap;
+    use crate::core::diagnostics::{
+        ShutdownBoundaryKind, ShutdownBoundaryResultKind, ShutdownResidualActionKind,
+    };
+    use crate::core::service_daemon::policy::RestartPolicy;
+    use futures::future::BoxFuture;
+    use std::collections::{BTreeMap, HashMap};
+    use std::fmt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{LazyLock, Mutex as StdMutex};
+    use tokio::sync::Mutex;
+    use tokio::task::JoinHandle;
     use tracing::field::{Field, Visit};
     use tracing::{Event, Subscriber};
     use tracing_subscriber::Layer;

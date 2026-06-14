@@ -45,7 +45,7 @@
 //! For the full guide and advanced patterns, visit our components on GitHub:
 //!
 //! - [**Quick Start Guide**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) - Complete step-by-step tutorial.
-//! - [**Architecture Overview**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) - Deep dive into DI and Registry.
+//! - [**Architecture Overview**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) - DI and registry internals.
 
 extern crate self as service_daemon;
 

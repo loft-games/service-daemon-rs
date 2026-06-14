@@ -1,11 +1,12 @@
 # Trigger Middlewares (Interceptors)
 
 > [!NOTE]
-> This is maintainer-oriented reference material, not part of the beginner quick-start path.
+> This is internal reference material, not part of the beginner quick-start path.
 
 You've seen how the framework automatically retries failed handlers and wraps every dispatch in a tracing span. That implementation lives in **interceptors**: composable middleware layers that wrap the trigger dispatch pipeline.
 
 Public interceptor registration is not exposed yet, so this page is an internal architecture sketch rather than a user extension guide.
+The current implementation lives under `service-daemon/src/core/trigger_runner/{dispatch.rs,interceptors.rs}`.
 
 ---
 
@@ -123,8 +124,9 @@ The context that flows through the chain carries everything needed for dispatch:
 ```rust,ignore
 pub struct DispatchContext<P> {
     pub service_id: ServiceId,     // Which trigger service
+    pub source_id: ServiceId,      // Which service emitted the event
     pub instance_seq: u64,         // Invocation sequence number
-    pub message_id: String,        // Globally unique event ID
+    pub message_id: uuid::Uuid,    // Globally unique UUID v7 event ID
     pub trigger_name: &'static str, // Human-readable trigger name
     pub payload: Arc<P>,           // Your business data (cheap to clone)
     pub handler: TriggerHandler<P>, // The final handler function
@@ -140,4 +142,4 @@ The context is passed **by value** -- each interceptor takes ownership, can read
 
 ---
 
-[Back to Event Triggers](../triggers.md)
+[Back to Event Triggers](../guide/triggers.md)

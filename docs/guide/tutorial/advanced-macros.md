@@ -55,7 +55,7 @@ Because the project uses `linkme`, the registration happens at the binary level.
 You *could* build a `ServiceDescription` manually and pass it to the daemon. But by using the macros, you benefit from:
 1.  **Compile-time Discovery**: No missing services due to typos.
 2.  **Automatic DI Mapping**: The macro analyzes your function arguments and writes the injection code for you.
-3.  **Unified Lifecycle**: Every service goes through the same supervisor -- error handling, backoff, and restart policy are applied consistently, with no per-service boilerplate.
+3.  **Unified Lifecycle**: Every service goes through the same supervisor -- error handling, backoff, and restart policy are applied consistently, without per-service setup code.
 
 ---
 

@@ -15,7 +15,7 @@ default = ["cron"]
 # Enable cron-based triggers (uses tokio-cron-scheduler)
 cron = ["dep:tokio-cron-scheduler"]
 # Enable simulation/testing support (MockContext, SimulationOverlay, log drain).
-# This feature gates all debugging utilities to guarantee zero overhead in production.
+# This feature excludes debugging utilities from production builds.
 simulation = []
 # Enable file-based log persistence with rotation (uses tracing-appender)
 file-logging = ["dep:tracing-appender", "dep:serde_json"]

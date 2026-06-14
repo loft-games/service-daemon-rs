@@ -4,6 +4,7 @@ The trigger dispatch pipeline uses an internal composable **interceptor chain** 
 each layer full control over when, whether, and how many times the next layer is invoked.
 
 Public interceptor registration is not exposed yet; this page documents the internal pipeline shape.
+The implementation lives under `service-daemon/src/core/trigger_runner/{dispatch.rs,interceptors.rs}`.
 
 ## 1. Architecture
 
@@ -34,8 +35,9 @@ The data envelope that flows through the chain:
 ```rust
 pub struct DispatchContext<P> {
     pub service_id: ServiceId,
+    pub source_id: ServiceId,
     pub instance_seq: u64,
-    pub message_id: String,
+    pub message_id: uuid::Uuid,
     pub trigger_name: &'static str,
     pub payload: Arc<P>,
     pub handler: TriggerHandler<P>,
@@ -163,6 +165,7 @@ This makes the trait object-safe within a specific `TriggerRunner<P>`:
 ## 7. More Information
 
 - [Extending the Framework](../development/extending-framework.md#3-internal-trigger-interceptors): Maintainer notes for the internal interceptor pipeline.
+- [Development Trigger Interceptors](../development/trigger-interceptors.md): Internal interceptor patterns.
 - [Trigger Guide](triggers.md#5-resilience-automatic-handler-retries): How retry works from the user's perspective.
 - [Architecture Overview](../architecture/internal-overview.md#7-event-traceability-architecture): System-level view of the interceptor pipeline.
 

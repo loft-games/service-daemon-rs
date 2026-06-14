@@ -56,7 +56,7 @@ This page explains common behaviors that are easy to misread when first using th
 
 ### The built-in template misconception
 **Problem**: Trying to modify the macro system to add a new default provider type such as MQTT.
-**Solution**: Use the `#[provider]` attribute on an `async fn`. Built-in templates are for low-level primitives such as signaling, queues, and socket listeners. See the [Provider Best Practices Guide](provider-best-practices.md).
+**Solution**: Use the `#[provider]` attribute on an `async fn`. Built-in templates are for low-level primitives such as signaling, queues, and socket listeners. See the [Provider Strategy Guide](provider-best-practices.md).
 
 ---
 
@@ -72,4 +72,3 @@ This page explains common behaviors that are easy to misread when first using th
 ### Registry Isolation 
 **Problem**: Integrated services in one test interfere with another test.
 **The Fix**: Use **Tags** and a filtered `Registry` for your tests. See [Testing & Troubleshooting](testing-troubleshooting.md#registry-isolation-in-tests) for implementation details.
-

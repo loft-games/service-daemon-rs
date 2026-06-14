@@ -82,7 +82,7 @@ async fn worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
 ### Watch Trigger (State Change)
-Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified. Internally, this leverages the `ServiceDaemon`'s reload mechanism: the service is re-spawned with a fresh snapshot exactly when the state changes.
+Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified. Internally, this uses the `ServiceDaemon` reload mechanism: the service is re-spawned with a fresh snapshot exactly when the state changes.
 
 ```rust
 #[trigger(Watch(MyData))]
@@ -185,7 +185,7 @@ let mut daemon = ServiceDaemon::builder()
 
 ## 8. Instance Lifecycle & State Reuse
 
-Unlike standard services where the macro-wrapped function is re-executed on every iteration, triggers leverage a **Stateful Host** model:
+Unlike standard services where the macro-wrapped function is re-executed on every iteration, triggers use a **Stateful Host** model:
 
 1.  **Instantiation**: The `TriggerHost` is created **once** via `setup()` when the service starts.
 2.  **State Persistence**: The `TriggerRunner` maintains a reference to this instance and calls `handle_step(&mut self, ...)` in a loop.
@@ -204,7 +204,7 @@ Queue concurrency is governed by the [`ScalingPolicy`]. The framework adjusts co
 
 ## 10. More Information
 
-- [Provider Best Practices](provider-best-practices.md): Deep dive into defining custom providers.
+- [Provider Strategy Guide](provider-best-practices.md): How to define custom providers.
 - [Concept Clarification (FAQ)](faq.md#2-lifecycle--paradigms): Understanding the difference between managed triggers and standard services.
 
 [Back to README](../../README.md)

@@ -1,6 +1,6 @@
-# Provider Best Practices & Strategy Guide
+# Provider Strategy Guide
 
-This guide helps you choose the right way to provide dependencies in your `service-daemon-rs` application. Using the correct strategy avoids unnecessary framework complexity and keeps your code clean.
+This guide helps you choose how to provide dependencies in your `service-daemon-rs` application. Matching the provider form to the resource keeps framework extension points focused.
 
 ---
 
@@ -11,7 +11,7 @@ There are three ways to define a Provider. Choose based on your use case:
 | Strategy | When to Use | Example |
 | :--- | :--- | :--- |
 | **Simple Value** | Static configuration, primitive types, or simple wrappers. | `Port(i32)`, `Config(String)` |
-| **Async Function** | **(Recommended)** External systems, database connections, MQTT, heavy initialization. | `MqttBus`, `DatabasePool` |
+| **Async Function** | External systems, database connections, MQTT, heavy initialization. | `MqttBus`, `DatabasePool` |
 | **Built-in template** | Low-level architecture primitives for synchronization, signaling, or networking. | `Notify`, `Listen`, `Queue` |
 
 ---
@@ -45,13 +45,13 @@ pub async fn mqtt_provider() -> MqttBus {
 1. **No framework changes**: Application-specific resources stay in application code.
 2. **Full initialization control**: Certificates, retries, and settings stay in the provider body.
 3. **Scoped sharing**: Normal daemons share the root provider slot. Simulation overrides can replace that provider for one daemon without changing the provider definition.
-4. **Standard DI**: Inject `Arc<MqttBus>` into any `#[service]` just like a regular provider.
+4. **DI usage**: Inject `Arc<MqttBus>` into any `#[service]` just like a regular provider.
 
 ---
 
 ## 3. When to use a built-in template
 
-Built-in templates are hardcoded forms inside the `#[provider]` macro. They generate boilerplate for primitives that many applications need.
+Built-in templates are hardcoded forms inside the `#[provider]` macro. They generate repeated wrapper code for primitives that many applications need.
 
 | Template | Alias | Logic |
 | :--- | :--- | :--- |

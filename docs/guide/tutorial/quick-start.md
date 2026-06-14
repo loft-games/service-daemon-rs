@@ -22,7 +22,7 @@ In this tutorial, we will walk through the progression of a typical service-daem
 
 ## Reading order
 
-The chapters build on each other; reading in order is recommended for the first pass. This directory is the beginner tutorial path: it focuses on best-practice usage, not framework internals or maintainer extension points.
+The chapters build on each other; reading in order is recommended for the first pass. This directory is the beginner tutorial path: it focuses on user-facing APIs, not framework internals or maintainer extension points.
 
 After finishing the tutorial, return to the [README](../../../README.md) documentation section for complete user guides, architecture references, and maintainer material.
 

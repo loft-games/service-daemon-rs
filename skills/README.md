@@ -36,7 +36,7 @@ Maintainer-facing — working on this repository:
 | `sd-changelog-release` | Maintaining `CHANGELOG.md` and cutting releases |
 | `sd-macro-development` | Working on the `service-daemon-macro` proc-macro crate |
 
-> The roadmap for these skills is tracked in `TODO2.md`, Phase 18.
+> Skill maintenance notes are tracked with the repository's internal planning files.
 
 ## Installing (your choice)
 

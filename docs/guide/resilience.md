@@ -30,7 +30,7 @@ The framework uses a unified `BackoffController` to manage retry delays, consecu
 Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service failures happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, clean `Ok(())` exits still restart immediately, and reload/shutdown signals still interrupt restart waits.
 
 > [!NOTE]
-> **Internal Architecture**: For a deep dive into the `BackoffController` state machine, restart-storm guard, and self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#15-backoffcontroller-internals).
+> **Internal Architecture**: For the `BackoffController` state machine, restart-storm guard, and self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#15-backoffcontroller-internals).
 
 ### 1.2. Retry Design: Services vs. Triggers
 
@@ -134,7 +134,7 @@ The probe-then-unlink path emits a `tracing::warn!` event with `provider` and `p
 
 The `UnixConnect` template performs **one connectivity probe at provider init time** and discards the result. The probe serves two purposes:
 
-1. With `eager = true`, it blocks the system startup wave until the peer is reachable. This is the canonical pattern for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
+1. With `eager = true`, it blocks the system startup wave until the peer is reachable. Use this for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
 2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `connect()` somewhere in the hot path.
 
 Peer servers will observe a single `accept()` followed by an instant close from the probe -- this is normal and any reasonable server already handles port-scanner / health-probe traffic the same way.

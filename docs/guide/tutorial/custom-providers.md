@@ -101,7 +101,7 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 * Return `ProviderError::Retryable` for transient startup failures so the daemon can retry within the configured provider initialization timeout.
 
 > [!TIP]
-> **Deep Dive**: For complex naming conventions and advanced lifecycle patterns, see the [Provider Best Practices](../provider-best-practices.md) guide.
+> For naming conventions and lifecycle patterns, see the [Provider Strategy](../provider-best-practices.md) guide.
 
 ---
 

@@ -37,7 +37,7 @@ fn has_clone_derive(attrs: &[syn::Attribute]) -> bool {
 
 /// Shared context for all template-based providers.
 ///
-/// Encapsulates the common boilerplate (root manager name generation, Clone derive
+/// Encapsulates the shared setup code (root manager name generation, Clone derive
 /// detection, constructor, and provider capability impls) that every template
 /// needs. Individual templates only supply their struct body and convenience
 /// methods.
@@ -50,7 +50,7 @@ struct TemplateContext<'a> {
 }
 
 impl<'a> TemplateContext<'a> {
-    /// Creates a new template context with all common boilerplate pre-computed.
+    /// Creates a new template context with shared setup tokens pre-computed.
     ///
     /// In-memory templates use `Self::default()` as the constructor. They default
     /// to the full provider capability set: snapshot resolution, managed-state

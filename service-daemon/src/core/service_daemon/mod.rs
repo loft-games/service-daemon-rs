@@ -1,103 +1,54 @@
 //! ServiceDaemon - the main orchestrator for managed services.
 //!
 //! This module is split into submodules for better organization:
+//! - `builder`: ServiceDaemon construction and registry assembly.
 //! - `policy`: Restart policy configuration.
+//! - `provider_graph`: Provider graph validation and eager provider startup.
 //! - `runner`: Service spawning and lifecycle management.
+//! - `runtime`: Runtime creation, probes, and shutdown helpers.
+//! - `startup_preflight`: Shared startup validation, provider init, and runtime preparation.
+//! - `startup_pipeline`: Production startup orchestration after shared preflight.
 
+mod builder;
 mod parts;
 mod policy;
+mod provider_graph;
 mod runner;
+mod runtime;
+#[cfg(feature = "simulation")]
+mod simulation_startup;
+mod startup_pipeline;
+mod startup_preflight;
 
-use dashmap::DashMap;
-use std::any::{Any, TypeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::future::pending;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(feature = "simulation")]
 use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
-use tokio::runtime::{Handle, Runtime};
+use tokio::runtime::Runtime;
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use petgraph::{
-    algo::toposort,
-    graph::{DiGraph, NodeIndex},
-};
-
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
-use crate::core::context::{__run_daemon_resources_scope, DaemonResources, process_token};
-use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane, run_lane_runtime_probe};
-use crate::core::provider_init::{
-    ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
-    ProviderInitSourceKind, ProviderRuntimePhase, provider_init_failure_into_error,
-    with_provider_runtime_phase,
-};
+use crate::core::context::DaemonResources;
+use crate::core::diagnostics::DiagnosticsStore;
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
-    DaemonDiagnosticsSnapshot, PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry,
-    Result as ServiceResult, SchedulingAdvisoryProfile, ServiceDescription, ServiceId,
-    ServiceScheduling, ServiceStatus,
+    DaemonDiagnosticsSnapshot, Result as ServiceResult, SchedulingAdvisoryProfile,
+    ServiceDescription, ServiceId, ServiceStatus,
 };
 
+pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
-
-const CONTROL_RUNTIME_WORKER_THREADS: usize = 1;
-const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct HighPriorityCapacityPlan {
-    entry_count: usize,
-    worker_count: Option<NonZeroUsize>,
-}
-
-impl HighPriorityCapacityPlan {
-    fn from_services(services: &[ServiceDescription]) -> Self {
-        let entry_count = services
-            .iter()
-            .filter(|service| service.scheduling() == ServiceScheduling::HighPriority)
-            .count();
-
-        Self::from_entry_count(entry_count, read_available_parallelism())
-    }
-
-    fn from_entry_count(entry_count: usize, available_parallelism: Option<NonZeroUsize>) -> Self {
-        let worker_count = if entry_count == 0 {
-            None
-        } else {
-            let cap = match available_parallelism {
-                Some(parallelism) => parallelism.get(),
-                None => 1,
-            };
-            NonZeroUsize::new(entry_count.min(cap))
-        };
-
-        Self {
-            entry_count,
-            worker_count,
-        }
-    }
-
-    fn entry_count(&self) -> usize {
-        self.entry_count
-    }
-
-    fn worker_count(&self) -> Option<NonZeroUsize> {
-        self.worker_count
-    }
-}
-
-fn read_available_parallelism() -> Option<NonZeroUsize> {
-    std::thread::available_parallelism().ok()
-}
+use runtime::HighPriorityCapacityPlan;
+use startup_pipeline::StartupError;
 
 // ---------------------------------------------------------------------------
 // ServiceDaemonHandle -- lightweight status query interface
@@ -191,226 +142,6 @@ impl ServiceDaemon {
         ServiceDaemonBuilder::new()
     }
 
-    async fn eager_init_reachable_providers(&self) -> Result<(), ProviderInitError> {
-        let mut providers_by_id: HashMap<TypeId, &'static ProviderEntry> = HashMap::new();
-        for entry in PROVIDER_REGISTRY.iter() {
-            providers_by_id.insert(entry.type_id, entry);
-        }
-
-        // 1) Collect initial reachable set from service parameters.
-        let mut reachable: HashSet<TypeId> = HashSet::new();
-        let mut queue: VecDeque<TypeId> = VecDeque::new();
-        for svc in &self.services {
-            for p in svc.params() {
-                if reachable.insert(p.type_id) {
-                    queue.push_back(p.type_id);
-                }
-            }
-        }
-
-        // 2) Expand via provider->provider edges.
-        while let Some(tid) = queue.pop_front() {
-            let Some(p) = providers_by_id.get(&tid) else {
-                continue;
-            };
-            for dep in p.params {
-                if reachable.insert(dep.type_id) {
-                    queue.push_back(dep.type_id);
-                }
-            }
-        }
-
-        // 3) Filter eager targets.
-        let eager_targets: Vec<&'static ProviderEntry> = reachable
-            .iter()
-            .filter_map(|tid| providers_by_id.get(tid).copied())
-            .filter(|p| p.eager)
-            .collect();
-
-        if eager_targets.is_empty() {
-            return Ok(());
-        }
-
-        // 4) Toposort reachable provider DAG to get a deterministic init order.
-        // Nodes are provider TypeIds; edges are dep -> provider.
-        let mut graph = DiGraph::<TypeId, ()>::new();
-        let mut nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
-
-        for tid in reachable.iter().copied() {
-            if providers_by_id.contains_key(&tid) {
-                nodes.entry(tid).or_insert_with(|| graph.add_node(tid));
-            }
-        }
-
-        for (&tid, entry) in providers_by_id.iter() {
-            if !reachable.contains(&tid) {
-                continue;
-            }
-            let Some(&prov_node) = nodes.get(&tid) else {
-                continue;
-            };
-            for dep in entry.params {
-                if !reachable.contains(&dep.type_id) {
-                    continue;
-                }
-                if let Some(&dep_node) = nodes.get(&dep.type_id) {
-                    graph.add_edge(dep_node, prov_node, ());
-                }
-            }
-        }
-
-        // Cycles are pre-checked by validate_dependency_graph() in run();
-        // if we still land in Err here, report it as a Fatal init error
-        // rather than panicking, as a defense-in-depth measure.
-        let order = match toposort(&graph, None) {
-            Ok(order) => order,
-            Err(err) => {
-                let offending = providers_by_id
-                    .iter()
-                    .find_map(|(tid, p)| (*tid == graph[err.node_id()]).then_some(p.name))
-                    .unwrap_or("<unknown>");
-                return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::with_phase(
-                        offending,
-                        ProviderRuntimePhase::FrameworkValidation,
-                        ProviderInitBoundaryKind::FrameworkValidation,
-                    ),
-                    ProviderInitFailure::fatal(
-                        offending,
-                        "Circular provider dependency reached eager_init; \
-                              this should have been caught by validate_dependency_graph"
-                            .to_owned(),
-                        ProviderInitSourceKind::FrameworkGraphValidation,
-                    ),
-                ));
-            }
-        };
-
-        // 5) Execute init in order, only for eager providers.
-        let eager_ids: HashSet<TypeId> = eager_targets.iter().map(|p| p.type_id).collect();
-        for node in order {
-            let tid = graph[node];
-            if !eager_ids.contains(&tid) {
-                continue;
-            }
-            let Some(entry) = providers_by_id.get(&tid).copied() else {
-                return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::with_phase(
-                        "<unknown>",
-                        ProviderRuntimePhase::StartupEagerInit,
-                        ProviderInitBoundaryKind::FrameworkValidation,
-                    ),
-                    ProviderInitFailure::fatal(
-                        "<unknown>",
-                        "provider missing from eager initialization graph".to_owned(),
-                        ProviderInitSourceKind::FrameworkEagerInit,
-                    ),
-                ));
-            };
-            let resources = self.resources.clone();
-            __run_daemon_resources_scope(resources, || async {
-                with_provider_runtime_phase(
-                    ProviderRuntimePhase::StartupEagerInit,
-                    (entry.init)(self.restart_policy, self.cancellation_token.clone()),
-                )
-                .await
-            })
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    fn ensure_control_runtime(&mut self) -> std::io::Result<Handle> {
-        if self.control_runtime.is_none() {
-            self.control_runtime = Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(CONTROL_RUNTIME_WORKER_THREADS)
-                    .thread_name("svc-control")
-                    .build()?,
-            );
-        }
-
-        match self.control_runtime.as_ref() {
-            Some(runtime) => Ok(runtime.handle().clone()),
-            None => Err(std::io::Error::other(
-                "control runtime missing after successful creation",
-            )),
-        }
-    }
-
-    fn ensure_high_priority_runtime(&mut self) -> std::io::Result<Option<Handle>> {
-        let Some(worker_count) = self.high_priority_capacity.worker_count() else {
-            return Ok(None);
-        };
-
-        if self.high_priority_runtime.is_none() {
-            info!(
-                high_priority_entries = self.high_priority_capacity.entry_count(),
-                high_priority_worker_threads = worker_count.get(),
-                "Creating high-priority runtime from static capacity plan"
-            );
-            self.high_priority_runtime = Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(worker_count.get())
-                    .thread_name("svc-high-priority")
-                    .build()?,
-            );
-        }
-
-        Ok(self
-            .high_priority_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle().clone()))
-    }
-
-    fn spawn_runtime_probe(&mut self, handle: &Handle, lane: RuntimeLane) {
-        let diagnostics = self.diagnostics.clone();
-        let token = self.cancellation_token.clone();
-        self.runtime_probe_tasks
-            .push(handle.spawn(run_lane_runtime_probe(diagnostics, lane, token)));
-    }
-
-    fn spawn_adaptive_recommendation_loop(&mut self, handle: &Handle) {
-        if self.adaptive_recommendation_task.is_some()
-            || !self.scheduling_advisory_profile.is_enabled()
-        {
-            return;
-        }
-
-        let diagnostics = self.diagnostics.clone();
-        let token = self.cancellation_token.clone();
-        self.adaptive_recommendation_task =
-            Some(handle.spawn(run_adaptive_scheduling_recommendations(diagnostics, token)));
-    }
-
-    async fn stop_runtime_probes(&mut self) {
-        for handle in self.runtime_probe_tasks.drain(..) {
-            if let Err(err) = handle.await
-                && !err.is_cancelled()
-            {
-                tracing::warn!(error = ?err, "Runtime probe task ended unexpectedly");
-            }
-        }
-    }
-
-    async fn stop_adaptive_recommendation_loop(&mut self) {
-        if let Some(handle) = self.adaptive_recommendation_task.take()
-            && let Err(err) = handle.await
-            && !err.is_cancelled()
-        {
-            tracing::error!(error = ?err, "Adaptive scheduling recommendation task ended unexpectedly");
-        }
-    }
-
-    fn abort_adaptive_recommendation_loop(&mut self) {
-        if let Some(handle) = self.adaptive_recommendation_task.take() {
-            handle.abort();
-        }
-    }
-
     /// Get the cancellation token for this daemon.
     pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancellation_token.clone()
@@ -447,81 +178,27 @@ impl ServiceDaemon {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
 
-        // Validate the provider dependency graph. Cycles in the provider graph
-        // would deadlock at runtime, so we surface them as a pre-startup failure
-        // that triggers a graceful shutdown (observable via the daemon handle /
-        // status plane rather than blocking `run()`).
-        if let Err(err) = validate_dependency_graph(&self.services, PROVIDER_REGISTRY.iter()) {
-            tracing::error!(error = %err, "ServiceDaemon provider dependency graph validation failed");
-            self.shutdown();
-            return self;
-        }
-
-        // Eager-initialize reachable providers before spawning services.
-        //
-        // This is opt-in (providers must specify `eager = true`).
-        if let Err(err) = self.eager_init_reachable_providers().await {
-            tracing::error!(error = %err, "ServiceDaemon eager provider initialization failed");
-            self.shutdown();
-            return self;
-        }
-
-        let control_runtime = if self.services.is_empty() {
-            None
-        } else {
-            match self.ensure_control_runtime() {
-                Ok(runtime) => Some(runtime),
-                Err(err) => {
+        if let Err(err) = self.run_startup_pipeline().await {
+            match err {
+                StartupError::ProviderGraph(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon provider dependency graph validation failed");
+                }
+                StartupError::EagerProviderInit(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon eager provider initialization failed");
+                }
+                StartupError::ControlRuntime(err) => {
                     tracing::error!(error = %err, "ServiceDaemon control runtime creation failed");
-                    self.shutdown();
-                    return self;
+                }
+                StartupError::HighPriorityRuntime(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon high-priority runtime creation failed");
+                }
+                StartupError::StartupOrchestration(err) => {
+                    tracing::error!(error = ?err, "ServiceDaemon startup orchestration failed");
                 }
             }
-        };
-
-        let high_priority_runtime = match self.ensure_high_priority_runtime() {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                tracing::error!(error = %err, "ServiceDaemon high-priority runtime creation failed");
-                self.shutdown();
-                return self;
-            }
-        };
-
-        let standard_runtime = Handle::current();
-        if let Some(runtime) = control_runtime.as_ref() {
-            self.spawn_runtime_probe(runtime, RuntimeLane::Control);
-            self.spawn_adaptive_recommendation_loop(runtime);
+            self.shutdown();
+            return self;
         }
-        self.spawn_runtime_probe(&standard_runtime, RuntimeLane::Standard);
-        if let Some(runtime) = high_priority_runtime.as_ref() {
-            self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
-        }
-
-        if let Some(control_runtime) = control_runtime.as_ref() {
-            let startup =
-                control_runtime.spawn(runner::spawn_all_services(parts::SpawnAllServicesParts {
-                    services: clone_service_descriptions(&self.services),
-                    restart_policy: self.restart_policy,
-                    running_tasks: self.running_tasks.clone(),
-                    resources: self.resources.clone(),
-                    diagnostics: self.diagnostics.clone(),
-                    isolated_startup_permits: self.isolated_startup_permits.clone(),
-                    control_runtime: control_runtime.clone(),
-                    standard_runtime,
-                    high_priority_runtime,
-                    daemon_token: self.cancellation_token.clone(),
-                }));
-
-            if let Err(err) = startup.await {
-                tracing::error!(error = ?err, "ServiceDaemon startup orchestration failed");
-                self.shutdown();
-                return self;
-            }
-        }
-
-        #[cfg(feature = "diagnostics")]
-        super::topology_collector::start_topology_collector();
 
         info!(
             "ServiceDaemon running with {} service(s).",
@@ -661,34 +338,6 @@ impl ServiceDaemon {
         info!("ServiceDaemon stopped.");
     }
 
-    fn shutdown_high_priority_runtime(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take()
-            && let Err(panic) = std::thread::spawn(move || drop(runtime)).join()
-        {
-            tracing::error!(?panic, "High-priority runtime shutdown thread panicked");
-        }
-    }
-
-    fn shutdown_control_runtime(&mut self) {
-        if let Some(runtime) = self.control_runtime.take()
-            && let Err(panic) = std::thread::spawn(move || drop(runtime)).join()
-        {
-            tracing::error!(?panic, "Control runtime shutdown thread panicked");
-        }
-    }
-
-    fn shutdown_high_priority_runtime_detached(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take() {
-            let _ = std::thread::spawn(move || drop(runtime));
-        }
-    }
-
-    fn shutdown_control_runtime_detached(&mut self) {
-        if let Some(runtime) = self.control_runtime.take() {
-            let _ = std::thread::spawn(move || drop(runtime));
-        }
-    }
-
     /// Internal helper: wait on an external CancellationToken if present.
     /// If no external token was provided, this future never resolves.
     async fn wait_external_token(token: &Option<CancellationToken>) {
@@ -704,77 +353,8 @@ impl ServiceDaemon {
     pub async fn run_for_duration(mut self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
-        let daemon_token = self.cancellation_token.clone();
 
-        if let Err(err) = validate_dependency_graph(&self.services, PROVIDER_REGISTRY.iter()) {
-            return Err(ServiceError::InternalError(format!(
-                "provider dependency graph validation failed: {err}"
-            )));
-        }
-
-        if let Err(err) = self.eager_init_reachable_providers().await {
-            return Err(ServiceError::InternalError(format!(
-                "eager provider initialization failed: {err}"
-            )));
-        }
-
-        let control_runtime = if self.services.is_empty() {
-            None
-        } else {
-            Some(
-                self.ensure_control_runtime()
-                    .map_err(|err| ServiceError::InternalError(err.to_string()))?,
-            )
-        };
-        let high_priority_runtime = self
-            .ensure_high_priority_runtime()
-            .map_err(|err| ServiceError::InternalError(err.to_string()))?;
-
-        let standard_runtime = Handle::current();
-        if let Some(runtime) = control_runtime.as_ref() {
-            self.spawn_runtime_probe(runtime, RuntimeLane::Control);
-            self.spawn_adaptive_recommendation_loop(runtime);
-        }
-        self.spawn_runtime_probe(&standard_runtime, RuntimeLane::Standard);
-        if let Some(runtime) = high_priority_runtime.as_ref() {
-            self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
-        }
-
-        if let Some(control_runtime) = control_runtime.as_ref() {
-            let body_lanes = parts::BodyExecutionLanes {
-                standard: standard_runtime.clone(),
-                high_priority: high_priority_runtime.clone(),
-            };
-            for service in &self.services {
-                if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
-                    && body_lanes.high_priority.is_none()
-                {
-                    return Err(ServiceError::InternalError(format!(
-                        "HighPriority service '{}' is missing the shared high-priority runtime",
-                        service.name()
-                    )));
-                }
-
-                runner::spawn_service(parts::SpawnServiceParts {
-                    service_id: service.id,
-                    name: service.name(),
-                    run: service.entry.wrapper,
-                    watcher: service.entry.watcher,
-                    policy: test_policy,
-                    scheduling: service.entry.scheduling,
-                    supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime.clone()),
-                    body_lanes: body_lanes.clone(),
-                    body_lane_resolver: parts::BodyLaneResolver::default(),
-                    running_tasks: self.running_tasks.clone(),
-                    resources: self.resources.clone(),
-                    diagnostics: self.diagnostics.clone(),
-                    isolated_startup_permits: self.isolated_startup_permits.clone(),
-                    cancellation_token: service.cancellation_token.clone(),
-                    daemon_token: daemon_token.clone(),
-                })
-                .await;
-            }
-        }
+        self.run_simulation_startup(test_policy).await?;
 
         tokio::time::sleep(duration).await;
 
@@ -807,359 +387,6 @@ fn clone_service_descriptions(services: &[ServiceDescription]) -> Vec<ServiceDes
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// ServiceDaemonBuilder -- Infallible, zero-config default
-// ---------------------------------------------------------------------------
-
-/// Builder for constructing a `ServiceDaemon`.
-///
-/// The `.build()` method is **infallible** -- it always returns a valid daemon.
-pub struct ServiceDaemonBuilder {
-    registry: Option<Registry>,
-    restart_policy: RestartPolicy,
-    /// External cancellation token for hierarchical lifecycle management.
-    external_cancel_token: Option<CancellationToken>,
-    /// Type-erased trigger configuration overrides.
-    trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    scheduling_advisory_profile: SchedulingAdvisoryProfile,
-    isolated_startup_concurrency_limit: usize,
-    /// Infrastructure tags whose services are always included in the final
-    /// registry, regardless of the user-provided tag filters. Used by
-    /// `MockContext` to auto-include `log_service` in simulation tests.
-    infra_tags: Vec<&'static str>,
-    /// Pre-filled resources for simulation (only available with `simulation` feature).
-    #[cfg(feature = "simulation")]
-    resources: Option<Arc<DaemonResources>>,
-}
-
-impl ServiceDaemonBuilder {
-    fn new() -> Self {
-        Self {
-            registry: None,
-            restart_policy: RestartPolicy::default(),
-            external_cancel_token: None,
-            trigger_configs: DashMap::new(),
-            scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
-            isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
-            infra_tags: Vec::new(),
-            #[cfg(feature = "simulation")]
-            resources: None,
-        }
-    }
-
-    /// **[Simulation Only]** Creates an isolated builder with an empty registry.
-    ///
-    /// This prevents auto-discovery of statically registered services, ensuring
-    /// the simulation sandbox only runs explicitly added services.
-    #[cfg(feature = "simulation")]
-    pub(crate) fn new_isolated() -> Self {
-        Self {
-            registry: Some(
-                Registry::builder()
-                    .with_tag("__simulation_isolation__")
-                    .build(),
-            ),
-            restart_policy: RestartPolicy::default(),
-            external_cancel_token: None,
-            trigger_configs: DashMap::new(),
-            scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
-            isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
-            infra_tags: Vec::new(),
-            resources: None,
-        }
-    }
-
-    /// Use a pre-built `Registry` for service discovery.
-    ///
-    /// If not called, the daemon will automatically include all services
-    /// discovered via the static `SERVICE_REGISTRY` (linkme).
-    #[must_use]
-    pub fn with_registry(mut self, registry: Registry) -> Self {
-        self.registry = Some(registry);
-        self
-    }
-
-    /// Set a custom restart policy for the daemon.
-    #[must_use]
-    pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
-        self.restart_policy = policy;
-        self
-    }
-
-    /// Set the scheduling advisory profile.
-    ///
-    /// This controls advisory diagnostics emission only. It does not change
-    /// service lifecycle, declared scheduling modes, or body placement.
-    #[must_use]
-    pub fn with_scheduling_advisory_profile(mut self, profile: SchedulingAdvisoryProfile) -> Self {
-        self.scheduling_advisory_profile = profile;
-        self
-    }
-
-    /// Set the maximum number of isolated generations admitted to startup at once.
-    ///
-    /// This covers isolated startup allocation only: permit acquisition, OS
-    /// thread spawn, and private Tokio runtime creation. It does not limit how
-    /// many isolated generation bodies may keep running after startup.
-    #[must_use]
-    pub fn with_isolated_startup_concurrency_limit(mut self, limit: NonZeroUsize) -> Self {
-        self.isolated_startup_concurrency_limit = limit.get();
-        self
-    }
-
-    /// **[Simulation Only]** Inject pre-filled `DaemonResources` into the daemon.
-    ///
-    /// This allows `MockContext` to pre-populate shelf data, status plane entries,
-    /// and other resources before the daemon starts running services.
-    ///
-    /// # Safety
-    /// This method is gated behind the `simulation` feature to prevent misuse
-    /// in production environments.
-    #[cfg(feature = "simulation")]
-    #[must_use]
-    pub(crate) fn with_resources(mut self, resources: Arc<DaemonResources>) -> Self {
-        self.resources = Some(resources);
-        self
-    }
-
-    /// Link the daemon to an external `CancellationToken` for hierarchical
-    /// lifecycle management.
-    ///
-    /// When the external token is cancelled, the daemon will treat it as a
-    /// shutdown signal and begin graceful termination. Conversely, when the
-    /// daemon's [`shutdown()`](ServiceDaemon::shutdown) is called, it will
-    /// also cancel this token, propagating the signal to all other components
-    /// sharing it.
-    #[must_use]
-    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
-        self.external_cancel_token = Some(token);
-        self
-    }
-
-    /// Register a trigger-specific configuration override.
-    ///
-    /// The registered config can be retrieved at runtime via
-    /// [`context::trigger_config::<C>()`](crate::core::context::trigger_config).
-    /// This is how users override the defaults declared by trigger templates
-    /// (e.g. [`ScalingPolicy`](crate::models::ScalingPolicy)).
-    ///
-    /// This method can be called multiple times with different config types.
-    /// Each call replaces the previous registration for that type.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let mut daemon = ServiceDaemon::builder()
-    ///     .with_trigger_config(ScalingPolicy::builder()
-    ///         .initial_concurrency(4)
-    ///         .build())
-    ///     .build();
-    /// ```
-    #[must_use]
-    pub fn with_trigger_config<C: 'static + Clone + Send + Sync>(self, config: C) -> Self {
-        self.trigger_configs
-            .insert(TypeId::of::<C>(), Box::new(config));
-        self
-    }
-
-    /// Registers infrastructure tags whose services are always included,
-    /// regardless of the user-provided Registry's include filters.
-    ///
-    /// This is used internally by `MockContext` to auto-include framework
-    /// services (e.g., `log_service`) in simulation tests. The tagged services
-    /// are merged into the final service list in `build()`, deduplicated by
-    /// `ServiceId`.
-    #[must_use]
-    pub fn with_infra_tags(mut self, tags: &[&'static str]) -> Self {
-        self.infra_tags.extend_from_slice(tags);
-        self
-    }
-
-    /// Build the `ServiceDaemon`.
-    ///
-    /// This method is **infallible** -- it always returns a valid daemon.
-    /// If no registry was provided, all statically registered services are included.
-    ///
-    /// Provider dependency cycles are checked later in [`ServiceDaemon::run`]
-    /// (not here) so that `build()` stays allocation-only and non-blocking.
-    /// A cycle surfaces as a `tracing::error!` followed by `shutdown()`; users
-    /// observe the outcome via the daemon handle / status plane.
-    #[must_use]
-    pub fn build(self) -> ServiceDaemon {
-        let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
-        let mut services = registry.into_services();
-
-        // Merge infrastructure services that bypass tag filtering.
-        // Each infra tag is resolved against the global SERVICE_REGISTRY,
-        // and matching services are appended (deduplicated by ServiceId).
-        if !self.infra_tags.is_empty() {
-            let infra_services = Registry::builder()
-                .with_tags(self.infra_tags)
-                .build()
-                .into_services();
-            for svc in infra_services {
-                if !services.iter().any(|s| s.id == svc.id) {
-                    services.push(svc);
-                }
-            }
-        }
-
-        let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
-
-        #[cfg(feature = "simulation")]
-        let resources = self.resources.unwrap_or_else(|| {
-            DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()))
-        });
-        #[cfg(not(feature = "simulation"))]
-        let resources = DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()));
-        let diagnostics = resources.diagnostics.clone();
-
-        // Inject daemon-level trigger configs into the shared resources.
-        resources
-            .trigger_configs
-            .insert(TypeId::of::<RestartPolicy>(), Box::new(self.restart_policy));
-        for entry in self.trigger_configs {
-            resources.trigger_configs.insert(entry.0, entry.1);
-        }
-
-        ServiceDaemon {
-            services,
-            running_tasks: Arc::new(Mutex::new(HashMap::new())),
-            restart_policy: self.restart_policy,
-            cancellation_token: process_token().child_token(),
-            control_runtime: None,
-            high_priority_capacity,
-            high_priority_runtime: None,
-            runtime_probe_tasks: Vec::new(),
-            adaptive_recommendation_task: None,
-            scheduling_advisory_profile: self.scheduling_advisory_profile,
-            external_cancel_token: self.external_cancel_token,
-            resources,
-            diagnostics,
-            isolated_startup_permits: Arc::new(Semaphore::new(
-                self.isolated_startup_concurrency_limit,
-            )),
-        }
-    }
-}
-
-/// Validates the provider dependency graph for cycles.
-///
-/// Services themselves do not depend on each other; only providers depend on
-/// other providers. This function builds a directed graph where:
-/// - Services are included only as the **roots** that anchor reachability
-///   (service -> provider edges).
-/// - Providers are nodes; edges go from a provider to each of its dependency
-///   provider types.
-///
-/// `petgraph::algo::toposort` then reports any cycle as an error. On success,
-/// the dependency summary is logged for observability.
-///
-/// The `providers` iterator is injected (rather than read from the global
-/// `PROVIDER_REGISTRY`) so unit tests can exercise the cycle path without
-/// polluting the static slice.
-fn validate_dependency_graph<'a>(
-    services: &[ServiceDescription],
-    providers: impl IntoIterator<Item = &'a ProviderEntry>,
-) -> Result<(), ProviderInitError> {
-    let providers: Vec<&ProviderEntry> = providers.into_iter().collect();
-
-    let mut graph = DiGraph::<&str, ()>::new();
-    let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
-    let mut type_nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
-
-    // Phase 1: Service -> Provider edges (roots).
-    for service in services {
-        let svc_node = *service_nodes
-            .entry(service.name())
-            .or_insert_with(|| graph.add_node(service.name()));
-
-        for param in service.params() {
-            let type_node = *type_nodes
-                .entry(param.type_id)
-                .or_insert_with(|| graph.add_node(param.type_name));
-            graph.add_edge(svc_node, type_node, ());
-        }
-    }
-
-    // Phase 2: Provider -> Provider edges (cycle-bearing subgraph).
-    for provider in &providers {
-        let prov_node = *type_nodes
-            .entry(provider.type_id)
-            .or_insert_with(|| graph.add_node(provider.name));
-
-        for param in provider.params {
-            let dep_node = *type_nodes
-                .entry(param.type_id)
-                .or_insert_with(|| graph.add_node(param.type_name));
-            graph.add_edge(prov_node, dep_node, ());
-        }
-    }
-
-    match toposort(&graph, None) {
-        Ok(_order) => {
-            for service in services {
-                if !service.params().is_empty() {
-                    let dep_names: Vec<&str> =
-                        service.params().iter().map(|p| p.type_name).collect();
-                    info!(
-                        service = %service.name(),
-                        dependencies = ?dep_names,
-                        "Service dependency edge"
-                    );
-                }
-            }
-            for provider in &providers {
-                if !provider.params.is_empty() {
-                    let dep_names: Vec<&str> =
-                        provider.params.iter().map(|p| p.type_name).collect();
-                    info!(
-                        provider = %provider.name,
-                        dependencies = ?dep_names,
-                        "Provider dependency edge"
-                    );
-                }
-            }
-            info!(
-                total_services = services.len(),
-                total_providers = providers.len(),
-                total_graph_nodes = graph.node_count(),
-                total_graph_edges = graph.edge_count(),
-                "Provider dependency graph validated - no cycles detected"
-            );
-            Ok(())
-        }
-        Err(cycle_node) => {
-            let cycle_label = graph[cycle_node.node_id()];
-            let involved: Vec<&str> = graph
-                .node_indices()
-                .filter(|&n| {
-                    graph.contains_edge(n, cycle_node.node_id())
-                        || graph.contains_edge(cycle_node.node_id(), n)
-                })
-                .map(|n| graph[n])
-                .collect();
-
-            Err(provider_init_failure_into_error(
-                ProviderInitBoundaryContext::with_phase(
-                    cycle_label,
-                    ProviderRuntimePhase::FrameworkValidation,
-                    ProviderInitBoundaryKind::FrameworkValidation,
-                ),
-                ProviderInitFailure::fatal(
-                    cycle_label,
-                    format!(
-                        "Circular dependency detected in provider dependency graph. \
-                         Cycle involves '{cycle_label}', related nodes: {involved:?}. \
-                         This would deadlock at runtime; review the #[provider] chain for these types."
-                    ),
-                    ProviderInitSourceKind::FrameworkGraphValidation,
-                ),
-            ))
-        }
-    }
-}
-
 #[cfg(feature = "diagnostics")]
 fn emit_shutdown_topology() {
     if let Some(mermaid) = super::topology_collector::export_mermaid() {
@@ -1174,10 +401,14 @@ fn emit_shutdown_topology() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ServiceEntry, ServiceParam};
+    use crate::models::{
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceParam, ServiceScheduling,
+    };
     use crate::{TT::*, provider, service, trigger};
+    use std::any::TypeId;
     #[cfg(feature = "diagnostics")]
     use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicU32, Ordering};
     #[cfg(feature = "diagnostics")]
     use std::sync::{Arc, Mutex as StdMutex};
@@ -1191,6 +422,9 @@ mod tests {
     use tracing_subscriber::layer::Context;
     #[cfg(feature = "diagnostics")]
     use tracing_subscriber::prelude::*;
+
+    use super::provider_graph::validate_dependency_graph;
+    use super::runtime::ISOLATED_STARTUP_CONCURRENCY_LIMIT;
 
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {

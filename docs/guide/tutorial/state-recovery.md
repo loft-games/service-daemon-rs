@@ -133,7 +133,7 @@ INFO counter_service: Count is: 3
 To the user, it looks like an automatic update. To the developer, it's a clean state migration.
 
 > [!NOTE]
-> **Deep Dive**: To understand how the shelf handles type-erasure and thread-safety, check out the [State Management](../state-management.md) design document.
+> For shelf type-erasure and thread-safety details, see the [State Management](../state-management.md) design document.
 
 ## 3. Why this matters? (The Provider Update)
 

@@ -1,7 +1,7 @@
 //! Runtime behavioral topology collector.
 //!
 //! Gated behind the `diagnostics` feature, this module subscribes to the
-//! [`LogQueue`](super::logging::LogQueue) broadcast channel and aggregates
+//! [`LogQueue`](super::logging::model::LogQueue) broadcast channel and aggregates
 //! causal edges between services based on natively propagated `source_service_id`.
 //!
 //! # Architecture
@@ -40,7 +40,7 @@ use tracing::{debug, warn};
 
 use crate::models::{SERVICE_REGISTRY, ServiceId};
 
-use super::logging::{LogEvent, get_log_queue};
+use super::logging::model::{LogEvent, get_log_queue};
 
 // ---------------------------------------------------------------------------
 // Edge model
@@ -214,7 +214,7 @@ mod tests {
     use std::borrow::Cow;
     use uuid::Uuid;
 
-    use crate::core::logging::LogLevel;
+    use crate::core::logging::model::LogLevel;
 
     #[test]
     fn test_stateless_correlation() {

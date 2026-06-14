@@ -77,7 +77,7 @@ Provider helper signatures are part of the macro public contract and depend on d
 | Provider with DI dependencies | `Result<Arc<T>, ProviderInitError>` | Dependency resolution can fail, so the helper is fallible. |
 | Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
 | `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
-| Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Canonical opt-in to retryable/fatal provider-init semantics. |
+| Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Documented opt-in to retryable/fatal provider-init semantics. |
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.
 
@@ -161,6 +161,6 @@ Verification methods used:
 5.  **Lint Phase**: When the Lint Checker finally runs, the `sync_handler` string has already been "deleted" from the source. Since it's gone, no "unknown lint" warning is ever triggered.
 
 > [!NOTE]
-> **For maintainers**: This relies on `#[allow]` being an inert built-in attribute and the expansion-before-linting order. If a future Rust edition changes these rules (e.g., if `allow` becomes a proc-macro itself or if linting moves earlier), the ordering might become sensitive. Maintaining the "macro first, permit second" order is still recommended for maximum robustness.
+> **For maintainers**: This relies on `#[allow]` being an inert built-in attribute and the expansion-before-linting order. If a future Rust edition changes these rules (e.g., if `allow` becomes a proc-macro itself or if linting moves earlier), the ordering might become sensitive. Keeping the "macro first, permit second" order reduces dependence on compiler ordering details.
 
 [Back to README](../../README.md)

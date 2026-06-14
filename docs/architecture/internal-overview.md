@@ -88,6 +88,8 @@ The control plane runs supervisors, watchers, startup waves, reload, restart/bac
 
 During daemon construction, the final selected service list is also the source for HighPriority worker-count selection. The daemon counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and applies the result only when the shared high-priority runtime is lazily created.
 
+Internally, `core/service_daemon/` keeps the public daemon facade separate from the startup control plane. The facade owns `ServiceDaemon`, `ServiceDaemonHandle`, `run()`, `wait()`, and `shutdown()`, while sibling modules handle builder assembly, provider graph validation/eager initialization, runtime preparation, and startup orchestration.
+
 The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract and must happen through a cooperative generation boundary.
 
 ### 3.1. Public Boundary
@@ -123,14 +125,35 @@ The main internal modules are:
 
 ### `service-daemon`
 - **`core/service_daemon/`**: The core orchestrator.
+  - `mod.rs`: Public daemon facade and lifecycle entry points.
+  - `builder.rs`: `ServiceDaemonBuilder`, registry assembly, infra tag merge, trigger config injection, and simulation resource injection.
+  - `provider_graph.rs`: Provider dependency graph validation and reachable eager provider initialization.
+  - `runtime.rs`: Control/high-priority runtime preparation, runtime probes, adaptive recommendation task, and runtime shutdown helpers.
+  - `startup_pipeline.rs`: Startup validation, provider startup, runtime preparation, and wave orchestration handoff.
   - `policy.rs`: Resilience configuration (backoff, jitter).
-  - `runner.rs`: Lifecycle management (startup waves, supervision, graceful shutdown).
-- **`core/logging.rs`**: Logging and diagnostic event pipeline.
-  - **DaemonLayer**: Captures events through a non-blocking broadcast pipeline. It extracts causal context (UUID v7 Message ID, numeric Service ID, and Instance ID) for asynchronous tracing.
+  - `runner/mod.rs`: Runtime entry points for spawning and stopping services.
+  - `runner/supervisor.rs`: Per-service supervisor FSM, restart/backoff decisions, and generation outcome classification.
+  - `runner/generation.rs`: Standard/high-priority body lane execution and isolated runtime bridge handling.
+  - `runner/wave.rs`: Priority startup/shutdown wave orchestration.
+- **`core/logging/`**: Logging and diagnostic event pipeline.
+  - `mod.rs`: Public logging facade, subscriber initialization, and re-exports.
+  - `model.rs`: Log event model, broadcast queue, and batch-size configuration.
+  - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUID v7 Message ID, numeric Service ID, and Instance ID) for asynchronous tracing.
+  - `render.rs`: Console and feature-gated JSON rendering.
+  - `services.rs`: Console log drain service.
+  - `file.rs`: Feature-gated file logging configuration and drain service.
   - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID and numeric fields instead of heap-allocated strings.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
 - **`core/diagnostics.rs`**: Internal observation store for generation, service, and lane aggregates. Public APIs receive only distilled read-only snapshots.
-- **`core/trigger_runner.rs`**: Event loop driver and interceptor pipeline.
+- **`core/trigger_runner/`**: Event loop driver and interceptor pipeline.
+  - `mod.rs`: `TriggerRunner` construction and module boundary.
+  - `event_loop.rs`: host polling, transition handling, shutdown/reload event loop.
+  - `dispatch.rs`: dispatch context, interceptor trait, in-flight task observation, and chain builder.
+  - `failure.rs`: typed trigger dispatch failure taxonomy.
+  - `interceptors.rs`: built-in tracing and retry interceptors.
+  - `scaling.rs`: elastic scale monitor and pressure calculations.
+  - `drain.rs`: shutdown drain timeout/outcome recording.
+  - `message_id.rs`: UUID v7 trigger message id generation.
   - **Instance Reuse**: Hosts maintain internal state across iterations.
   - **Backpressure and concurrency**: Asynchronous dispatch with semaphore-based limits.
   - **Dispatch Ownership**: In-flight dispatch tasks are owned by the runner, so retry exhaustion, task errors, panics, and unexpected helper-task exits report back through the normal supervisor path instead of becoming detached log-only failures.
@@ -185,7 +208,7 @@ For practical usage and sandbox setup, see **[Testing & Troubleshooting](../guid
 
 Because of the automatic service discovery, testing a subsystem in a large project can lead to "Service Interference" where production services are unintentionally started during tests.
 
-**Best Practices:**
+**Test Setup:**
 1. **Use Tags**: Group services logically using `#[service(tags = ["core", "api"])]`.
 2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment. Register test services with unique tags via `#[service(tags = ["__my_test__"])]` and select them with `Registry::builder().with_tag("__my_test__").build()`.
 3. **ServiceId Safety**: The `ServiceDaemonBuilder` automatically detects `ServiceId` collisions at startup, preventing two services from competing for the same status plane slot.
@@ -201,4 +224,3 @@ The system uses a unified messaging layer for all cross-service events:
 - **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). Public user-defined interceptor registration is not exposed yet.
 
 [Back to README](../../README.md)
-

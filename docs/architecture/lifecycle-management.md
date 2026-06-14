@@ -30,6 +30,8 @@ Service supervisors, dependency watch construction, startup wave orchestration, 
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
 
+Startup control-plane code is split under `core/service_daemon/`: `provider_graph.rs` validates provider dependency cycles and runs reachable eager providers, `runtime.rs` prepares control/high-priority runtimes and probes, and `startup_pipeline.rs` sequences those steps before handing service startup to `runner/wave.rs`.
+
 HighPriority worker-count selection happens before runtime allocation and only reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the selected worker count. Pressure diagnostics remain advisory and do not rebuild or resize the runtime after creation.
 
 ### Scheduling Advisory and Generation Boundaries

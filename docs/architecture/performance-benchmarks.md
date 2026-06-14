@@ -188,7 +188,7 @@ Deep-dive measurements using `example-memory-analysis` confirmed:
 2.  **Allocation Metadata**: Small individual allocations (`Arc`, `Notify`, `CancellationToken`) each carry an allocation header (typically 8-16 B) used by the memory allocator (e.g., jemalloc/libc).
 3.  **Future Size**: The supervisor task's async future size depends on the local variables held across `.await` points, which is captured in the **Tokio Task Runtime** cost.
 
-#### Deep Dive: Why is DashMap Overhead ~139 B per Entry?
+#### Detail: Why is DashMap Overhead ~139 B per Entry?
 
 `DashMap` provides lock-free concurrent reads across 1,000+ services by
 sharding the map into multiple independent segments. Each entry pays for:

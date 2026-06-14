@@ -67,7 +67,7 @@ This shape is illustrative, not final API. The required semantic change is that 
 
 Current behavior:
 
-- `service-daemon/src/core/service_daemon/runner.rs` now uses an internal `GenerationExitRecord` with `GenerationResultKind` and `GenerationSignalFacts`.
+- `service-daemon/src/core/service_daemon/runner/supervisor.rs` now uses an internal `GenerationExitRecord` with `GenerationResultKind` and `GenerationSignalFacts`.
 - Reload is recorded as `signals.reload_requested` instead of overwriting recoverable errors, trigger dispatch failures, or panics.
 - Clean exit while reload is requested still projects to reload/restoring semantics.
 
@@ -277,7 +277,7 @@ Runtime contract tests assert:
 
 ## 10. Open decisions
 
-- Exact internal Rust type names and module placement. Current lifecycle helpers live in `service_daemon::runner` and `trigger_runner`; this may still be refactored before stabilization.
+- Exact internal Rust type names remain internal. Current lifecycle helpers live under `service_daemon::{builder,provider_graph,runtime,startup_pipeline,runner::{supervisor,generation,wave}}` and `trigger_runner::{event_loop,dispatch,drain,scaling,interceptors,failure,message_id}`; the `service_daemon::mod` file remains the public daemon facade.
 - Whether timeout values become public configuration.
 - Which shutdown residual actions are purely diagnostic and which should escalate.
 - Whether any future status-plane expansion is needed beyond the current compact lifecycle summaries.

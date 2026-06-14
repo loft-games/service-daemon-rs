@@ -44,7 +44,7 @@ runs every discovered service.
 | `shutdown(&self)` | No | Signals shutdown from elsewhere (another task, a handler). |
 | `run_for_duration(self, Duration) -> ServiceResult<()>` | Yes | **`#[cfg(feature = "simulation")]` only** — run, then auto-shutdown after the duration. For deterministic tests. |
 
-The canonical pairing is `run().await` then `wait().await?`. `run()` alone does
+The usual pairing is `run().await` then `wait().await?`. `run()` alone does
 not keep the process alive.
 
 ## 4. Wave ordering and priority

@@ -158,7 +158,7 @@ impl<P> TriggerContext<P> {
 // TriggerHandler -- unified async handler signature
 // ---------------------------------------------------------------------------
 
-/// The canonical function signature for trigger event handlers.
+/// Function signature used for trigger event handlers.
 ///
 /// Every trigger host invokes a handler of this shape, providing a
 /// `TriggerContext` with full traceability information.

@@ -66,7 +66,7 @@ impl fmt::Display for ServiceId {
 }
 
 // ---------------------------------------------------------------------------
-// InstanceId: Zero-allocation trigger instance identifier.
+// InstanceId: numeric trigger instance identifier.
 // Combines ServiceId + monotonic sequence for unique instance identification.
 // ---------------------------------------------------------------------------
 
