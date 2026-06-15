@@ -4,7 +4,7 @@
 
 **Manage the long-running loops in your tokio application.**
 
-`service-daemon-rs` lets you declare the independent loops your program runs -- their dependencies, startup/shutdown order, failure recovery, and signal handling -- so your `main.rs` doesn't grow into a 500-line `tokio::spawn` graveyard.
+`service-daemon-rs` lets you declare the independent loops your program runs -- their dependencies, startup/shutdown order, failure recovery, and signal handling -- so your `main.rs` does not become a large block of hand-written `tokio::spawn` orchestration.
 
 It earns its keep when your application has more than one long-running concern. Typical scenarios:
 
@@ -15,7 +15,7 @@ It earns its keep when your application has more than one long-running concern. 
 
 ## Why choose service-daemon?
 
-*   **Declarative orchestration** -- Describe services, triggers, providers, and their relationships with attributes like `#[service]` or `#[trigger(Cron(CleanupSchedule))]`, where trigger targets are provider types. No manual wiring in `main`, no spawn-and-pray.
+*   **Declarative orchestration** -- Describe services, triggers, providers, and their relationships with attributes like `#[service]` or `#[trigger(Cron(CleanupSchedule))]`, where trigger targets are provider types. No manual service list or ad hoc spawn supervision in `main`.
 *   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, scheduling lanes (`Standard`, `HighPriority`, `Isolated`), restart policies, graceful signal handling, early-binding TCP/Unix listeners -- the glue you'd otherwise rewrite per project.
 *   **Type-safe dependency injection** -- Resolved by Rust's type system. No runtime container, no string keys, no reflection. Discovery is linker-level via `linkme`.
 *   **Causal observability** -- UUID v7 message IDs propagate across services automatically. Optional **Mermaid** topology export visualizes the running system.
@@ -97,7 +97,7 @@ Documentation is split by audience.
 ### Tutorial
 *Recommended first path for new users.*
 
-- [Quick Start Tutorial](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) -- Best-practice path from the first service through triggers, state recovery, retries, scheduling, and simulation.
+- [Quick Start Tutorial](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) -- Tutorial path from the first service through triggers, state recovery, retries, scheduling, and simulation.
 
 ### User Guides
 *For people building applications on top of the framework who need complete usage references.*
@@ -113,7 +113,7 @@ Documentation is split by audience.
 
 - [Internal Overview](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) -- Registry design, linkme segments, DI resolution.
 - [Causal Tracing](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/causal-tracing.md) -- Causal identity across asynchronous trigger chains.
-- [Lifecycle Deep Dive](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md) -- Reload paths and supervisor internals.
+- [Lifecycle Internals](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/lifecycle-management.md) -- Reload paths and supervisor internals.
 - [Macro Expansion](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/macro-expansion.md) -- How `#[service]` / `#[trigger]` rewrite your code.
 
 ### Maintainer Notes
@@ -121,7 +121,7 @@ For contributors maintaining release validation and framework internals.
 
 - [Release Validation](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/release-validation.md) -- Feature-to-test matrix, linkme platform smoke coverage, dependency baseline, and example layers.
 
-For contribution workflow and maintainer-oriented development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
+For contribution workflow and development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 
 ---
 

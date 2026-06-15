@@ -18,7 +18,8 @@ mod trigger;
 // Internal Module Structure:
 // - trigger/: Macro logic for #[trigger]. Split into mod.rs (main), parser.rs (attributes), and codegen.rs (logic).
 // - service/: Macro logic for #[service]. Split into mod.rs (main) and codegen.rs (helpers).
-// - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, templates.rs (special types), and struct_gen.rs (DI).
+// - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, impls.rs,
+//   templates/ (special types), and struct_gen.rs (struct orchestration).
 
 /// Marks a function as a service managed by ServiceDaemon.
 ///

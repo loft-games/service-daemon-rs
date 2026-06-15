@@ -5,6 +5,7 @@
 //! - `templates`: Template generators for Notify, Queue.
 //! - `struct_gen`: Struct provider generation with field injection.
 
+mod impls;
 mod parser;
 mod struct_gen;
 mod templates;
@@ -16,8 +17,9 @@ use syn::spanned::Spanned;
 use syn::{Item, ItemFn, parse_macro_input};
 
 use crate::common::{WrapperKind, decompose_type, extract_sync_handler_flag};
+use impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 pub use parser::ProviderArgs;
-use struct_gen::{HelperStyle, generate_struct_provider};
+use struct_gen::generate_struct_provider;
 
 struct FallibleProviderReturn {
     ok_ty: syn::Type,
@@ -291,7 +293,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         HelperStyle::Infallible
     };
     let provider_origin = format!("#[provider] function {fn_name_str}");
-    let provided_impl = struct_gen::generate_provided_impl(struct_gen::ProvidedImplConfig {
+    let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
         user_span: return_type.span(),
