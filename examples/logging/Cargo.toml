@@ -3,6 +3,7 @@ name = "example-logging"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Logging example: demonstrates file-based log persistence with JSON rotation."
 
 [dependencies]

@@ -3,6 +3,7 @@ name = "example-unix-domain-socket"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Unix domain socket example: listener and connector provider templates."
 
 [dependencies]

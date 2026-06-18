@@ -3,6 +3,7 @@ name = "example-web-api"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Neutral Web API example: Axum service, listener provider, and maintenance trigger."
 
 [dependencies]

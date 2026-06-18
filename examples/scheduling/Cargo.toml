@@ -3,6 +3,7 @@ name = "examples-scheduling"
 version = "0.1.0"
 edition = "2021"
 publish = false
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
