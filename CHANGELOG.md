@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.5] - 2026-06-21
+
 ### Added
 
 - **Runtime Facts Snapshots**: Added read-only daemon, readiness, service, and trigger runtime snapshots, including trigger self-pressure access through `TriggerContext::pressure()`.
@@ -104,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MockContext` simulation support (feature-gated).
 - `#![deny(unsafe_code)]` across the entire crate.
 
-[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.4...HEAD
+[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.5...HEAD
+[0.1.0-alpha.5]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.2
