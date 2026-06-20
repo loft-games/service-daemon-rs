@@ -4,7 +4,8 @@ use futures::future::BoxFuture;
 use tracing::{Instrument, info, warn};
 
 use crate::core::context;
-use crate::models::policy::{BackoffController, RestartPolicy};
+use crate::core::runtime_facts::TriggerRuntimeFactsHandle;
+use crate::models::policy::BackoffController;
 use crate::models::trigger::{TriggerContext, TriggerMessage};
 
 use super::dispatch::{DispatchContext, Next, TriggerInterceptor};
@@ -66,7 +67,15 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
 
 /// Log the failure, record it in the backoff controller, and wait for the
 /// computed delay. Returns `false` when reload or shutdown interrupts the wait.
-async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> bool {
+async fn record_retry_failure(
+    backoff: &mut BackoffController,
+    error: Error,
+    runtime_facts: Option<&TriggerRuntimeFactsHandle>,
+) -> bool {
+    let error_message = error.to_string();
+    if let Some(runtime_facts) = runtime_facts {
+        runtime_facts.record_retry(error_message.clone());
+    }
     warn!(
         attempt = backoff.attempt_count() + 1,
         error = %error,
@@ -97,7 +106,7 @@ async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> 
 ///
 /// # Retry Behavior
 ///
-/// - Uses [`BackoffController`] with the policy from the [`TriggerRunner`].
+/// - Uses [`BackoffController`] with the dispatch-captured retry policy.
 /// - On handler failure, logs a warning and waits before retrying.
 /// - Respects shutdown signals during the backoff wait period.
 /// - On success, returns `Ok(())` immediately (no further retries).
@@ -108,10 +117,7 @@ async fn record_retry_failure(backoff: &mut BackoffController, error: Error) -> 
 /// each retry only clones the `Arc` pointer (not the business data). The
 /// `DispatchContext` itself is reconstructed for each retry attempt from
 /// the shared fields.
-pub(super) struct RetryInterceptor {
-    /// The backoff policy used for computing retry delays.
-    pub(super) policy: RestartPolicy,
-}
+pub(super) struct RetryInterceptor;
 
 impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
     fn intercept<'a>(
@@ -120,17 +126,20 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
         next: Next<'a, P>,
     ) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async move {
-            let mut backoff = BackoffController::new(self.policy);
-            let trigger_max_retries = self.policy.trigger_max_retries;
+            let retry_policy = ctx.retry_policy;
+            let mut backoff = BackoffController::new(retry_policy);
+            let trigger_max_retries = retry_policy.trigger_max_retries;
 
             // Preserve shared fields for reconstruction across retries
             let service_id = ctx.service_id;
             let source_id = ctx.source_id;
             let instance_seq = ctx.instance_seq;
+            let generation = ctx.generation;
             let message_id = ctx.message_id;
             let trigger_name = ctx.trigger_name;
             let payload = ctx.payload;
             let handler = ctx.handler;
+            let runtime_facts = ctx.runtime_facts;
 
             // First attempt: use the original `next` closure (enters the
             // interceptor chain below us)
@@ -138,14 +147,17 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                 service_id,
                 source_id,
                 instance_seq,
+                generation,
                 message_id,
                 trigger_name,
                 payload: payload.clone(),
                 handler: handler.clone(),
+                runtime_facts: runtime_facts.clone(),
+                retry_policy,
             };
 
             if let Err(e) = next(first_ctx).await {
-                if !record_retry_failure(&mut backoff, e).await {
+                if !record_retry_failure(&mut backoff, e, runtime_facts.as_ref()).await {
                     return Ok(());
                 }
             } else {
@@ -180,19 +192,20 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                     .into());
                 }
 
-                let retry_ctx = TriggerContext {
+                let retry_ctx = TriggerContext::new(
                     service_id,
+                    generation,
                     instance_seq,
-                    message: TriggerMessage {
+                    TriggerMessage {
                         message_id,
                         source_id,
                         timestamp: Utc::now(),
                         payload: payload.clone(),
                     },
-                };
+                );
 
                 if let Err(e) = (handler.clone())(retry_ctx).await {
-                    if !record_retry_failure(&mut backoff, e).await {
+                    if !record_retry_failure(&mut backoff, e, runtime_facts.as_ref()).await {
                         return Ok(());
                     }
                 } else {

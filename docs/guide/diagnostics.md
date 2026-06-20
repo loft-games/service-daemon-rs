@@ -159,6 +159,50 @@ Generation outcome logs include a compact summary of sleep/probe observations, r
 
 The public snapshot is a distilled read model. It does not expose `DiagnosticsStore`, diagnostics windows, recommendation fingerprints, evaluator thresholds, or mutation paths.
 
+### Runtime Facts and Readiness Snapshots
+
+Use runtime facts for health endpoints, debug pages, or operational checks that
+need current daemon state:
+
+```rust
+let handle = daemon.handle();
+
+let runtime = handle.runtime();
+let readiness = handle.runtime_readiness();
+let services = handle.runtime_services();
+let trigger = handle.runtime_trigger(trigger_service_id);
+```
+
+`DaemonRuntimeSnapshot` reports daemon identity, uptime, shutdown state, and
+registered service/trigger counts. `ServiceRuntimeSnapshot` reports service
+identity, declared scheduling, lifecycle status, generation, restart count, and
+recent lifecycle timing/error facts. `ReadinessSnapshot` groups services by
+status and carries recent errors. It does not compute an `is_ready` or degraded
+verdict; applications map the grouped facts to their own readiness contract.
+
+Trigger handlers can read self-scoped pressure without receiving a daemon-wide handle:
+
+```rust
+async fn on_event(ctx: TriggerContext<MyEvent>) -> anyhow::Result<()> {
+    if let Some(pressure) = ctx.pressure()
+        && pressure.in_flight >= pressure.current_limit
+    {
+        // Application code may skip optional work based on read-only facts.
+    }
+    Ok(())
+}
+```
+
+Trigger runtime snapshots include `in_flight`, `current_limit`,
+`available_permits`, dispatch/retry counters, recent success/error timestamps,
+and optional streaming pressure counters. They do not include application
+payloads, private application keys, or runtime handles.
+
+Runtime snapshots are read-only. A trigger that wants to react to pressure can
+submit a temporary overlay with
+`TriggerContext::request_policy_overlay(...)`; see
+[Queue concurrency](triggers.md#7-queue-concurrency-async-dispatch).
+
 ### Lifecycle Facts and Restart Decisions
 
 `last_exit_kind` describes why the previous recorded generation ended. `last_restart_decision` describes the most recent restart path the supervisor actually entered. Keeping these facts separate avoids making users infer restart meaning from delay values alone.

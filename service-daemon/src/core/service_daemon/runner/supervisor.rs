@@ -311,6 +311,7 @@ impl ServiceSupervisor {
                         | TriggerDispatchFailureKind::DispatchTaskError
                         | TriggerDispatchFailureKind::DispatchTaskCancelled
                         | TriggerDispatchFailureKind::DispatchPermitAcquireFailed
+                        | TriggerDispatchFailureKind::DispatchTimedOut
                         | TriggerDispatchFailureKind::ScaleMonitorFailed => (
                             RestartFailureKind::RecoverableError,
                             GenerationResultKind::RecoverableError,
@@ -403,6 +404,9 @@ impl ServiceSupervisor {
     pub(super) async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
         let RestartDecision::WithBackoff(failure_kind) = decision else {
             self.record_restart_decision(decision, Duration::ZERO, Duration::ZERO, false);
+            self.resources
+                .runtime_facts
+                .record_service_restart(self.service_id, None);
             self.backoff.record_success();
             self.restart_storm.reset();
             return true;
@@ -419,6 +423,9 @@ impl ServiceSupervisor {
             .restart_storm
             .record_failure(Instant::now(), self.backoff.current_delay());
         let restart_delay = storm_decision.effective_delay;
+        self.resources
+            .runtime_facts
+            .record_service_restart(self.service_id, Some(restart_delay));
         self.record_restart_decision(
             decision,
             storm_decision.policy_delay,
@@ -450,7 +457,11 @@ impl ServiceSupervisor {
             }
             _ = self.cancellation_token.cancelled() => {
                 info!("Service {} received shutdown signal during restart delay", self.name);
-                self.resources.status_plane.insert(self.service_id, ServiceStatus::Terminated);
+                let terminated = ServiceStatus::Terminated;
+                self.resources.status_plane.insert(self.service_id, terminated.clone());
+                self.resources
+                    .runtime_facts
+                    .record_service_status(self.service_id, &terminated);
                 self.resources.status_changed.notify_waiters();
                 return false;
             }
@@ -511,6 +522,11 @@ impl ServiceSupervisor {
             runtime_lane = ?runtime_lane,
             status = ?start_status,
             "Starting service generation"
+        );
+        self.resources.runtime_facts.record_service_started(
+            self.service_id,
+            self.generation,
+            &start_status,
         );
         self.resources
             .status_plane
@@ -713,9 +729,13 @@ impl ServiceSupervisor {
                 message = %message,
                 "Service generation outcome missing reload token"
             );
+            let recovering = ServiceStatus::Recovering(message);
             self.resources
                 .status_plane
-                .insert(self.service_id, ServiceStatus::Recovering(message));
+                .insert(self.service_id, recovering.clone());
+            self.resources
+                .runtime_facts
+                .record_service_status(self.service_id, &recovering);
             self.resources.status_changed.notify_waiters();
             return SupervisorState::Restart(RestartDecision::WithBackoff(
                 RestartFailureKind::InternalSupervisorError,
@@ -783,12 +803,18 @@ impl ServiceSupervisor {
         }
 
         if !exit_record.should_restart {
+            self.resources
+                .runtime_facts
+                .record_service_status(self.service_id, &exit_record.next_status);
             info!("Service {} marked as fatal, not restarting", self.name);
             return self.terminate();
         }
         self.resources
             .status_plane
             .insert(self.service_id, exit_record.next_status.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(self.service_id, &exit_record.next_status);
         self.resources.status_changed.notify_waiters();
 
         if matches!(
@@ -832,9 +858,13 @@ impl ServiceSupervisor {
             elapsed_ms = self.generation_start.map(|start| duration_millis(start.elapsed())),
             "Service generation terminated"
         );
+        let terminated = ServiceStatus::Terminated;
         self.resources
             .status_plane
-            .insert(self.service_id, ServiceStatus::Terminated);
+            .insert(self.service_id, terminated.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(self.service_id, &terminated);
         self.resources.status_changed.notify_waiters();
         SupervisorState::Terminated
     }

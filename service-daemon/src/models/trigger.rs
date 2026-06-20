@@ -48,6 +48,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::policy::{RestartPolicy, ScalingPolicy};
+use super::policy::{TriggerPolicyOverlay, TriggerPolicyOverlayError};
+use super::runtime::TriggerPressureSnapshot;
 use super::service::{InstanceId, ServiceId};
 use crate::core::context;
 use crate::core::trigger_runner::TriggerRunner;
@@ -135,6 +137,8 @@ pub struct TriggerMessage<P> {
 pub struct TriggerContext<P> {
     /// The `ServiceId` of the trigger service that captured this event.
     pub service_id: ServiceId,
+    /// Service generation that owns this trigger handler invocation.
+    pub generation: u64,
     /// Monotonically increasing sequence number within this trigger service.
     pub instance_seq: u64,
     /// The incoming message that triggered this invocation.
@@ -142,6 +146,24 @@ pub struct TriggerContext<P> {
 }
 
 impl<P> TriggerContext<P> {
+    /// Creates a trigger context for a specific service generation.
+    ///
+    /// Most users receive contexts from the framework. Custom trigger engines
+    /// and tests should use this constructor instead of struct literals.
+    pub fn new(
+        service_id: ServiceId,
+        generation: u64,
+        instance_seq: u64,
+        message: TriggerMessage<P>,
+    ) -> Self {
+        Self {
+            service_id,
+            generation,
+            instance_seq,
+            message,
+        }
+    }
+
     /// Produces a hierarchical instance identifier (e.g. `svc#1:42`).
     ///
     /// This links the handler invocation to a specific trigger service and
@@ -151,6 +173,29 @@ impl<P> TriggerContext<P> {
     /// of a heap-allocated `String`.
     pub fn trigger_instance_id(&self) -> InstanceId {
         InstanceId::new(self.service_id, self.instance_seq)
+    }
+
+    /// Returns read-only pressure facts for this trigger service.
+    ///
+    /// The snapshot is scoped to the current trigger service.
+    pub fn pressure(&self) -> Option<TriggerPressureSnapshot> {
+        context::current_trigger_pressure(self.service_id)
+    }
+
+    /// Request a temporary policy overlay for this trigger service.
+    ///
+    /// The framework scopes the request by this context's service id and
+    /// generation. Accepted overlays affect future dispatch boundaries.
+    pub fn request_policy_overlay(
+        &self,
+        overlay: TriggerPolicyOverlay,
+    ) -> Result<(), TriggerPolicyOverlayError> {
+        context::request_trigger_policy_overlay(self.service_id, self.generation, overlay)
+    }
+
+    /// Clear the current temporary policy overlay for this trigger service.
+    pub fn clear_policy_overlay(&self, reason: &str) -> Result<(), TriggerPolicyOverlayError> {
+        context::clear_trigger_policy_overlay(self.service_id, self.generation, reason)
     }
 }
 
@@ -391,4 +436,30 @@ pub mod TT {
     pub use crate::core::triggers::WatchHost;
     pub use crate::core::triggers::WatchHost as State;
     pub use crate::core::triggers::WatchHost as Watch;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_context_new_preserves_identity_fields() {
+        let message = TriggerMessage {
+            message_id: Uuid::now_v7(),
+            source_id: ServiceId::new(7),
+            timestamp: Utc::now(),
+            payload: Arc::new("payload"),
+        };
+
+        let ctx = TriggerContext::new(ServiceId::new(42), 11, 3, message);
+
+        assert_eq!(ctx.service_id, ServiceId::new(42));
+        assert_eq!(ctx.generation, 11);
+        assert_eq!(ctx.instance_seq, 3);
+        assert_eq!(ctx.message.source_id, ServiceId::new(7));
+        assert_eq!(
+            ctx.trigger_instance_id(),
+            InstanceId::new(ServiceId::new(42), 3)
+        );
+    }
 }

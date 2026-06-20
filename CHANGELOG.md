@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Runtime Facts Snapshots**: Added read-only daemon, readiness, service, and trigger runtime snapshots, including trigger self-pressure access through `TriggerContext::pressure()`.
+- **Trigger Policy Overlays**: Added temporary trigger policy overlays through `TriggerContext::request_policy_overlay(...)` and `clear_policy_overlay(...)` for future-dispatch concurrency, timeout, and retry/backoff.
+- **Trigger Context Constructor**: Added `TriggerContext::new(...)` for custom trigger engines and tests.
 - **Public Diagnostics Snapshot**: Added read-only diagnostics snapshots with lifecycle facts, restart decisions, runtime-lane observations, bounded generation details, and Standard-lane interpretation hints.
 - **Scheduling Advisory Controls**: Added `SchedulingAdvisoryProfile` so applications can suppress advisory diagnostics without changing lifecycle or body placement.
 - **Provider Scope Ownership**: Added daemon-scoped provider ownership, binding epochs, and simulation override behavior so reload propagation can distinguish root, local, and override bindings.
@@ -24,10 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider Initialization Boundaries**: Clarified `ProviderError` versus `ProviderInitError`, preserved provider-init source classification in tracing/tests, and kept fatal, timeout, cancellation, panic, and dependency-provider failures distinct.
 - **Scheduling Runtime**: Split supervision/control-plane work from service and trigger body execution lanes, added HighPriority worker-count selection from final registry entries, and kept advisory analysis read-only.
 - **Trigger Supervision**: Improved trigger dispatch observability so retry exhaustion, infrastructure errors, panics, reload, and shutdown produce distinct lifecycle/restart signals.
+- **Trigger Context Identity**: `TriggerContext` now carries the owning service generation. Manual struct literals should migrate to `TriggerContext::new(service_id, generation, instance_seq, message)` during the alpha API window.
+- **Trigger Policy Overlay Contract**: Clarified temporary overlays as generation-scoped desired state for future dispatch scheduling. Concurrency is reconciled at runner scheduling boundaries; already captured timeout and retry policy are unchanged.
 - **Logging Initialization**: Made logging initialization safe to call repeatedly and tightened log batch-size validation.
 
 ### Fixed
 
+- **Runtime Facts Timeline**: Cleared stale `healthy_since` values when services leave `Healthy` and recorded recover/shutdown/termination boundaries consistently in service runtime facts.
 - **Provider Reload Scope**: Made provider dependency reload generation-scoped so binding/value changes reload the affected generation without leaking across daemon boundaries.
 - **Public API Boundaries**: Reduced accidental public surface area and tightened macro/runtime checks for invalid parameters and unsupported capacity values.
 - **Panic Path Reduction**: Reworked several public-facing error paths to return structured errors instead of relying on panic behavior.

@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::diagnostics::{DiagnosticsStore, GenerationDiagnosticsHandle};
 use crate::core::provider_scope::ProviderScope;
+use crate::core::runtime_facts::RuntimeFactsStore;
+use crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore;
 use crate::models::{ServiceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
@@ -60,6 +62,8 @@ pub struct DaemonResources {
     pub trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
     pub(crate) diagnostics: Arc<DiagnosticsStore>,
     pub(crate) provider_scope: Arc<ProviderScope>,
+    pub(crate) runtime_facts: Arc<RuntimeFactsStore>,
+    pub(crate) trigger_policy_overlays: Arc<TriggerPolicyOverlayStore>,
 }
 
 impl DaemonResources {
@@ -78,6 +82,8 @@ impl DaemonResources {
             trigger_configs: DashMap::new(),
             diagnostics,
             provider_scope: ProviderScope::new_daemon_scope(),
+            runtime_facts: Arc::new(RuntimeFactsStore::new()),
+            trigger_policy_overlays: Arc::new(TriggerPolicyOverlayStore::default()),
         })
     }
 }

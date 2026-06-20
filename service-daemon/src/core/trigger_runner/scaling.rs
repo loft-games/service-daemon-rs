@@ -51,6 +51,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let semaphore = self.semaphore.clone();
         let current_limit = self.current_limit.clone();
         let trigger_name = self.name;
+        let service_id = self.service_id;
+        let generation = self.generation;
+        let policy_overlays = self.policy_overlays.clone();
 
         tokio::spawn(async move {
             // Track how long the queue has been idle (all permits available)
@@ -62,30 +65,58 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 let limit = current_limit.load(Ordering::Relaxed);
                 let available = semaphore.available_permits();
                 let in_flight = limit.saturating_sub(available);
+                let effective_max = policy_overlays.as_ref().map_or_else(
+                    || scaling.max_concurrency(),
+                    |store| {
+                        store.effective_concurrency_limit(
+                            service_id,
+                            generation,
+                            scaling.max_concurrency(),
+                        )
+                    },
+                );
 
                 if in_flight == 0 {
                     idle_since.get_or_insert_with(Instant::now);
-                    Self::try_scale_down(
-                        &semaphore,
-                        &current_limit,
-                        &scaling,
-                        trigger_name,
-                        limit,
-                        &mut idle_since,
-                    );
+                    if let Some(store) = &policy_overlays {
+                        let base_target = Self::scale_down_target(
+                            &scaling,
+                            limit,
+                            effective_max,
+                            &mut idle_since,
+                        );
+                        store.reconcile_effective_concurrency(service_id, generation, base_target);
+                    } else {
+                        Self::try_scale_down(
+                            &semaphore,
+                            &current_limit,
+                            &scaling,
+                            trigger_name,
+                            limit,
+                            effective_max,
+                            &mut idle_since,
+                        );
+                    }
                     continue;
                 }
 
                 // --- Path B: Active handlers present ---
                 idle_since = None;
-                Self::try_scale_up(
-                    &semaphore,
-                    &current_limit,
-                    &scaling,
-                    trigger_name,
-                    limit,
-                    in_flight,
-                );
+                if let Some(store) = &policy_overlays {
+                    let base_target =
+                        Self::scale_up_target(&scaling, limit, in_flight, effective_max);
+                    store.reconcile_effective_concurrency(service_id, generation, base_target);
+                } else {
+                    Self::try_scale_up(
+                        &semaphore,
+                        &current_limit,
+                        &scaling,
+                        trigger_name,
+                        limit,
+                        in_flight,
+                        effective_max,
+                    );
+                }
             }
         })
     }
@@ -133,18 +164,18 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         scaling: &ScalingPolicy,
         trigger_name: &str,
         limit: usize,
+        effective_max: usize,
         idle_since: &mut Option<Instant>,
-    ) {
-        let Some(since) = *idle_since else { return };
-        let initial = scaling.initial_concurrency();
-        if since.elapsed() < scaling.scale_cooldown() || limit <= initial {
-            return;
+    ) -> usize {
+        let target = Self::scale_down_target(scaling, limit, effective_max, idle_since);
+        if target >= limit {
+            return target;
         }
 
         // Physically revoke excess permits by acquiring and forgetting them.
         // `forget()` permanently reduces the semaphore capacity, ensuring
         // `dispatch` cannot acquire more permits than `initial_concurrency`.
-        let to_revoke = limit.saturating_sub(initial);
+        let to_revoke = limit.saturating_sub(target);
         let mut revoked = 0usize;
         for _ in 0..to_revoke {
             match semaphore.try_acquire() {
@@ -167,6 +198,25 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             revoked
         );
         *idle_since = None;
+        new_limit
+    }
+
+    fn scale_down_target(
+        scaling: &ScalingPolicy,
+        limit: usize,
+        effective_max: usize,
+        idle_since: &mut Option<Instant>,
+    ) -> usize {
+        let Some(since) = *idle_since else {
+            return limit.min(effective_max).max(1);
+        };
+        let initial = scaling.initial_concurrency().min(effective_max).max(1);
+        if since.elapsed() < scaling.scale_cooldown() || limit <= initial {
+            limit.min(effective_max).max(1)
+        } else {
+            *idle_since = None;
+            initial
+        }
     }
 
     pub(super) fn pressure_limit_for(limit: usize, threshold: usize) -> usize {
@@ -193,21 +243,11 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         trigger_name: &str,
         limit: usize,
         in_flight: usize,
-    ) {
-        if limit >= scaling.max_concurrency() {
-            return;
-        }
-
-        let pressure_limit = Self::pressure_limit_for(limit, scaling.scale_threshold());
-
-        if in_flight < pressure_limit {
-            return;
-        }
-
-        let new_limit = Self::next_scaled_limit(limit, scaling);
-
+        effective_max: usize,
+    ) -> usize {
+        let new_limit = Self::scale_up_target(scaling, limit, in_flight, effective_max);
         if new_limit <= limit {
-            return;
+            return new_limit;
         }
 
         let added = new_limit - limit;
@@ -221,6 +261,27 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             "Elastic scale-up: added {} permits",
             added
         );
+        new_limit
+    }
+
+    fn scale_up_target(
+        scaling: &ScalingPolicy,
+        limit: usize,
+        in_flight: usize,
+        effective_max: usize,
+    ) -> usize {
+        let max_concurrency = scaling.max_concurrency().min(effective_max).max(1);
+        if limit >= max_concurrency {
+            return limit.min(max_concurrency).max(1);
+        }
+
+        let pressure_limit = Self::pressure_limit_for(limit, scaling.scale_threshold());
+
+        if in_flight < pressure_limit {
+            return limit.min(max_concurrency).max(1);
+        }
+
+        Self::next_scaled_limit(limit, scaling).min(max_concurrency)
     }
 }
 
@@ -278,6 +339,7 @@ mod tests {
             "test_trigger",
             1,
             1,
+            scaling.max_concurrency(),
         );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 2);
@@ -290,6 +352,7 @@ mod tests {
             "test_trigger",
             2,
             2,
+            scaling.max_concurrency(),
         );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 4);
@@ -315,6 +378,7 @@ mod tests {
             "test_trigger",
             1,
             1,
+            scaling.max_concurrency(),
         );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 3);
@@ -346,6 +410,7 @@ mod tests {
             &scaling,
             "test_trigger",
             4, // current limit
+            scaling.max_concurrency(),
             &mut idle_since,
         );
 
@@ -385,6 +450,7 @@ mod tests {
             &scaling,
             "test_trigger",
             4,
+            scaling.max_concurrency(),
             &mut idle_since,
         );
 
@@ -403,6 +469,7 @@ mod tests {
             "test_trigger",
             2, // current limit
             2, // in_flight (100% pressure)
+            scaling.max_concurrency(),
         );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 4);
@@ -467,6 +534,7 @@ mod tests {
             "test_trigger",
             0,
             0,
+            scaling.max_concurrency(),
         );
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 0);

@@ -27,6 +27,25 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         T: Send + Sync + 'static,
         H: TriggerHost<T, Payload = P>,
     {
+        struct OverlayGenerationGuard {
+            store: Option<Arc<crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore>>,
+            service_id: crate::models::ServiceId,
+            generation: u64,
+        }
+
+        impl Drop for OverlayGenerationGuard {
+            fn drop(&mut self) {
+                if let Some(store) = &self.store {
+                    store.remove_trigger_generation(self.service_id, self.generation);
+                }
+            }
+        }
+
+        let _overlay_generation_guard = OverlayGenerationGuard {
+            store: self.policy_overlays.clone(),
+            service_id: self.service_id,
+            generation: self.generation,
+        };
         let mut in_flight = InFlightDispatches::new();
         let mut scale_monitor = self.scale_monitor_future();
         let mut drain_timeout: BoxFuture<'static, TriggerDrainOutcome> =

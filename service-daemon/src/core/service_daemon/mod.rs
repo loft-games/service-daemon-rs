@@ -41,8 +41,9 @@ use crate::core::diagnostics::DiagnosticsStore;
 #[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
-    DaemonDiagnosticsSnapshot, Result as ServiceResult, SchedulingAdvisoryProfile,
-    ServiceDescription, ServiceId, ServiceStatus,
+    DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
+    SchedulingAdvisoryProfile, ServiceDescription, ServiceId, ServiceRuntimeSnapshot,
+    ServiceStatus, TriggerRuntimeSnapshot,
 };
 
 pub use builder::ServiceDaemonBuilder;
@@ -59,6 +60,7 @@ use startup_pipeline::StartupError;
 pub struct ServiceDaemonHandle {
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
+    shutdown_token: CancellationToken,
 }
 
 impl ServiceDaemonHandle {
@@ -74,6 +76,52 @@ impl ServiceDaemonHandle {
     /// Return a read-only snapshot of daemon diagnostics.
     pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
         self.diagnostics.snapshot().into()
+    }
+
+    /// Return read-only daemon runtime facts.
+    pub fn runtime(&self) -> DaemonRuntimeSnapshot {
+        self.resources
+            .runtime_facts
+            .daemon_snapshot(self.shutdown_token.is_cancelled())
+    }
+
+    /// Return a facts-only readiness grouping.
+    pub fn runtime_readiness(&self) -> ReadinessSnapshot {
+        self.resources
+            .runtime_facts
+            .readiness_snapshot(|service_id| self.status_for_snapshot(service_id))
+    }
+
+    /// Return read-only runtime facts for all registered services.
+    pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
+        self.resources
+            .runtime_facts
+            .service_snapshots(|service_id| self.status_for_snapshot(service_id))
+    }
+
+    /// Return read-only runtime facts for a service.
+    pub fn runtime_service(&self, id: ServiceId) -> Option<ServiceRuntimeSnapshot> {
+        self.resources
+            .runtime_facts
+            .service_snapshot(id, |service_id| self.status_for_snapshot(service_id))
+    }
+
+    /// Return read-only runtime facts for all observed triggers.
+    pub fn runtime_triggers(&self) -> Vec<TriggerRuntimeSnapshot> {
+        self.resources.runtime_facts.trigger_snapshots()
+    }
+
+    /// Return read-only runtime facts for an observed trigger.
+    pub fn runtime_trigger(&self, id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+        self.resources.runtime_facts.trigger_snapshot(id)
+    }
+
+    fn status_for_snapshot(&self, id: ServiceId) -> ServiceStatus {
+        self.resources
+            .status_plane
+            .get(&id)
+            .map(|status| status.clone())
+            .unwrap_or(ServiceStatus::Initializing)
     }
 }
 
@@ -152,6 +200,7 @@ impl ServiceDaemon {
         ServiceDaemonHandle {
             resources: self.resources.clone(),
             diagnostics: self.diagnostics.clone(),
+            shutdown_token: self.cancellation_token.clone(),
         }
     }
 
@@ -163,6 +212,36 @@ impl ServiceDaemon {
     /// Return a read-only snapshot of daemon diagnostics.
     pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
         self.diagnostics.snapshot().into()
+    }
+
+    /// Return read-only daemon runtime facts.
+    pub fn runtime(&self) -> DaemonRuntimeSnapshot {
+        self.handle().runtime()
+    }
+
+    /// Return a facts-only readiness grouping.
+    pub fn runtime_readiness(&self) -> ReadinessSnapshot {
+        self.handle().runtime_readiness()
+    }
+
+    /// Return read-only runtime facts for all registered services.
+    pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
+        self.handle().runtime_services()
+    }
+
+    /// Return read-only runtime facts for a service.
+    pub fn runtime_service(&self, id: ServiceId) -> Option<ServiceRuntimeSnapshot> {
+        self.handle().runtime_service(id)
+    }
+
+    /// Return read-only runtime facts for all observed triggers.
+    pub fn runtime_triggers(&self) -> Vec<TriggerRuntimeSnapshot> {
+        self.handle().runtime_triggers()
+    }
+
+    /// Return read-only runtime facts for an observed trigger.
+    pub fn runtime_trigger(&self, id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+        self.handle().runtime_trigger(id)
     }
 
     /// Start the daemon in the background (non-blocking).
@@ -959,6 +1038,72 @@ mod tests {
             .insert(ServiceId(0), ServiceStatus::Healthy);
         let status = handle.get_service_status(&ServiceId(0)).await;
         assert_eq!(status, ServiceStatus::Healthy);
+    }
+
+    #[test]
+    fn runtime_snapshots_are_available_from_daemon_and_handle() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        daemon.services = vec![
+            test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
+            test_service(1, &STANDARD_TEST_ENTRY),
+        ];
+        daemon
+            .resources
+            .runtime_facts
+            .register_services(&daemon.services);
+        daemon
+            .resources
+            .status_plane
+            .insert(ServiceId::new(1), ServiceStatus::Healthy);
+        daemon.resources.status_plane.insert(
+            ServiceId::new(2),
+            ServiceStatus::Recovering("temporary failure".to_owned()),
+        );
+
+        let daemon_runtime = daemon.runtime();
+        let handle = daemon.handle();
+        let handle_runtime = handle.runtime();
+        assert_eq!(daemon_runtime.daemon_id, handle_runtime.daemon_id);
+        assert_eq!(handle_runtime.service_count, 2);
+        assert!(!handle_runtime.shutdown_requested);
+
+        let services = handle.runtime_services();
+        assert_eq!(
+            services
+                .iter()
+                .map(|snapshot| snapshot.service_id)
+                .collect::<Vec<_>>(),
+            vec![ServiceId::new(1), ServiceId::new(2)]
+        );
+        assert_eq!(
+            handle
+                .runtime_service(ServiceId::new(1))
+                .map(|snapshot| snapshot.status),
+            Some(ServiceStatus::Healthy)
+        );
+        assert!(handle.runtime_service(ServiceId::new(999)).is_none());
+
+        let readiness = handle.runtime_readiness();
+        assert_eq!(readiness.healthy.len(), 1);
+        assert_eq!(readiness.recovering.len(), 1);
+        assert_eq!(readiness.recent_errors.len(), 1);
+        assert_eq!(readiness.recent_errors[0].message, "temporary failure");
+    }
+
+    #[test]
+    fn runtime_snapshot_reports_shutdown_requested() {
+        setup_tracing();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let handle = daemon.handle();
+
+        assert!(!handle.runtime().shutdown_requested);
+        daemon.shutdown();
+        assert!(handle.runtime().shutdown_requested);
     }
 
     #[test]

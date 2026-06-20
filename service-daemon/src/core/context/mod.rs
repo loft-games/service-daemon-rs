@@ -28,7 +28,12 @@ pub use api::{
     __run_service_scope, current_cancellation_token, current_service_id, done, is_shutdown, shelve,
     shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
 };
-pub(crate) use api::{current_daemon_diagnostics, current_generation_diagnostics};
+pub(crate) use api::{
+    clear_trigger_policy_overlay, current_daemon_diagnostics, current_generation_diagnostics,
+    current_service_generation, current_trigger_pressure, effective_trigger_policy,
+    register_current_trigger_policy_overlay, register_current_trigger_runtime,
+    request_trigger_policy_overlay,
+};
 
 #[cfg(feature = "simulation")]
 pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};

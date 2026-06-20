@@ -10,6 +10,7 @@ pub(crate) enum TriggerDispatchFailureKind {
     DispatchTaskPanic,
     DispatchTaskCancelled,
     DispatchPermitAcquireFailed,
+    DispatchTimedOut,
     ScaleMonitorFailed,
 }
 
@@ -21,6 +22,7 @@ impl TriggerDispatchFailureKind {
             Self::DispatchTaskPanic => "dispatch_task_panic",
             Self::DispatchTaskCancelled => "dispatch_task_cancelled",
             Self::DispatchPermitAcquireFailed => "dispatch_permit_acquire_failed",
+            Self::DispatchTimedOut => "dispatch_timed_out",
             Self::ScaleMonitorFailed => "scale_monitor_failed",
         }
     }

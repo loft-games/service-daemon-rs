@@ -92,6 +92,26 @@ Internally, `core/service_daemon/` keeps the public daemon facade separate from 
 
 The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract and must happen through a cooperative generation boundary.
 
+Runtime facts are a separate read-only operational plane. `core::runtime_facts`
+is owned by `DaemonResources` and combines service metadata from the final
+registry, lifecycle facts from the supervisor/context handshake, and trigger
+pressure counters from `TriggerRunner`. `ServiceDaemonHandle` exposes owned
+snapshots for daemon facts, readiness grouping, service facts, and trigger facts.
+The snapshots copy facts out of the runtime; they do not expose status-plane
+guards, semaphores, diagnostics stores, or policy handles.
+
+The first runtime-facts surface is keyed by `ServiceId`. Trigger host and target
+labels are omitted because stable host/target metadata would require a separate
+registry contract. Status subscription is also separate from this surface: the
+current `status_changed` signal is a lossy `Notify`, not a sequenced status
+stream.
+
+Trigger policy overlays live beside runtime facts but use a different contract.
+`TriggerContext::request_policy_overlay(...)` records a generation-scoped desired
+overlay; runner scheduling boundaries reconcile concurrency, timeout, and retry
+policy for later dispatches. Generation cleanup and TTL expiry remove the overlay
+without changing the trigger's base policy.
+
 ### 3.1. Public Boundary
 
 | Surface | Boundary |
@@ -100,6 +120,9 @@ The diagnostics analyzer is internal and recommendation-first. It reads windowed
 | Macro `scheduling = ...` | Accepts only `Standard`, `HighPriority`, or `Isolated`; there is no `Auto` or `Control` user-facing mode. |
 | `ServiceEntry` | Public metadata surface. It does not carry experimental restart policy or scheduling hint fields. |
 | `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
+| `DaemonRuntimeSnapshot`, `ReadinessSnapshot`, service runtime snapshots, and trigger runtime snapshots | Public read-only operational facts copied out of runtime state. |
+| `TriggerContext::pressure()` | Self-scoped read-only trigger pressure facts for the current trigger service. |
+| `TriggerContext::request_policy_overlay(...)` / `clear_policy_overlay(...)` | Temporary trigger policy overlay scoped by the current service generation; overlays require TTL, reason, bounds validation, and generation cleanup. |
 | Provider root fallback | Public helper behavior for `T::resolve()` outside daemon context; it is a convenience path, not the owner of every daemon's effective provider binding. |
 | Daemon provider scope / slot ids / binding epochs | Internal ownership model used for cache scope and reload propagation. IDs are not exposed as stable public API. |
 | Simulation provider override | Feature-gated testing surface that installs daemon-local provider bindings; no production override API is exposed. |
@@ -218,7 +241,7 @@ Because of the automatic service discovery, testing a subsystem in a large proje
 The system uses a unified messaging layer for all cross-service events:
 
 - **TriggerMessage**: Encapsulates the payload with a **UUID v7** `message_id` and a `source_id` (the publishing service).
-- **TriggerContext**: Provides execution-specific identity, including the current `service_id` and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`.
+- **TriggerContext**: Provides execution-specific identity, including the current `service_id`, generation, and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`. Custom trigger engines that construct contexts manually must preserve that identity.
 - **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI resolution.
 - **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context (Source, Message, and Instance). The runner also owns in-flight dispatch observation so completed failures and panics return to the service supervisor.
 - **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). Public user-defined interceptor registration is not exposed yet.

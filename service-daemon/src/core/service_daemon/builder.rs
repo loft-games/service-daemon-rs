@@ -216,6 +216,7 @@ impl ServiceDaemonBuilder {
         #[cfg(not(feature = "simulation"))]
         let resources = DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()));
         let diagnostics = resources.diagnostics.clone();
+        resources.runtime_facts.register_services(&services);
 
         // Inject daemon-level trigger configs into the shared resources.
         resources

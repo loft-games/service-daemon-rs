@@ -9,15 +9,23 @@ use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, Servi
 use std::any::{Any, TypeId};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 
 use crate::core::diagnostics::{
     DiagnosticsStore, GenerationDiagnosticsHandle, SleepExitReason, SleepObservation,
     SleepObservationSource,
 };
 use crate::core::provider_scope::ProviderScope;
-use crate::models::{ServiceId, ServiceStatus};
+use crate::core::runtime_facts::TriggerRuntimeFactsHandle;
+use crate::core::trigger_policy_overlay::{
+    EffectiveTriggerPolicy, TriggerBasePolicy, TriggerPolicyOverlayStore,
+};
+use crate::models::{
+    ServiceId, ServiceStatus, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+    TriggerPressureSnapshot,
+};
 
 /// Runs a future with service task-local identity and resources set.
 #[doc(hidden)]
@@ -122,6 +130,9 @@ pub fn done() {
         resources
             .status_plane
             .insert(id.service_id, next_status.clone());
+        resources
+            .runtime_facts
+            .record_service_status(id.service_id, &next_status);
         resources.status_changed.notify_waiters();
         tracing::info!(
             "Service '{}' signalled done() (Transition: {:?} -> {:?})",
@@ -237,6 +248,9 @@ fn implicit_handshake() {
         resources
             .status_plane
             .insert(id.service_id, ServiceStatus::Healthy);
+        resources
+            .runtime_facts
+            .record_service_status(id.service_id, &ServiceStatus::Healthy);
         resources.status_changed.notify_waiters();
         tracing::debug!(
             "Service '{}' implicitly transitioned to Healthy (via lifecycle utility)",
@@ -394,6 +408,104 @@ pub(crate) fn current_daemon_diagnostics() -> Option<Arc<DiagnosticsStore>> {
     CURRENT_RESOURCES
         .try_with(|resources| resources.diagnostics.clone())
         .ok()
+}
+
+pub(crate) fn current_service_generation() -> u64 {
+    CURRENT_SERVICE
+        .try_with(|identity| {
+            identity
+                .diagnostics
+                .as_ref()
+                .map(|diagnostics| diagnostics.snapshot().generation)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+pub(crate) fn current_trigger_pressure(service_id: ServiceId) -> Option<TriggerPressureSnapshot> {
+    CURRENT_RESOURCES
+        .try_with(|resources| resources.runtime_facts.trigger_pressure(service_id))
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn request_trigger_policy_overlay(
+    service_id: ServiceId,
+    generation: u64,
+    overlay: TriggerPolicyOverlay,
+) -> Result<(), TriggerPolicyOverlayError> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources
+                .trigger_policy_overlays
+                .request_overlay(service_id, generation, overlay)
+        })
+        .map_err(|_| TriggerPolicyOverlayError::TriggerOverlayUnavailable)?
+}
+
+pub(crate) fn clear_trigger_policy_overlay(
+    service_id: ServiceId,
+    generation: u64,
+    reason: &str,
+) -> Result<(), TriggerPolicyOverlayError> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources
+                .trigger_policy_overlays
+                .clear_overlay(service_id, generation, reason)
+        })
+        .map_err(|_| TriggerPolicyOverlayError::TriggerOverlayUnavailable)?
+}
+
+pub(crate) fn register_current_trigger_runtime(
+    service_id: ServiceId,
+    service_name: &'static str,
+    generation: u64,
+    semaphore: Arc<Semaphore>,
+    current_limit: Arc<AtomicUsize>,
+) -> Option<TriggerRuntimeFactsHandle> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources.runtime_facts.register_trigger(
+                service_id,
+                service_name,
+                generation,
+                semaphore,
+                current_limit,
+            )
+        })
+        .ok()
+}
+
+pub(crate) fn register_current_trigger_policy_overlay(
+    service_id: ServiceId,
+    generation: u64,
+    base: TriggerBasePolicy,
+    semaphore: Arc<Semaphore>,
+    current_limit: Arc<AtomicUsize>,
+) -> Option<Arc<TriggerPolicyOverlayStore>> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources.trigger_policy_overlays.register_trigger(
+                service_id,
+                generation,
+                base,
+                semaphore,
+                current_limit,
+            );
+            resources.trigger_policy_overlays.clone()
+        })
+        .ok()
+}
+
+pub(crate) fn effective_trigger_policy(
+    store: &TriggerPolicyOverlayStore,
+    service_id: ServiceId,
+    generation: u64,
+    fallback: TriggerBasePolicy,
+) -> EffectiveTriggerPolicy {
+    store.effective_policy(service_id, generation, fallback)
 }
 
 // ---------------------------------------------------------------------------

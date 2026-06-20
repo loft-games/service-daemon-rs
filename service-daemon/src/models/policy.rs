@@ -291,6 +291,249 @@ impl RestartPolicyBuilder {
 }
 
 // ---------------------------------------------------------------------------
+// TriggerPolicyOverlay -- temporary self-scoped trigger scheduling overlay
+// ---------------------------------------------------------------------------
+
+/// Temporary trigger policy overlay requested from a trigger handler.
+///
+/// The request is submitted through
+/// [`TriggerContext::request_policy_overlay`](crate::TriggerContext::request_policy_overlay)
+/// and is scoped to the current trigger service generation. The framework
+/// validates it against the trigger's base policy and clears it on TTL expiry or
+/// generation end.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct TriggerPolicyOverlay {
+    reason: String,
+    ttl: Duration,
+    concurrency_limit: Option<usize>,
+    dispatch_timeout: Option<Duration>,
+    retry_policy: Option<RestartPolicy>,
+}
+
+impl TriggerPolicyOverlay {
+    /// Start building a temporary trigger policy overlay.
+    pub fn builder(reason: impl Into<String>, ttl: Duration) -> TriggerPolicyOverlayBuilder {
+        TriggerPolicyOverlayBuilder {
+            reason: reason.into(),
+            ttl,
+            concurrency_limit: None,
+            dispatch_timeout: None,
+            retry_policy: None,
+        }
+    }
+
+    /// Reason recorded in overlay audit logs.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Overlay lifetime.
+    #[must_use]
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Temporary concurrency limit for future dispatches.
+    #[must_use]
+    pub fn concurrency_limit(&self) -> Option<usize> {
+        self.concurrency_limit
+    }
+
+    /// Timeout for a full future dispatch cycle.
+    #[must_use]
+    pub fn dispatch_timeout(&self) -> Option<Duration> {
+        self.dispatch_timeout
+    }
+
+    /// Retry/backoff policy for future dispatches.
+    #[must_use]
+    pub fn retry_policy(&self) -> Option<RestartPolicy> {
+        self.retry_policy
+    }
+
+    pub(crate) fn validate_shape(&self) -> std::result::Result<(), TriggerPolicyOverlayError> {
+        validate_reason(&self.reason)?;
+        if self.ttl.is_zero() {
+            return Err(TriggerPolicyOverlayError::TtlIsZero);
+        }
+        if self.concurrency_limit.is_none()
+            && self.dispatch_timeout.is_none()
+            && self.retry_policy.is_none()
+        {
+            return Err(TriggerPolicyOverlayError::EmptyOverlay);
+        }
+        if self.concurrency_limit == Some(0) {
+            return Err(TriggerPolicyOverlayError::ConcurrencyLimitZero);
+        }
+        if self.dispatch_timeout == Some(Duration::ZERO) {
+            return Err(TriggerPolicyOverlayError::DispatchTimeoutZero);
+        }
+        if let Some(policy) = self.retry_policy {
+            validate_retry_policy(policy)?;
+        }
+        Ok(())
+    }
+}
+
+/// Builder for [`TriggerPolicyOverlay`].
+#[derive(Debug, Clone)]
+pub struct TriggerPolicyOverlayBuilder {
+    reason: String,
+    ttl: Duration,
+    concurrency_limit: Option<usize>,
+    dispatch_timeout: Option<Duration>,
+    retry_policy: Option<RestartPolicy>,
+}
+
+impl TriggerPolicyOverlayBuilder {
+    /// Set a temporary trigger concurrency limit.
+    #[must_use]
+    pub fn concurrency_limit(mut self, limit: usize) -> Self {
+        self.concurrency_limit = Some(limit);
+        self
+    }
+
+    /// Set a temporary timeout for a full dispatch cycle.
+    #[must_use]
+    pub fn dispatch_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatch_timeout = Some(timeout);
+        self
+    }
+
+    /// Set a temporary retry/backoff policy for future dispatches.
+    #[must_use]
+    pub fn retry_policy(mut self, policy: RestartPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
+    /// Build and validate the overlay shape.
+    pub fn build(self) -> std::result::Result<TriggerPolicyOverlay, TriggerPolicyOverlayError> {
+        let overlay = TriggerPolicyOverlay {
+            reason: self.reason,
+            ttl: self.ttl,
+            concurrency_limit: self.concurrency_limit,
+            dispatch_timeout: self.dispatch_timeout,
+            retry_policy: self.retry_policy,
+        };
+        overlay.validate_shape()?;
+        Ok(overlay)
+    }
+}
+
+/// Errors returned when a trigger policy overlay is rejected.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerPolicyOverlayError {
+    /// The overlay reason is empty or whitespace-only.
+    EmptyReason,
+    /// The overlay TTL is zero.
+    TtlIsZero,
+    /// No overlay field was set.
+    EmptyOverlay,
+    /// A concurrency limit of zero was requested.
+    ConcurrencyLimitZero,
+    /// The requested concurrency limit exceeds the trigger's framework bounds.
+    ConcurrencyLimitExceedsMax { requested: usize, max: usize },
+    /// A zero dispatch timeout was requested.
+    DispatchTimeoutZero,
+    /// The retry policy contains an invalid multiplier.
+    InvalidRetryMultiplier,
+    /// The retry policy contains an invalid jitter factor.
+    InvalidRetryJitter,
+    /// The caller is not running inside a managed trigger context.
+    TriggerOverlayUnavailable,
+}
+
+impl TriggerPolicyOverlayError {
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::EmptyReason => "empty_reason",
+            Self::TtlIsZero => "ttl_is_zero",
+            Self::EmptyOverlay => "empty_overlay",
+            Self::ConcurrencyLimitZero => "concurrency_limit_zero",
+            Self::ConcurrencyLimitExceedsMax { .. } => "concurrency_limit_exceeds_max",
+            Self::DispatchTimeoutZero => "dispatch_timeout_zero",
+            Self::InvalidRetryMultiplier => "invalid_retry_multiplier",
+            Self::InvalidRetryJitter => "invalid_retry_jitter",
+            Self::TriggerOverlayUnavailable => "trigger_overlay_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for TriggerPolicyOverlayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyReason => write!(f, "trigger policy overlay reason must not be empty"),
+            Self::TtlIsZero => write!(f, "trigger policy overlay ttl must be greater than zero"),
+            Self::EmptyOverlay => write!(f, "trigger policy overlay must set at least one field"),
+            Self::ConcurrencyLimitZero => {
+                write!(
+                    f,
+                    "trigger policy overlay concurrency limit must be greater than zero"
+                )
+            }
+            Self::ConcurrencyLimitExceedsMax { requested, max } => write!(
+                f,
+                "trigger policy overlay concurrency limit {requested} exceeds maximum {max}"
+            ),
+            Self::DispatchTimeoutZero => {
+                write!(
+                    f,
+                    "trigger policy overlay dispatch timeout must be greater than zero"
+                )
+            }
+            Self::InvalidRetryMultiplier => {
+                write!(
+                    f,
+                    "trigger policy overlay retry multiplier must be finite and positive"
+                )
+            }
+            Self::InvalidRetryJitter => write!(
+                f,
+                "trigger policy overlay retry jitter factor must be finite and between 0.0 and 1.0"
+            ),
+            Self::TriggerOverlayUnavailable => {
+                write!(
+                    f,
+                    "trigger policy overlay is unavailable outside a registered trigger"
+                )
+            }
+        }
+    }
+}
+
+impl StdError for TriggerPolicyOverlayError {}
+
+pub(crate) fn validate_overlay_clear_reason(
+    reason: &str,
+) -> std::result::Result<(), TriggerPolicyOverlayError> {
+    validate_reason(reason)
+}
+
+fn validate_reason(reason: &str) -> std::result::Result<(), TriggerPolicyOverlayError> {
+    if reason.trim().is_empty() {
+        Err(TriggerPolicyOverlayError::EmptyReason)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_retry_policy(
+    policy: RestartPolicy,
+) -> std::result::Result<(), TriggerPolicyOverlayError> {
+    if !policy.multiplier.is_finite() || policy.multiplier <= 0.0 {
+        return Err(TriggerPolicyOverlayError::InvalidRetryMultiplier);
+    }
+    if !policy.jitter_factor.is_finite() || !(0.0..=1.0).contains(&policy.jitter_factor) {
+        return Err(TriggerPolicyOverlayError::InvalidRetryJitter);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ScalingPolicy -- elastic scaling configuration for trigger concurrency
 // ---------------------------------------------------------------------------
 
@@ -1147,5 +1390,70 @@ mod tests {
             "Builder without trigger_max_retries() must produce None"
         );
         assert_eq!(policy.provider_init_timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn trigger_policy_overlay_builder_rejects_invalid_shape() {
+        assert_eq!(
+            TriggerPolicyOverlay::builder(" ", Duration::from_secs(1))
+                .concurrency_limit(1)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::EmptyReason)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("ttl", Duration::ZERO)
+                .concurrency_limit(1)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::TtlIsZero)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("empty", Duration::from_secs(1))
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::EmptyOverlay)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("zero concurrency", Duration::from_secs(1))
+                .concurrency_limit(0)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::ConcurrencyLimitZero)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("zero timeout", Duration::from_secs(1))
+                .dispatch_timeout(Duration::ZERO)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::DispatchTimeoutZero)
+        );
+    }
+
+    #[test]
+    fn trigger_policy_overlay_builder_rejects_invalid_retry_policy() {
+        let invalid_multiplier = RestartPolicy {
+            multiplier: f64::NAN,
+            ..RestartPolicy::for_testing()
+        };
+        assert_eq!(
+            TriggerPolicyOverlay::builder("bad retry", Duration::from_secs(1))
+                .retry_policy(invalid_multiplier)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::InvalidRetryMultiplier)
+        );
+
+        let invalid_jitter = RestartPolicy {
+            jitter_factor: 1.5,
+            ..RestartPolicy::for_testing()
+        };
+        assert_eq!(
+            TriggerPolicyOverlay::builder("bad jitter", Duration::from_secs(1))
+                .retry_policy(invalid_jitter)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::InvalidRetryJitter)
+        );
     }
 }

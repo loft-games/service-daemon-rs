@@ -220,9 +220,13 @@ pub(super) async fn stop_all_services(
         // 1. Parallel Signal: Cancel all services in this wave
         for service in &wave.services {
             service.cancellation_token.cancel();
+            let shutting_down = ServiceStatus::ShuttingDown;
             resources
                 .status_plane
-                .insert(service.id, ServiceStatus::ShuttingDown);
+                .insert(service.id, shutting_down.clone());
+            resources
+                .runtime_facts
+                .record_service_status(service.id, &shutting_down);
             resources.status_changed.notify_waiters();
         }
 

@@ -4,11 +4,14 @@ use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::task::{JoinError, JoinHandle};
 use tracing::warn;
 
 use crate::core::context;
 use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
+use crate::core::runtime_facts::TriggerRuntimeFactsHandle;
+use crate::models::policy::RestartPolicy;
 use crate::models::service::ServiceId;
 use crate::models::trigger::{TriggerContext, TriggerHandler, TriggerMessage};
 use uuid::Uuid;
@@ -63,6 +66,8 @@ pub struct DispatchContext<P> {
     pub source_id: ServiceId,
     /// Monotonically increasing sequence number within this trigger service.
     pub instance_seq: u64,
+    /// Service generation that owns this dispatch.
+    pub generation: u64,
     /// Globally unique identifier for this event instance (UUID v7, time-ordered).
     pub message_id: uuid::Uuid,
     /// Human-readable name of this trigger service (for logging/tracing).
@@ -71,6 +76,10 @@ pub struct DispatchContext<P> {
     pub payload: Arc<P>,
     /// The user's event handler (needed at the terminal node of the chain).
     pub handler: TriggerHandler<P>,
+    /// Read-only runtime facts writer for this trigger dispatch.
+    pub runtime_facts: Option<TriggerRuntimeFactsHandle>,
+    /// Retry/backoff policy captured at this dispatch boundary.
+    pub retry_policy: RestartPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -161,6 +170,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let seq = self.instance_counter.fetch_add(1, Ordering::Relaxed);
         let (message_id, source_id) =
             identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
+        if let Some(policy_overlays) = &self.policy_overlays {
+            policy_overlays.apply_effective_concurrency(self.service_id, self.generation);
+        }
 
         let permit = self
             .semaphore
@@ -177,25 +189,57 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     format!("could not acquire dispatch permit: {error}"),
                 )
             })?;
+        if let Some(runtime_facts) = &self.runtime_facts {
+            runtime_facts.record_dispatched();
+        }
+        let effective_policy = self
+            .policy_overlays
+            .as_ref()
+            .map(|store| {
+                context::effective_trigger_policy(
+                    store,
+                    self.service_id,
+                    self.generation,
+                    self.base_policy,
+                )
+            })
+            .unwrap_or_else(
+                || crate::core::trigger_policy_overlay::EffectiveTriggerPolicy {
+                    restart_policy: self.base_policy.restart_policy,
+                    dispatch_timeout: None,
+                },
+            );
 
         let ctx = DispatchContext {
             service_id: self.service_id,
             source_id,
             instance_seq: seq,
+            generation: self.generation,
             message_id,
             trigger_name: self.name,
             payload: Arc::new(payload),
             handler: self.handler.clone(),
+            runtime_facts: self.runtime_facts.clone(),
+            retry_policy: effective_policy.restart_policy,
         };
 
         let chain = self.build_chain();
         let trigger_name = self.name;
         let service_id = self.service_id;
+        let dispatch_timeout = effective_policy.dispatch_timeout;
 
         let dispatch_task = context::spawn_with_context(async move {
-            let result = with_provider_runtime_phase(
+            let dispatch = with_provider_runtime_phase(
                 ProviderRuntimePhase::TriggerDispatchResolve,
                 chain(ctx),
+            );
+            let result = run_dispatch_with_timeout(
+                dispatch,
+                dispatch_timeout,
+                trigger_name,
+                service_id,
+                seq,
+                message_id,
             )
             .await;
             drop(permit);
@@ -207,6 +251,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             service_id,
             seq,
             message_id,
+            self.runtime_facts.clone(),
             dispatch_task,
         ));
 
@@ -218,14 +263,23 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         service_id: ServiceId,
         instance_seq: u64,
         message_id: Uuid,
+        runtime_facts: Option<TriggerRuntimeFactsHandle>,
         handle: JoinHandle<anyhow::Result<()>>,
     ) -> BoxFuture<'static, DispatchTaskOutcome> {
         Box::pin(async move {
             let mut handle = AbortOnDropJoinHandle::new(handle);
             match handle.join().await {
-                Ok(Ok(())) => Ok(()),
+                Ok(Ok(())) => {
+                    if let Some(runtime_facts) = &runtime_facts {
+                        runtime_facts.record_completed();
+                    }
+                    Ok(())
+                }
                 Ok(Err(error)) => match error.downcast::<TriggerDispatchFailure>() {
                     Ok(failure) => {
+                        if let Some(runtime_facts) = &runtime_facts {
+                            runtime_facts.record_failed(failure.to_string());
+                        }
                         warn!(
                             trigger = %failure.trigger_name(),
                             service_id = failure.service_id().value(),
@@ -238,14 +292,18 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         Err(failure)
                     }
                     Err(error) => {
+                        let error_message = error.to_string();
                         let failure = TriggerDispatchFailure::new(
                             TriggerDispatchFailureKind::DispatchTaskError,
                             trigger_name,
                             service_id,
                             Some(instance_seq),
                             Some(message_id),
-                            error.to_string(),
+                            error_message,
                         );
+                        if let Some(runtime_facts) = &runtime_facts {
+                            runtime_facts.record_failed(failure.to_string());
+                        }
                         warn!(
                             trigger = %trigger_name,
                             service_id = service_id.value(),
@@ -272,6 +330,9 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         Some(message_id),
                         join_error.to_string(),
                     );
+                    if let Some(runtime_facts) = &runtime_facts {
+                        runtime_facts.record_failed(failure.to_string());
+                    }
                     warn!(
                         trigger = %trigger_name,
                         service_id = service_id.value(),
@@ -303,16 +364,17 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             dyn FnOnce(DispatchContext<P>) -> BoxFuture<'static, anyhow::Result<()>> + Send,
         > = Box::new(|ctx: DispatchContext<P>| {
             Box::pin(async move {
-                let trigger_ctx = TriggerContext {
-                    service_id: ctx.service_id,
-                    instance_seq: ctx.instance_seq,
-                    message: TriggerMessage {
+                let trigger_ctx = TriggerContext::new(
+                    ctx.service_id,
+                    ctx.generation,
+                    ctx.instance_seq,
+                    TriggerMessage {
                         message_id: ctx.message_id,
                         source_id: ctx.source_id,
                         timestamp: Utc::now(),
                         payload: ctx.payload,
                     },
-                };
+                );
                 (ctx.handler)(trigger_ctx).await
             }) as BoxFuture<'static, anyhow::Result<()>>
         });
@@ -332,5 +394,30 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     }) as BoxFuture<'static, anyhow::Result<()>>
                 })
             })
+    }
+}
+
+async fn run_dispatch_with_timeout(
+    dispatch: impl std::future::Future<Output = anyhow::Result<()>>,
+    timeout: Option<Duration>,
+    trigger_name: &'static str,
+    service_id: ServiceId,
+    instance_seq: u64,
+    message_id: Uuid,
+) -> anyhow::Result<()> {
+    let Some(timeout) = timeout else {
+        return dispatch.await;
+    };
+    match tokio::time::timeout(timeout, dispatch).await {
+        Ok(result) => result,
+        Err(_) => Err(TriggerDispatchFailure::new(
+            TriggerDispatchFailureKind::DispatchTimedOut,
+            trigger_name,
+            service_id,
+            Some(instance_seq),
+            Some(message_id),
+            format!("dispatch did not complete within {timeout:?}"),
+        )
+        .into()),
     }
 }

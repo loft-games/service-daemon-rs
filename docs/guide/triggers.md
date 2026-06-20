@@ -181,6 +181,47 @@ let mut daemon = ServiceDaemon::builder()
     .build();
 ```
 
+Handlers can request a temporary policy overlay for future events handled by the
+same trigger generation. The request is self-scoped from `TriggerContext`, so the
+handler supplies only the overlay itself:
+
+```rust
+use std::time::Duration;
+
+use service_daemon::{RestartPolicy, TriggerContext, TriggerPolicyOverlay};
+
+async fn on_event(ctx: TriggerContext<MyEvent>) -> anyhow::Result<()> {
+    if let Some(pressure) = ctx.pressure()
+        && pressure.in_flight >= pressure.current_limit
+    {
+        let overlay = TriggerPolicyOverlay::builder("downstream pressure", Duration::from_secs(30))
+            .concurrency_limit(2)
+            .dispatch_timeout(Duration::from_secs(5))
+            .retry_policy(
+                RestartPolicy::builder()
+                    .initial_delay(Duration::from_millis(100))
+                    .max_delay(Duration::from_secs(2))
+                    .trigger_max_retries(3)
+                    .build(),
+            )
+            .build()?;
+
+        ctx.request_policy_overlay(overlay)?;
+    }
+
+    Ok(())
+}
+```
+
+Temporary overlays require a non-empty reason and a TTL. They affect future
+dispatch boundaries only; a dispatch that already captured its timeout or retry
+policy keeps that policy. The runner clears overlays on TTL expiry or when the
+trigger generation ends.
+
+Custom `TriggerHost::run_as_service` implementations that bypass the default
+runner should construct contexts with `TriggerContext::new(...)` and pass the
+current service id and generation.
+
 ---
 
 ## 8. Instance Lifecycle & State Reuse

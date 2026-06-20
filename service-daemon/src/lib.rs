@@ -72,20 +72,22 @@ pub use core::service_daemon::{
 pub use models::service::{InstanceId, ServicePriority, ServiceScheduling};
 pub use models::trigger::TriggerTransition;
 pub use models::{
-    BackoffController, DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
-    DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
-    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
-    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
-    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
-    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
-    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
-    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    BackoffController, DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticAggregateStats,
+    DiagnosticConfidence, DiagnosticGenerationExitKind, DiagnosticInterpretation,
+    DiagnosticInterpretationLabel, DiagnosticLifecycleStats, DiagnosticObservationStats,
+    DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
+    DiagnosticProviderFailureKind, DiagnosticProviderFailureRetry,
+    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
+    DiagnosticProviderFailureStats, DiagnosticRecommendationHint, DiagnosticRestartDecisionKind,
+    DiagnosticRuntimeLane, DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
     DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
     DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot, ProviderError,
-    ProviderInitError, Registry, RegistryBuilder, Result, RuntimeLaneDiagnosticsSnapshot,
-    ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
-    ServiceDiagnosticsSnapshot, ServiceError, ServiceId, ServiceStatus, TT, TriggerContext,
-    TriggerHandler, TriggerHost, TriggerMessage,
+    ProviderInitError, ReadinessServiceError, ReadinessSnapshot, Registry, RegistryBuilder, Result,
+    RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
+    SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceError, ServiceId,
+    ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost,
+    TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
+    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)
@@ -143,9 +145,11 @@ pub use service_daemon_macro::{provider, service, trigger};
 pub mod prelude {
     pub use crate::TT::*;
     pub use crate::{
-        DaemonDiagnosticsSnapshot, DiagnosticRuntimeLane, ManagedProvided, Provided,
-        SchedulingAdvisoryProfile, ServiceDaemon, ServiceError, ServicePriority, ServiceScheduling,
-        ServiceStatus, TT, WatchableProvided, current_service_id, done, is_shutdown, provider,
+        DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticRuntimeLane, ManagedProvided,
+        Provided, ReadinessSnapshot, SchedulingAdvisoryProfile, ServiceDaemon, ServiceError,
+        ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
+        TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
+        TriggerRuntimeSnapshot, WatchableProvided, current_service_id, done, is_shutdown, provider,
         service, shelve, shelve_clone, sleep, spawn_with_context, state, trigger, trigger_config,
         unshelve, wait_shutdown,
     };
