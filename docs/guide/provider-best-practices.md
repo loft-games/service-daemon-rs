@@ -1,6 +1,6 @@
-# Provider Best Practices & Strategy Guide
+# Provider Strategy Guide
 
-This guide helps you choose the right way to provide dependencies in your `service-daemon-rs` application. Using the correct strategy avoids unnecessary framework complexity and keeps your code clean.
+This guide helps you choose how to provide dependencies in your `service-daemon-rs` application. Matching the provider form to the resource keeps framework extension points focused.
 
 ---
 
@@ -11,16 +11,16 @@ There are three ways to define a Provider. Choose based on your use case:
 | Strategy | When to Use | Example |
 | :--- | :--- | :--- |
 | **Simple Value** | Static configuration, primitive types, or simple wrappers. | `Port(i32)`, `Config(String)` |
-| **Async Function** | **(Recommended)** External systems, database connections, MQTT, heavy initialization. | `MqttBus`, `DatabasePool` |
-| **Magic Provider** | Low-level architecture primitives for synchronization, signaling, or networking. | `Notify`, `Listen`, `Queue` |
+| **Async Function** | External systems, database connections, MQTT, heavy initialization. | `MqttBus`, `DatabasePool` |
+| **Built-in template** | Low-level architecture primitives for synchronization, signaling, or networking. | `Notify`, `Listen`, `Queue` |
 
 ---
 
-## 2. The Power of `#[provider] async fn`
+## 2. Prefer `#[provider] async fn` for custom resources
 
-For 95% of custom providers (like MQTT, Redis, or HTTP clients), you should **never** need to modify the framework's internal macro templates or "Magic Providers". 
+For custom providers such as MQTT, Redis, or HTTP clients, use an `async fn` provider instead of changing the framework's built-in templates.
 
-Simply use the `#[provider]` attribute on an `async fn`:
+Use the `#[provider]` attribute on an `async fn`:
 
 ```rust
 use service_daemon::provider;
@@ -41,17 +41,17 @@ pub async fn mqtt_provider() -> MqttBus {
 }
 ```
 
-### Why this is the Best Strategy:
-1. **Zero Framework Bloat**: No need to touch `service-daemon` source code.
-2. **Full Logic Control**: You have total control over certificates, retries, and settings.
-3. **Implicit Singleton**: The framework ensures this `async fn` is only called **once**.
-4. **Standard DI**: Inject `Arc<MqttBus>` into any `#[service]` just like a regular provider.
+### Why this works well
+1. **No framework changes**: Application-specific resources stay in application code.
+2. **Full initialization control**: Certificates, retries, and settings stay in the provider body.
+3. **Scoped sharing**: Normal daemons share the root provider slot. Simulation overrides can replace that provider for one daemon without changing the provider definition.
+4. **DI usage**: Inject `Arc<MqttBus>` into any `#[service]` just like a regular provider.
 
 ---
 
-## 3. When is it a "Magic Provider"?
+## 3. When to use a built-in template
 
-"Magic" specifically refers to hardcoded templates inside the `#[provider]` macro. These templates generate specialized boilerplate that would be tedious to write manually.
+Built-in templates are hardcoded forms inside the `#[provider]` macro. They generate repeated wrapper code for primitives that many applications need.
 
 | Template | Alias | Logic |
 | :--- | :--- | :--- |
@@ -111,12 +111,12 @@ Three behaviors that distinguish them from the TCP `Listen` template:
 > [!NOTE]
 > **API form: socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths. `try_get().await?` and `try_connect().await?` remain available when you need the lower-level listener clone or explicitly named connection helper.
 
-**Avoid creating new Magic Providers unless:**
+**Avoid creating new built-in templates unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
 * The provider requires **special code generation** (like automatically creating `push()`, `subscribe()`, or `get()` instance methods via macro).
 
 > [!IMPORTANT]
-> Business-specific components (MQTT, Database, API Clients) are **NOT** Magic Providers. They should be implemented as regular `async fn` providers.
+> Business-specific components (MQTT, Database, API Clients) should be implemented as regular `async fn` providers.
 
 ---
 
@@ -134,15 +134,46 @@ pub struct WebListener;
 
 ---
 
-## 5. Common Misconceptions
+## 5. Choosing `ProviderError::Fatal` vs `ProviderError::Retryable`
 
-* **"I need a Magic Provider for my DB"**: No! Use an `async fn` provider that returns your connection pool.
-* **"Magic Providers are faster"**: No! They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are just shorthand for common patterns.
+Use `ProviderError` only from provider functions that intentionally opt into framework-owned initialization semantics by returning `Result<T, ProviderError>`.
+
+Return `ProviderError::Fatal` when retrying cannot make progress without an operator or configuration change:
+
+- required credentials or configuration are malformed;
+- a local filesystem or permission problem is deterministic;
+- a peer contract is incompatible with the current binary.
+
+Return `ProviderError::Retryable` when the same initialization may succeed soon without changing code or configuration:
+
+- a dependent process is still starting;
+- a socket or port is temporarily unavailable during rolling restart;
+- a short network or service discovery outage is expected to clear.
+
+Retryable provider errors are bounded by `RestartPolicy::provider_init_timeout`. Once that timeout expires, the framework reports a `ProviderInitError::Timeout`; it does not convert cancellation or timeout into a generic fatal error. Normal service code should still receive providers through DI rather than catching these initialization errors itself.
+
+---
+
+## 6. Helper APIs Are Usually Not the Main Path
+
+Most applications should not call provider helper methods directly. Declare providers, inject `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` into services or triggers, and let the daemon own initialization, retry, cancellation, and reload behavior.
+
+When helper methods are called from a service, trigger, watcher, or daemon startup path, they use that daemon's effective provider scope. When helper methods are called outside framework context, they use the root fallback slot. Treat that fallback as a convenience for tests, setup, and diagnostics rather than as a production override mechanism.
+
+If you are writing tests, diagnostics, or macro-level integrations and need the exact helper return shapes, see [Macro Expansion](../architecture/macro-expansion.md#provider-helper-return-shapes).
+
+---
+
+## 7. Common Misconceptions
+
+* **"I need a built-in template for my DB"**: No. Use an `async fn` provider that returns your connection pool.
+* **"Built-in templates are faster"**: No. They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are shorthand for common primitives.
+* **"Provider overrides should be global"**: No. Test-time overrides belong to a simulation daemon scope so they do not pollute root helper resolution or other daemon instances.
 * **"Provided is hard to implement"**: You should **never** implement provider capability traits manually for normal usage. Let `#[provider]` do it for you.
 
 ---
 
-## 5. Summary Table
+## 8. Summary Table
 
 | Goal | Best Approach |
 | :--- | :--- |

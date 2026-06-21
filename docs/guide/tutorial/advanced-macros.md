@@ -1,5 +1,8 @@
 # Advanced Macro Usage
 
+> [!NOTE]
+> This is advanced reference material, not part of the beginner quick-start path.
+
 The `#[service]` and `#[trigger]` macros do more than register a function -- they accept attribute arguments that drive selection, scheduling, and dispatch. This page covers the ones beyond the basics.
 
 ---
@@ -43,21 +46,21 @@ The macros generate a `ServiceEntry` struct at compile time. This struct is publ
 
 You can use this to build **Internal Discovery Systems** or **Health Check Dashboards** that automatically list all services in the binary without manual hardcoding.
 
-## 3. Customizing Macro Outputs (Future-Proofing)
+## 3. Service Metadata Boundaries
 
-Because the project uses `linkme`, the registration happens at the binary level. If you need to add your own custom metadata (like "Department Name" or "Service Owner") to the services, you can contribute to the `ServiceEntry` struct in the framework or use the Tag system to encode this information (e.g., `tags = ["owner:billing"]`).
+Because the project uses `linkme`, the registration happens at the binary level. Use the tag system for service metadata such as ownership (e.g., `tags = ["owner:billing"]`). `ServiceEntry` does not carry per-service restart overrides, scheduling hints, or experimental scheduling fields; keep those concerns in explicitly designed APIs rather than overloading registry metadata.
 
 ## 4. Why stick with the Macros?
 
 You *could* build a `ServiceDescription` manually and pass it to the daemon. But by using the macros, you benefit from:
 1.  **Compile-time Discovery**: No missing services due to typos.
 2.  **Automatic DI Mapping**: The macro analyzes your function arguments and writes the injection code for you.
-3.  **Unified Lifecycle**: Every service goes through the same supervisor -- error handling, backoff, and restart policy are applied consistently, with no per-service boilerplate.
+3.  **Unified Lifecycle**: Every service goes through the same supervisor -- error handling, backoff, and restart policy are applied consistently, without per-service setup code.
 
 ---
 
-## End of the Quick Start
+## More Information
 
-You've gone from a heartbeat service to the macro internals and extension points. From here, the [Architecture](../../architecture/internal-overview.md) docs cover the registry and DI internals; the [User Guides](../../guide/) cover triggers, state, resilience, and diagnostics in depth.
+For the full macro implementation model, see [Macro Expansion](../../architecture/macro-expansion.md). For normal user-facing usage, return to the [README](../../../README.md) documentation section.
 
-[**<- Previous Step: Trigger Middlewares (Interceptors)**](./trigger-interceptors.md) | [**Back to the Quick Start Guide ->**](./quick-start.md)
+[Back to README](../../../README.md)

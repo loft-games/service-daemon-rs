@@ -10,14 +10,59 @@
 //!   trigger templates (e.g. `Queue`). Declared via
 //!   [`TriggerHost::scaling_policy()`](crate::models::trigger::TriggerHost::scaling_policy) and optionally overridden by the user
 //!   via [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
+//! - [`SchedulingAdvisoryProfile`]: Coarse control for diagnostics advisory
+//!   emission. It does not change service placement or lifecycle behavior.
 //! - [`BackoffController`]: A **stateful** controller that tracks the current
 //!   backoff delay and attempt count. It wraps a `RestartPolicy` and provides
 //!   interruption-aware waiting via `tokio::select!`.
 
 use rand::RngExt;
-use std::time::Duration;
+use std::collections::VecDeque;
+use std::error::Error as StdError;
+use std::fmt;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+// ---------------------------------------------------------------------------
+// SchedulingAdvisoryProfile -- diagnostics advisory emission
+// ---------------------------------------------------------------------------
+
+/// Coarse configuration for scheduling advisory diagnostics.
+///
+/// The default keeps the internal recommendation loop enabled. Disabling the
+/// profile only stops advisory emission; it does not change service lifecycle,
+/// declared scheduling modes, body placement, reload, or restart behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchedulingAdvisoryProfile {
+    enabled: bool,
+}
+
+impl SchedulingAdvisoryProfile {
+    /// Enable scheduling advisory diagnostics.
+    #[must_use]
+    pub const fn enabled() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Disable scheduling advisory diagnostics.
+    #[must_use]
+    pub const fn disabled() -> Self {
+        Self { enabled: false }
+    }
+
+    /// Returns whether advisory emission is enabled.
+    #[must_use]
+    pub const fn is_enabled(self) -> bool {
+        self.enabled
+    }
+}
+
+impl Default for SchedulingAdvisoryProfile {
+    fn default() -> Self {
+        Self::enabled()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RestartPolicy -- stateless backoff configuration
@@ -115,13 +160,54 @@ impl RestartPolicy {
         }
     }
 
+    fn sanitized_multiplier(multiplier: f64) -> f64 {
+        if multiplier.is_finite() && multiplier > 0.0 {
+            multiplier
+        } else {
+            1.0
+        }
+    }
+
+    fn sanitized_jitter_factor(factor: f64) -> f64 {
+        if factor.is_finite() {
+            factor.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
     /// Calculate the next retry delay using exponential backoff with jitter.
     pub fn next_delay(&self, current_delay: Duration) -> Duration {
-        let base = current_delay.as_secs_f64() * self.multiplier;
-        let jitter_range = base * self.jitter_factor;
-        let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
-        let next = Duration::from_secs_f64((base + jitter).max(0.0));
-        next.min(self.max_delay)
+        let max_delay_seconds = self.max_delay.as_secs_f64();
+        if max_delay_seconds <= 0.0 {
+            return Duration::ZERO;
+        }
+
+        let multiplier = Self::sanitized_multiplier(self.multiplier);
+        let jitter_factor = Self::sanitized_jitter_factor(self.jitter_factor);
+        let base = current_delay.as_secs_f64() * multiplier;
+        if !base.is_finite() || base >= max_delay_seconds {
+            return self.max_delay;
+        }
+
+        let next_seconds = if jitter_factor > 0.0 && base > 0.0 {
+            let jitter_range = base * jitter_factor;
+            let jitter = rand::rng().random_range(-jitter_range..=jitter_range);
+            base + jitter
+        } else {
+            base
+        };
+
+        if !next_seconds.is_finite() || next_seconds >= max_delay_seconds {
+            return self.max_delay;
+        }
+
+        if next_seconds <= 0.0 {
+            return Duration::ZERO;
+        }
+
+        Duration::try_from_secs_f64(next_seconds)
+            .map_or(self.max_delay, |next| next.min(self.max_delay))
     }
 }
 
@@ -143,7 +229,7 @@ impl RestartPolicyBuilder {
     }
 
     pub fn multiplier(mut self, multiplier: f64) -> Self {
-        self.policy.multiplier = multiplier;
+        self.policy.multiplier = RestartPolicy::sanitized_multiplier(multiplier);
         self
     }
 
@@ -153,7 +239,7 @@ impl RestartPolicyBuilder {
     }
 
     pub fn jitter_factor(mut self, factor: f64) -> Self {
-        self.policy.jitter_factor = factor.clamp(0.0, 1.0);
+        self.policy.jitter_factor = RestartPolicy::sanitized_jitter_factor(factor);
         self
     }
 
@@ -205,6 +291,249 @@ impl RestartPolicyBuilder {
 }
 
 // ---------------------------------------------------------------------------
+// TriggerPolicyOverlay -- temporary self-scoped trigger scheduling overlay
+// ---------------------------------------------------------------------------
+
+/// Temporary trigger policy overlay requested from a trigger handler.
+///
+/// The request is submitted through
+/// [`TriggerContext::request_policy_overlay`](crate::TriggerContext::request_policy_overlay)
+/// and is scoped to the current trigger service generation. The framework
+/// validates it against the trigger's base policy and clears it on TTL expiry or
+/// generation end.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct TriggerPolicyOverlay {
+    reason: String,
+    ttl: Duration,
+    concurrency_limit: Option<usize>,
+    dispatch_timeout: Option<Duration>,
+    retry_policy: Option<RestartPolicy>,
+}
+
+impl TriggerPolicyOverlay {
+    /// Start building a temporary trigger policy overlay.
+    pub fn builder(reason: impl Into<String>, ttl: Duration) -> TriggerPolicyOverlayBuilder {
+        TriggerPolicyOverlayBuilder {
+            reason: reason.into(),
+            ttl,
+            concurrency_limit: None,
+            dispatch_timeout: None,
+            retry_policy: None,
+        }
+    }
+
+    /// Reason recorded in overlay audit logs.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// Overlay lifetime.
+    #[must_use]
+    pub fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Temporary concurrency limit for future dispatches.
+    #[must_use]
+    pub fn concurrency_limit(&self) -> Option<usize> {
+        self.concurrency_limit
+    }
+
+    /// Timeout for a full future dispatch cycle.
+    #[must_use]
+    pub fn dispatch_timeout(&self) -> Option<Duration> {
+        self.dispatch_timeout
+    }
+
+    /// Retry/backoff policy for future dispatches.
+    #[must_use]
+    pub fn retry_policy(&self) -> Option<RestartPolicy> {
+        self.retry_policy
+    }
+
+    pub(crate) fn validate_shape(&self) -> std::result::Result<(), TriggerPolicyOverlayError> {
+        validate_reason(&self.reason)?;
+        if self.ttl.is_zero() {
+            return Err(TriggerPolicyOverlayError::TtlIsZero);
+        }
+        if self.concurrency_limit.is_none()
+            && self.dispatch_timeout.is_none()
+            && self.retry_policy.is_none()
+        {
+            return Err(TriggerPolicyOverlayError::EmptyOverlay);
+        }
+        if self.concurrency_limit == Some(0) {
+            return Err(TriggerPolicyOverlayError::ConcurrencyLimitZero);
+        }
+        if self.dispatch_timeout == Some(Duration::ZERO) {
+            return Err(TriggerPolicyOverlayError::DispatchTimeoutZero);
+        }
+        if let Some(policy) = self.retry_policy {
+            validate_retry_policy(policy)?;
+        }
+        Ok(())
+    }
+}
+
+/// Builder for [`TriggerPolicyOverlay`].
+#[derive(Debug, Clone)]
+pub struct TriggerPolicyOverlayBuilder {
+    reason: String,
+    ttl: Duration,
+    concurrency_limit: Option<usize>,
+    dispatch_timeout: Option<Duration>,
+    retry_policy: Option<RestartPolicy>,
+}
+
+impl TriggerPolicyOverlayBuilder {
+    /// Set a temporary trigger concurrency limit.
+    #[must_use]
+    pub fn concurrency_limit(mut self, limit: usize) -> Self {
+        self.concurrency_limit = Some(limit);
+        self
+    }
+
+    /// Set a temporary timeout for a full dispatch cycle.
+    #[must_use]
+    pub fn dispatch_timeout(mut self, timeout: Duration) -> Self {
+        self.dispatch_timeout = Some(timeout);
+        self
+    }
+
+    /// Set a temporary retry/backoff policy for future dispatches.
+    #[must_use]
+    pub fn retry_policy(mut self, policy: RestartPolicy) -> Self {
+        self.retry_policy = Some(policy);
+        self
+    }
+
+    /// Build and validate the overlay shape.
+    pub fn build(self) -> std::result::Result<TriggerPolicyOverlay, TriggerPolicyOverlayError> {
+        let overlay = TriggerPolicyOverlay {
+            reason: self.reason,
+            ttl: self.ttl,
+            concurrency_limit: self.concurrency_limit,
+            dispatch_timeout: self.dispatch_timeout,
+            retry_policy: self.retry_policy,
+        };
+        overlay.validate_shape()?;
+        Ok(overlay)
+    }
+}
+
+/// Errors returned when a trigger policy overlay is rejected.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerPolicyOverlayError {
+    /// The overlay reason is empty or whitespace-only.
+    EmptyReason,
+    /// The overlay TTL is zero.
+    TtlIsZero,
+    /// No overlay field was set.
+    EmptyOverlay,
+    /// A concurrency limit of zero was requested.
+    ConcurrencyLimitZero,
+    /// The requested concurrency limit exceeds the trigger's framework bounds.
+    ConcurrencyLimitExceedsMax { requested: usize, max: usize },
+    /// A zero dispatch timeout was requested.
+    DispatchTimeoutZero,
+    /// The retry policy contains an invalid multiplier.
+    InvalidRetryMultiplier,
+    /// The retry policy contains an invalid jitter factor.
+    InvalidRetryJitter,
+    /// The caller is not running inside a managed trigger context.
+    TriggerOverlayUnavailable,
+}
+
+impl TriggerPolicyOverlayError {
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::EmptyReason => "empty_reason",
+            Self::TtlIsZero => "ttl_is_zero",
+            Self::EmptyOverlay => "empty_overlay",
+            Self::ConcurrencyLimitZero => "concurrency_limit_zero",
+            Self::ConcurrencyLimitExceedsMax { .. } => "concurrency_limit_exceeds_max",
+            Self::DispatchTimeoutZero => "dispatch_timeout_zero",
+            Self::InvalidRetryMultiplier => "invalid_retry_multiplier",
+            Self::InvalidRetryJitter => "invalid_retry_jitter",
+            Self::TriggerOverlayUnavailable => "trigger_overlay_unavailable",
+        }
+    }
+}
+
+impl fmt::Display for TriggerPolicyOverlayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyReason => write!(f, "trigger policy overlay reason must not be empty"),
+            Self::TtlIsZero => write!(f, "trigger policy overlay ttl must be greater than zero"),
+            Self::EmptyOverlay => write!(f, "trigger policy overlay must set at least one field"),
+            Self::ConcurrencyLimitZero => {
+                write!(
+                    f,
+                    "trigger policy overlay concurrency limit must be greater than zero"
+                )
+            }
+            Self::ConcurrencyLimitExceedsMax { requested, max } => write!(
+                f,
+                "trigger policy overlay concurrency limit {requested} exceeds maximum {max}"
+            ),
+            Self::DispatchTimeoutZero => {
+                write!(
+                    f,
+                    "trigger policy overlay dispatch timeout must be greater than zero"
+                )
+            }
+            Self::InvalidRetryMultiplier => {
+                write!(
+                    f,
+                    "trigger policy overlay retry multiplier must be finite and positive"
+                )
+            }
+            Self::InvalidRetryJitter => write!(
+                f,
+                "trigger policy overlay retry jitter factor must be finite and between 0.0 and 1.0"
+            ),
+            Self::TriggerOverlayUnavailable => {
+                write!(
+                    f,
+                    "trigger policy overlay is unavailable outside a registered trigger"
+                )
+            }
+        }
+    }
+}
+
+impl StdError for TriggerPolicyOverlayError {}
+
+pub(crate) fn validate_overlay_clear_reason(
+    reason: &str,
+) -> std::result::Result<(), TriggerPolicyOverlayError> {
+    validate_reason(reason)
+}
+
+fn validate_reason(reason: &str) -> std::result::Result<(), TriggerPolicyOverlayError> {
+    if reason.trim().is_empty() {
+        Err(TriggerPolicyOverlayError::EmptyReason)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_retry_policy(
+    policy: RestartPolicy,
+) -> std::result::Result<(), TriggerPolicyOverlayError> {
+    if !policy.multiplier.is_finite() || policy.multiplier <= 0.0 {
+        return Err(TriggerPolicyOverlayError::InvalidRetryMultiplier);
+    }
+    if !policy.jitter_factor.is_finite() || !(0.0..=1.0).contains(&policy.jitter_factor) {
+        return Err(TriggerPolicyOverlayError::InvalidRetryJitter);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // ScalingPolicy -- elastic scaling configuration for trigger concurrency
 // ---------------------------------------------------------------------------
 
@@ -221,39 +550,54 @@ impl RestartPolicyBuilder {
 ///
 /// Users can override the template default via
 /// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
+/// Construct custom policies with [`ScalingPolicy::builder`] or
+/// [`ScalingPolicy::try_new`]; custom [`TriggerHost::scaling_policy()`](crate::models::trigger::TriggerHost::scaling_policy)
+/// implementations should return a validated policy value.
 #[derive(Debug, Clone, Copy)]
 pub struct ScalingPolicy {
-    /// Number of concurrent handler instances at cold-start (default: 1).
-    ///
-    /// The trigger runner starts with this many dispatch slots and scales
-    /// up only when the pressure ratio exceeds `scale_threshold`.
-    pub initial_concurrency: usize,
-    /// Hard upper limit on concurrent handler instances (default: 64).
-    ///
-    /// The auto-scaler will never exceed this value, even under sustained
-    /// high pressure. This acts as a safety guard against unbounded
-    /// resource consumption.
-    pub max_concurrency: usize,
-    /// Multiplier applied to the current concurrency limit on each
-    /// scale-up event (default: 2).
-    ///
-    /// For example, with `scale_factor = 2`, limits grow as:
-    /// 1 -> 2 -> 4 -> 8 -> ... -> `max_concurrency`.
-    pub scale_factor: usize,
-    /// Pressure ratio threshold that triggers a scale-up (default: 5).
-    ///
-    /// Pressure ratio is defined as `queue_depth / current_instances`.
-    /// A threshold of 5 means: "if the backlog would take 5 processing
-    /// cycles to drain at the current rate, scale up". Backlogs that
-    /// can be consumed within fewer cycles are not worth scaling for.
-    pub scale_threshold: usize,
-    /// Duration of queue idleness before the runner starts reclaiming
-    /// excess handler instances (default: 30 seconds).
-    ///
-    /// After the queue has been empty for this long, the runner
-    /// shrinks concurrency back towards `initial_concurrency`.
-    pub scale_cooldown: Duration,
+    initial_concurrency: usize,
+    max_concurrency: usize,
+    scale_factor: usize,
+    scale_threshold: usize,
+    scale_cooldown: Duration,
 }
+
+/// Error returned by [`ScalingPolicy::try_new`] for invalid scaling configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalingPolicyError {
+    /// `initial_concurrency` must be at least 1.
+    InitialConcurrencyZero,
+    /// `max_concurrency` must be at least 1.
+    MaxConcurrencyZero,
+    /// `scale_factor` must be at least 2.
+    ScaleFactorTooSmall { requested: usize, min: usize },
+    /// `scale_threshold` must be at least 1.
+    ScaleThresholdZero,
+    /// `initial_concurrency` must not exceed `max_concurrency`.
+    InitialConcurrencyExceedsMax { initial: usize, max: usize },
+}
+
+impl fmt::Display for ScalingPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InitialConcurrencyZero => {
+                write!(f, "initial_concurrency must be greater than zero")
+            }
+            Self::MaxConcurrencyZero => write!(f, "max_concurrency must be greater than zero"),
+            Self::ScaleFactorTooSmall { requested, min } => write!(
+                f,
+                "scale_factor {requested} is below the minimum supported value {min}"
+            ),
+            Self::ScaleThresholdZero => write!(f, "scale_threshold must be greater than zero"),
+            Self::InitialConcurrencyExceedsMax { initial, max } => write!(
+                f,
+                "initial_concurrency {initial} exceeds max_concurrency {max}"
+            ),
+        }
+    }
+}
+
+impl StdError for ScalingPolicyError {}
 
 impl Default for ScalingPolicy {
     fn default() -> Self {
@@ -271,6 +615,75 @@ impl ScalingPolicy {
     /// Create a scaling policy builder.
     pub fn builder() -> ScalingPolicyBuilder {
         ScalingPolicyBuilder::default()
+    }
+
+    /// Create a scaling policy with strict validation.
+    pub fn try_new(
+        initial_concurrency: usize,
+        max_concurrency: usize,
+        scale_factor: usize,
+        scale_threshold: usize,
+        scale_cooldown: Duration,
+    ) -> Result<Self, ScalingPolicyError> {
+        if initial_concurrency == 0 {
+            return Err(ScalingPolicyError::InitialConcurrencyZero);
+        }
+        if max_concurrency == 0 {
+            return Err(ScalingPolicyError::MaxConcurrencyZero);
+        }
+        if scale_factor < 2 {
+            return Err(ScalingPolicyError::ScaleFactorTooSmall {
+                requested: scale_factor,
+                min: 2,
+            });
+        }
+        if scale_threshold == 0 {
+            return Err(ScalingPolicyError::ScaleThresholdZero);
+        }
+        if initial_concurrency > max_concurrency {
+            return Err(ScalingPolicyError::InitialConcurrencyExceedsMax {
+                initial: initial_concurrency,
+                max: max_concurrency,
+            });
+        }
+
+        Ok(Self {
+            initial_concurrency,
+            max_concurrency,
+            scale_factor,
+            scale_threshold,
+            scale_cooldown,
+        })
+    }
+
+    /// Number of concurrent handler instances at cold start.
+    #[must_use]
+    pub const fn initial_concurrency(&self) -> usize {
+        self.initial_concurrency
+    }
+
+    /// Hard upper limit on concurrent handler instances.
+    #[must_use]
+    pub const fn max_concurrency(&self) -> usize {
+        self.max_concurrency
+    }
+
+    /// Multiplier applied to the current concurrency limit on each scale-up event.
+    #[must_use]
+    pub const fn scale_factor(&self) -> usize {
+        self.scale_factor
+    }
+
+    /// Pressure ratio threshold that triggers scale-up.
+    #[must_use]
+    pub const fn scale_threshold(&self) -> usize {
+        self.scale_threshold
+    }
+
+    /// Queue idle duration before the runner starts shrinking concurrency.
+    #[must_use]
+    pub const fn scale_cooldown(&self) -> Duration {
+        self.scale_cooldown
     }
 
     /// Create a scaling policy for testing with smaller limits.
@@ -333,6 +746,104 @@ impl ScalingPolicyBuilder {
         // Auto-clamp rather than panic so the builder remains infallible.
         policy.initial_concurrency = policy.initial_concurrency.min(policy.max_concurrency);
         policy
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RestartStormGuard -- internal service restart rate limiter
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RestartStormConfig {
+    window: Duration,
+    failure_threshold: usize,
+    suppression_delay: Duration,
+}
+
+impl Default for RestartStormConfig {
+    fn default() -> Self {
+        Self {
+            window: Duration::from_secs(20),
+            failure_threshold: 6,
+            suppression_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RestartStormDecision {
+    pub policy_delay: Duration,
+    pub effective_delay: Duration,
+    pub rate_limited: bool,
+    pub window_failures: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct RestartStormGuard {
+    config: RestartStormConfig,
+    failures: VecDeque<Instant>,
+}
+
+impl Default for RestartStormGuard {
+    fn default() -> Self {
+        Self::new(RestartStormConfig::default())
+    }
+}
+
+impl RestartStormGuard {
+    pub(crate) fn new(config: RestartStormConfig) -> Self {
+        Self {
+            config: RestartStormConfig {
+                failure_threshold: config.failure_threshold.max(1),
+                ..config
+            },
+            failures: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn record_failure(
+        &mut self,
+        now: Instant,
+        policy_delay: Duration,
+    ) -> RestartStormDecision {
+        self.prune(now);
+        self.failures.push_back(now);
+
+        let window_failures = self.failures.len();
+        let storm_delay = if window_failures >= self.config.failure_threshold {
+            self.config.suppression_delay
+        } else {
+            Duration::ZERO
+        };
+        let effective_delay = policy_delay.max(storm_delay);
+
+        RestartStormDecision {
+            policy_delay,
+            effective_delay,
+            rate_limited: effective_delay > policy_delay,
+            window_failures,
+        }
+    }
+
+    pub(crate) fn reset(&mut self) {
+        self.failures.clear();
+    }
+
+    pub(crate) fn maybe_reset(&mut self, elapsed: Duration, reset_after: Duration) {
+        if elapsed >= reset_after {
+            self.reset();
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        while self
+            .failures
+            .front()
+            .and_then(|failure| now.checked_duration_since(*failure))
+            .is_some_and(|elapsed| elapsed > self.config.window)
+        {
+            self.failures.pop_front();
+        }
     }
 }
 
@@ -423,7 +934,7 @@ impl BackoffController {
     /// The delay is multiplied according to the policy's exponential
     /// backoff parameters.
     pub fn record_failure(&mut self) {
-        self.attempt_count += 1;
+        self.attempt_count = self.attempt_count.saturating_add(1);
         self.current_delay = self.policy.next_delay(self.current_delay);
     }
 
@@ -488,11 +999,11 @@ mod tests {
     #[test]
     fn test_scaling_policy_default() {
         let policy = ScalingPolicy::default();
-        assert_eq!(policy.initial_concurrency, 1);
-        assert_eq!(policy.max_concurrency, 64);
-        assert_eq!(policy.scale_factor, 2);
-        assert_eq!(policy.scale_threshold, 5);
-        assert_eq!(policy.scale_cooldown, Duration::from_secs(30));
+        assert_eq!(policy.initial_concurrency(), 1);
+        assert_eq!(policy.max_concurrency(), 64);
+        assert_eq!(policy.scale_factor(), 2);
+        assert_eq!(policy.scale_threshold(), 5);
+        assert_eq!(policy.scale_cooldown(), Duration::from_secs(30));
     }
 
     #[test]
@@ -504,24 +1015,24 @@ mod tests {
             .scale_threshold(10)
             .scale_cooldown(Duration::from_secs(60))
             .build();
-        assert_eq!(policy.initial_concurrency, 4);
-        assert_eq!(policy.max_concurrency, 2048);
-        assert_eq!(policy.scale_factor, 3);
-        assert_eq!(policy.scale_threshold, 10);
-        assert_eq!(policy.scale_cooldown, Duration::from_secs(60));
+        assert_eq!(policy.initial_concurrency(), 4);
+        assert_eq!(policy.max_concurrency(), 2048);
+        assert_eq!(policy.scale_factor(), 3);
+        assert_eq!(policy.scale_threshold(), 10);
+        assert_eq!(policy.scale_cooldown(), Duration::from_secs(60));
     }
 
     #[test]
     fn test_scaling_policy_builder_clamping() {
         // initial_concurrency minimum is 1
         let policy = ScalingPolicy::builder().initial_concurrency(0).build();
-        assert_eq!(policy.initial_concurrency, 1);
+        assert_eq!(policy.initial_concurrency(), 1);
         // scale_factor minimum is 2
         let policy = ScalingPolicy::builder().scale_factor(1).build();
-        assert_eq!(policy.scale_factor, 2);
+        assert_eq!(policy.scale_factor(), 2);
         // scale_threshold minimum is 1
         let policy = ScalingPolicy::builder().scale_threshold(0).build();
-        assert_eq!(policy.scale_threshold, 1);
+        assert_eq!(policy.scale_threshold(), 1);
     }
 
     #[test]
@@ -532,10 +1043,53 @@ mod tests {
             .max_concurrency(4)
             .build();
         assert_eq!(
-            policy.initial_concurrency, 4,
+            policy.initial_concurrency(),
+            4,
             "initial_concurrency must be clamped to max_concurrency"
         );
-        assert_eq!(policy.max_concurrency, 4);
+        assert_eq!(policy.max_concurrency(), 4);
+    }
+
+    #[test]
+    fn scaling_policy_try_new_accepts_valid_values() {
+        let policy = ScalingPolicy::try_new(4, 16, 3, 10, Duration::from_secs(60))
+            .expect("valid scaling policy should be accepted");
+
+        assert_eq!(policy.initial_concurrency(), 4);
+        assert_eq!(policy.max_concurrency(), 16);
+        assert_eq!(policy.scale_factor(), 3);
+        assert_eq!(policy.scale_threshold(), 10);
+        assert_eq!(policy.scale_cooldown(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn scaling_policy_try_new_rejects_invalid_values() {
+        assert_eq!(
+            ScalingPolicy::try_new(0, 16, 2, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::InitialConcurrencyZero)
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(1, 0, 2, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::MaxConcurrencyZero)
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(1, 16, 1, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::ScaleFactorTooSmall {
+                requested: 1,
+                min: 2,
+            })
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(1, 16, 2, 0, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::ScaleThresholdZero)
+        );
+        assert_eq!(
+            ScalingPolicy::try_new(17, 16, 2, 5, Duration::from_secs(1)).err(),
+            Some(ScalingPolicyError::InitialConcurrencyExceedsMax {
+                initial: 17,
+                max: 16,
+            })
+        );
     }
 
     #[tokio::test]
@@ -570,6 +1124,71 @@ mod tests {
         let next = policy.next_delay(Duration::from_secs(1));
         // 1 * 100 = 100, clamped to max_delay = 10
         assert_eq!(next, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn restart_policy_next_delay_handles_invalid_public_float_fields() {
+        let cases = [
+            (f64::NAN, 0.0),
+            (f64::INFINITY, 0.5),
+            (f64::NEG_INFINITY, 0.5),
+            (-2.0, -0.5),
+            (0.0, f64::NAN),
+            (2.0, f64::INFINITY),
+            (2.0, f64::NEG_INFINITY),
+            (2.0, 2.0),
+        ];
+
+        for (multiplier, jitter_factor) in cases {
+            let policy = RestartPolicy {
+                max_delay: Duration::from_secs(10),
+                multiplier,
+                jitter_factor,
+                ..RestartPolicy::default()
+            };
+
+            let next = policy.next_delay(Duration::from_secs(1));
+            assert!(next <= policy.max_delay);
+        }
+    }
+
+    #[test]
+    fn restart_policy_next_delay_caps_before_duration_conversion() {
+        let policy = RestartPolicy {
+            max_delay: Duration::from_millis(250),
+            multiplier: f64::MAX,
+            jitter_factor: 0.0,
+            ..RestartPolicy::default()
+        };
+
+        let next = policy.next_delay(Duration::from_secs(2));
+
+        assert_eq!(next, policy.max_delay);
+    }
+
+    #[test]
+    fn restart_policy_builder_sanitizes_invalid_floats() {
+        let invalid_policy = RestartPolicy::builder()
+            .multiplier(f64::NAN)
+            .jitter_factor(f64::INFINITY)
+            .build();
+        assert_eq!(invalid_policy.multiplier, 1.0);
+        assert_eq!(invalid_policy.jitter_factor, 0.0);
+        assert!(invalid_policy.next_delay(Duration::from_secs(1)) <= invalid_policy.max_delay);
+
+        let negative_policy = RestartPolicy::builder()
+            .multiplier(-2.0)
+            .jitter_factor(-1.0)
+            .build();
+        assert_eq!(negative_policy.multiplier, 1.0);
+        assert_eq!(negative_policy.jitter_factor, 0.0);
+
+        let clamped_policy = RestartPolicy::builder()
+            .multiplier(3.0)
+            .jitter_factor(2.0)
+            .build();
+        assert_eq!(clamped_policy.multiplier, 3.0);
+        assert_eq!(clamped_policy.jitter_factor, 1.0);
     }
 
     #[test]
@@ -619,6 +1238,113 @@ mod tests {
         assert!(!result, "Should return false when cancelled");
     }
 
+    #[test]
+    fn test_backoff_controller_record_failure_saturates_attempt_count() {
+        let mut ctrl = BackoffController::new(RestartPolicy::for_testing());
+        ctrl.attempt_count = u32::MAX;
+
+        ctrl.record_failure();
+
+        assert_eq!(ctrl.attempt_count(), u32::MAX);
+    }
+
+    #[test]
+    fn restart_storm_guard_inactive_before_threshold() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 3,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        let first = guard.record_failure(now, Duration::from_secs(1));
+        let second = guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(2));
+
+        assert!(!first.rate_limited);
+        assert_eq!(first.effective_delay, Duration::from_secs(1));
+        assert_eq!(second.window_failures, 2);
+        assert!(!second.rate_limited);
+        assert_eq!(second.effective_delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn restart_storm_guard_extends_delay_after_threshold() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        let decision = guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(2));
+
+        assert_eq!(decision.window_failures, 2);
+        assert!(decision.rate_limited);
+        assert_eq!(decision.policy_delay, Duration::from_secs(2));
+        assert_eq!(decision.effective_delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn restart_storm_guard_prunes_failures_outside_window() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        let decision = guard.record_failure(now + Duration::from_secs(11), Duration::from_secs(2));
+
+        assert_eq!(decision.window_failures, 1);
+        assert!(!decision.rate_limited);
+        assert_eq!(decision.effective_delay, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn restart_storm_guard_reset_clears_suppression() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        let limited = guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(1));
+        guard.reset();
+        let after_reset =
+            guard.record_failure(now + Duration::from_secs(2), Duration::from_secs(1));
+
+        assert!(limited.rate_limited);
+        assert_eq!(after_reset.window_failures, 1);
+        assert!(!after_reset.rate_limited);
+    }
+
+    #[test]
+    fn restart_storm_guard_maybe_reset_uses_reset_after() {
+        let config = RestartStormConfig {
+            window: Duration::from_secs(10),
+            failure_threshold: 2,
+            suppression_delay: Duration::from_secs(30),
+        };
+        let mut guard = RestartStormGuard::new(config);
+        let now = Instant::now();
+
+        guard.record_failure(now, Duration::from_secs(1));
+        guard.record_failure(now + Duration::from_secs(1), Duration::from_secs(1));
+        guard.maybe_reset(Duration::from_secs(5), Duration::from_secs(5));
+        let decision = guard.record_failure(now + Duration::from_secs(2), Duration::from_secs(1));
+
+        assert_eq!(decision.window_failures, 1);
+        assert!(!decision.rate_limited);
+    }
+
     // -----------------------------------------------------------------------
     // trigger_max_retries tests
     // -----------------------------------------------------------------------
@@ -664,5 +1390,70 @@ mod tests {
             "Builder without trigger_max_retries() must produce None"
         );
         assert_eq!(policy.provider_init_timeout, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn trigger_policy_overlay_builder_rejects_invalid_shape() {
+        assert_eq!(
+            TriggerPolicyOverlay::builder(" ", Duration::from_secs(1))
+                .concurrency_limit(1)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::EmptyReason)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("ttl", Duration::ZERO)
+                .concurrency_limit(1)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::TtlIsZero)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("empty", Duration::from_secs(1))
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::EmptyOverlay)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("zero concurrency", Duration::from_secs(1))
+                .concurrency_limit(0)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::ConcurrencyLimitZero)
+        );
+        assert_eq!(
+            TriggerPolicyOverlay::builder("zero timeout", Duration::from_secs(1))
+                .dispatch_timeout(Duration::ZERO)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::DispatchTimeoutZero)
+        );
+    }
+
+    #[test]
+    fn trigger_policy_overlay_builder_rejects_invalid_retry_policy() {
+        let invalid_multiplier = RestartPolicy {
+            multiplier: f64::NAN,
+            ..RestartPolicy::for_testing()
+        };
+        assert_eq!(
+            TriggerPolicyOverlay::builder("bad retry", Duration::from_secs(1))
+                .retry_policy(invalid_multiplier)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::InvalidRetryMultiplier)
+        );
+
+        let invalid_jitter = RestartPolicy {
+            jitter_factor: 1.5,
+            ..RestartPolicy::for_testing()
+        };
+        assert_eq!(
+            TriggerPolicyOverlay::builder("bad jitter", Duration::from_secs(1))
+                .retry_policy(invalid_jitter)
+                .build()
+                .err(),
+            Some(TriggerPolicyOverlayError::InvalidRetryJitter)
+        );
     }
 }

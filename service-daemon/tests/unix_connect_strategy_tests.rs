@@ -6,7 +6,30 @@
 
 #![cfg(unix)]
 
-use service_daemon::{ManagedProvided, provider};
+use service_daemon::{ManagedProvided, RestartPolicy, ServiceDaemon, provider, service};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{
+    LazyLock, Mutex, MutexGuard,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::Duration;
+
+static MISSING_PEER_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
+static ENV_EAGER_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
+static ENV_EAGER_SERVICE_SAW_ENV_PATH: AtomicBool = AtomicBool::new(false);
+static ENV_EAGER_SERVICE_SAW_PROBE: AtomicBool = AtomicBool::new(false);
+static ENV_EAGER_PROBE_ACCEPTED: AtomicBool = AtomicBool::new(false);
+static ENV_EAGER_SERVICE_READY: LazyLock<tokio::sync::Notify> =
+    LazyLock::new(tokio::sync::Notify::new);
+static ENV_EAGER_PROBE_READY: LazyLock<tokio::sync::Notify> =
+    LazyLock::new(tokio::sync::Notify::new);
+static ENV_VAR_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+const ENV_EAGER_ENV_VAR: &str = "SERVICE_DAEMON_RS_UNIX_CONNECT_ENV_EAGER_PATH_8E16B4A9";
+const ENV_EAGER_PATH: &str = "target/sd-uds-connect-env-eager-env.sock";
+const ENV_EAGER_FALLBACK_PATH: &str = "target/sd-uds-connect-env-eager-fallback.sock";
+const RETRY_ENV_VAR: &str = "SERVICE_DAEMON_RS_UNIX_CONNECT_RETRY_PATH_4D39F2C1";
 
 fn cleanup_path(path: &str) {
     match std::fs::remove_file(path) {
@@ -16,10 +39,55 @@ fn cleanup_path(path: &str) {
     }
 }
 
+fn cleanup_pathbuf(path: &Path) {
+    match std::fs::remove_file(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => eprintln!(
+            "cleanup_path({}) failed: {} (ignored in test)",
+            path.display(),
+            e
+        ),
+    }
+}
+
 struct PathGuard(&'static str);
 impl Drop for PathGuard {
     fn drop(&mut self) {
         cleanup_path(self.0);
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // Rust 2024 marks environment mutation unsafe because it is process-global.
+        unsafe {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
+
+fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
+    let lock = ENV_VAR_LOCK.lock().expect("env var test lock poisoned");
+    let previous = std::env::var_os(key);
+    // Rust 2024 marks environment mutation unsafe because it is process-global.
+    unsafe {
+        std::env::set_var(key, value);
+    }
+    EnvVarGuard {
+        key,
+        previous,
+        _lock: lock,
     }
 }
 
@@ -31,6 +99,31 @@ fn prepare_socket_path(path: &'static str) -> PathGuard {
     }
     cleanup_path(path);
     PathGuard(path)
+}
+
+struct OwnedPathGuard(PathBuf);
+impl Drop for OwnedPathGuard {
+    fn drop(&mut self) {
+        cleanup_pathbuf(&self.0);
+    }
+}
+
+fn unique_socket_path(name: &str) -> PathBuf {
+    PathBuf::from("target").join(format!(
+        "service-daemon-rs-{name}-{}-{}.sock",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("unnamed")
+    ))
+}
+
+fn prepare_owned_socket_path(path: PathBuf) -> OwnedPathGuard {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).expect("Failed to create socket test directory");
+    }
+    cleanup_pathbuf(&path);
+    OwnedPathGuard(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -64,22 +157,160 @@ async fn test_unix_connect_succeeds_when_server_ready() {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
-#[provider(UnixConnect("target/sd-uds-connect-retry.sock"))]
+#[provider(
+    UnixConnect("target/sd-uds-connect-retry.sock"),
+    env = "SERVICE_DAEMON_RS_UNIX_CONNECT_RETRY_PATH_4D39F2C1"
+)]
 pub struct RetryClient;
+
+#[derive(Debug)]
+#[provider(UnixConnect("target/sd-uds-connect-missing-peer.sock"), eager = true)]
+pub struct MissingPeerClient;
+
+#[service(tags = ["unix_connect_missing_peer_provider_test"])]
+async fn missing_peer_client_service(
+    _client: std::sync::Arc<MissingPeerClient>,
+) -> anyhow::Result<()> {
+    MISSING_PEER_SERVICE_ENTERED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[derive(Debug)]
+#[provider(
+    UnixConnect("target/sd-uds-connect-env-eager-fallback.sock"),
+    env = "SERVICE_DAEMON_RS_UNIX_CONNECT_ENV_EAGER_PATH_8E16B4A9",
+    eager = true
+)]
+pub struct EnvEagerClient;
+
+#[service(tags = ["unix_connect_env_eager_provider_test"])]
+async fn env_eager_client_service(client: std::sync::Arc<EnvEagerClient>) -> anyhow::Result<()> {
+    ENV_EAGER_SERVICE_ENTERED.store(true, Ordering::SeqCst);
+
+    if !ENV_EAGER_PROBE_ACCEPTED.load(Ordering::SeqCst) {
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), ENV_EAGER_PROBE_READY.notified()).await;
+    }
+
+    ENV_EAGER_SERVICE_SAW_PROBE.store(
+        ENV_EAGER_PROBE_ACCEPTED.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    ENV_EAGER_SERVICE_SAW_ENV_PATH
+        .store(client.path() == Path::new(ENV_EAGER_PATH), Ordering::SeqCst);
+    ENV_EAGER_SERVICE_READY.notify_one();
+
+    service_daemon::done();
+    while !service_daemon::is_shutdown() {
+        service_daemon::sleep(Duration::from_millis(10)).await;
+    }
+
+    Ok(())
+}
 
 // We need multi_thread so the delayed-bind task can run while the main task
 // is parked inside init_fallible's backoff sleep. With current_thread the
 // runtime would wait for the spawn to be polled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_unix_connect_retries_on_connection_refused() {
-    let path = "target/sd-uds-connect-retry.sock";
+async fn test_unix_connect_missing_peer_returns_provider_init_error() {
+    let path = "target/sd-uds-connect-missing-peer.sock";
     let _guard = prepare_socket_path(path);
+    MISSING_PEER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            service_daemon::Registry::builder()
+                .with_tag("unix_connect_missing_peer_provider_test")
+                .build(),
+        )
+        .with_restart_policy(
+            RestartPolicy::builder()
+                .initial_delay(Duration::from_millis(1))
+                .max_delay(Duration::from_millis(5))
+                .jitter_factor(0.0)
+                .provider_init_timeout(Duration::from_millis(20))
+                .build(),
+        )
+        .build();
+
+    daemon.run().await;
+
+    assert!(daemon.cancel_token().is_cancelled());
+    assert!(!MISSING_PEER_SERVICE_ENTERED.load(Ordering::SeqCst));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unix_connect_env_overrides_fallback_and_eager_runs_before_service_body()
+-> anyhow::Result<()> {
+    ENV_EAGER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
+    ENV_EAGER_SERVICE_SAW_ENV_PATH.store(false, Ordering::SeqCst);
+    ENV_EAGER_SERVICE_SAW_PROBE.store(false, Ordering::SeqCst);
+    ENV_EAGER_PROBE_ACCEPTED.store(false, Ordering::SeqCst);
+
+    let _env_var = set_test_env(ENV_EAGER_ENV_VAR, ENV_EAGER_PATH);
+    let _fallback_guard = prepare_socket_path(ENV_EAGER_FALLBACK_PATH);
+    let _env_path_guard = prepare_socket_path(ENV_EAGER_PATH);
+
+    let peer = std::os::unix::net::UnixListener::bind(ENV_EAGER_PATH)?;
+    peer.set_nonblocking(true)?;
+    let peer = tokio::net::UnixListener::from_std(peer)?;
+    let accept_task = tokio::spawn(async move {
+        if peer.accept().await.is_ok() {
+            ENV_EAGER_PROBE_ACCEPTED.store(true, Ordering::SeqCst);
+            ENV_EAGER_PROBE_READY.notify_one();
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+
+    let mut daemon = ServiceDaemon::builder()
+        .with_registry(
+            service_daemon::Registry::builder()
+                .with_tag("unix_connect_env_eager_provider_test")
+                .build(),
+        )
+        .with_restart_policy(
+            RestartPolicy::builder()
+                .initial_delay(Duration::from_millis(1))
+                .max_delay(Duration::from_millis(5))
+                .jitter_factor(0.0)
+                .provider_init_timeout(Duration::from_millis(200))
+                .build(),
+        )
+        .build();
+    let cancel = daemon.cancel_token();
+
+    daemon.run().await;
+
+    if !ENV_EAGER_SERVICE_ENTERED.load(Ordering::SeqCst) {
+        tokio::time::timeout(Duration::from_secs(5), ENV_EAGER_SERVICE_READY.notified()).await?;
+    }
+
+    assert!(ENV_EAGER_SERVICE_ENTERED.load(Ordering::SeqCst));
+    assert!(ENV_EAGER_SERVICE_SAW_ENV_PATH.load(Ordering::SeqCst));
+    assert!(ENV_EAGER_SERVICE_SAW_PROBE.load(Ordering::SeqCst));
+
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await??;
+    accept_task.abort();
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_unix_connect_retries_on_connection_refused() {
+    let path = unique_socket_path("connect-retry");
+    let path_string = path
+        .to_str()
+        .expect("test socket path must be valid UTF-8")
+        .to_owned();
+    let _env_var = set_test_env(RETRY_ENV_VAR, &path_string);
+    let _guard = prepare_owned_socket_path(path.clone());
 
     // Spawn a delayed peer that binds 200ms after the test starts. The
     // template's first probe will hit NotFound (Retryable); the framework
     // backs off and retries; by the time the second probe runs, the peer
     // should be up.
-    let delayed_path = path.to_owned();
+    let delayed_path = path.clone();
     let peer_handle = tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let listener = std::os::unix::net::UnixListener::bind(&delayed_path)

@@ -3,14 +3,15 @@ name = "example-triggers"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Triggers example: demonstrates all trigger types (Cron, Queue, Signal, Watch) as decoupled, optional components."
 
 [dependencies]
 service-daemon = { path = "../../service-daemon", features = [
     "cron",
 ] }
-tokio = { version = "1.43", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.102"
+serde = { version = "1.0.228", features = ["derive"] }

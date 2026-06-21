@@ -20,7 +20,7 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    service_daemon::core::logging::init_logging();
+    service_daemon::init_logging();
 
     let policy = RestartPolicy::builder()
         .initial_delay(Duration::from_secs(2))

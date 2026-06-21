@@ -16,12 +16,12 @@ impl service_daemon::Provided for NotWatchable {
 
 impl service_daemon::ManagedProvided for NotWatchable {
     async fn resolve_rwlock(
-    ) -> std::result::Result<Arc<service_daemon::core::managed_state::RwLock<Self>>, service_daemon::ProviderInitError> {
+    ) -> std::result::Result<Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
         unimplemented!()
     }
 
     async fn resolve_mutex(
-    ) -> std::result::Result<Arc<service_daemon::core::managed_state::Mutex<Self>>, service_daemon::ProviderInitError> {
+    ) -> std::result::Result<Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
         unimplemented!()
     }
 

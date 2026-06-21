@@ -9,15 +9,25 @@ use super::identity::{CURRENT_RESOURCES, CURRENT_SERVICE, DaemonResources, Servi
 use std::any::{Any, TypeId};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 
-use crate::models::{ServiceId, ServiceStatus};
+use crate::core::diagnostics::{
+    DiagnosticsStore, GenerationDiagnosticsHandle, SleepExitReason, SleepObservation,
+    SleepObservationSource,
+};
+use crate::core::provider_scope::ProviderScope;
+use crate::core::runtime_facts::TriggerRuntimeFactsHandle;
+use crate::core::trigger_policy_overlay::{
+    EffectiveTriggerPolicy, TriggerBasePolicy, TriggerPolicyOverlayStore,
+};
+use crate::models::{
+    ServiceId, ServiceStatus, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+    TriggerPressureSnapshot,
+};
 
-/// Runs a future within the context of a service.
-///
-/// This is the internal entry point used by the `#[service]` and `#[trigger]` macros.
-/// It sets up the task-local identity and resources before executing the user's code.
+/// Runs a future with service task-local identity and resources set.
 #[doc(hidden)]
 pub async fn __run_service_scope<F, Fut>(
     identity: ServiceIdentity,
@@ -31,6 +41,27 @@ where
     CURRENT_SERVICE
         .scope(identity, CURRENT_RESOURCES.scope(resources, f()))
         .await
+}
+
+pub(crate) async fn __run_daemon_resources_scope<F, Fut>(
+    resources: Arc<DaemonResources>,
+    f: F,
+) -> Fut::Output
+where
+    F: FnOnce() -> Fut,
+    Fut: Future,
+{
+    CURRENT_RESOURCES.scope(resources, f()).await
+}
+
+pub(crate) async fn __run_daemon_resources_sync_scope<F, T>(
+    resources: Arc<DaemonResources>,
+    f: F,
+) -> T
+where
+    F: FnOnce() -> T,
+{
+    CURRENT_RESOURCES.scope(resources, async move { f() }).await
 }
 
 /// Returns the current lifecycle status of the calling service.
@@ -99,6 +130,9 @@ pub fn done() {
         resources
             .status_plane
             .insert(id.service_id, next_status.clone());
+        resources
+            .runtime_facts
+            .record_service_status(id.service_id, &next_status);
         resources.status_changed.notify_waiters();
         tracing::info!(
             "Service '{}' signalled done() (Transition: {:?} -> {:?})",
@@ -113,15 +147,14 @@ pub fn done() {
 /// The value is stored in a service-isolated bucket based on the calling service's identity.
 ///
 /// # Note
-/// This function is `async` for API consistency with the rest of the context module
-/// and to allow future migration to async-aware storage backends without breaking changes.
+/// The async signature matches the other context helpers.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
-        Ok(n) => n,
+    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+        Ok(id) => id,
         Err(_) => return,
     };
     if let Ok(resources) = CURRENT_RESOURCES.try_with(|r| r.clone()) {
-        let entry = resources.shelf.entry(name).or_default();
+        let entry = resources.shelf.entry(service_id).or_default();
         entry.insert(key.to_string(), Box::new(data));
     }
 }
@@ -132,16 +165,15 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// For a non-destructive read, use [`shelve_clone`] instead.
 ///
 /// # Note
-/// This function is `async` for API consistency with the rest of the context module
-/// and to allow future migration to async-aware storage backends without breaking changes.
+/// The async signature matches the other context helpers.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
-        Ok(n) => n,
+    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+        Ok(id) => id,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(name).and_then(|entry| {
+            r.shelf.get(&service_id).and_then(|entry| {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
@@ -162,16 +194,15 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// by `Arc<T>` values, which are the primary use case.
 ///
 /// # Note
-/// This function is `async` for API consistency with the rest of the context module
-/// and to allow future migration to async-aware storage backends without breaking changes.
+/// The async signature matches the other context helpers.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
-    let name = match CURRENT_SERVICE.try_with(|id| id.name) {
-        Ok(n) => n,
+    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+        Ok(id) => id,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(name).and_then(|entry| {
+            r.shelf.get(&service_id).and_then(|entry| {
                 entry
                     .get(key)
                     .and_then(|val| val.downcast_ref::<T>().cloned())
@@ -217,6 +248,9 @@ fn implicit_handshake() {
         resources
             .status_plane
             .insert(id.service_id, ServiceStatus::Healthy);
+        resources
+            .runtime_facts
+            .record_service_status(id.service_id, &ServiceStatus::Healthy);
         resources.status_changed.notify_waiters();
         tracing::debug!(
             "Service '{}' implicitly transitioned to Healthy (via lifecycle utility)",
@@ -290,6 +324,12 @@ pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
         .unwrap_or_else(|_| tokio_util::sync::CancellationToken::new())
 }
 
+pub(crate) fn current_provider_scope() -> Arc<ProviderScope> {
+    CURRENT_RESOURCES
+        .try_with(|resources| resources.provider_scope.clone())
+        .unwrap_or_else(|_| ProviderScope::root())
+}
+
 /// An interruptible sleep that returns early if a shutdown or reload signal is received.
 /// Returns `true` if the sleep completed normally, `false` if interrupted.
 ///
@@ -298,16 +338,174 @@ pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
 pub async fn sleep(duration: Duration) -> bool {
     implicit_handshake();
     if let Ok(id) = CURRENT_SERVICE.try_with(|id| id.clone()) {
+        let start = Instant::now();
         tokio::select! {
-            _ = tokio::time::sleep(duration) => true,
-            _ = id.cancellation_token.cancelled() => false,
-            _ = id.reload_token.cancelled() => false,
+            _ = tokio::time::sleep(duration) => {
+                let elapsed = start.elapsed();
+                record_service_sleep_observation(
+                    &id,
+                    SleepExitReason::Completed,
+                    duration,
+                    elapsed,
+                    elapsed.saturating_sub(duration),
+                );
+                true
+            }
+            _ = id.cancellation_token.cancelled() => {
+                record_service_sleep_observation(
+                    &id,
+                    SleepExitReason::Shutdown,
+                    duration,
+                    start.elapsed(),
+                    Duration::ZERO,
+                );
+                false
+            }
+            _ = id.reload_token.cancelled() => {
+                record_service_sleep_observation(
+                    &id,
+                    SleepExitReason::Reload,
+                    duration,
+                    start.elapsed(),
+                    Duration::ZERO,
+                );
+                false
+            }
         }
     } else {
         // Outside of a service context, just perform a regular sleep
         tokio::time::sleep(duration).await;
         true
     }
+}
+
+fn record_service_sleep_observation(
+    id: &ServiceIdentity,
+    reason: SleepExitReason,
+    requested: Duration,
+    elapsed: Duration,
+    drift: Duration,
+) {
+    if let Some(diagnostics) = id.diagnostics.as_ref() {
+        diagnostics.record_sleep_observation(SleepObservation {
+            source: SleepObservationSource::ServiceSleep,
+            reason,
+            requested,
+            elapsed,
+            drift,
+        });
+    }
+}
+
+pub(crate) fn current_generation_diagnostics() -> Option<GenerationDiagnosticsHandle> {
+    CURRENT_SERVICE
+        .try_with(|id| id.diagnostics.clone())
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn current_daemon_diagnostics() -> Option<Arc<DiagnosticsStore>> {
+    CURRENT_RESOURCES
+        .try_with(|resources| resources.diagnostics.clone())
+        .ok()
+}
+
+pub(crate) fn current_service_generation() -> u64 {
+    CURRENT_SERVICE
+        .try_with(|identity| {
+            identity
+                .diagnostics
+                .as_ref()
+                .map(|diagnostics| diagnostics.snapshot().generation)
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+pub(crate) fn current_trigger_pressure(service_id: ServiceId) -> Option<TriggerPressureSnapshot> {
+    CURRENT_RESOURCES
+        .try_with(|resources| resources.runtime_facts.trigger_pressure(service_id))
+        .ok()
+        .flatten()
+}
+
+pub(crate) fn request_trigger_policy_overlay(
+    service_id: ServiceId,
+    generation: u64,
+    overlay: TriggerPolicyOverlay,
+) -> Result<(), TriggerPolicyOverlayError> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources
+                .trigger_policy_overlays
+                .request_overlay(service_id, generation, overlay)
+        })
+        .map_err(|_| TriggerPolicyOverlayError::TriggerOverlayUnavailable)?
+}
+
+pub(crate) fn clear_trigger_policy_overlay(
+    service_id: ServiceId,
+    generation: u64,
+    reason: &str,
+) -> Result<(), TriggerPolicyOverlayError> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources
+                .trigger_policy_overlays
+                .clear_overlay(service_id, generation, reason)
+        })
+        .map_err(|_| TriggerPolicyOverlayError::TriggerOverlayUnavailable)?
+}
+
+pub(crate) fn register_current_trigger_runtime(
+    service_id: ServiceId,
+    service_name: &'static str,
+    generation: u64,
+    semaphore: Arc<Semaphore>,
+    current_limit: Arc<AtomicUsize>,
+) -> Option<TriggerRuntimeFactsHandle> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources.runtime_facts.register_trigger(
+                service_id,
+                service_name,
+                generation,
+                semaphore,
+                current_limit,
+            )
+        })
+        .ok()
+}
+
+pub(crate) fn register_current_trigger_policy_overlay(
+    service_id: ServiceId,
+    generation: u64,
+    base: TriggerBasePolicy,
+    semaphore: Arc<Semaphore>,
+    current_limit: Arc<AtomicUsize>,
+) -> Option<Arc<TriggerPolicyOverlayStore>> {
+    CURRENT_RESOURCES
+        .try_with(|resources| {
+            resources.trigger_policy_overlays.register_trigger(
+                service_id,
+                generation,
+                base,
+                semaphore,
+                current_limit,
+            );
+            resources.trigger_policy_overlays.clone()
+        })
+        .ok()
+}
+
+pub(crate) fn effective_trigger_policy(
+    store: &TriggerPolicyOverlayStore,
+    service_id: ServiceId,
+    generation: u64,
+    fallback: TriggerBasePolicy,
+) -> EffectiveTriggerPolicy {
+    store.effective_policy(service_id, generation, fallback)
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +519,7 @@ pub async fn sleep(duration: Duration) -> bool {
 ///
 /// This function is typically called from the default `run_as_service`
 /// implementation in [`TriggerHost`](crate::models::trigger::TriggerHost) to check for user overrides before
-/// falling back to the template's self-declared [`ScalingPolicy`].
+/// falling back to the template's self-declared [`ScalingPolicy`](crate::models::ScalingPolicy).
 ///
 /// # Panics
 ///
@@ -358,10 +556,16 @@ where
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
 {
-    let identity = CURRENT_SERVICE.with(|id| id.clone());
-    let resources = CURRENT_RESOURCES.with(|r| r.clone());
+    let context = CURRENT_SERVICE
+        .try_with(|id| id.clone())
+        .and_then(|identity| CURRENT_RESOURCES.try_with(|r| (identity, r.clone())));
 
-    tokio::spawn(async move { __run_service_scope(identity, resources, || fut).await })
+    match context {
+        Ok((identity, resources)) => {
+            tokio::spawn(async move { __run_service_scope(identity, resources, || fut).await })
+        }
+        Err(_) => tokio::spawn(fut),
+    }
 }
 
 /// Returns the `ServiceId` of the calling service.
@@ -372,4 +576,121 @@ pub fn current_service_id() -> ServiceId {
     CURRENT_SERVICE
         .try_with(|identity| identity.service_id)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane};
+    use crate::core::provider_scope::ProviderScopeId;
+    use tokio_util::sync::CancellationToken;
+
+    #[tokio::test]
+    async fn current_provider_scope_falls_back_to_root_outside_service_scope() {
+        let scope = current_provider_scope();
+
+        assert_eq!(scope.id(), ProviderScopeId::root());
+    }
+
+    #[tokio::test]
+    async fn daemon_resources_scope_sets_provider_scope_without_service_identity() {
+        let resources = DaemonResources::new();
+        let expected_scope_id = resources.provider_scope.id();
+
+        let actual_scope_id =
+            __run_daemon_resources_scope(resources, || async { current_provider_scope().id() })
+                .await;
+
+        assert_eq!(actual_scope_id, expected_scope_id);
+        assert_ne!(actual_scope_id, ProviderScopeId::root());
+    }
+
+    #[tokio::test]
+    async fn current_provider_scope_uses_daemon_resources_inside_service_scope() {
+        let resources = DaemonResources::new();
+        let expected_scope_id = resources.provider_scope.id();
+        let identity = ServiceIdentity::new(
+            ServiceId::new(17),
+            "provider_scope",
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+
+        let actual_scope_id = __run_service_scope(identity, resources, || async {
+            current_provider_scope().id()
+        })
+        .await;
+
+        assert_eq!(actual_scope_id, expected_scope_id);
+        assert_ne!(actual_scope_id, ProviderScopeId::root());
+    }
+
+    #[tokio::test]
+    async fn spawn_with_context_falls_back_outside_service_scope() {
+        let task = spawn_with_context(async { 42u32 });
+
+        let value = task.await.expect("fallback task should join cleanly");
+
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn sleep_records_completed_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(11);
+        let diagnostics =
+            store.register_generation(service_id, "sleep_completed", 1, RuntimeLane::Standard);
+        let identity = ServiceIdentity::new_with_diagnostics(
+            service_id,
+            "sleep_completed",
+            CancellationToken::new(),
+            CancellationToken::new(),
+            diagnostics,
+        );
+
+        let completed = __run_service_scope(identity, DaemonResources::new(), || async {
+            sleep(Duration::ZERO).await
+        })
+        .await;
+
+        assert!(completed);
+        let generation = store
+            .generation_snapshot(service_id, 1)
+            .expect("generation diagnostics should exist");
+        assert_eq!(generation.aggregate.service_sleep.completed, 1);
+        assert_eq!(generation.aggregate.service_sleep.interrupted, 0);
+
+        let lane = store.lane_snapshot(RuntimeLane::Standard);
+        assert_eq!(lane.aggregate.service_sleep.completed, 1);
+    }
+
+    #[tokio::test]
+    async fn sleep_records_reload_interruption_diagnostics() {
+        let store = DiagnosticsStore::new();
+        let service_id = ServiceId::new(12);
+        let diagnostics =
+            store.register_generation(service_id, "sleep_reload", 1, RuntimeLane::Standard);
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+        let identity = ServiceIdentity::new_with_diagnostics(
+            service_id,
+            "sleep_reload",
+            CancellationToken::new(),
+            reload_token,
+            diagnostics,
+        );
+
+        let completed = __run_service_scope(identity, DaemonResources::new(), || async {
+            sleep(Duration::from_secs(30)).await
+        })
+        .await;
+
+        assert!(!completed);
+        let generation = store
+            .generation_snapshot(service_id, 1)
+            .expect("generation diagnostics should exist");
+        assert_eq!(generation.aggregate.service_sleep.completed, 0);
+        assert_eq!(generation.aggregate.service_sleep.interrupted, 1);
+        assert_eq!(generation.aggregate.service_sleep.total_drift_ms, 0);
+    }
 }

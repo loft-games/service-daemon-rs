@@ -3,11 +3,12 @@ name = "example-minimal"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Minimal example: basic service with is_shutdown() polling loop."
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.43", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.102"

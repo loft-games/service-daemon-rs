@@ -1,0 +1,5 @@
+error: Unknown scheduling policy 'Control'. Supported: Standard, HighPriority, Isolated
+ --> tests/fail/16_trigger_control_scheduling.rs:6:41
+  |
+6 | #[trigger(Event(MySignal), scheduling = Control)]
+  |                                         ^^^^^^^

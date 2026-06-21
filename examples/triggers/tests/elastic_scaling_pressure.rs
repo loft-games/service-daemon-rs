@@ -1,8 +1,8 @@
-//! # Elastic Scaling Pressure Test
+//! # Queue concurrency pressure test
 //!
 //! End-to-end integration test that verifies the `TriggerRunner`'s
-//! `scale_monitor` background task automatically increases concurrency
-//! under sustained pressure.
+//! `scale_monitor` background task increases concurrency under sustained
+//! pressure.
 //!
 //! ## Test Strategy
 //!
@@ -11,8 +11,7 @@
 //! 2. Start a `ServiceDaemon` with all default settings
 //!    (`initial_concurrency=1`).
 //! 3. A producer task floods the queue with messages.
-//! 4. After sufficient time for the `scale_monitor` to react (which checks
-//!    every 1 second), trigger a graceful shutdown.
+//! 4. Wait until the `scale_monitor` raises observed handler concurrency.
 //! 5. Assert that `peak_concurrency > 1`, proving the scale-up occurred.
 //!
 //! **Run**: `cargo test -p example-triggers --test elastic_scaling_pressure -- --nocapture`
@@ -27,7 +26,7 @@ use service_daemon::trigger;
 
 fn isolated_registry() -> Registry {
     Registry::builder()
-        .with_tag("__test_elastic_scaling_pressure__")
+        .with_tag("__test_queue_concurrency_pressure__")
         .build()
 }
 
@@ -35,6 +34,16 @@ fn reset_counters() {
     ACTIVE_COUNT.store(0, Ordering::SeqCst);
     PEAK_COUNT.store(0, Ordering::SeqCst);
     COMPLETED_COUNT.store(0, Ordering::SeqCst);
+}
+
+async fn wait_until(description: &'static str, mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(6), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect(description);
 }
 
 #[allow(unused_imports)]
@@ -68,7 +77,7 @@ pub struct PressureQueue;
 /// Uses static atomics to track the maximum number of concurrently
 /// running handler instances. Under `initial_concurrency=1`, the
 /// scale_monitor should detect saturation and expand capacity.
-#[trigger(Queue(PressureQueue), tags = ["__test_elastic_scaling_pressure__"])]
+#[trigger(Queue(PressureQueue), tags = ["__test_queue_concurrency_pressure__"])]
 pub async fn pressure_handler(_payload: String) -> anyhow::Result<()> {
     // Increment active count and update peak high-water mark
     let current = ACTIVE_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
@@ -89,8 +98,7 @@ pub async fn pressure_handler(_payload: String) -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn elastic_scaling_increases_concurrency_under_pressure() {
-    // -- Setup tracing for debug output --
+async fn elastic_scaling_increases_concurrency_under_pressure() -> anyhow::Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("info")
         .with_test_writer()
@@ -98,47 +106,40 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
 
     reset_counters();
 
-    // -- Build and start the daemon --
-    // TopicHost (Queue template) declares ScalingPolicy::default() via
-    // TriggerHost::scaling_policy(), which gives initial_concurrency=1,
-    // max_concurrency=64, scale_factor=2, scale_threshold=5 (~83% utilization).
     let mut daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .build();
     let token = daemon.cancel_token();
     daemon.run().await;
 
-    // Give the daemon a moment to initialise triggers
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // -- Producer: flood the queue with messages --
-    // 100ms between sends at 200ms handler time -> queue builds up fast.
-    // With initial_concurrency=1, the semaphore is 100% utilized.
     let producer = tokio::spawn(async move {
         for i in 0..50 {
-            // push() may block momentarily if the broadcaster is full
-            let _ = PressureQueue::resolve().await.push(format!("msg-{}", i));
+            let queue = PressureQueue::resolve().await;
+            let _ = queue.push(format!("msg-{}", i));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        Ok::<(), anyhow::Error>(())
     });
 
-    // -- Let the system run for 5 seconds --
-    // The scale_monitor checks every 1s. After ~1-2s it should detect
-    // 100% utilization and scale from 1 -> 2 (then possibly 2 -> 4).
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    wait_until("queue pressure should increase handler concurrency", || {
+        PEAK_COUNT.load(Ordering::SeqCst) > 1
+    })
+    .await;
 
-    // -- Trigger graceful shutdown --
     token.cancel();
 
-    // Wait for producer to finish (it should be done by now)
-    let _ = tokio::time::timeout(Duration::from_secs(5), producer).await;
+    tokio::time::timeout(Duration::from_secs(5), producer)
+        .await
+        .expect("pressure producer did not finish in time")
+        .expect("pressure producer task panicked")?;
 
     tokio::time::timeout(Duration::from_secs(5), daemon.wait())
         .await
         .expect("pressure test daemon did not shut down in time")
         .expect("pressure test daemon shutdown failed");
 
-    // -- Assert results --
     let peak = PEAK_COUNT.load(Ordering::SeqCst);
     let completed = COMPLETED_COUNT.load(Ordering::SeqCst);
 
@@ -148,19 +149,11 @@ async fn elastic_scaling_increases_concurrency_under_pressure() {
         "Pressure test results"
     );
 
-    // The scale_monitor should have detected pressure within 1-2 seconds
-    // and increased concurrency beyond the initial value of 1.
     assert!(
         peak > 1,
-        "Expected elastic scaling to increase concurrency beyond \
-         initial_concurrency=1, but peak was {}. Completed: {}",
-        peak,
-        completed
+        "expected queue pressure to increase concurrency beyond 1, peak={peak}, completed={completed}"
     );
+    assert!(completed > 0, "expected at least one completed handler");
 
-    tracing::info!(
-        "Pressure test PASSED: peak_concurrency={}, completed={}",
-        peak,
-        completed
-    );
+    Ok(())
 }

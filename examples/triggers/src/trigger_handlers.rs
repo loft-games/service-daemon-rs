@@ -7,7 +7,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::providers::{CleanupSchedule, ExternalStatus, TaskQueue, UserNotifier, WorkerQueue};
+use crate::providers::{
+    CleanupSchedule, ComplexJob, ExternalStatus, JobQueue, TaskQueue, UserNotifier, WorkerQueue,
+};
 use service_daemon::TT::*;
 use service_daemon::trigger;
 
@@ -57,10 +59,8 @@ pub async fn lb_worker_handler(payload: String) -> anyhow::Result<()> {
 // =============================================================================
 
 /// Receives a `ComplexJob` wrapped in `Arc` -- zero-copy payload delivery.
-#[trigger(Queue(crate::providers::JobQueue))]
-pub async fn complex_job_handler(
-    #[payload] job: Arc<crate::providers::ComplexJob>,
-) -> anyhow::Result<()> {
+#[trigger(Queue(JobQueue))]
+pub async fn complex_job_handler(#[payload] job: Arc<ComplexJob>) -> anyhow::Result<()> {
     tracing::info!(">>> [Queue Complex] id={}, data='{}'", job.id, job.data);
     Ok(())
 }

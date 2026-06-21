@@ -1,19 +1,8 @@
-//! Testing context for service-level isolation.
+//! Test-only context helpers for running a real `ServiceDaemon` with injected
+//! shelf, status, and provider resources.
 //!
-//! This entire module is gated behind the `simulation` feature flag and is
-//! physically removed from production builds.
-//!
-//! ## Architecture: Interactive Simulation Sandbox
-//!
-//! `MockContext` acts as a **simulation sandbox factory**: it collects pre-filled
-//! resources (shelf data, status overrides) and produces a `ServiceDaemonBuilder`
-//! that spawns a fully real `ServiceDaemon` with those resources injected.
-//!
-//! After the daemon starts, a `SimulationHandle` provides "SimulationHandle" capabilities
-//! for dynamic intervention -- modifying shelf data, flipping service status, or
-//! triggering reload signals while the daemon is running.
-//!
-//! All types in this module are **strictly gated** behind `#[cfg(feature = "simulation")]`.
+//! This module is gated behind the `simulation` feature flag and is removed
+//! from production builds.
 
 use crate::core::context::identity::DaemonResources;
 use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
@@ -22,21 +11,17 @@ use crate::models::{ServiceId, ServiceStatus};
 use std::any::Any;
 use std::sync::Arc;
 
-// =============================================================================
-// SimulationHandle -- The "SimulationHandle" for dynamic intervention
-// =============================================================================
-
-/// A handle for dynamically intervening in a running simulation.
+/// A handle for updating daemon resources during a simulation run.
 ///
-/// `SimulationHandle` holds a reference to the daemon's internal `DaemonResources`
-/// (which are `Arc`-based), so mutations are immediately visible to all services.
+/// `SimulationHandle` holds `Arc`-backed daemon resources, so updates are
+/// visible to services that use the same simulation daemon.
 ///
 /// # Example
 /// ```rust,ignore
 /// let (daemon, handle) = ctx.run().await;
 ///
 /// // Phase 2: mid-flight mutation
-/// handle.set_shelf::<String>("config_svc", "db_url", "new://host".into());
+/// handle.set_shelf::<String>(svc_id, "db_url", "new://host".into());
 /// handle.set_status(svc_id, ServiceStatus::NeedReload);
 /// ```
 #[derive(Clone)]
@@ -56,8 +41,8 @@ impl SimulationHandle {
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
-    pub fn set_shelf<T: Any + Send + Sync>(&self, service_name: &'static str, key: &str, value: T) {
-        let entry = self.resources.shelf.entry(service_name).or_default();
+    pub fn set_shelf<T: Any + Send + Sync>(&self, service_id: ServiceId, key: &str, value: T) {
+        let entry = self.resources.shelf.entry(service_id).or_default();
         entry.insert(key.to_string(), Box::new(value));
     }
 
@@ -81,6 +66,20 @@ impl SimulationHandle {
         }
     }
 
+    /// Overrides a provider for this simulation daemon only.
+    ///
+    /// The override is installed into the daemon-local provider scope and is
+    /// treated as a binding mutation. Existing generations that watch this
+    /// provider will reload through the normal provider watch path.
+    pub fn override_provider<T>(&self, value: T)
+    where
+        T: 'static + Send + Sync + Clone,
+    {
+        self.resources
+            .provider_scope
+            .override_local_slot(Arc::new(value));
+    }
+
     /// Returns a list of all `ServiceId`s currently visible in the status plane.
     ///
     /// This is useful for discovering the runtime IDs assigned by `Registry`,
@@ -101,7 +100,7 @@ impl SimulationHandle {
     // Safe Read API -- lock-free accessors that return owned values
     // =========================================================================
 
-    /// Reads a shelf value by service name and key, returning an owned clone.
+    /// Reads a shelf value by service ID and key, returning an owned clone.
     ///
     /// This is the **recommended** way to inspect shelf data in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
@@ -109,22 +108,19 @@ impl SimulationHandle {
     ///
     /// # Example
     /// ```rust,ignore
-    /// let val: Option<String> = handle.get_shelf("my_service", "config_key");
+    /// let val: Option<String> = handle.get_shelf(svc_id, "config_key");
     /// assert_eq!(val, Some("expected_value".to_string()));
     /// ```
     pub fn get_shelf<T: Any + Clone + Send + Sync>(
         &self,
-        service_name: &str,
+        service_id: ServiceId,
         key: &str,
     ) -> Option<T> {
-        self.resources
-            .shelf
-            .get(service_name as &str)
-            .and_then(|entry| {
-                entry
-                    .get(key)
-                    .and_then(|val| val.downcast_ref::<T>().cloned())
-            })
+        self.resources.shelf.get(&service_id).and_then(|entry| {
+            entry
+                .get(key)
+                .and_then(|val| val.downcast_ref::<T>().cloned())
+        })
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -142,112 +138,22 @@ impl SimulationHandle {
     /// Checks whether a shelf key exists for the specified service.
     ///
     /// Returns `true` if the key is present (regardless of its type).
-    pub fn has_shelf(&self, service_name: &str, key: &str) -> bool {
+    pub fn has_shelf(&self, service_id: ServiceId, key: &str) -> bool {
         self.resources
             .shelf
-            .get(service_name as &str)
+            .get(&service_id)
             .is_some_and(|entry| entry.contains_key(key))
     }
 
     /// Returns all shelf key names for the specified service.
     ///
     /// Returns an empty `Vec` if the service has no shelved data.
-    pub fn shelf_keys(&self, service_name: &str) -> Vec<String> {
+    pub fn shelf_keys(&self, service_id: ServiceId) -> Vec<String> {
         self.resources
             .shelf
-            .get(service_name as &str)
+            .get(&service_id)
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
-    }
-
-    /// Returns a clone of the underlying `DaemonResources` for advanced inspection.
-    ///
-    /// # WARNING: Deadlock Risk -- Real Incident Case Study
-    ///
-    /// **Why this warning is here instead of in a FAQ:**
-    /// If you are reaching for `resources()` to bypass [`get_shelf`] / [`get_status`],
-    /// you are an advanced user who reads source code. This documentation is
-    /// placed at the point of danger so you encounter it exactly when you need it.
-    /// A FAQ entry would be boilerplate-free to someone skimming the API surface.
-    ///
-    /// ## The Problem
-    ///
-    /// `DashMap::get()` returns a `Ref<K, V>` that **holds an internal shard lock**
-    /// for the entire lifetime of the `Ref`. These guards look like ordinary
-    /// variables, but they are **unbounded lock hazards**.
-    ///
-    /// ## Real Failure Scenario
-    ///
-    /// The following test code caused an **indefinite hang** in CI:
-    ///
-    /// ```rust,ignore
-    /// // DEADLOCK -- DO NOT DO THIS
-    /// let resources = handle.resources();
-    /// let shelf = resources.shelf.get("svc_name").unwrap();  // holds read lock!
-    /// let val = shelf.get("key").unwrap();                    // holds another read lock!
-    /// assert_eq!(val.value().downcast_ref::<String>(), ...);
-    /// // locks are still alive here...
-    ///
-    /// cancel.cancel();
-    /// daemon_task.await;  // <-- DEADLOCK: daemon waits for service to stop,
-    ///                     //   service calls shelve() which needs write lock,
-    ///                     //   but test still holds read lock above.
-    /// ```
-    ///
-    /// ## Circular Wait Diagram
-    ///
-    /// ```text
-    /// Test thread               Daemon / Service thread
-    /// -------------             ----------------------
-    /// shelf.get("svc")          (running service loop)
-    ///   | holds read lock
-    /// shelf.get("key")
-    ///   | holds read lock
-    /// cancel.cancel()
-    ///   |
-    /// daemon_task.await ------> stop_all_services()
-    ///   (blocked)                 | cancels service token
-    ///                          service loop exits
-    ///                            | calls shelve()
-    ///                          shelf.entry("svc").insert()
-    ///                            | needs WRITE lock
-    ///                          BLOCKED by test's read lock
-    ///                            ^
-    ///                          == circular wait ==
-    /// ```
-    ///
-    /// ## Safe Alternative
-    ///
-    /// Use the lock-free accessors instead -- they acquire and release the lock
-    /// within a single synchronous call, making cross-await deadlocks impossible:
-    ///
-    /// ```rust,ignore
-    /// // SAFE -- lock released before any .await
-    /// let val: Option<String> = handle.get_shelf("svc_name", "key");
-    /// assert_eq!(val, Some("expected".to_string()));
-    ///
-    /// cancel.cancel();
-    /// daemon_task.await;  // no lock held, no deadlock
-    /// ```
-    ///
-    /// ## If You Must Use `resources()`
-    ///
-    /// Scope every `DashMap::Ref` inside a `{ ... }` block so the lock is
-    /// dropped before any `.await`:
-    ///
-    /// ```rust,ignore
-    /// let val = {
-    ///     let resources = handle.resources();
-    ///     let shelf = resources.shelf.get("svc").unwrap();
-    ///     shelf.get("key").unwrap().value().downcast_ref::<String>().cloned()
-    /// }; // <-- all locks dropped here
-    ///
-    /// cancel.cancel();
-    /// daemon_task.await;  // safe
-    /// ```
-    #[doc(hidden)]
-    pub fn resources(&self) -> Arc<DaemonResources> {
-        self.resources.clone()
     }
 }
 
@@ -286,12 +192,12 @@ impl MockContextBuilder {
     /// and state persistence logic.
     pub fn with_shelf<T: Any + Send + Sync>(
         self,
-        service_name: &'static str,
+        service_id: ServiceId,
         key: &str,
         data: T,
     ) -> Self {
         {
-            let entry = self.resources.shelf.entry(service_name).or_default();
+            let entry = self.resources.shelf.entry(service_id).or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self
@@ -303,6 +209,21 @@ impl MockContextBuilder {
     /// setting the initial state of the service under test.
     pub fn with_status(self, service_id: ServiceId, status: ServiceStatus) -> Self {
         self.resources.status_plane.insert(service_id, status);
+        self
+    }
+
+    /// Pre-installs a provider override before the simulation daemon starts.
+    ///
+    /// The override is scoped to this sandbox's daemon resources, so eager
+    /// provider initialization and service injection see the fake value without
+    /// writing into the root provider slot.
+    pub fn with_provider_override<T>(self, value: T) -> Self
+    where
+        T: 'static + Send + Sync + Clone,
+    {
+        self.resources
+            .provider_scope
+            .override_local_slot(Arc::new(value));
         self
     }
 
@@ -320,7 +241,7 @@ impl MockContextBuilder {
     }
 
     /// Builds the `MockContext` and returns a pre-configured `ServiceDaemonBuilder`
-    /// along with a `SimulationHandle` for dynamic intervention.
+    /// along with a `SimulationHandle` for runtime updates.
     ///
     /// The returned builder:
     /// - Has `Registry` isolation enabled (empty registry, no auto-discovery).

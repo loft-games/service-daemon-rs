@@ -24,11 +24,13 @@ daemon.run().await;
 daemon.wait().await?;
 ```
 
-### 1.1. Backoff & Jitter Strategy
+### 1.1. Backoff, Jitter & Restart Storm Protection
 The framework uses a unified `BackoffController` to manage retry delays, consecutive failure counts, and interruption-aware waiting. This ensures that both standard services and trigger handlers follow the same resilience policy.
 
+Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service failures happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, clean `Ok(())` exits still restart immediately, and reload/shutdown signals still interrupt restart waits.
+
 > [!NOTE]
-> **Internal Architecture**: For a deep dive into the `BackoffController` state machine and the self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#14-backoffcontroller-internals).
+> **Internal Architecture**: For the `BackoffController` state machine, restart-storm guard, and self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#15-backoffcontroller-internals).
 
 ### 1.2. Retry Design: Services vs. Triggers
 
@@ -36,15 +38,15 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 
 | Layer | Retry Behavior | How to Stop |
 | :--- | :--- | :--- |
-| **Service** | Restarts forever; failures use backoff, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
+| **Service** | Restarts forever; failures use backoff plus an internal storm guard, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
 | **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
-| **Trigger** | Always retries forever (default) | Set `trigger_max_retries` on the `RestartPolicy` |
+| **Trigger dispatch** | A handler failure is retried inside the current dispatch; retry exhaustion becomes a recoverable trigger-service generation failure | Set `trigger_max_retries` on the `RestartPolicy` to bound each dispatch |
 
 **Why the difference?** Services are long-running background tasks - they *are* the application. If a service crashes, the daemon must bring it back. The only valid reason for a service to stop permanently is an unrecoverable error (e.g., a missing license key, a corrupt database), which the service itself signals via `ServiceError::Fatal`.
 
 Lazy providers are different: they may initialize after startup, inside a running service. In that case, a `ProviderError::Fatal` is promoted to a daemon-wide shutdown request by the service runner, so the process can stop cleanly instead of continuing in a partially initialized state.
 
-Trigger handlers, on the other hand, process individual messages. A single poison message should not block the entire queue forever. `trigger_max_retries` acts as a safety valve to skip messages that consistently fail.
+Trigger handlers process individual events. A single handler `Err` is treated as a message-handling failure and stays inside the trigger retry pipeline. If the configured retry limit is exhausted, the trigger service generation reports a recoverable failure to the normal supervisor, which then applies the same restart/backoff/status/diagnostics path as other recoverable service failures.
 
 ### 1.3. Trigger Retry Safety Valve: `trigger_max_retries`
 
@@ -61,10 +63,10 @@ let mut daemon = ServiceDaemon::builder()
     .build();
 ```
 
-When `trigger_max_retries` is reached, the `RetryInterceptor` logs a warning and propagates the error. The default is `None` (unlimited retries).
+When `trigger_max_retries` is reached, the current dispatch is exhausted and the trigger service generation reports a recoverable failure. The supervisor then records the exit, applies restart/backoff policy, and starts the next generation when policy allows. The default is `None` (unlimited retries).
 
 > [!WARNING]
-> Do **not** use `trigger_max_retries` to control service lifecycle. If a service needs to stop permanently, return `ServiceError::Fatal` from the service function instead.
+> Do **not** use `trigger_max_retries` as a service restart-storm control. It only bounds retries for one trigger dispatch. Service-generation restarts remain governed by supervisor restart/backoff policy.
 
 ### 1.4. Fatal Errors
 
@@ -73,7 +75,7 @@ Sometimes a service encounters an error that it cannot recover from via a restar
 When a service returns a `Fatal` error, the `ServiceDaemon` will **permanently stop** that service and transition its status to `Terminated`, bypassing the restart policy entirely.
 
 ```rust
-use service_daemon::models::ServiceError;
+use service_daemon::ServiceError;
 
 #[service]
 async fn license_checker() -> anyhow::Result<()> {
@@ -87,14 +89,18 @@ async fn license_checker() -> anyhow::Result<()> {
 
 ## 2. Initialization Resilience: Providers
 
-When a provider's initialization fails, the daemon distinguishes transient errors (retried with backoff) from fatal errors (abort startup). The two paths are explicit and chosen by the provider via the `ProviderError` it returns.
+When a provider's initialization fails, the daemon distinguishes transient errors from terminal provider-init boundary failures. User provider functions opt into this behavior by returning `Result<T, ProviderError>`; framework-generated providers can also produce `ProviderInitError` for required environment variables, parse failures, dependency-provider failures, panic translation, timeout, cancellation, and eager dependency-graph defense errors.
 
 ### 2.1. Provider Error Mapping: Retryable vs Fatal
 
 When a provider fails to initialize, it can influence the daemon's behavior by returning specific error variants:
 
-- **Retryable**: The daemon will retry the initialization using the global `RestartPolicy`. Useful for transient issues like temporary network partitions.
-- **Fatal**: The daemon will immediately stop the startup process and shutdown. Useful for configuration errors (e.g., invalid connection string).
+- **Retryable**: the daemon retries initialization with provider-init backoff until `RestartPolicy::provider_init_timeout` expires. If the timeout expires, the terminal boundary error is `ProviderInitError::Timeout`.
+- **Fatal**: the daemon does not retry the provider. The terminal boundary error is `ProviderInitError::Fatal`, and the supervisor requests daemon shutdown for lazy failures or aborts startup for eager failures.
+
+Provider retry/backoff is separate from service-generation restart/backoff. A provider-init terminal error bypasses the normal service restart loop; it is recorded as a provider-init lifecycle exit and does not synthesize a restart decision.
+
+Cancellation also remains distinct: if daemon shutdown cancels provider initialization, the framework reports `ProviderInitError::Cancelled` rather than rewriting it as fatal.
 
 ### 2.2. Smart Listen Strategy (`Listen` Template)
 
@@ -128,7 +134,7 @@ The probe-then-unlink path emits a `tracing::warn!` event with `provider` and `p
 
 The `UnixConnect` template performs **one connectivity probe at provider init time** and discards the result. The probe serves two purposes:
 
-1. With `eager = true`, it blocks the system startup wave until the peer is reachable. This is the canonical pattern for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
+1. With `eager = true`, it blocks the system startup wave until the peer is reachable. Use this for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
 2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `connect()` somewhere in the hot path.
 
 Peer servers will observe a single `accept()` followed by an instant close from the probe -- this is normal and any reasonable server already handles port-scanner / health-probe traffic the same way.
@@ -161,10 +167,10 @@ let policy = RestartPolicy::builder()
 - **Spawn Timeout**: The maximum time a startup wave waits for all services within it to report `Healthy`. If the timeout is reached, the daemon logs a warning and proceeds to the next wave to avoid blocking the entire system.
 - **Stop Timeout**: The maximum time a shutdown wave waits for all services within it to exit gracefully before forcing an abort.
 
-### 2.1. Concurrency & Elastic Scaling
-Resilience also extends to **throughput management**. For streaming triggers (e.g. `Queue`), elastic scaling is governed by a dedicated [`ScalingPolicy`] struct &mdash; separate from `RestartPolicy`. Each trigger template self-declares its scaling requirements via `TriggerHost::scaling_policy()`. Templates that do not need scaling (e.g. `Cron`, `Watch`, `Notify`) return `None` and incur zero scaling overhead. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+### 3.1. Queue concurrency and backpressure
+For streaming triggers (e.g. `Queue`), [`ScalingPolicy`] controls handler concurrency separately from `RestartPolicy`. Scaling policy controls concurrency volume; restart policy controls retry/backoff time. Each trigger template declares its concurrency requirements via `TriggerHost::scaling_policy()`. Templates that do not need concurrent dispatch (e.g. `Cron`, `Watch`, `Notify`) return `None` and run serially. Most users can rely on the defaults or override them with `ScalingPolicy::builder()`.
 
-## 3. Managing CPU-Intensive & Blocking Tasks
+## 4. Managing CPU-Intensive & Blocking Tasks
 
 The asynchronous executor (Tokio) relies on cooperative multitasking. If a service performs a long-running CPU computation or a blocking I/O operation without yielding, it will **stall the entire daemon**.
 
@@ -199,7 +205,7 @@ pub fn fast_calc() -> anyhow::Result<()> { Ok(()) }
 > [!WARNING]
 > **Never** use `#[allow(sync_handler)]` for network requests or disk I/O. This will cause severe performance degradation and may block shutdown.
 
-## 3. Lifecycle Priorities
+## 5. Lifecycle Priorities
 
 Services are assigned a `u8` priority (default 50) to determine their relative importance.
 - **Startup**: Descending order (100 -> 0). Core systems start first.
@@ -217,7 +223,7 @@ Services are assigned a `u8` priority (default 50) to determine their relative i
 pub async fn log_flush() { ... }
 ```
 
-## 4. Graceful Shutdown
+## 6. Graceful Shutdown
 
 The daemon uses `CancellationToken` to signal services to stop. 
 1. **Notification**: All services are notified via `is_shutdown()`.

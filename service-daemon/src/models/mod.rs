@@ -1,19 +1,38 @@
+pub mod diagnostics;
 pub mod error;
 pub mod policy;
 pub mod provider_error;
+pub mod runtime;
 pub mod service;
 pub mod trigger;
 
+pub use diagnostics::{
+    DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
+    DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
+    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
+    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
+    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
+    DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot,
+    RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
+};
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{
-    BackoffController, RestartPolicy, RestartPolicyBuilder, ScalingPolicy, ScalingPolicyBuilder,
+    BackoffController, RestartPolicy, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
+    SchedulingAdvisoryProfile, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
+    TriggerPolicyOverlayError,
 };
 pub use provider_error::ProviderError;
+pub use runtime::{
+    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceRuntimeSnapshot,
+    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+};
 pub use service::{
-    InstanceId, PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
-    ServiceDescription, ServiceEntry, ServiceFn, ServiceId, ServiceParam, ServicePriority,
-    ServiceScheduling, ServiceStatus,
+    PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
+    ServiceDescription, ServiceEntry, ServiceFn, ServiceId, ServiceParam, ServiceScheduling,
+    ServiceStatus,
 };
-pub use trigger::{
-    TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, trigger_clone_payload,
-};
+pub use trigger::{TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage};

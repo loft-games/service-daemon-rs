@@ -21,6 +21,16 @@ pub enum ServiceError {
     #[error("Service '{0}' timed out during shutdown")]
     ShutdownTimeout(String),
 
+    /// An I/O error occurred while a service was running.
+    #[error("Runtime I/O error while {operation}: {source}")]
+    RuntimeIo {
+        /// Description of the operation that failed.
+        operation: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
+
     /// An internal task or channel error.
     #[error("Internal error: {0}")]
     InternalError(String),
@@ -47,6 +57,15 @@ pub enum ServiceError {
         /// The target state that was rejected.
         to: String,
     },
+}
+
+impl ServiceError {
+    pub fn runtime_io(operation: impl Into<String>, source: std::io::Error) -> Self {
+        Self::RuntimeIo {
+            operation: operation.into(),
+            source,
+        }
+    }
 }
 
 /// Internal provider initialization error used while orchestrating eager startup.

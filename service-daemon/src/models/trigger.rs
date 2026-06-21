@@ -4,9 +4,9 @@
 //!
 //! - **Policy** (`handle_step`): Defined by each trigger host. It only cares about
 //!   *"how to wait for the next event"* and returns a [`TriggerTransition`].
-//! - **Engine** (`run_as_service` default impl --> [`TriggerRunner`](crate::core::trigger_runner::TriggerRunner)):
+//! - **Engine** (`run_as_service` default impl --> [`TriggerRunner`]):
 //!   Manages the event loop, tracing, retry, middleware pipeline, and graceful
-//!   shutdown. Host implementors get this for free.
+//!   shutdown for host implementations.
 //!
 //! ## Extension Model
 //!
@@ -48,6 +48,8 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use super::policy::{RestartPolicy, ScalingPolicy};
+use super::policy::{TriggerPolicyOverlay, TriggerPolicyOverlayError};
+use super::runtime::TriggerPressureSnapshot;
 use super::service::{InstanceId, ServiceId};
 use crate::core::context;
 use crate::core::trigger_runner::TriggerRunner;
@@ -135,6 +137,8 @@ pub struct TriggerMessage<P> {
 pub struct TriggerContext<P> {
     /// The `ServiceId` of the trigger service that captured this event.
     pub service_id: ServiceId,
+    /// Service generation that owns this trigger handler invocation.
+    pub generation: u64,
     /// Monotonically increasing sequence number within this trigger service.
     pub instance_seq: u64,
     /// The incoming message that triggered this invocation.
@@ -142,6 +146,24 @@ pub struct TriggerContext<P> {
 }
 
 impl<P> TriggerContext<P> {
+    /// Creates a trigger context for a specific service generation.
+    ///
+    /// Most users receive contexts from the framework. Custom trigger engines
+    /// and tests should use this constructor instead of struct literals.
+    pub fn new(
+        service_id: ServiceId,
+        generation: u64,
+        instance_seq: u64,
+        message: TriggerMessage<P>,
+    ) -> Self {
+        Self {
+            service_id,
+            generation,
+            instance_seq,
+            message,
+        }
+    }
+
     /// Produces a hierarchical instance identifier (e.g. `svc#1:42`).
     ///
     /// This links the handler invocation to a specific trigger service and
@@ -152,13 +174,36 @@ impl<P> TriggerContext<P> {
     pub fn trigger_instance_id(&self) -> InstanceId {
         InstanceId::new(self.service_id, self.instance_seq)
     }
+
+    /// Returns read-only pressure facts for this trigger service.
+    ///
+    /// The snapshot is scoped to the current trigger service.
+    pub fn pressure(&self) -> Option<TriggerPressureSnapshot> {
+        context::current_trigger_pressure(self.service_id)
+    }
+
+    /// Request a temporary policy overlay for this trigger service.
+    ///
+    /// The framework scopes the request by this context's service id and
+    /// generation. Accepted overlays affect future dispatch boundaries.
+    pub fn request_policy_overlay(
+        &self,
+        overlay: TriggerPolicyOverlay,
+    ) -> Result<(), TriggerPolicyOverlayError> {
+        context::request_trigger_policy_overlay(self.service_id, self.generation, overlay)
+    }
+
+    /// Clear the current temporary policy overlay for this trigger service.
+    pub fn clear_policy_overlay(&self, reason: &str) -> Result<(), TriggerPolicyOverlayError> {
+        context::clear_trigger_policy_overlay(self.service_id, self.generation, reason)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // TriggerHandler -- unified async handler signature
 // ---------------------------------------------------------------------------
 
-/// The canonical function signature for trigger event handlers.
+/// Function signature used for trigger event handlers.
 ///
 /// Every trigger host invokes a handler of this shape, providing a
 /// `TriggerContext` with full traceability information.
@@ -178,8 +223,8 @@ pub type TriggerHandler<P> = Arc<
 ///
 /// - [`Next`](TriggerTransition::Next): Dispatch the payload and loop again.
 /// - [`Reload`](TriggerTransition::Reload): Dispatch the payload, then idle
-///   until the framework's `ServiceWatcher` restarts us (leveraging the
-///   existing service reload mechanism).
+///   until the generation-scoped dependency watch path restarts us through
+///   the service reload mechanism.
 /// - [`Stop`](TriggerTransition::Stop): Exit the event loop cleanly.
 #[non_exhaustive]
 pub enum TriggerTransition<P> {
@@ -191,8 +236,9 @@ pub enum TriggerTransition<P> {
     /// Deliver the payload, then idle until the framework restarts us.
     ///
     /// Used by state-watch triggers: fire once with the current snapshot,
-    /// then wait. When the target provider changes, the `ServiceWatcher`
-    /// will abort this instance and spawn a fresh one with updated state.
+    /// then wait. When the target provider changes, the generation-scoped
+    /// dependency watch path aborts this instance and spawns a fresh one with
+    /// updated state.
     /// The optional `(Uuid, ServiceId)` carries a pre-generated message identity.
     Reload(P, Option<(Uuid, ServiceId)>),
 
@@ -218,7 +264,7 @@ pub enum TriggerTransition<P> {
 ///   what to do next.
 /// - **Engine**: The default [`run_as_service`](TriggerHost::run_as_service)
 ///   implementation manages the event loop, tracing spans, instance IDs, and
-///   graceful shutdown. You get all of this **for free**.
+///   graceful shutdown.
 ///
 /// Override `run_as_service` only for hosts that cannot fit the
 /// `handle_step` model (e.g., `CronHost` which uses external callbacks).
@@ -297,7 +343,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     ///
     /// Users can override the template's default via
     /// [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
-    fn scaling_policy() -> Option<crate::models::policy::ScalingPolicy> {
+    fn scaling_policy() -> Option<ScalingPolicy> {
         None
     }
 
@@ -308,8 +354,8 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
     /// 2. Calls `handle_step` in a `tokio::select!` with shutdown monitoring.
     /// 3. Dispatches payloads through a middleware-instrumented handler pipeline.
     /// 4. Issues monotonically increasing instance sequence IDs.
-    /// 5. On `Reload`, idles via `wait_shutdown()` so the framework's
-    ///    `ServiceWatcher` can restart us when dependencies change.
+    /// 5. On `Reload`, idles via `wait_shutdown()` so the generation-scoped
+    ///    dependency watch path can restart us when dependencies change.
     ///
     /// Override this only for hosts that cannot fit the `setup` + `handle_step`
     /// model.
@@ -328,8 +374,8 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
             let scaling =
                 context::trigger_config::<ScalingPolicy>().or_else(|| Self::scaling_policy());
 
-            let runner =
-                TriggerRunner::new(name, service_id, handler, RestartPolicy::default(), scaling);
+            let restart_policy = context::trigger_config::<RestartPolicy>().unwrap_or_default();
+            let runner = TriggerRunner::new(name, service_id, handler, restart_policy, scaling);
 
             runner.run_with_host::<T, Self>(&mut host, target).await
         })
@@ -390,4 +436,30 @@ pub mod TT {
     pub use crate::core::triggers::WatchHost;
     pub use crate::core::triggers::WatchHost as State;
     pub use crate::core::triggers::WatchHost as Watch;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_context_new_preserves_identity_fields() {
+        let message = TriggerMessage {
+            message_id: Uuid::now_v7(),
+            source_id: ServiceId::new(7),
+            timestamp: Utc::now(),
+            payload: Arc::new("payload"),
+        };
+
+        let ctx = TriggerContext::new(ServiceId::new(42), 11, 3, message);
+
+        assert_eq!(ctx.service_id, ServiceId::new(42));
+        assert_eq!(ctx.generation, 11);
+        assert_eq!(ctx.instance_seq, 3);
+        assert_eq!(ctx.message.source_id, ServiceId::new(7));
+        assert_eq!(
+            ctx.trigger_instance_id(),
+            InstanceId::new(ServiceId::new(42), 3)
+        );
+    }
 }

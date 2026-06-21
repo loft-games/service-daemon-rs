@@ -5,7 +5,7 @@ use std::time::Duration;
 use tokio::time;
 use tracing::info;
 
-/// Simulates the 50ms Modbus server, running in an isolated OS thread with its own Tokio runtime.
+/// Simulates the 50ms Modbus server body running in an isolated OS thread with its own Tokio runtime.
 #[service(priority = ServicePriority::STORAGE, scheduling = Isolated)]
 pub async fn modbus_server() -> Result<()> {
     let thread = thread::current();

@@ -26,6 +26,13 @@ pub async fn on_signal() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[trigger(Event(MySignal))]
+#[allow(dead_code, sync_handler, clippy::too_many_arguments)]
+#[doc = "Intentionally synchronous trigger used to verify attribute preservation."]
+pub fn on_signal_sync() -> anyhow::Result<()> {
+    Ok(())
+}
+
 #[trigger(Queue(MyQueue))]
 pub async fn on_queue_item(item: String) -> anyhow::Result<()> {
     tracing::info!("Received: {}", item);

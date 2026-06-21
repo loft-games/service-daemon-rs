@@ -353,7 +353,7 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_fn_provider_dependency_chain() -> anyhow::Result<()> {
     // Resolve the async fn provider - this triggers the full dependency chain.
-    let conn_str = ConnectionString::resolve().await;
+    let conn_str = ConnectionString::resolve().await?;
 
     // The connection string should be assembled from Port(8080) + DbUrl("mysql://localhost")
     assert_eq!(

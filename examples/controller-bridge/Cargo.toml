@@ -1,0 +1,15 @@
+[package]
+name = "example-controller-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Controller bridge example: custom TriggerHost over a simulated device source."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon" }
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+anyhow = "1.0.102"
+futures = "0.3.32"
+prost = "0.14.1"

@@ -13,11 +13,11 @@
 
 use example_logging as _;
 use service_daemon::ServiceDaemon;
-use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
+use service_daemon::{FileLogConfig, enable_file_logging};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    service_daemon::core::logging::init_logging();
+    service_daemon::init_logging();
 
     // Enable file-based JSON log persistence (consumed by file_log_service)
     enable_file_logging(FileLogConfig::new("logs", "my-app"));

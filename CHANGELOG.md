@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.1.0-alpha.5] - 2026-06-21
+
+### Added
+
+- **Runtime Facts Snapshots**: Added read-only daemon, readiness, service, and trigger runtime snapshots, including trigger self-pressure access through `TriggerContext::pressure()`.
+- **Trigger Policy Overlays**: Added temporary trigger policy overlays through `TriggerContext::request_policy_overlay(...)` and `clear_policy_overlay(...)` for future-dispatch concurrency, timeout, and retry/backoff.
+- **Trigger Context Constructor**: Added `TriggerContext::new(...)` for custom trigger engines and tests.
+- **Public Diagnostics Snapshot**: Added read-only diagnostics snapshots with lifecycle facts, restart decisions, runtime-lane observations, bounded generation details, and Standard-lane interpretation hints.
+- **Scheduling Advisory Controls**: Added `SchedulingAdvisoryProfile` so applications can suppress advisory diagnostics without changing lifecycle or body placement.
+- **Provider Scope Ownership**: Added daemon-scoped provider ownership, binding epochs, and simulation override behavior so reload propagation can distinguish root, local, and override bindings.
+- **Release Validation Map**: Added maintainer docs and skill rules for feature-to-test coverage, dependency baselines, linkme platform smoke coverage, and example responsibility layers.
+
+### Changed
+
+- **Diagnostics Topology Export**: Changed automatic shutdown topology export from direct stdout printing to a structured `tracing::info!` event carrying the Mermaid text in `topology_mermaid`.
+- **Linkme Platform Monitoring**: Added positive release-mode linkme smoke and registry section/symbol inspection for Linux GNU, Linux musl, Windows MSVC, and macOS, while keeping Windows GNU as a best-effort XFAIL/workaround watchdog.
+- **File Logging Contract**: Documented and tested file logging initialization failure as a warning plus console-only degradation instead of daemon startup failure.
+- **Provider Macro Contract**: Reworked `#[provider]` item parsing around `syn::Item`, added explicit diagnostics for unsupported provider items and unsafe provider functions, and tightened function-provider `Result<T, ProviderError>` handling so same-named custom error types are rejected.
+- **Generated Provider Helpers**: Kept helper return shapes tied to declared fallibility: direct helpers for infallible and framework-owned providers, `Result<_, ProviderInitError>` helpers for env, socket, dependency-injected, and `ProviderError` providers, with direct-helper panic diagnostics that include provider origin, definition location, helper callsite, module path, and the original provider-init error.
+- **Provider Initialization Boundaries**: Clarified `ProviderError` versus `ProviderInitError`, preserved provider-init source classification in tracing/tests, and kept fatal, timeout, cancellation, panic, and dependency-provider failures distinct.
+- **Scheduling Runtime**: Split supervision/control-plane work from service and trigger body execution lanes, added HighPriority worker-count selection from final registry entries, and kept advisory analysis read-only.
+- **Trigger Supervision**: Improved trigger dispatch observability so retry exhaustion, infrastructure errors, panics, reload, and shutdown produce distinct lifecycle/restart signals.
+- **Trigger Context Identity**: `TriggerContext` now carries the owning service generation. Manual struct literals should migrate to `TriggerContext::new(service_id, generation, instance_seq, message)` during the alpha API window.
+- **Trigger Policy Overlay Contract**: Clarified temporary overlays as generation-scoped desired state for future dispatch scheduling. Concurrency is reconciled at runner scheduling boundaries; already captured timeout and retry policy are unchanged.
+- **Logging Initialization**: Made logging initialization safe to call repeatedly and tightened log batch-size validation.
+
+### Fixed
+
+- **Runtime Facts Timeline**: Cleared stale `healthy_since` values when services leave `Healthy` and recorded recover/shutdown/termination boundaries consistently in service runtime facts.
+- **Provider Reload Scope**: Made provider dependency reload generation-scoped so binding/value changes reload the affected generation without leaking across daemon boundaries.
+- **Public API Boundaries**: Reduced accidental public surface area and tightened macro/runtime checks for invalid parameters and unsupported capacity values.
+- **Panic Path Reduction**: Reworked several public-facing error paths to return structured errors instead of relying on panic behavior.
+- **Shelf Isolation**: Isolated shelf status by `ServiceId` so duplicate Rust function names selected into different service entries do not share persisted generation state.
+
 ## [0.1.0-alpha.4] - 2026-05-07
 
 ### Added
@@ -70,7 +106,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MockContext` simulation support (feature-gated).
 - `#![deny(unsafe_code)]` across the entire crate.
 
-[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.4...HEAD
+[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.5...HEAD
+[0.1.0-alpha.5]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.2

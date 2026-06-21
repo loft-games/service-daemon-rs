@@ -9,6 +9,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check
@@ -19,6 +22,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Rust Check
         run: cargo check --workspace
+      - name: Rust Check All Features
+        run: cargo check --workspace --all-features
+      - name: Rust Check Diagnostics Example
+        run: cargo check -p example-diagnostics
+      - name: Rust Check No Default Features
+        run: cargo check -p service-daemon --no-default-features
 
   test:
     name: Test
@@ -27,15 +36,74 @@ jobs:
       - uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Run check
-        run: cargo check --workspace
+      - name: Check file logging example
+        run: cargo check -p example-logging
+      - name: Check simulation example
+        run: cargo check -p example-simulation
       - name: Run tests
         run: cargo test --workspace
+      - name: Run tests with all features
+        run: cargo test --workspace --all-features
+      - name: Run service-daemon tests without default features
+        run: cargo test -p service-daemon --no-default-features
       # Release-mode smoke against linker section GC (see linkme_smoke.rs).
       # Catches rustc/LLVM upgrades that silently drop #[service] entries
       # before they can mask service-discovery failures in production builds.
       - name: Linkme smoke (release)
         run: cargo test -p service-daemon --release --test linkme_smoke
+
+  deny:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: cargo-deny-advisory-db-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            cargo-deny-advisory-db-${{ runner.os }}-
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --force
+      - name: Cargo Deny
+        run: cargo deny --locked check
+
+  linkme-platforms:
+    name: Linkme platform smoke
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: host
+            target_arg: ""
+            label: Linux GNU
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            target_arg: --target x86_64-pc-windows-msvc
+            label: Windows MSVC
+          - os: macos-latest
+            target: host
+            target_arg: ""
+            label: macOS
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            target_arg: --target x86_64-unknown-linux-musl
+            label: Linux musl
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (${{ matrix.target }})
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable "${{ matrix.target }}" llvm-tools-preview
+      - name: Linkme smoke (${{ matrix.label }})
+        run: cargo test ${{ matrix.target_arg }} --release -p service-daemon --test linkme_smoke
+      - name: Inspect linkme registry sections (${{ matrix.label }})
+        shell: bash
+        run: bash .github/scripts/check-linkme-registry-sections "${{ matrix.target }}"
 
   fmt:
     name: Format
@@ -60,3 +128,7 @@ jobs:
           components: clippy
       - name: Rust Clippy
         run: cargo clippy --workspace -- -D warnings
+      - name: Rust Clippy All Features
+        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Rust Clippy No Default Features
+        run: cargo clippy -p service-daemon --no-default-features -- -D warnings

@@ -23,18 +23,20 @@
 use std::io::Read;
 use std::sync::Arc;
 
-use std::collections::HashMap;
+use std::any::{Any, TypeId};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use futures::future::BoxFuture;
+use tokio::runtime::Handle;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-use service_daemon::ServiceDaemon;
-use service_daemon::core::context::DaemonResources;
-use service_daemon::models::{
-    BackoffController, RestartPolicy, ServiceFn, ServiceId, ServiceStatus,
+use service_daemon::{
+    BackoffController, RestartPolicy, ServiceDaemon, ServiceId, ServiceScheduling, ServiceStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -54,6 +56,39 @@ const WARMUP_ROUNDS: usize = 100;
 /// Seconds to wait after spawning services before sampling RSS.
 const SETTLE_DELAY_SECS: u64 = 2;
 
+type MockServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
+type MockShelfValue = Box<dyn Any + Send + Sync>;
+type MockServiceShelf = DashMap<String, MockShelfValue>;
+type MockGlobalShelfMapping = DashMap<ServiceId, MockServiceShelf>;
+
+#[allow(dead_code)]
+struct MockDaemonResources {
+    status_plane: DashMap<ServiceId, ServiceStatus>,
+    shelf: MockGlobalShelfMapping,
+    reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
+    status_changed: tokio::sync::Notify,
+    trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+}
+
+impl MockDaemonResources {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            status_plane: DashMap::new(),
+            shelf: DashMap::new(),
+            reload_signals: DashMap::new(),
+            status_changed: tokio::sync::Notify::new(),
+            trigger_configs: DashMap::new(),
+        })
+    }
+}
+
+#[allow(dead_code)]
+struct MockServiceDescription {
+    id: ServiceId,
+    entry: &'static (),
+    cancellation_token: CancellationToken,
+}
+
 // ---------------------------------------------------------------------------
 // MockSupervisor -- mirrors the private `ServiceSupervisor` in runner.rs
 // ---------------------------------------------------------------------------
@@ -72,17 +107,90 @@ const SETTLE_DELAY_SECS: u64 = 2;
 /// struct changes layout, this assertion will fail at compile time, reminding
 /// you to update the mock.
 #[allow(dead_code)]
+struct MockBodyExecutionLanes {
+    standard: Handle,
+    high_priority: Option<Handle>,
+}
+
+#[allow(dead_code)]
+struct MockBodyLaneResolver;
+
+#[allow(dead_code)]
+enum MockBodyExecutionLane {
+    Standard(Handle),
+    HighPriority(Handle),
+    Isolated,
+}
+
+#[allow(dead_code)]
+struct MockRestartStormConfig {
+    window: Duration,
+    failure_threshold: usize,
+    suppression_delay: Duration,
+}
+
+#[allow(dead_code)]
+struct MockRestartStormGuard {
+    config: MockRestartStormConfig,
+    failures: VecDeque<Instant>,
+}
+
+impl Default for MockRestartStormGuard {
+    fn default() -> Self {
+        Self {
+            config: MockRestartStormConfig {
+                window: Duration::from_secs(20),
+                failure_threshold: 6,
+                suppression_delay: Duration::from_secs(30),
+            },
+            failures: VecDeque::new(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+struct MockDiagnosticsStore;
+
+#[allow(dead_code)]
+struct MockGenerationDiagnosticsHandle {
+    service: Arc<()>,
+    generation: Arc<()>,
+    lane: Arc<()>,
+}
+
+#[allow(dead_code)]
+struct MockServiceIdentity {
+    service_id: ServiceId,
+    name: &'static str,
+    cancellation_token: CancellationToken,
+    reload_token: CancellationToken,
+    diagnostics: Option<MockGenerationDiagnosticsHandle>,
+    is_handshake_done: Arc<AtomicBool>,
+}
+
+#[allow(dead_code)]
 struct MockSupervisor {
     // -- Immutable service identity --
     service_id: ServiceId,
     name: &'static str,
-    run: ServiceFn,
+    run: MockServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    scheduling: ServiceScheduling,
+    body_lanes: MockBodyExecutionLanes,
+    body_lane_resolver: MockBodyLaneResolver,
+    generation_body_lane: Option<MockBodyExecutionLane>,
+    generation_scheduling: Option<ServiceScheduling>,
     backoff: BackoffController,
-    resources: Arc<DaemonResources>,
+    restart_storm: MockRestartStormGuard,
+    resources: Arc<MockDaemonResources>,
+    diagnostics: Arc<MockDiagnosticsStore>,
+    isolated_startup_permits: Arc<Semaphore>,
     cancellation_token: CancellationToken,
+    daemon_token: CancellationToken,
     // -- Per-generation mutable context --
     generation_start: Option<Instant>,
+    generation: u64,
+    generation_diagnostics: Option<MockGenerationDiagnosticsHandle>,
     reload_token: Option<CancellationToken>,
 }
 
@@ -92,7 +200,7 @@ struct MockSupervisor {
 // not for CI invariants.
 #[cfg(feature = "memory-analysis")]
 const _: () = {
-    const EXPECTED_SIZE: usize = 216;
+    const EXPECTED_SIZE: usize = 416;
     assert!(
         std::mem::size_of::<MockSupervisor>() == EXPECTED_SIZE,
         // If this fails, the real ServiceSupervisor layout has changed.
@@ -165,8 +273,8 @@ fn run_static_analysis() {
         ("ServiceId", std::mem::size_of::<ServiceId>()),
         ("ServiceStatus", std::mem::size_of::<ServiceStatus>()),
         (
-            "ServiceDescription",
-            std::mem::size_of::<service_daemon::models::ServiceDescription>(),
+            "MockServiceDescription (~= internal ServiceDescription)",
+            std::mem::size_of::<MockServiceDescription>(),
         ),
         ("RestartPolicy", std::mem::size_of::<RestartPolicy>()),
         (
@@ -174,17 +282,20 @@ fn run_static_analysis() {
             std::mem::size_of::<BackoffController>(),
         ),
         (
-            "ServiceIdentity",
-            std::mem::size_of::<service_daemon::core::context::ServiceIdentity>(),
+            "MockServiceIdentity (~= internal ServiceIdentity)",
+            std::mem::size_of::<MockServiceIdentity>(),
         ),
-        ("DaemonResources", std::mem::size_of::<DaemonResources>()),
+        (
+            "MockDaemonResources",
+            std::mem::size_of::<MockDaemonResources>(),
+        ),
         (
             "CancellationToken",
             std::mem::size_of::<CancellationToken>(),
         ),
         (
-            "Arc<DaemonResources>",
-            std::mem::size_of::<Arc<DaemonResources>>(),
+            "Arc<MockDaemonResources>",
+            std::mem::size_of::<Arc<MockDaemonResources>>(),
         ),
         (
             "Arc<Notify>",
@@ -263,7 +374,10 @@ fn measure_cancellation_tokens() -> Option<f64> {
 
 fn measure_supervisor_heap_box() -> Option<f64> {
     warmup_allocator();
-    let res = DaemonResources::new();
+    let res = MockDaemonResources::new();
+    let standard_handle = Handle::current();
+    let diagnostics = Arc::new(MockDiagnosticsStore);
+    let isolated_startup_permits = Arc::new(Semaphore::new(32));
     let mut boxes: Vec<Box<MockSupervisor>> = Vec::with_capacity(ISOLATION_COUNT);
 
     let delta = measure_rss_delta(|| {
@@ -273,10 +387,24 @@ fn measure_supervisor_heap_box() -> Option<f64> {
                 name: "bench",
                 run: |_| Box::pin(async { Ok(()) }),
                 watcher: None,
+                scheduling: ServiceScheduling::Standard,
+                body_lanes: MockBodyExecutionLanes {
+                    standard: standard_handle.clone(),
+                    high_priority: None,
+                },
+                body_lane_resolver: MockBodyLaneResolver,
+                generation_body_lane: None,
+                generation_scheduling: None,
                 backoff: BackoffController::new(RestartPolicy::default()),
+                restart_storm: MockRestartStormGuard::default(),
                 resources: res.clone(),
+                diagnostics: diagnostics.clone(),
+                isolated_startup_permits: isolated_startup_permits.clone(),
                 cancellation_token: CancellationToken::new(),
+                daemon_token: CancellationToken::new(),
                 generation_start: None,
+                generation: 0,
+                generation_diagnostics: None,
                 reload_token: None,
             }));
         }

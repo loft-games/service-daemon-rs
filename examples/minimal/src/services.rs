@@ -8,8 +8,8 @@
 use std::time::Duration;
 
 use crate::providers::{MinimalListener, Port};
-use service_daemon::service;
-use tracing::info;
+use service_daemon::{ServiceError, service};
+use tracing::{error, info};
 
 /// A service that demonstrates the Listen template.
 ///
@@ -17,11 +17,21 @@ use tracing::info;
 /// the listener which was bound early during system-init wave.
 #[service]
 pub async fn listener_service(listener: Arc<MinimalListener>) -> anyhow::Result<()> {
-    let l = listener.get();
-    info!(
-        "Listener service: Port is already bound at {}",
-        l.local_addr()?
-    );
+    let l = match listener.get() {
+        Ok(listener) => listener,
+        Err(error) => {
+            error!(error = %error, "Listener service failed to clone TCP listener; supervisor should restart this service");
+            return Err(ServiceError::runtime_io("clone TCP listener", error).into());
+        }
+    };
+    let addr = match l.local_addr() {
+        Ok(addr) => addr,
+        Err(error) => {
+            error!(error = %error, "Listener service failed to read local address; supervisor should restart this service");
+            return Err(ServiceError::runtime_io("read TCP listener local address", error).into());
+        }
+    };
+    info!("Listener service: Port is already bound at {}", addr);
 
     while !service_daemon::is_shutdown() {
         if !service_daemon::sleep(Duration::from_secs(10)).await {

@@ -3,6 +3,7 @@ name = "example-stress"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT OR Apache-2.0"
 description = "Stress test: bulk service registration via macro expansion."
 
 [features]
@@ -23,8 +24,8 @@ s1000 = ["s900"]
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.43", features = ["full"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1.0"
-paste = "1.0"
+tokio = { version = "1.52.3", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+anyhow = "1.0.102"
+pastey = "0.2.3"

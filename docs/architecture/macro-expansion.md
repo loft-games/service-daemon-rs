@@ -1,0 +1,166 @@
+# Macro Expansion
+
+This document explains how the procedural macros transform user code and preserve useful source spans for IDEs.
+
+## 1. The `#[service]` Transformation
+
+When you annotate a function, the macro generates:
+1. The original function, with its body preserved.
+2. An `async move` wrapper that resolves dependencies before calling the original function.
+3. A `static` registry entry collected by `linkme` with the metadata the daemon needs at runtime.
+
+> [!IMPORTANT]
+> **Distributed Registration Requirement**: Because `linkme` works at the linker level, any module containing a `#[service]` or `#[trigger]` **must** be included in your compilation tree (e.g., via `mod my_module;`). If a module is not reachable from `main.rs`, its services will not be discovered.
+
+## 2. The `#[trigger]` Transformation
+
+Triggers are specialized services registered through the same service registry. The macro-generated host wrapper:
+- Spawns the selected host logic, such as the notify host.
+- Resolves dependency providers once at trigger startup, outside the event loop, matching standard service behavior.
+- For `Watch` templates, registers the target provider in the generation dependency watch set so provider changes use the `ServiceDaemon` reload path.
+- Dispatches incoming events to the user handler.
+- Stores the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`) in the registry entry; the daemon runner uses it to place the user body while keeping supervision, dependency-watch evaluation, reload, restart/backoff, and shutdown coordination on the daemon control plane.
+
+## 3. The `#[provider]` Transformation
+
+Providers generate `Provided` / `ManagedProvided` / `WatchableProvided` implementations plus ergonomic helper methods for the declared type. The generated impl keeps a static root `StateManager<T>` as the compatibility slot, but all public helper methods delegate through runtime bridge functions that choose the current effective provider scope.
+
+The supported provider attribute forms are:
+
+```rust
+#[provider]
+#[provider("fallback")]
+#[provider("fallback", env = "CONFIG_ENV")]
+#[provider(Notify)]
+#[provider(Queue(String), capacity = 128)]
+#[provider(Listen("127.0.0.1:8080"), env = "BIND_ADDR", eager = true)]
+#[provider(UnixListen("/run/app.sock"), eager = true)]
+#[provider(UnixConnect("/run/peer.sock"), env = "PEER_SOCK")]
+```
+
+Shared attributes are parsed once and rejected at compile time if duplicated:
+
+| Attribute | Accepted on | Rule |
+| :--- | :--- | :--- |
+| `env = "NAME"` | value providers and provider templates | The environment variable overrides the literal fallback when present. |
+| `capacity = N` | `Queue(...)` only | `N` must be greater than zero; value providers reject `capacity`. |
+| `eager = true` / `eager = false` | all provider forms | The value must be a boolean literal, not an identifier or expression. |
+
+Unsupported attributes keep the stable parser diagnostic that lists the supported shared attributes: `env`, `capacity`, and `eager`.
+
+Function providers opt into framework fallibility only with `Result<T, ProviderError>` or an equivalent path ending in `ProviderError`. The error type must resolve to `service_daemon::ProviderError`: either directly, through an imported `ProviderError`, or through a type alias named `ProviderError`. Same-named custom types fail type checking at the provider return.
+
+Other `Result<T, E>` provider returns are rejected by the macro. To provide a non-framework result value, wrap it in a local provider type.
+
+### Scoped Resolution Bridge
+
+The macro-generated `Provided::resolve()`, lock helpers, `resolve_managed()`, and `WatchableProvided::watch_dependency()` do not resolve or watch directly against the static root manager. They call internal bridge functions with that manager as the root fallback. The bridge then applies the runtime rule:
+
+1. If a daemon provider scope is active, resolve the daemon's effective slot for the provider type.
+2. If that scope has a local fork or simulation override, use the daemon-local slot.
+3. Otherwise inherit the generated root slot.
+4. If no daemon context exists, use the generated root slot directly.
+
+Service wrappers, trigger wrappers, provider dependency resolution, reachable eager initialization, and generated dependency watch builders all use the same bridge path. The user-facing macro syntax remains `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`; scope and slot ids stay internal.
+
+Manual `WatchableProvided` implementations should return a `ProviderDependencyWatch` from `watch_dependency()` instead of exposing an async `changed()` method. Generated providers implement this by delegating to the scoped `provider_dependency_watch(...)` bridge, which captures the provider value and binding baselines when the watch handle is constructed.
+
+### Provider Helper Return Shapes
+
+Provider helper signatures are part of the macro public contract and depend on declared fallibility:
+
+| Provider shape | `resolve()` / lock helpers | Notes |
+| :--- | :--- | :--- |
+| Infallible provider with no DI dependency | Direct `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` | No declared fallible init path. Boundary errors are reported as direct-helper panics with provider type, origin, provider definition location, helper callsite, module path, helper name, and the original provider-init error. |
+| Infallible function provider with no DI dependency | Direct `Arc<T>` / lock wrappers | User panics are caught at the provider-init boundary and re-raised through the same direct-helper diagnostic. |
+| `Notify` / `Queue` templates | Direct `Arc<T>` / lock wrappers | Framework-owned templates are infallible after macro validation. Queue capacity is a compile-time diagnostic. |
+| Provider with DI dependencies | `Result<Arc<T>, ProviderInitError>` | Dependency resolution can fail, so the helper is fallible. |
+| Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
+| `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
+| Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Documented opt-in to retryable/fatal provider-init semantics. |
+
+`resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.
+
+### Provider Init Boundary
+
+Generated provider impls keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The normal branch preserves hidden `ProviderInitFailure` source kinds such as env parse, dependency provider failure, user fatal, retry timeout, or system I/O. The panic branch tags the converted fatal error as `panic`. The public error remains `ProviderInitError`, with diagnostics keyed by boundary names such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
+
+Fallible helpers expose `ProviderInitError` directly. Direct-return helpers are generated only for providers without a declared fallible path. If one receives an error from the shared boundary, it panics with the helper name, provider type, `#[provider]` origin, provider definition location, helper callsite, module path, and original error. The re-raised panic is span-tagged to the provider definition, not to a macro crate source line.
+
+Do not collapse this boundary to `?`; that would drop source classification. Keep wrapper-specific translation centralized in the runtime helpers.
+
+## 4. Span-preserving tracked state
+
+Generated wrappers route shared-state dependencies through tracked types while keeping source spans useful for IDEs:
+
+### Transparent tracking
+- `Arc<RwLock<T>>` is routed to a tracked version that reports changes to `Watch` triggers.
+- **Span preservation**: `quote_spanned!` attaches the original source span to generated code.
+- **IDE behavior**: rust-analyzer can still show source-level definitions and documentation hints for the user's types.
+
+### Qualified Path Support
+The macros recognize common import styles:
+- `std::sync::Arc<T>`
+- `Arc<T>`
+- `tokio::sync::RwLock<T>`
+
+## 5. Promotion Logic
+- **Fast Path**: If only `Arc<T>` is used, the effective provider slot can serve immutable snapshots without lock overhead.
+- **Managed Path**: When a dependency resolves as `Arc<RwLock<T>>` or `Arc<Mutex<T>>`, that effective slot uses the `StateManager` managed path, enabling dirty-tracked publishing and slot-aware `Watch` reloads.
+
+## 6. Shared Macro Infrastructure (`common.rs`)
+
+To ensure consistency between `#[service]` and `#[trigger]`, shared code is consolidated in `common.rs`:
+- **`ParamProcessor`**: A unified state machine for parsing function inputs and identifying DI dependencies (`Arc<T>`, `Arc<RwLock<T>>`).
+- **`generate_call_expr`**: A shared generator for calling user functions, handling async/sync differences and warning injection.
+- **`generate_watcher`**: A unified generator for the service/trigger reload watcher.
+
+## 7. The `#[allow(sync_handler)]` Pseudo-Lint
+
+### Background
+
+When a synchronous (non-`async`) function is used with `#[service]`, `#[trigger]`, or `#[provider]`, the macro generates a `tracing::warn!` call at runtime. To suppress this warning, users annotate their function with `#[allow(sync_handler)]`.
+
+`sync_handler` is **not** a real compiler lint. It is a pseudo-lint that the framework's proc macro intercepts and strips from the attribute list before the compiler ever sees it.
+
+### Implementation: `extract_sync_handler_flag`
+
+Located in `common.rs`, this function:
+1. Scans the item's attribute list for any `#[allow(...)]` containing `sync_handler`.
+2. If found, strips `sync_handler` from the `allow` list (preserving other lints like `dead_code`).
+3. If `sync_handler` was the only entry, removes the entire `#[allow(...)]` attribute.
+4. Returns `(true, cleaned_attrs)` so the macro knows to skip the `tracing::warn!` generation.
+
+### Attribute Ordering: No Constraint Required
+
+**Finding (2026-02)**: Despite common assumptions about Rust attribute macro visibility, `#[allow(sync_handler)]` works correctly regardless of whether it is placed above or below the `#[service]` macro.
+
+This was verified empirically with three tests:
+
+| Configuration | `tracing::warn!` in expanded code | Runtime WARN log |
+| :--- | :--- | :--- |
+| No `#[allow(sync_handler)]` | Present | Yes |
+| `#[allow(sync_handler)]` below `#[service]` | Absent | No |
+| `#[allow(sync_handler)]` above `#[service]` | Absent | No |
+
+Verification methods used:
+- **`cargo expand`**: Confirmed the presence/absence of `tracing::warn!` in generated code.
+- **Runtime execution**: Ran the binary and inspected logs for each configuration.
+
+**Why both orders work**: This behavior is rooted in the Rust compiler's execution pipeline and the nature of **Inert Attributes**:
+
+1.  **Built-in vs. Custom**: `#[allow(...)]` is a built-in attribute recognized by the compiler's core. Unlike custom proc-macro attributes, it doesn't require discovery.
+2.  **Inertia**: In Rust, built-in attributes (like `allow`, `cfg`, `derive`) are considered "inert." When the compiler calls an attribute macro like `#[service]`, it includes *all* inert attributes attached to the item in the `item` `TokenStream`, regardless of whether they appear above or below the proc-macro attribute.
+3.  **Lint Check Timing**: The compiler's **Lint Checker** (which flags `unknown_lints`) runs much later in the pipeline than **Macro Expansion**. 
+
+**The Execution Flow**:
+1.  **Expansion Phase**: The compiler sees `#[allow(sync_handler)] #[service]`.
+2.  **Macro Call**: It calls the `service` macro, passing the function and the `allow` attribute in the `item` stream.
+3.  **Stripping**: Our `extract_sync_handler_flag` function intercepts the `TokenStream`, identifies `sync_handler`, and physically removes it.
+4.  **Re-emission**: The macro returns a "clean" `TokenStream` to the compiler.
+5.  **Lint Phase**: When the Lint Checker finally runs, the `sync_handler` string has already been "deleted" from the source. Since it's gone, no "unknown lint" warning is ever triggered.
+
+> [!NOTE]
+> **For maintainers**: This relies on `#[allow]` being an inert built-in attribute and the expansion-before-linting order. If a future Rust edition changes these rules (e.g., if `allow` becomes a proc-macro itself or if linting moves earlier), the ordering might become sensitive. Keeping the "macro first, permit second" order reduces dependence on compiler ordering details.
+
+[Back to README](../../README.md)

@@ -1,5 +1,6 @@
 use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned};
+use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
 
 /// Result of extracting and categorizing function parameters.
@@ -51,56 +52,28 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
         if attr.path().is_ident("allow")
             && let syn::Meta::List(meta_list) = &attr.meta
         {
-            // Parse the token stream inside allow(...) to find sync_handler
-            let tokens = &meta_list.tokens;
-            let mut has_sync_handler = false;
-            let mut other_idents: Vec<proc_macro2::TokenStream> = Vec::new();
+            let parser = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated;
+            if let Ok(paths) = parser.parse2(meta_list.tokens.clone()) {
+                let mut has_sync_handler = false;
+                let mut remaining = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::new();
 
-            // Walk tokens: expect comma-separated identifiers
-            for token in tokens.clone().into_iter() {
-                match &token {
-                    proc_macro2::TokenTree::Ident(ident) if ident == "sync_handler" => {
+                for path in paths {
+                    if path.is_ident("sync_handler") {
                         has_sync_handler = true;
-                    }
-                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {
-                        // Skip commas - we rebuild them below
-                    }
-                    other => {
-                        other_idents.push(other.clone().into());
+                    } else {
+                        remaining.push(path);
                     }
                 }
-            }
 
-            if has_sync_handler {
-                found = true;
-                // If there are remaining lints, rebuild the #[allow(...)]
-                if !other_idents.is_empty() {
-                    let rebuilt: proc_macro2::TokenStream = other_idents
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                        .enumerate()
-                        .flat_map(|(i, ts)| {
-                            if i > 0 {
-                                vec![
-                                    proc_macro2::TokenTree::Punct(proc_macro2::Punct::new(
-                                        ',',
-                                        proc_macro2::Spacing::Alone,
-                                    ))
-                                    .into(),
-                                    ts,
-                                ]
-                            } else {
-                                vec![ts]
-                            }
-                        })
-                        .collect();
-
-                    let new_attr: Attribute = syn::parse_quote!(#[allow(#rebuilt)]);
-                    cleaned.push(new_attr);
+                if has_sync_handler {
+                    found = true;
+                    if !remaining.is_empty() {
+                        let new_attr: Attribute = syn::parse_quote!(#[allow(#remaining)]);
+                        cleaned.push(new_attr);
+                    }
+                    // If sync_handler was the only item, drop the entire attribute
+                    continue;
                 }
-                // If sync_handler was the only item, drop the entire attribute
-                continue;
             }
         }
 
@@ -116,7 +89,7 @@ pub fn extract_sync_handler_flag(attrs: &[Attribute]) -> (bool, Vec<Attribute>) 
 ///
 /// The `#[service]` / `#[trigger]` macros place the user function inside a
 /// private `mod __*_USER_SCOPE_* { ... }` to keep imports out of the function
-/// body (import hygiene) while applying the tracked-lock "Macro Illusion".
+/// body (import hygiene) while applying tracked-lock aliases.
 ///
 /// Moving the function into a child module changes the meaning of restricted
 /// visibilities like `pub(super)` / `pub(in super::...)` / `pub(in self::...)`.
@@ -378,7 +351,7 @@ impl ParamProcessor {
             // Uses a descriptive helper to produce a clear compiler
             // error when T does not implement Clone.
             self.call_args
-                .push(quote! { service_daemon::trigger_clone_payload(&*payload) });
+                .push(quote! { service_daemon::__private::trigger_clone_payload(&*payload) });
         }
     }
 
@@ -393,7 +366,7 @@ impl ParamProcessor {
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
 
         self.watcher_arms.push(quote! {
-            _ = <#inner_type as service_daemon::WatchableProvided>::changed() => {}
+            watch_set.push(<#inner_type as service_daemon::WatchableProvided>::watch_dependency());
         });
 
         match wrapper {
@@ -403,7 +376,7 @@ impl ParamProcessor {
                 });
                 self.clean_inputs.push(
                     syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#inner_type> },
+                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
                     )
                     .unwrap_or_else(|e| {
                         abort!(
@@ -417,27 +390,29 @@ impl ParamProcessor {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
                 });
-                let rw_path = quote_spanned! { rwlock_span => service_daemon::core::managed_state::RwLock<#inner_type> };
+                let rw_path = quote_spanned! { rwlock_span => service_daemon::RwLock<#inner_type> };
                 self.clean_inputs.push(
-                    syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#rw_path> },
-                    )
-                    .unwrap_or_else(|e| {
-                        abort!(
-                            arg_name,
-                            format!("Internal macro error parsing Arc<RwLock> dependency: {}", e)
-                        )
-                    }),
+                    syn::parse2(quote_spanned! { arc_span => #arg_name: std::sync::Arc<#rw_path> })
+                        .unwrap_or_else(|e| {
+                            abort!(
+                                arg_name,
+                                format!(
+                                    "Internal macro error parsing Arc<RwLock> dependency: {}",
+                                    e
+                                )
+                            )
+                        }),
                 );
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
                 });
-                let mutex_path = quote_spanned! { mutex_span => service_daemon::core::managed_state::Mutex<#inner_type> };
+                let mutex_path =
+                    quote_spanned! { mutex_span => service_daemon::Mutex<#inner_type> };
                 self.clean_inputs.push(
                     syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: service_daemon::Arc<#mutex_path> },
+                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#mutex_path> },
                     )
                     .unwrap_or_else(|e| {
                         abort!(
@@ -452,7 +427,7 @@ impl ParamProcessor {
         self.call_args.push(quote! { #arg_name });
         self.di_idents.push(arg_name.clone());
         self.param_entries.push(quote! {
-            service_daemon::ServiceParam {
+            service_daemon::__private::ServiceParam {
                 name: #arg_name_str,
                 type_name: #type_str,
                 type_id: std::any::TypeId::of::<#inner_type>(),
@@ -548,9 +523,9 @@ pub fn generate_call_expr(
 
 /// Generates the watcher function and pointer for dependency change monitoring.
 ///
-/// Shared by `#[service]` and `#[trigger]`. Both pass their watcher arms
+/// Shared by `#[service]` and `#[trigger]`. Both pass their watcher builders
 /// (collected by `extract_params`); triggers should push the target's
-/// `changed()` arm to the list before calling this function.
+/// `watch_dependency()` builder before calling this function.
 ///
 /// # Returns
 /// A tuple of `(watcher_fn_tokens, watcher_ptr_tokens)`.
@@ -563,13 +538,11 @@ pub fn generate_watcher(
     if !watcher_select_arms.is_empty() {
         (
             quote! {
-                /// Auto-generated watcher -- notifies when dependencies change
-                pub fn #watcher_name() -> service_daemon::futures::future::BoxFuture<'static, ()> {
-                    Box::pin(async move {
-                        service_daemon::tokio::select! {
-                            #(#watcher_select_arms),*
-                        }
-                    })
+                /// Auto-generated watcher -- captures dependency baselines for a service generation
+                pub fn #watcher_name() -> service_daemon::ProviderDependencyWatchSet {
+                    let mut watch_set = service_daemon::ProviderDependencyWatchSet::new();
+                    #(#watcher_select_arms)*
+                    watch_set
                 }
             },
             quote! { Some(#watcher_name) },
@@ -647,7 +620,7 @@ pub fn parse_scheduling_policy(ident: &syn::Ident) -> syn::Result<proc_macro2::T
     }
 }
 
-/// Generates the "Macro Illusion" user scope module.
+/// Generates the user scope module with tracked-lock aliases.
 ///
 /// Wraps the user function in a private module to provide hygiene and
 /// redirect certain types (like RwLock/Mutex) to their tracked versions.
@@ -663,9 +636,9 @@ pub fn generate_user_scope_mod(
             #[allow(unused_imports)]
             use super::*;
 
-            // "Macro Illusion": Redirect RwLock/Mutex to our tracked versions
+            // Redirect RwLock/Mutex names to the framework's tracked versions.
             #[allow(unused_imports)]
-            use service_daemon::core::managed_state::{RwLock, Mutex};
+            use service_daemon::{Mutex, RwLock};
 
             #(#cleaned_attrs)*
             #inner_vis #clean_sig {
@@ -701,9 +674,9 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
     quote! {
         /// Auto-generated static registry entry - collected by linkme at link time
         #[allow(unsafe_code)] // linkme uses #[link_section] internally
-        #[service_daemon::linkme::distributed_slice(service_daemon::SERVICE_REGISTRY)]
-        #[linkme(crate = service_daemon::linkme)]
-        static #entry_name: service_daemon::ServiceEntry = service_daemon::ServiceEntry {
+        #[service_daemon::__private::linkme::distributed_slice(service_daemon::__private::SERVICE_REGISTRY)]
+        #[linkme(crate = service_daemon::__private::linkme)]
+        static #entry_name: service_daemon::__private::ServiceEntry = service_daemon::__private::ServiceEntry {
             name: #fn_name_str,
             module: module_path!(),
             params: &[#(#param_entries),*],
@@ -724,8 +697,8 @@ pub fn generate_wrapper_fn(
     quote! {
         /// Auto-generated wrapper - resolves dependencies and executes logic
         pub fn #wrapper_name(
-            token: service_daemon::tokio_util::sync::CancellationToken,
-        ) -> service_daemon::futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            token: service_daemon::__private::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::__private::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 #content
             })
@@ -735,9 +708,55 @@ pub fn generate_wrapper_fn(
 
 #[cfg(test)]
 mod tests {
-    use super::scope_inner_visibility;
-    use quote::quote;
-    use syn::Visibility;
+    use super::{extract_sync_handler_flag, scope_inner_visibility};
+    use quote::{ToTokens, quote};
+    use syn::parse::Parser;
+    use syn::{Attribute, Visibility};
+
+    fn allow_paths(attr: &Attribute) -> Vec<String> {
+        let syn::Meta::List(meta_list) = &attr.meta else {
+            panic!("expected list attribute");
+        };
+        let parser = syn::punctuated::Punctuated::<syn::Path, syn::Token![,]>::parse_terminated;
+        parser
+            .parse2(meta_list.tokens.clone())
+            .unwrap()
+            .into_iter()
+            .map(|path| path.to_token_stream().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn extract_sync_handler_flag_preserves_path_lints() {
+        let attrs: Vec<Attribute> = vec![
+            syn::parse_quote!(#[doc = "kept"]),
+            syn::parse_quote!(#[allow(dead_code, sync_handler, clippy::too_many_arguments)]),
+        ];
+
+        let (found, cleaned) = extract_sync_handler_flag(&attrs);
+
+        assert!(found);
+        assert_eq!(cleaned.len(), 2);
+        assert!(cleaned[0].path().is_ident("doc"));
+        assert_eq!(
+            allow_paths(&cleaned[1]),
+            vec!["dead_code", "clippy :: too_many_arguments"]
+        );
+    }
+
+    #[test]
+    fn extract_sync_handler_flag_drops_sync_handler_only_allow() {
+        let attrs: Vec<Attribute> = vec![
+            syn::parse_quote!(#[allow(sync_handler)]),
+            syn::parse_quote!(#[cfg_attr(test, allow(dead_code))]),
+        ];
+
+        let (found, cleaned) = extract_sync_handler_flag(&attrs);
+
+        assert!(found);
+        assert_eq!(cleaned.len(), 1);
+        assert!(cleaned[0].path().is_ident("cfg_attr"));
+    }
 
     #[test]
     fn scope_inner_visibility_public_stays_public() {

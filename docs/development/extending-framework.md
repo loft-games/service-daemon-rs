@@ -17,7 +17,7 @@ Triggers are implemented as stateful hosts with a two-phase lifecycle managed by
 > [!NOTE]
 > The `#[trigger]` macro calls `TriggerHost::run_as_service` by default. This default implementation automatically handles the `setup` -> `TriggerRunner` lifecycle. Most hosts do **not** need to override `run_as_service`.
 >
-> Trigger scheduling is registry metadata, not host policy. A custom host should focus on event acquisition and `TriggerTransition`; the daemon applies the selected runtime lane when it supervises the generated trigger service.
+> Trigger scheduling is registry metadata, not host policy. A custom host should focus on event acquisition and `TriggerTransition`; the daemon applies the selected runtime lane to the generated trigger body while keeping supervision, reload, and restart/backoff in the daemon lifecycle.
 
 ### Example: Custom Host with Scaling
 
@@ -70,13 +70,15 @@ Provider templates (like `Notify` or `Queue`) generate specialized struct bodies
 2. Update the `TEMPLATE_NAMES` list in `service-daemon-macro/src/provider/parser.rs`.
 3. Update `try_generate_template` (or equivalent logic) in `service-daemon-macro/src/provider/struct_gen.rs` to wire up your new generator.
 
-## 3. Adding Custom Interceptors
+## 3. Internal Trigger Interceptors
 
-The `TriggerInterceptor<P>` trait provides a composable, onion-model middleware layer.
+The trigger runner uses an internal composable, onion-model middleware layer.
+Public interceptor registration is not exposed yet; treat these types as runtime internals unless a builder-level registration API is added.
+The implementation is split across `service-daemon/src/core/trigger_runner/dispatch.rs` and `interceptors.rs`; see [Development Trigger Interceptors](trigger-interceptors.md) for the internal reference.
 
-1. **Implement `TriggerInterceptor<P>`**: Define `intercept(ctx, next)`.
-2. **Registration**: Registered via `TriggerRunner::with_interceptor()`.
-3. **Flow**: Interceptors execute in registration order. You decide when to call `next(ctx).await`.
+1. **Implementation**: Built-in interceptors define `intercept(ctx, next)`.
+2. **Registration**: The runner installs framework-owned interceptors during construction.
+3. **Flow**: Interceptors execute in order and decide when to call `next(ctx).await`.
 
 ```rust
 pub struct MyInterceptor;

@@ -33,7 +33,7 @@ macro_rules! define_stress_service {
 
 macro_rules! define_batch {
     ($($n:literal),* $(,)?) => {
-        paste::paste! {
+        pastey::paste! {
             $(
                 define_stress_service!([<mem_svc_ $n>]);
             )*

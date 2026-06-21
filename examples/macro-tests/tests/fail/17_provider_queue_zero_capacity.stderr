@@ -1,0 +1,5 @@
+error: provider capacity must be greater than zero
+ --> tests/fail/17_provider_queue_zero_capacity.rs:3:38
+  |
+3 | #[provider(Queue(String), capacity = 0)]
+  |                                      ^

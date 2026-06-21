@@ -13,6 +13,10 @@ use std::sync::{Arc, OnceLock};
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::diagnostics::{DiagnosticsStore, GenerationDiagnosticsHandle};
+use crate::core::provider_scope::ProviderScope;
+use crate::core::runtime_facts::RuntimeFactsStore;
+use crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore;
 use crate::models::{ServiceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
@@ -33,7 +37,7 @@ pub(crate) fn process_token() -> &'static CancellationToken {
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
-pub(crate) type GlobalShelfMapping = DashMap<&'static str, ServiceShelf>;
+pub(crate) type GlobalShelfMapping = DashMap<ServiceId, ServiceShelf>;
 
 /// Identity and resource container for a running service daemon.
 ///
@@ -46,7 +50,7 @@ pub struct DaemonResources {
     /// Indexed by `ServiceId` for safety and performance.
     pub status_plane: DashMap<ServiceId, ServiceStatus>,
     /// Global storage for service-owned arbitrary data (the shelf).
-    /// Keyed by service name to support persistence and user-facing inspection.
+    /// Keyed by `ServiceId` to prevent same-name services from sharing state.
     pub shelf: GlobalShelfMapping,
     /// Signals for services to reload, indexed by `ServiceId`.
     pub reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
@@ -56,17 +60,30 @@ pub struct DaemonResources {
     /// Users register configs via `ServiceDaemonBuilder::with_trigger_config<C>`.
     /// Templates read them via `context::trigger_config::<C>()`.
     pub trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    pub(crate) diagnostics: Arc<DiagnosticsStore>,
+    pub(crate) provider_scope: Arc<ProviderScope>,
+    pub(crate) runtime_facts: Arc<RuntimeFactsStore>,
+    pub(crate) trigger_policy_overlays: Arc<TriggerPolicyOverlayStore>,
 }
 
 impl DaemonResources {
     /// Creates a new set of daemon resources wrapped in `Arc` for shared ownership.
+    #[cfg(any(test, feature = "simulation"))]
     pub fn new() -> Arc<Self> {
+        Self::new_with_diagnostics(Arc::new(DiagnosticsStore::new()))
+    }
+
+    pub(crate) fn new_with_diagnostics(diagnostics: Arc<DiagnosticsStore>) -> Arc<Self> {
         Arc::new(Self {
             status_plane: DashMap::new(),
             shelf: DashMap::new(),
             reload_signals: DashMap::new(),
             status_changed: tokio::sync::Notify::new(),
             trigger_configs: DashMap::new(),
+            diagnostics,
+            provider_scope: ProviderScope::new_daemon_scope(),
+            runtime_facts: Arc::new(RuntimeFactsStore::new()),
+            trigger_policy_overlays: Arc::new(TriggerPolicyOverlayStore::default()),
         })
     }
 }
@@ -86,6 +103,7 @@ pub struct ServiceIdentity {
     pub name: &'static str,
     pub cancellation_token: CancellationToken,
     pub reload_token: CancellationToken,
+    pub(crate) diagnostics: Option<GenerationDiagnosticsHandle>,
     /// Shared flag: true means the auto-handshake (Initializing->Healthy) has been performed.
     /// Uses Arc to persist the state across TLS clones within the same task generation.
     pub(crate) is_handshake_done: Arc<AtomicBool>,
@@ -93,7 +111,8 @@ pub struct ServiceIdentity {
 
 impl ServiceIdentity {
     /// Creates a new ServiceIdentity with the handshake flag set to false.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         service_id: ServiceId,
         name: &'static str,
         cancellation_token: CancellationToken,
@@ -104,6 +123,41 @@ impl ServiceIdentity {
             name,
             cancellation_token,
             reload_token,
+            diagnostics: None,
+            is_handshake_done: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_with_diagnostics(
+        service_id: ServiceId,
+        name: &'static str,
+        cancellation_token: CancellationToken,
+        reload_token: CancellationToken,
+        diagnostics: GenerationDiagnosticsHandle,
+    ) -> Self {
+        Self::new_generation_with_diagnostics(
+            service_id,
+            name,
+            cancellation_token,
+            reload_token,
+            diagnostics,
+        )
+    }
+
+    pub(crate) fn new_generation_with_diagnostics(
+        service_id: ServiceId,
+        name: &'static str,
+        cancellation_token: CancellationToken,
+        reload_token: CancellationToken,
+        diagnostics: GenerationDiagnosticsHandle,
+    ) -> Self {
+        Self {
+            service_id,
+            name,
+            cancellation_token,
+            reload_token,
+            diagnostics: Some(diagnostics),
             is_handshake_done: Arc::new(AtomicBool::new(false)),
         }
     }

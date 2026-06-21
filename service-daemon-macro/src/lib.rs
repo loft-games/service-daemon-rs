@@ -18,7 +18,8 @@ mod trigger;
 // Internal Module Structure:
 // - trigger/: Macro logic for #[trigger]. Split into mod.rs (main), parser.rs (attributes), and codegen.rs (logic).
 // - service/: Macro logic for #[service]. Split into mod.rs (main) and codegen.rs (helpers).
-// - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, templates.rs (special types), and struct_gen.rs (DI).
+// - provider/: Macro logic for #[provider]. Split into mod.rs, parser.rs, impls.rs,
+//   templates/ (special types), and struct_gen.rs (struct orchestration).
 
 /// Marks a function as a service managed by ServiceDaemon.
 ///
@@ -123,12 +124,14 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// # Example with async function (dependency injection)
 /// ```rust,ignore
-/// use service_daemon::provider;
+/// use service_daemon::{provider, ProviderError};
 /// use std::sync::Arc;
 ///
 /// #[provider]
-/// pub async fn db_pool(url: Arc<DbUrl>) -> DatabasePool {
-///     DatabasePool::connect(&url).await.expect("DB connection failed")
+/// pub async fn db_pool(url: Arc<DbUrl>) -> Result<DatabasePool, ProviderError> {
+///     DatabasePool::connect(&url)
+///         .await
+///         .map_err(|e| ProviderError::Retryable(format!("DB connection failed: {e}")))
 /// }
 /// ```
 #[proc_macro_attribute]

@@ -113,6 +113,50 @@ pub enum TemplateArg {
     Addr(syn::LitStr),
 }
 
+fn parse_capacity_literal(lit: syn::LitInt) -> syn::Result<usize> {
+    let capacity = lit.base10_parse::<usize>()?;
+    if capacity == 0 {
+        return Err(syn::Error::new(
+            lit.span(),
+            "provider capacity must be greater than zero",
+        ));
+    }
+    Ok(capacity)
+}
+
+fn parse_eager_literal(input: ParseStream, key: &Ident) -> syn::Result<bool> {
+    if input.fork().parse::<syn::LitBool>().is_err() {
+        return Err(syn::Error::new(
+            key.span(),
+            "provider attribute `eager` expects a boolean literal: eager = true or eager = false",
+        ));
+    }
+    Ok(input.parse::<syn::LitBool>()?.value)
+}
+
+fn set_once<T>(slot: &mut Option<T>, key: &Ident, attr_name: &str, value: T) -> syn::Result<()> {
+    if slot.is_some() {
+        return Err(syn::Error::new(
+            key.span(),
+            format!("duplicate provider attribute `{}`", attr_name),
+        ));
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn set_eager(eager: &mut bool, eager_seen: &mut bool, key: &Ident, value: bool) -> syn::Result<()> {
+    if *eager_seen {
+        return Err(syn::Error::new(
+            key.span(),
+            "duplicate provider attribute `eager`",
+        ));
+    }
+    *eager = value;
+    *eager_seen = true;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
@@ -184,17 +228,26 @@ impl Parse for ProviderArgs {
 
                 let mut env = None;
                 let mut capacity = None;
+                let mut capacity_span = None;
                 let mut eager = false;
+                let mut eager_seen = false;
                 match key.to_string().as_str() {
                     "env" => {
-                        env = Some(input.parse::<syn::LitStr>()?);
+                        set_once(&mut env, &key, "env", input.parse::<syn::LitStr>()?)?;
                     }
                     "capacity" => {
                         let lit: syn::LitInt = input.parse()?;
-                        capacity = Some(lit.base10_parse::<usize>()?);
+                        set_once(
+                            &mut capacity,
+                            &key,
+                            "capacity",
+                            parse_capacity_literal(lit)?,
+                        )?;
+                        capacity_span = Some(key.span());
                     }
                     "eager" => {
-                        eager = input.parse::<syn::LitBool>()?.value;
+                        let value = parse_eager_literal(input, &key)?;
+                        set_eager(&mut eager, &mut eager_seen, &key, value)?;
                     }
                     other => {
                         return Err(syn::Error::new(
@@ -215,7 +268,9 @@ impl Parse for ProviderArgs {
                     },
                     env,
                     capacity,
+                    capacity_span,
                     eager,
+                    eager_seen,
                 );
             } else {
                 // Not a template name - treat as an expression
@@ -234,7 +289,7 @@ impl Parse for ProviderArgs {
         };
 
         // == Phase 2: Core mapping logic =================================
-        Self::parse_trailing_attrs(input, kind, None, None, false)
+        Self::parse_trailing_attrs(input, kind, None, None, None, false, false)
     }
 }
 
@@ -249,7 +304,9 @@ impl ProviderArgs {
         kind: ProviderKind,
         mut env: Option<syn::LitStr>,
         mut capacity: Option<usize>,
+        mut capacity_span: Option<proc_macro2::Span>,
         mut eager: bool,
+        mut eager_seen: bool,
     ) -> syn::Result<Self> {
         while input.peek(Token![,]) {
             input.parse::<Token![,]>()?;
@@ -262,14 +319,21 @@ impl ProviderArgs {
 
             match key.to_string().as_str() {
                 "env" => {
-                    env = Some(input.parse::<syn::LitStr>()?);
+                    set_once(&mut env, &key, "env", input.parse::<syn::LitStr>()?)?;
                 }
                 "capacity" => {
                     let lit: syn::LitInt = input.parse()?;
-                    capacity = Some(lit.base10_parse::<usize>()?);
+                    set_once(
+                        &mut capacity,
+                        &key,
+                        "capacity",
+                        parse_capacity_literal(lit)?,
+                    )?;
+                    capacity_span = Some(key.span());
                 }
                 "eager" => {
-                    eager = input.parse::<syn::LitBool>()?.value;
+                    let value = parse_eager_literal(input, &key)?;
+                    set_eager(&mut eager, &mut eager_seen, &key, value)?;
                 }
                 other => {
                     return Err(syn::Error::new(
@@ -281,6 +345,13 @@ impl ProviderArgs {
                     ));
                 }
             }
+        }
+
+        if capacity.is_some() && matches!(kind, ProviderKind::Value { .. }) {
+            return Err(syn::Error::new(
+                capacity_span.unwrap_or_else(proc_macro2::Span::call_site),
+                "provider attribute `capacity` is only supported on Queue providers",
+            ));
         }
 
         Ok(ProviderArgs {
@@ -354,6 +425,15 @@ mod tests {
         let args = parse_args(quote! { Queue(String), capacity = 500 }).unwrap();
         assert!(matches!(&args.kind, ProviderKind::Template { .. }));
         assert_eq!(args.capacity, Some(500));
+    }
+
+    #[test]
+    fn capacity_zero_is_rejected() {
+        let err = parse_args(quote! { Queue(String), capacity = 0 }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("capacity must be greater than zero")
+        );
     }
 
     #[test]
@@ -452,6 +532,58 @@ mod tests {
             err_msg.contains("Unknown provider attribute"),
             "Error message should mention unknown provider attribute, got: {}",
             err_msg
+        );
+    }
+
+    #[test]
+    fn duplicate_env_is_error() {
+        let err = parse_args(quote! { Notify, env = "A", env = "B" }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate provider attribute `env`")
+        );
+    }
+
+    #[test]
+    fn duplicate_capacity_is_error() {
+        let err = parse_args(quote! { Queue(String), capacity = 10, capacity = 20 }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate provider attribute `capacity`")
+        );
+    }
+
+    #[test]
+    fn duplicate_eager_is_error() {
+        let err =
+            parse_args(quote! { UnixConnect("/sock"), eager = true, eager = false }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("duplicate provider attribute `eager`")
+        );
+    }
+
+    #[test]
+    fn malformed_eager_is_error() {
+        let err = parse_args(quote! { UnixConnect("/sock"), eager = yes }).unwrap_err();
+        assert!(err.to_string().contains("expects a boolean literal"));
+    }
+
+    #[test]
+    fn value_provider_capacity_is_error() {
+        let err = parse_args(quote! { "fallback", capacity = 10 }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider attribute `capacity` is only supported on Queue providers")
+        );
+    }
+
+    #[test]
+    fn value_provider_capacity_zero_is_rejected() {
+        let err = parse_args(quote! { "fallback", capacity = 0 }).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("provider capacity must be greater than zero")
         );
     }
 

@@ -5,21 +5,28 @@
 //! - `templates`: Template generators for Notify, Queue.
 //! - `struct_gen`: Struct provider generation with field injection.
 
+mod impls;
 mod parser;
 mod struct_gen;
 mod templates;
 
 use proc_macro::TokenStream;
 use proc_macro_error2::abort;
-use quote::{format_ident, quote};
+use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
-use syn::{ItemFn, parse_macro_input};
+use syn::{Item, ItemFn, parse_macro_input};
 
 use crate::common::{WrapperKind, decompose_type, extract_sync_handler_flag};
+use impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 pub use parser::ProviderArgs;
 use struct_gen::generate_struct_provider;
 
-fn extract_fallible_provider_type(ty: &syn::Type) -> Option<syn::Type> {
+struct FallibleProviderReturn {
+    ok_ty: syn::Type,
+    err_ty: syn::Type,
+}
+
+fn extract_result_provider_return(ty: &syn::Type) -> Option<FallibleProviderReturn> {
     let syn::Type::Path(tp) = ty else {
         return None;
     };
@@ -33,7 +40,6 @@ fn extract_fallible_provider_type(ty: &syn::Type) -> Option<syn::Type> {
         return None;
     };
 
-    // Expect Result<Ok, Err>
     let mut iter = args.args.iter();
     let ok = iter.next()?;
     let err = iter.next()?;
@@ -43,91 +49,67 @@ fn extract_fallible_provider_type(ty: &syn::Type) -> Option<syn::Type> {
         _ => return None,
     };
     let err_ty = match err {
-        syn::GenericArgument::Type(t) => t,
+        syn::GenericArgument::Type(t) => t.clone(),
         _ => return None,
     };
 
-    // Only accept error type whose last segment ident is ProviderError
-    if let syn::Type::Path(err_path) = err_ty
-        && err_path
-            .path
-            .segments
-            .last()
-            .is_some_and(|s| s.ident == "ProviderError")
-    {
-        return Some(ok_ty);
-    }
-
-    None
+    Some(FallibleProviderReturn { ok_ty, err_ty })
 }
 
-/// Implementation of the `#[provider]` attribute macro.
-///
-/// Uses a peek-first-token strategy to determine the item kind before parsing,
-/// avoiding unnecessary `TokenStream::clone()` and trial-error parsing.
-pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Peek at the first meaningful tokens to determine the item kind.
-    // This avoids cloning the full TokenStream for trial parsing.
-    //
-    // Safety assumption: In attribute macro context, `item` does NOT include
-    // other `#[...]` attributes (e.g., `#[derive(...)]`, `#[cfg(...)]`).
-    // The compiler strips them before passing the token stream to us.
-    // Therefore, the first idents are guaranteed to be visibility qualifiers
-    // and/or the item keyword (e.g., `pub`, `struct`, `async`, `fn`).
-    let item2: proc_macro2::TokenStream = item.clone().into();
-    let first_tokens: Vec<String> = item2
-        .into_iter()
-        .filter_map(|tt| {
-            if let proc_macro2::TokenTree::Ident(ident) = tt {
-                Some(ident.to_string())
-            } else {
-                None
+fn is_provider_error_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
+
+    tp.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "ProviderError")
+}
+
+fn provider_error_type_assertion(err_ty: &syn::Type) -> proc_macro2::TokenStream {
+    let span = err_ty.span();
+    quote_spanned! { span =>
+        const _: () = {
+            fn __service_daemon_assert_provider_error_type(value: #err_ty) {
+                let _: service_daemon::ProviderError = value;
             }
-        })
-        .take(3) // e.g., ["pub", "async", "fn"] or ["pub", "struct", "Name"]
-        .collect();
-
-    let has_struct = first_tokens.iter().any(|t| t == "struct");
-    let has_fn = first_tokens.iter().any(|t| t == "fn");
-
-    if has_struct {
-        let item_struct = parse_macro_input!(item as syn::ItemStruct);
-        let args = parse_macro_input!(attr as ProviderArgs);
-        return generate_struct_provider(item_struct, args);
+        };
     }
-
-    if has_fn {
-        let item_fn = parse_macro_input!(item as ItemFn);
-        let args = parse_macro_input!(attr as ProviderArgs);
-        return generate_async_fn_provider(item_fn, args.eager);
-    }
-
-    // Error for unsupported items - use abort! for enhanced error
-    abort!(
-        proc_macro2::TokenStream::from(item),
-        "#[provider] can only be applied to struct or async fn items";
-        help = "Use #[provider] on a struct definition or an async function";
-        note = "Example: #[provider(8080)] pub struct Port(pub i32);"
-    )
 }
 
-/// Generates a provider from an async function with automatic dependency injection.
-///
-/// Supports the same `Arc<T>` injection patterns as `#[service]` / `#[trigger]`:
-/// - `Arc<T>` -> `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` -> `<T as ManagedProvided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` -> `<T as ManagedProvided>::resolve_mutex().await`
-///
-/// The function is preserved as-is with its original signature. The generated
-/// `Provided` impl calls the function with resolved dependencies.
+pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let parsed_item = parse_macro_input!(item as Item);
+    let args = parse_macro_input!(attr as ProviderArgs);
+
+    match parsed_item {
+        Item::Struct(item_struct) => generate_struct_provider(item_struct, args),
+        Item::Fn(item_fn) => generate_async_fn_provider(item_fn, args.eager),
+        other => abort!(
+            other,
+            "#[provider] can only be applied to struct or function items";
+            help = "Use #[provider] on a struct definition or a function returning the provider type";
+            note = "Example: #[provider(8080)] pub struct Port(pub i32);"
+        ),
+    }
+}
+
 fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let fn_name = &item_fn.sig.ident;
     let fn_vis = &item_fn.vis;
+    let fn_sig = &item_fn.sig;
     let fn_block = &item_fn.block;
     let fn_asyncness = &item_fn.sig.asyncness;
     let fn_inputs = &item_fn.sig.inputs;
 
-    // Extract return type
+    if let Some(unsafety) = &item_fn.sig.unsafety {
+        abort!(
+            unsafety,
+            "#[provider] fn cannot be unsafe";
+            help = "Move unsafe operations behind a safe provider function boundary"
+        );
+    }
+
     let return_type = match &item_fn.sig.output {
         syn::ReturnType::Type(_, ty) => ty.clone(),
         syn::ReturnType::Default => {
@@ -139,9 +121,23 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     };
 
-    // Detect fallible provider: Result<T, ProviderError>
-    let (provided_type, is_fallible) = match extract_fallible_provider_type(&return_type) {
-        Some(inner) => (inner, true),
+    let result_return = extract_result_provider_return(&return_type);
+    if let Some(result_return) = &result_return
+        && !is_provider_error_type(&result_return.err_ty)
+    {
+        abort!(
+            result_return.err_ty,
+            "#[provider] function Result error type must be service_daemon::ProviderError";
+            help = "Use Result<T, service_daemon::ProviderError> for provider-init retry/fatal semantics, or wrap non-framework Result values in a local provider type"
+        );
+    }
+
+    let fallible_return = result_return;
+    let provider_error_assertion = fallible_return
+        .as_ref()
+        .map(|fallible| provider_error_type_assertion(&fallible.err_ty));
+    let (provided_type, is_fallible) = match &fallible_return {
+        Some(fallible) => (fallible.ok_ty.clone(), true),
         None => ((*return_type).clone(), false),
     };
 
@@ -149,14 +145,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let return_type_str = quote!(#provided_type).to_string().replace(" ", "");
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&item_fn.attrs);
 
-    // Process function parameters for DI resolution
     let mut framework_resolve_tokens = Vec::new();
     let mut managed_resolve_tokens = Vec::new();
     let mut call_args = Vec::new();
     let mut param_entries = Vec::new();
 
     for arg in fn_inputs {
-        // Reject `self` / `&self` / `&mut self` - providers must be free functions.
         if let syn::FnArg::Receiver(_) = arg {
             abort!(
                 arg,
@@ -174,7 +168,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
             match wrapper {
                 Some(WrapperKind::ArcRwLock(_, _)) => {
                     framework_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
+                            .await
+                            .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                e,
+                            ))?;
                     });
                     managed_resolve_tokens.push(quote! {
                         let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
@@ -184,7 +183,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
                 }
                 Some(WrapperKind::ArcMutex(_, _)) => {
                     framework_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
+                        let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
+                            .await
+                            .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                e,
+                            ))?;
                     });
                     managed_resolve_tokens.push(quote! {
                         let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
@@ -194,7 +198,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
                 }
                 Some(WrapperKind::Arc(_)) => {
                     framework_resolve_tokens.push(quote! {
-                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
+                        let #arg_name = <#inner_type as service_daemon::Provided>::resolve()
+                            .await
+                            .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
+                                e,
+                            ))?;
                     });
                     managed_resolve_tokens.push(quote! {
                         let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_managed().await?;
@@ -209,11 +218,10 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
                 }
             }
 
-            // Collect dependency metadata for PROVIDER_REGISTRY
             let arg_name_str = arg_name.to_string();
             let type_str = quote!(#inner_type).to_string().replace(' ', "");
             param_entries.push(quote! {
-                service_daemon::ServiceParam {
+                service_daemon::__private::ServiceParam {
                     name: #arg_name_str,
                     type_name: #type_str,
                     type_id: std::any::TypeId::of::<#inner_type>(),
@@ -224,11 +232,9 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     }
 
-    // Build the call expression with or without dependency injection
     let fn_call_with_args = if fn_asyncness.is_some() {
         quote! { #fn_name(#(#call_args),*).await }
     } else if allow_sync_present {
-        // User explicitly allowed sync, no warning
         quote! { #fn_name(#(#call_args),*) }
     } else {
         quote! {
@@ -239,7 +245,6 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     };
 
-    // Singleton name uses the function name (unique within a module)
     let singleton_name = format_ident!(
         "__PROVIDER_SINGLETON_{}",
         fn_name.to_string().to_uppercase()
@@ -248,7 +253,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let framework_init_fn = if is_fallible {
         quote! {
             #(#framework_resolve_tokens)*
-            service_daemon::core::provider_init::init_fallible(
+            service_daemon::__private::init_fallible(
                 #fn_name_str,
                 policy,
                 cancel,
@@ -281,9 +286,14 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         }
     };
 
-    // Use the shared Provided impl generator
     let type_tokens = quote! { #provided_type };
-    let provided_impl = struct_gen::generate_provided_impl(struct_gen::ProvidedImplConfig {
+    let helper_style = if is_fallible || !param_entries.is_empty() {
+        HelperStyle::Fallible
+    } else {
+        HelperStyle::Infallible
+    };
+    let provider_origin = format!("#[provider] function {fn_name_str}");
+    let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
         user_span: return_type.span(),
@@ -291,18 +301,15 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         eager,
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
-        helper_style: if is_fallible {
-            struct_gen::HelperStyle::Fallible
-        } else {
-            struct_gen::HelperStyle::Infallible
-        },
+        helper_style,
+        provider_origin,
     });
 
     let expanded = quote! {
-        // Keep the original function with its full signature and attributes preserved
         #(#cleaned_attrs)*
-        #fn_vis #fn_asyncness fn #fn_name(#fn_inputs) -> #return_type
-            #fn_block
+        #fn_vis #fn_sig #fn_block
+
+        #provider_error_assertion
 
         #provided_impl
     };

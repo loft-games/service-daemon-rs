@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${1:-host}"
+host_triple="$(rustc -vV | sed -n 's/^host: //p')"
+if [[ "$target" == "host" || -z "$target" ]]; then
+  deps_dir="target/release/deps"
+  inspect_target="$host_triple"
+else
+  deps_dir="target/${target}/release/deps"
+  inspect_target="$target"
+fi
+
+is_test_binary_candidate() {
+  case "$1" in
+    *.d | *.pdb | *.rlib | *.rmeta | *.lib | *.exp | *.ilk)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+binary=""
+for path in "$deps_dir"/linkme_smoke-* "$deps_dir"/linkme_smoke-*.exe; do
+  [[ -f "$path" ]] || continue
+  is_test_binary_candidate "$path" || continue
+  if [[ -z "$binary" || "$path" -nt "$binary" ]]; then
+    binary="$path"
+  fi
+done
+
+if [[ -z "$binary" ]]; then
+  echo "Could not find linkme_smoke test binary under ${deps_dir}" >&2
+  exit 1
+fi
+
+objdump="${LLVM_OBJDUMP:-}"
+if [[ -z "$objdump" ]]; then
+  sysroot="$(rustc --print sysroot)"
+  objdump="${sysroot}/lib/rustlib/${host_triple}/bin/llvm-objdump"
+  if [[ ! -x "$objdump" && -x "${objdump}.exe" ]]; then
+    objdump="${objdump}.exe"
+  fi
+fi
+if [[ ! -x "$objdump" ]]; then
+  objdump="$(command -v llvm-objdump || true)"
+fi
+if [[ -z "$objdump" || ! -x "$objdump" ]]; then
+  echo "llvm-objdump not found; install rustup component llvm-tools-preview" >&2
+  exit 1
+fi
+
+sections="$("$objdump" -h "$binary" || true)"
+symbols="$("$objdump" -t "$binary")"
+object_markers="${sections}
+${symbols}"
+
+require_pattern() {
+  local haystack="$1"
+  local pattern="$2"
+  local label="$3"
+  if ! grep -Eq "$pattern" <<<"$haystack"; then
+    echo "Missing ${label} in ${binary}" >&2
+    echo "Expected pattern: ${pattern}" >&2
+    exit 1
+  fi
+}
+
+require_registry_marker() {
+  local pattern="$1"
+  local label="$2"
+  if grep -Eq "$pattern" <<<"$sections"; then
+    return
+  fi
+  require_pattern "$symbols" "$pattern" "$label"
+}
+
+require_macho_registry_sections() {
+  local count
+  count="$(grep -Eo '__linkme[[:alnum:]]{8}' <<<"$object_markers" | sort -u | wc -l | tr -d ' ' || true)"
+  if [[ "$count" -lt 2 ]]; then
+    echo "Missing Mach-O linkme registry section markers in ${binary}" >&2
+    echo "Expected at least two distinct __linkme<hash> markers; found ${count}" >&2
+    exit 1
+  fi
+}
+
+require_windows_registry_sections() {
+  local count
+  count="$(grep -Ec '(^|[[:space:]])\.linkme_' <<<"$sections" || true)"
+  if [[ "$count" -lt 2 ]]; then
+    echo "Missing PE/COFF linkme registry section markers in ${binary}" >&2
+    echo "Expected at least two .linkme_ section markers; found ${count}" >&2
+    exit 1
+  fi
+}
+
+require_test_local_entry_symbols() {
+  require_pattern "$symbols" '__SERVICE_ENTRY_LINKME_SMOKE_SERVICE' "test-local service registry entry"
+  require_pattern "$symbols" '__PROVIDER_ENTRY_LINKMESMOKECONFIG' "test-local provider registry entry"
+}
+
+require_symbol_markers=true
+
+case "$inspect_target" in
+  *-apple-darwin)
+    # linkme hashes Mach-O section names, so they do not contain SERVICE_REGISTRY
+    # or PROVIDER_REGISTRY. The smoke test itself verifies test-local entries.
+    require_macho_registry_sections
+    require_symbol_markers=false
+    ;;
+  *-pc-windows-* | *-windows-*)
+    # PE image section names are short, so final executables may not preserve
+    # the full .linkme_<REGISTRY> contribution name or local static symbols.
+    # The smoke test itself verifies test-local entries.
+    require_windows_registry_sections
+    require_symbol_markers=false
+    ;;
+  *-unknown-illumos | *-pc-solaris | *-sun-solaris)
+    require_registry_marker 'set_linkme[^[:space:]]*SERVICE_REGISTRY' "SERVICE_REGISTRY linkme section marker"
+    require_registry_marker 'set_linkme[^[:space:]]*PROVIDER_REGISTRY' "PROVIDER_REGISTRY linkme section marker"
+    ;;
+  *)
+    require_registry_marker 'linkme[^[:space:]]*SERVICE_REGISTRY' "SERVICE_REGISTRY linkme section marker"
+    require_registry_marker 'linkme[^[:space:]]*PROVIDER_REGISTRY' "PROVIDER_REGISTRY linkme section marker"
+    ;;
+esac
+
+if [[ "$require_symbol_markers" == true ]]; then
+  require_test_local_entry_symbols
+fi
+
+echo "Verified linkme registry markers in ${binary}"

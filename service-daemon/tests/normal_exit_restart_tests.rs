@@ -1,4 +1,7 @@
-use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceId, ServiceStatus, service};
+use service_daemon::{
+    DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceId,
+    ServiceStatus, service,
+};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -66,6 +69,19 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
     assert_eq!(
         daemon.handle().get_service_status(&ServiceId::new(0)).await,
         ServiceStatus::Terminated
+    );
+
+    let service = daemon
+        .diagnostics_snapshot()
+        .services
+        .into_iter()
+        .find(|service| service.service_name == "normal_exit_service")
+        .expect("normal exit service diagnostics should be recorded");
+    assert!(service.aggregate.lifecycle.restart >= 1);
+    assert_eq!(service.aggregate.lifecycle.backoff_restart, 0);
+    assert_eq!(
+        service.aggregate.lifecycle.last_restart_decision,
+        Some(DiagnosticRestartDecisionKind::Immediate)
     );
 
     Ok(())

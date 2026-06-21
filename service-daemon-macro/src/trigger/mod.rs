@@ -66,10 +66,10 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     // Triggers always watch their target for configuration changes,
-    // in addition to any DI dependency watchers from extract_params.
+    // in addition to any DI dependency watch handles from extract_params.
     if is_watch_host {
         watcher_arms.push(quote! {
-            _ = <#target_type as service_daemon::WatchableProvided>::changed() => {}
+            watch_set.push(<#target_type as service_daemon::WatchableProvided>::watch_dependency());
         });
     }
     let (watcher_fn, watcher_ptr) = generate_watcher(fn_name, &watcher_arms);

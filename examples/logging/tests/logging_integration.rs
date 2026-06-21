@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use service_daemon::core::logging::{FileLogConfig, enable_file_logging};
+use service_daemon::{FileLogConfig, enable_file_logging};
 use service_daemon::{Registry, RestartPolicy, ServiceDaemon};
 
 /// Verifies that the daemon can start with file logging enabled

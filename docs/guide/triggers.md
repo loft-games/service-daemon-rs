@@ -1,3 +1,5 @@
+# Event Triggers
+
 Triggers are specialized services with built-in event loops that run your function when an event occurs. While idle they are blocked on the underlying primitive (channel `recv`, `Notify::notified()`, etc.) -- no polling, no busy-wait.
 
 ## 0. Quick Start: Chain Reactions
@@ -35,7 +37,7 @@ pub async fn cleanup_handler() -> anyhow::Result<()> {
 
 Triggers follow a decoupled **Policy-Engine** architecture:
 
-- **Engine (Generic)**: The `TriggerRunner` manages the main event loop, interceptor pipeline, and standard shutdown/reload handling. Built-in interceptors (`TracingInterceptor`, `RetryInterceptor`) provide tracing and retry for free. It's provided automatically by the framework.
+- **Engine (Generic)**: The `TriggerRunner` manages the main event loop, interceptor pipeline, and standard shutdown/reload handling. Built-in interceptors (`TracingInterceptor`, `RetryInterceptor`) provide tracing and retry.
 - **Policy (Specific)**: Defines *how* to wait for the next event. Each trigger type (Cron, Queue, etc.) implements its own policy via the `TriggerHost` trait's `setup` (one-time initialization) and `handle_step` (per-event waiting) methods.
 
 ### The `TriggerTransition` Protocol
@@ -45,16 +47,16 @@ Policies communicate with the engine using a transition enum:
 - `Stop`: Terminate the trigger loop cleanly.
 
 
-## 1. Trigger Template Reference
+## 2. Trigger Template Reference
 
 | Template | Alias | Functionality |
 | :--- | :--- | :--- |
 | `Cron` | - | Time-based scheduling via `tokio-cron-scheduler` |
 | `Queue` | `BQueue`, `BroadcastQueue` | Receives every message sent to the target queue |
-| `Watch` | `State` | Zero-lock reactive handlers for shared state changes |
+| `Watch` | `State` | Runs when watched provider state changes |
 | `Notify` | `Event`, `Signal` | Simple signal-based triggers |
 
-## 2. Detailed Usage
+## 3. Detailed Usage
 
 ### Cron Trigger
 
@@ -80,7 +82,7 @@ async fn worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
 ### Watch Trigger (State Change)
-Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified. Internally, this leverages the `ServiceDaemon`'s reload mechanism: the service is re-spawned with a fresh snapshot exactly when the state changes.
+Executes automatically whenever shared state (`Arc<RwLock<T>>` or `Arc<Mutex<T>>`) is modified. Internally, this uses the `ServiceDaemon` reload mechanism: the service is re-spawned with a fresh snapshot exactly when the state changes.
 
 ```rust
 #[trigger(Watch(MyData))]
@@ -99,22 +101,22 @@ pub async fn on_metrics_changed(snapshot: Arc<MetricsData>) -> anyhow::Result<()
 
 ### Scheduling
 
-Triggers also support the same `scheduling` parameter as services. The trigger host still defines how events are received; scheduling controls which runtime lane supervises and executes the generated trigger service.
+Triggers also support the same static `scheduling` declaration as services. The trigger host still defines how events are received; scheduling declares the execution mode used by the generated trigger service body while supervision, watchers, reload, restart/backoff, and shutdown coordination stay on the daemon control plane.
 
 ```rust
 #[trigger(Queue(WorkerQueue), scheduling = HighPriority)]
 async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
-Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop needs a dedicated OS thread and private Tokio runtime. See [Priorities & Scheduling Policies](tutorial/priority-orchestration.md) for the full policy table.
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` is not an overflow pool for ordinary triggers; a trigger uses that lane only when its source declaration asks for it. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed.
 
-## 3. Parameter Mapping Rules
+## 4. Parameter Mapping Rules
 
 1. **Implicit Payload**: The first parameter that is *not* an `Arc<T>` is treated as the event payload.
 2. **Explicit Payload**: Any parameter marked with `#[payload]` is the payload (allows `Arc<Payload>`).
 3. **DI Resources**: All other `Arc<T>` parameters are resolved via the DI system.
 
-## 4. Event Flow: Causal Tracing
+## 5. Event Flow: Causal Tracing
 
 Services and triggers emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI. 
 
@@ -124,20 +126,22 @@ The framework's `TriggerRunner` automatically manages the **Causal Identity** fo
 3.  **Service ID**: The `ServiceId` of the current trigger handler.
 4.  **Instance Seq**: A monotonic sequence number for the current invocation.
 
-This 4-tuple identity enables structured log correlation and automated topology mapping without manual intervention.
+This 4-tuple identity supports log correlation and trace reconstruction.
 
-## 5. Resilience: Automatic Handler Retries
+## 6. Resilience: Automatic Handler Retries
 
-Individual trigger handler failures (returning `Err`) are automatically retried using the same global **Exponential Backoff** policy as regular services.
+Individual trigger handler failures (returning `Err`) are automatically retried using the daemon's **Exponential Backoff** policy. A single failed attempt is treated as a message-handling problem, not as a failed service generation.
 
 ### How it works
 When a handler fails:
 1. The built-in `RetryInterceptor` catches the error and manages retry logic with a `BackoffController`.
 2. The payload is shared via `Arc` internally -- retries **never** deep-copy business data.
 3. Errors are automatically logged with structured context.
-4. Shutdown signals are respected during backoff waits -- no hanging retries.
+4. Shutdown and reload signals interrupt backoff waits cleanly -- no hanging retries and no false failure report during lifecycle cancellation.
 
-The retry logic is implemented as an interceptor layer, part of the composable `TriggerInterceptor` pipeline. See [Interceptor Middleware](interceptor-middleware.md) for details on customizing the dispatch pipeline.
+If you set `trigger_max_retries` on `RestartPolicy`, reaching that limit means the current dispatch has been exhausted. At that point the trigger service generation reports a recoverable failure to the normal supervisor, so the existing restart/backoff/status/diagnostics path is used. Dispatch infrastructure failures, such as a spawned dispatch task panic, also flow through the supervisor; panic is recorded as a panic exit rather than as a silent log line.
+
+Application code usually only configures the restart policy and writes idempotent handlers.
 
 ### Payload Handling
 
@@ -149,43 +153,99 @@ The framework wraps every payload in `Arc<P>` at the dispatch boundary. How the 
 | `async fn handler(#[payload] data: Arc<T>)` | Zero-copy pointer pass | **No** |
 
 > [!TIP]
-> For large payloads or types that cannot implement `Clone`, declare your handler parameter as `Arc<T>`. This gives you true zero-copy access and works with any type.
+> For large payloads or types that cannot implement `Clone`, declare your handler parameter as `Arc<T>`. This passes the payload by shared pointer and works with any type.
 
 ---
 
-## 6. Elastic Scaling (Async Dispatch)
+## 7. Queue concurrency (async dispatch)
 
-Elastic scaling is **automatically enabled** only for streaming trigger templates that declare scaling support (e.g. `Queue` / `TopicHost`). Other templates (`Cron`, `Watch`, `Notify`) dispatch handlers serially with zero scaling overhead.
+Concurrent dispatch is enabled only for streaming trigger templates that declare scaling support (e.g. `Queue` / `TopicHost`). Other templates (`Cron`, `Watch`, `Notify`) dispatch handlers serially.
 
-Each trigger template declares its scaling needs via `TriggerHost::scaling_policy()`. Users can override the template defaults using `ServiceDaemonBuilder::with_trigger_config(ScalingPolicy::builder()...build())`.
+Each trigger template declares its scaling needs via `TriggerHost::scaling_policy()`. Most users should keep the template defaults; when you need to override them, use `ScalingPolicy::builder()` and pass the result to `ServiceDaemonBuilder::with_trigger_config(...)`.
+
+```rust
+use std::time::Duration;
+
+use service_daemon::{ScalingPolicy, ServiceDaemon};
+
+let scaling = ScalingPolicy::builder()
+    .initial_concurrency(4)
+    .max_concurrency(64)
+    .scale_factor(2)
+    .scale_threshold(5)
+    .scale_cooldown(Duration::from_secs(30))
+    .build();
+
+let mut daemon = ServiceDaemon::builder()
+    .with_trigger_config(scaling)
+    .build();
+```
+
+Handlers can request a temporary policy overlay for future events handled by the
+same trigger generation. The request is self-scoped from `TriggerContext`, so the
+handler supplies only the overlay itself:
+
+```rust
+use std::time::Duration;
+
+use service_daemon::{RestartPolicy, TriggerContext, TriggerPolicyOverlay};
+
+async fn on_event(ctx: TriggerContext<MyEvent>) -> anyhow::Result<()> {
+    if let Some(pressure) = ctx.pressure()
+        && pressure.in_flight >= pressure.current_limit
+    {
+        let overlay = TriggerPolicyOverlay::builder("downstream pressure", Duration::from_secs(30))
+            .concurrency_limit(2)
+            .dispatch_timeout(Duration::from_secs(5))
+            .retry_policy(
+                RestartPolicy::builder()
+                    .initial_delay(Duration::from_millis(100))
+                    .max_delay(Duration::from_secs(2))
+                    .trigger_max_retries(3)
+                    .build(),
+            )
+            .build()?;
+
+        ctx.request_policy_overlay(overlay)?;
+    }
+
+    Ok(())
+}
+```
+
+Temporary overlays require a non-empty reason and a TTL. They affect future
+dispatch boundaries only; a dispatch that already captured its timeout or retry
+policy keeps that policy. The runner clears overlays on TTL expiry or when the
+trigger generation ends.
+
+Custom `TriggerHost::run_as_service` implementations that bypass the default
+runner should construct contexts with `TriggerContext::new(...)` and pass the
+current service id and generation.
 
 ---
 
-## 7. Instance Lifecycle & State Reuse
+## 8. Instance Lifecycle & State Reuse
 
-Unlike standard services where the macro-wrapped function is re-executed on every iteration, triggers leverage a **Stateful Host** model:
+Unlike standard services where the macro-wrapped function is re-executed on every iteration, triggers use a **Stateful Host** model:
 
 1.  **Instantiation**: The `TriggerHost` is created **once** via `setup()` when the service starts.
 2.  **State Persistence**: The `TriggerRunner` maintains a reference to this instance and calls `handle_step(&mut self, ...)` in a loop.
 3.  **State Reuse**: You can store resources (e.g., a `tokio::sync::mpsc::Receiver` or a local cache) as struct fields in your `TriggerHost`. These fields are preserved across all event iterations.
 4.  **Reload Boundary**: When a reload signal is received (e.g., configuration change), the current `TriggerRunner` and its `TriggerHost` are dropped, and a **new** instance is created.
 
-This design enables high-performance event processing by avoiding repeated setup overhead while ensuring clean resource isolation during reloads.
+This avoids repeated setup work while keeping reload boundaries clear.
 
 ---
 
-### 8. Elastic Scaling & Backpressure Details
+## 9. Concurrency and backpressure details
 
-Elastic scaling is governed by the [`ScalingPolicy`]. The framework automatically adjusts concurrency based on pressure and ensures backpressure via a shared semaphore.
-
-> [!NOTE]
-> **Scaling Internals**: For the mathematical pressure formula, 1-second monitoring logic, and the "Shadow Permits" implementation details, see [Internal Architecture: Trigger Scaling](../architecture/internal-overview.md#7-coretrigger_runner_rs).
+Queue concurrency is governed by the [`ScalingPolicy`]. The framework adjusts concurrency based on pressure and applies backpressure through a shared semaphore. Most applications only need the builder example above; custom host and diagnostic internals are covered in the architecture docs.
 
 ---
 
-## 7. More Information
+## 10. More Information
 
-- [Provider Best Practices](provider-best-practices.md): Deep dive into defining custom providers.
-- [Concept Clarification (FAQ)](pitfalls-faq.md#2-lifecycle--paradigms): Understanding the difference between managed triggers and standard services.
+- [Provider Strategy Guide](provider-best-practices.md): How to define custom providers.
+- [Concept Clarification (FAQ)](faq.md#2-lifecycle--paradigms): Understanding the difference between managed triggers and standard services.
 
 [Back to README](../../README.md)

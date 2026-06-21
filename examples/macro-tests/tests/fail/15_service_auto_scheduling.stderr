@@ -1,0 +1,5 @@
+error: Unknown scheduling policy 'Auto'. Supported: Standard, HighPriority, Isolated
+ --> tests/fail/15_service_auto_scheduling.rs:3:24
+  |
+3 | #[service(scheduling = Auto)]
+  |                        ^^^^

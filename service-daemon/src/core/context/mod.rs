@@ -15,7 +15,7 @@ pub mod simulation;
 // Re-exports for backward compatibility
 // -----------------------------------------------------------------------------
 
-// Identity types (used by runner.rs, service_daemon, macros)
+// Identity types (used by runner modules, service_daemon, macros)
 // These re-exports are used by tests and by simulation_tests
 pub(crate) use identity::process_token;
 #[cfg(test)]
@@ -23,9 +23,16 @@ pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
+pub(crate) use api::{__run_daemon_resources_scope, __run_daemon_resources_sync_scope};
 pub use api::{
     __run_service_scope, current_cancellation_token, current_service_id, done, is_shutdown, shelve,
     shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
+};
+pub(crate) use api::{
+    clear_trigger_policy_overlay, current_daemon_diagnostics, current_generation_diagnostics,
+    current_service_generation, current_trigger_pressure, effective_trigger_policy,
+    register_current_trigger_policy_overlay, register_current_trigger_runtime,
+    request_trigger_policy_overlay,
 };
 
 #[cfg(feature = "simulation")]
@@ -85,6 +92,50 @@ mod tests {
             let val2: Option<i32> = unshelve("test").await;
             assert_eq!(val2, None);
         })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_shelf_isolated_by_service_id_for_duplicate_names() {
+        let resources = create_test_resources();
+        let first = ServiceIdentity::new(
+            ServiceId::new(1),
+            "duplicate_name",
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+        let second = ServiceIdentity::new(
+            ServiceId::new(2),
+            "duplicate_name",
+            CancellationToken::new(),
+            CancellationToken::new(),
+        );
+
+        in_scope(first, resources.clone(), || async {
+            shelve("value", 42i32).await;
+        })
+        .await;
+
+        in_scope(second, resources.clone(), || async {
+            let val: Option<i32> = unshelve("value").await;
+            assert_eq!(val, None);
+            shelve("value", 7i32).await;
+        })
+        .await;
+
+        in_scope(
+            ServiceIdentity::new(
+                ServiceId::new(1),
+                "duplicate_name",
+                CancellationToken::new(),
+                CancellationToken::new(),
+            ),
+            resources,
+            || async {
+                let val: Option<i32> = unshelve("value").await;
+                assert_eq!(val, Some(42));
+            },
+        )
         .await;
     }
 
@@ -279,8 +330,8 @@ mod tests {
         .await;
 
         let fetched = result.expect("should return Some");
-        assert_eq!(fetched.initial_concurrency, 8);
-        assert_eq!(fetched.max_concurrency, 32);
+        assert_eq!(fetched.initial_concurrency(), 8);
+        assert_eq!(fetched.max_concurrency(), 32);
     }
 
     /// Verify that multiple config types are independently stored and retrieved.
@@ -307,7 +358,7 @@ mod tests {
 
         in_scope(identity, resources, || async {
             let sp = trigger_config::<ScalingPolicy>().expect("ScalingPolicy should be present");
-            assert_eq!(sp.initial_concurrency, 4);
+            assert_eq!(sp.initial_concurrency(), 4);
 
             let custom =
                 trigger_config::<MyCustomConfig>().expect("MyCustomConfig should be present");
@@ -340,16 +391,17 @@ mod simulation_tests {
     #[test]
     fn test_mock_context_shelf_pre_filling() {
         // Verify that pre-filled shelf data is accessible through the handle.
+        let svc_id = ServiceId::new(7);
         let (builder, handle) = MockContext::builder()
-            .with_shelf::<i32>("test_svc", "counter", 42)
-            .with_shelf::<String>("test_svc", "name", "hello".to_string())
+            .with_shelf::<i32>(svc_id, "counter", 42)
+            .with_shelf::<String>(svc_id, "name", "hello".to_string())
             .build();
 
-        // The handle should see the pre-filled resources
-        let resources = handle.resources();
-        let shelf = resources.shelf.get("test_svc").unwrap();
-        let counter = shelf.get("counter").unwrap();
-        assert_eq!(counter.value().downcast_ref::<i32>(), Some(&42));
+        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(42));
+        assert_eq!(
+            handle.get_shelf::<String>(svc_id, "name"),
+            Some("hello".to_string())
+        );
 
         // Builder should be valid (not consumed)
         let _ = builder;
@@ -362,26 +414,19 @@ mod simulation_tests {
             .with_status(svc_id, ServiceStatus::Healthy)
             .build();
 
-        let resources = handle.resources();
-        let status = resources.status_plane.get(&svc_id).unwrap().clone();
-        assert_eq!(status, ServiceStatus::Healthy);
+        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Healthy));
     }
 
     #[test]
     fn test_simulation_handle_dynamic_shelf_update() {
         let (_, handle) = MockContext::builder().build();
+        let svc_id = ServiceId::new(7);
 
-        // Initially empty
-        assert!(handle.resources().shelf.get("svc").is_none());
+        assert!(!handle.has_shelf(svc_id, "counter"));
 
-        // Dynamic injection via SimulationHandle
-        handle.set_shelf::<i32>("svc", "counter", 99);
+        handle.set_shelf::<i32>(svc_id, "counter", 99);
 
-        // Now visible
-        let resources = handle.resources();
-        let shelf = resources.shelf.get("svc").unwrap();
-        let val = shelf.get("counter").unwrap();
-        assert_eq!(val.value().downcast_ref::<i32>(), Some(&99));
+        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(99));
     }
 
     #[test]
@@ -391,29 +436,11 @@ mod simulation_tests {
             .with_status(svc_id, ServiceStatus::Initializing)
             .build();
 
-        // Phase 1: initial state
-        assert_eq!(
-            handle
-                .resources()
-                .status_plane
-                .get(&svc_id)
-                .unwrap()
-                .clone(),
-            ServiceStatus::Initializing
-        );
+        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Initializing));
 
-        // Phase 2: SimulationHandle flips status
         handle.set_status(svc_id, ServiceStatus::NeedReload);
 
-        assert_eq!(
-            handle
-                .resources()
-                .status_plane
-                .get(&svc_id)
-                .unwrap()
-                .clone(),
-            ServiceStatus::NeedReload
-        );
+        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::NeedReload));
     }
 
     #[test]
@@ -427,34 +454,18 @@ mod simulation_tests {
             .build();
 
         assert_eq!(
-            handle_a
-                .resources()
-                .status_plane
-                .get(&ServiceId::new(1))
-                .unwrap()
-                .clone(),
-            ServiceStatus::Healthy
+            handle_a.get_status(ServiceId::new(1)),
+            Some(ServiceStatus::Healthy)
         );
         assert_eq!(
-            handle_b
-                .resources()
-                .status_plane
-                .get(&ServiceId::new(1))
-                .unwrap()
-                .clone(),
-            ServiceStatus::Initializing
+            handle_b.get_status(ServiceId::new(1)),
+            Some(ServiceStatus::Initializing)
         );
 
-        // Mutation in A should NOT affect B
         handle_a.set_status(ServiceId::new(1), ServiceStatus::Terminated);
         assert_eq!(
-            handle_b
-                .resources()
-                .status_plane
-                .get(&ServiceId::new(1))
-                .unwrap()
-                .clone(),
-            ServiceStatus::Initializing
+            handle_b.get_status(ServiceId::new(1)),
+            Some(ServiceStatus::Initializing)
         );
     }
 }

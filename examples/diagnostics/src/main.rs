@@ -5,7 +5,7 @@ use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    service_daemon::core::logging::init_logging();
+    service_daemon::init_logging();
 
     let mut daemon = ServiceDaemon::builder().build();
 

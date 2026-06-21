@@ -1,10 +1,15 @@
+pub(crate) mod adaptive_scheduling;
 pub mod context;
 pub mod di;
+pub(crate) mod diagnostics;
 pub mod logging;
 pub mod managed_state;
 pub mod provider_init;
+pub(crate) mod provider_scope;
+pub(crate) mod runtime_facts;
 pub mod service_daemon;
 #[cfg(feature = "diagnostics")]
 pub mod topology_collector;
+pub(crate) mod trigger_policy_overlay;
 pub mod trigger_runner;
 pub mod triggers;

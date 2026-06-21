@@ -45,45 +45,54 @@
 //! For the full guide and advanced patterns, visit our components on GitHub:
 //!
 //! - [**Quick Start Guide**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md) - Complete step-by-step tutorial.
-//! - [**Architecture Overview**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) - Deep dive into DI and Registry.
+//! - [**Architecture Overview**](https://github.com/loft-games/service-daemon-rs/blob/master/docs/architecture/internal-overview.md) - DI and registry internals.
 
 extern crate self as service_daemon;
 
-pub mod core;
-pub mod models;
+mod core;
+mod models;
 
 // Re-export commonly used items
 pub use core::context::{
-    current_cancellation_token, done, is_shutdown, shelve, shelve_clone, sleep, state,
+    current_service_id, done, is_shutdown, shelve, shelve_clone, sleep, spawn_with_context, state,
     trigger_config, unshelve, wait_shutdown,
 };
-pub use core::di::{ManagedProvided, Provided, WatchableProvided};
-pub use core::managed_state::{TrackedNotify, TrackedSender};
+pub use core::di::{
+    ManagedProvided, Provided, ProviderDependencyChange, ProviderDependencyChangeReason,
+    ProviderDependencyWatch, ProviderDependencyWatchSet, WatchableProvided,
+};
+pub use core::logging::{
+    DaemonLayer, LogBatchSizeError, MAX_LOG_BATCH_SIZE, init_logging, set_log_batch_size,
+    try_init_logging,
+};
+pub use core::managed_state::{Mutex, RwLock, TrackedNotify, TrackedSender};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
 };
-pub use models::service::{ServicePriority, ServiceScheduling};
+pub use models::service::{InstanceId, ServicePriority, ServiceScheduling};
+pub use models::trigger::TriggerTransition;
 pub use models::{
-    BackoffController, PROVIDER_REGISTRY, ProviderEntry, ProviderError, ProviderInitError,
-    Registry, RegistryBuilder, Result, SERVICE_REGISTRY, ScalingPolicy, ScalingPolicyBuilder,
-    ServiceDescription, ServiceEntry, ServiceError, ServiceFn, ServiceId, ServiceParam,
-    ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage,
-    trigger_clone_payload,
+    BackoffController, DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticAggregateStats,
+    DiagnosticConfidence, DiagnosticGenerationExitKind, DiagnosticInterpretation,
+    DiagnosticInterpretationLabel, DiagnosticLifecycleStats, DiagnosticObservationStats,
+    DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
+    DiagnosticProviderFailureKind, DiagnosticProviderFailureRetry,
+    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
+    DiagnosticProviderFailureStats, DiagnosticRecommendationHint, DiagnosticRestartDecisionKind,
+    DiagnosticRuntimeLane, DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
+    DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot, ProviderError,
+    ProviderInitError, ReadinessServiceError, ReadinessSnapshot, Registry, RegistryBuilder, Result,
+    RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
+    SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceError, ServiceId,
+    ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost,
+    TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
+    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
-pub use std::sync::Arc;
 
 // Re-export simulation utilities (feature-gated toolbox)
 #[cfg(feature = "simulation")]
 pub use core::context::{MockContext, MockContextBuilder, SimulationHandle};
-
-// Re-export dependencies for use in macro-generated code
-pub use futures;
-pub use linkme;
-pub use tokio;
-pub use tokio_util;
-
-// Re-export log batch size configuration (always available)
-pub use core::logging::set_log_batch_size;
 
 // Conditionally re-export file logging utilities
 #[cfg(feature = "file-logging")]
@@ -93,11 +102,38 @@ pub use core::logging::{FileLogConfig, RotationPolicy, enable_file_logging};
 #[cfg(feature = "diagnostics")]
 pub use core::topology_collector::{export_mermaid, reset_topology, start_topology_collector};
 
-// Conditionally re-export dependencies based on features
-#[cfg(feature = "cron")]
-pub use tokio_cron_scheduler;
+#[doc(hidden)]
+pub mod __private {
+    pub use std::sync::Arc;
 
-pub use uuid;
+    pub use crate::ProviderDependencyWatchSet;
+    pub use crate::core::context::current_cancellation_token;
+    pub use crate::core::managed_state::{
+        StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
+    };
+    pub use crate::core::provider_init::{
+        ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
+        ProviderInitSourceKind, ProviderRuntimePhase, catch_init_panic, init_fallible,
+        init_fallible_with_source, provider_init_boundary, provider_init_failure_boundary,
+        provider_init_failure_into_error, with_provider_runtime_phase,
+    };
+    pub use crate::core::provider_scope::{
+        provider_changed, provider_dependency_watch, resolve_provider_managed,
+        resolve_provider_mutex, resolve_provider_rwlock, resolve_provider_snapshot,
+    };
+    pub use crate::models::trigger::trigger_clone_payload;
+    pub use crate::models::{
+        PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceFn, ServiceParam,
+    };
+
+    pub use futures;
+    pub use linkme;
+    pub use tokio;
+    #[cfg(feature = "cron")]
+    pub use tokio_cron_scheduler;
+    pub use tokio_util;
+    pub use uuid;
+}
 
 // Re-export macros for unified user experience
 pub use service_daemon_macro::{provider, service, trigger};
@@ -107,13 +143,14 @@ pub use service_daemon_macro::{provider, service, trigger};
 /// Importing this allows using short variant names like `Cron` or `Watch` and
 /// provides IDE autocompletion for `#[trigger]` attributes.
 pub mod prelude {
-    pub use crate::core::context::{
-        is_shutdown, shelve, shelve_clone, sleep, state, unshelve, wait_shutdown,
+    pub use crate::TT::*;
+    pub use crate::{
+        DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticRuntimeLane, ManagedProvided,
+        Provided, ReadinessSnapshot, SchedulingAdvisoryProfile, ServiceDaemon, ServiceError,
+        ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
+        TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
+        TriggerRuntimeSnapshot, WatchableProvided, current_service_id, done, is_shutdown, provider,
+        service, shelve, shelve_clone, sleep, spawn_with_context, state, trigger, trigger_config,
+        unshelve, wait_shutdown,
     };
-    pub use crate::core::di::{ManagedProvided, Provided, WatchableProvided};
-    pub use crate::models::service::ServicePriority;
-    pub use crate::models::service::ServiceScheduling;
-    pub use crate::models::service::ServiceStatus;
-    pub use crate::models::trigger::TT;
-    pub use crate::models::trigger::TT::*;
 }

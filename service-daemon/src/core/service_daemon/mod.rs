@@ -1,16 +1,26 @@
 //! ServiceDaemon - the main orchestrator for managed services.
 //!
 //! This module is split into submodules for better organization:
+//! - `builder`: ServiceDaemon construction and registry assembly.
 //! - `policy`: Restart policy configuration.
+//! - `provider_graph`: Provider graph validation and eager provider startup.
 //! - `runner`: Service spawning and lifecycle management.
+//! - `runtime`: Runtime creation, probes, and shutdown helpers.
+//! - `startup_preflight`: Shared startup validation, provider init, and runtime preparation.
+//! - `startup_pipeline`: Production startup orchestration after shared preflight.
 
+mod builder;
 mod parts;
 mod policy;
+mod provider_graph;
 mod runner;
+mod runtime;
+#[cfg(feature = "simulation")]
+mod simulation_startup;
+mod startup_pipeline;
+mod startup_preflight;
 
-use dashmap::DashMap;
-use std::any::{Any, TypeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 use std::future::pending;
 use std::sync::Arc;
 #[cfg(feature = "simulation")]
@@ -18,28 +28,28 @@ use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
 
-use petgraph::{
-    algo::toposort,
-    graph::{DiGraph, NodeIndex},
-};
-
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::core::context::{DaemonResources, process_token};
-#[cfg(unix)]
+use crate::core::context::DaemonResources;
+use crate::core::diagnostics::DiagnosticsStore;
+#[cfg(any(unix, feature = "simulation"))]
 use crate::models::ServiceError;
 use crate::models::{
-    PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, Registry, Result as ServiceResult,
-    ServiceDescription, ServiceId, ServiceStatus,
+    DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
+    SchedulingAdvisoryProfile, ServiceDescription, ServiceId, ServiceRuntimeSnapshot,
+    ServiceStatus, TriggerRuntimeSnapshot,
 };
 
+pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
+use runtime::HighPriorityCapacityPlan;
+use startup_pipeline::StartupError;
 
 // ---------------------------------------------------------------------------
 // ServiceDaemonHandle -- lightweight status query interface
@@ -49,6 +59,8 @@ pub use policy::{RestartPolicy, RestartPolicyBuilder};
 #[derive(Clone)]
 pub struct ServiceDaemonHandle {
     resources: Arc<DaemonResources>,
+    diagnostics: Arc<DiagnosticsStore>,
+    shutdown_token: CancellationToken,
 }
 
 impl ServiceDaemonHandle {
@@ -59,6 +71,57 @@ impl ServiceDaemonHandle {
             .get(id)
             .map(|s| s.clone())
             .unwrap_or(ServiceStatus::Terminated)
+    }
+
+    /// Return a read-only snapshot of daemon diagnostics.
+    pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
+        self.diagnostics.snapshot().into()
+    }
+
+    /// Return read-only daemon runtime facts.
+    pub fn runtime(&self) -> DaemonRuntimeSnapshot {
+        self.resources
+            .runtime_facts
+            .daemon_snapshot(self.shutdown_token.is_cancelled())
+    }
+
+    /// Return a facts-only readiness grouping.
+    pub fn runtime_readiness(&self) -> ReadinessSnapshot {
+        self.resources
+            .runtime_facts
+            .readiness_snapshot(|service_id| self.status_for_snapshot(service_id))
+    }
+
+    /// Return read-only runtime facts for all registered services.
+    pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
+        self.resources
+            .runtime_facts
+            .service_snapshots(|service_id| self.status_for_snapshot(service_id))
+    }
+
+    /// Return read-only runtime facts for a service.
+    pub fn runtime_service(&self, id: ServiceId) -> Option<ServiceRuntimeSnapshot> {
+        self.resources
+            .runtime_facts
+            .service_snapshot(id, |service_id| self.status_for_snapshot(service_id))
+    }
+
+    /// Return read-only runtime facts for all observed triggers.
+    pub fn runtime_triggers(&self) -> Vec<TriggerRuntimeSnapshot> {
+        self.resources.runtime_facts.trigger_snapshots()
+    }
+
+    /// Return read-only runtime facts for an observed trigger.
+    pub fn runtime_trigger(&self, id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+        self.resources.runtime_facts.trigger_snapshot(id)
+    }
+
+    fn status_for_snapshot(&self, id: ServiceId) -> ServiceStatus {
+        self.resources
+            .status_plane
+            .get(&id)
+            .map(|status| status.clone())
+            .unwrap_or(ServiceStatus::Initializing)
     }
 }
 
@@ -95,18 +158,28 @@ pub struct ServiceDaemon {
     running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
-    /// Shared runtime used by HighPriority services.
+    /// Dedicated runtime for supervisor and control-plane work.
+    control_runtime: Option<Runtime>,
+    high_priority_capacity: HighPriorityCapacityPlan,
+    /// Shared runtime lazily created for HighPriority service bodies.
     high_priority_runtime: Option<Runtime>,
+    runtime_probe_tasks: Vec<JoinHandle<()>>,
+    adaptive_recommendation_task: Option<JoinHandle<()>>,
+    scheduling_advisory_profile: SchedulingAdvisoryProfile,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
     external_cancel_token: Option<CancellationToken>,
     /// Instance-owned resources (Status Plane, Shelf, Signals)
     resources: Arc<DaemonResources>,
+    diagnostics: Arc<DiagnosticsStore>,
+    isolated_startup_permits: Arc<Semaphore>,
 }
 
 impl Drop for ServiceDaemon {
     fn drop(&mut self) {
+        self.abort_adaptive_recommendation_loop();
         self.shutdown_high_priority_runtime_detached();
+        self.shutdown_control_runtime_detached();
     }
 }
 
@@ -117,139 +190,58 @@ impl ServiceDaemon {
         ServiceDaemonBuilder::new()
     }
 
-    async fn eager_init_reachable_providers(&self) -> Result<(), ProviderInitError> {
-        let mut providers_by_id: HashMap<TypeId, &'static ProviderEntry> = HashMap::new();
-        for entry in PROVIDER_REGISTRY.iter() {
-            providers_by_id.insert(entry.type_id, entry);
-        }
-
-        // 1) Collect initial reachable set from service parameters.
-        let mut reachable: HashSet<TypeId> = HashSet::new();
-        let mut queue: VecDeque<TypeId> = VecDeque::new();
-        for svc in &self.services {
-            for p in svc.params() {
-                if reachable.insert(p.type_id) {
-                    queue.push_back(p.type_id);
-                }
-            }
-        }
-
-        // 2) Expand via provider->provider edges.
-        while let Some(tid) = queue.pop_front() {
-            let Some(p) = providers_by_id.get(&tid) else {
-                continue;
-            };
-            for dep in p.params {
-                if reachable.insert(dep.type_id) {
-                    queue.push_back(dep.type_id);
-                }
-            }
-        }
-
-        // 3) Filter eager targets.
-        let eager_targets: Vec<&'static ProviderEntry> = reachable
-            .iter()
-            .filter_map(|tid| providers_by_id.get(tid).copied())
-            .filter(|p| p.eager)
-            .collect();
-
-        if eager_targets.is_empty() {
-            return Ok(());
-        }
-
-        // 4) Toposort reachable provider DAG to get a deterministic init order.
-        // Nodes are provider TypeIds; edges are dep -> provider.
-        let mut graph = DiGraph::<TypeId, ()>::new();
-        let mut nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
-
-        for tid in reachable.iter().copied() {
-            if providers_by_id.contains_key(&tid) {
-                nodes.entry(tid).or_insert_with(|| graph.add_node(tid));
-            }
-        }
-
-        for (&tid, entry) in providers_by_id.iter() {
-            if !reachable.contains(&tid) {
-                continue;
-            }
-            let Some(&prov_node) = nodes.get(&tid) else {
-                continue;
-            };
-            for dep in entry.params {
-                if !reachable.contains(&dep.type_id) {
-                    continue;
-                }
-                if let Some(&dep_node) = nodes.get(&dep.type_id) {
-                    graph.add_edge(dep_node, prov_node, ());
-                }
-            }
-        }
-
-        // Cycles are pre-checked by validate_dependency_graph() in run();
-        // if we still land in Err here, report it as a Fatal init error
-        // rather than panicking, as a defense-in-depth measure.
-        let order = match toposort(&graph, None) {
-            Ok(order) => order,
-            Err(err) => {
-                let offending = providers_by_id
-                    .iter()
-                    .find_map(|(tid, p)| (*tid == graph[err.node_id()]).then_some(p.name))
-                    .unwrap_or("<unknown>");
-                return Err(ProviderInitError::Fatal {
-                    provider: offending.to_owned(),
-                    message: "Circular provider dependency reached eager_init; \
-                              this should have been caught by validate_dependency_graph"
-                        .to_owned(),
-                });
-            }
-        };
-
-        // 5) Execute init in order, only for eager providers.
-        let eager_ids: HashSet<TypeId> = eager_targets.iter().map(|p| p.type_id).collect();
-        for node in order {
-            let tid = graph[node];
-            if !eager_ids.contains(&tid) {
-                continue;
-            }
-            let entry = providers_by_id
-                .get(&tid)
-                .copied()
-                .expect("provider must exist in providers_by_id");
-            (entry.init)(self.restart_policy, self.cancellation_token.clone()).await?;
-        }
-
-        Ok(())
-    }
-
     /// Get the cancellation token for this daemon.
     pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
         self.cancellation_token.clone()
     }
 
-    /// Get a handle to the daemon for querying status.
+    /// Get a handle to the daemon for querying status and diagnostics.
     pub fn handle(&self) -> ServiceDaemonHandle {
         ServiceDaemonHandle {
             resources: self.resources.clone(),
+            diagnostics: self.diagnostics.clone(),
+            shutdown_token: self.cancellation_token.clone(),
         }
-    }
-
-    /// **[Simulation Only]** Returns a clone of the daemon's internal resources.
-    ///
-    /// This is used by `SimulationHandle` to perform dynamic injection ("SimulationHandle")
-    /// during a running simulation. Since `DaemonResources` uses `Arc` internally,
-    /// modifications through the returned clone are immediately visible to all services.
-    ///
-    /// # Safety
-    /// This method is gated behind the `simulation` feature to prevent misuse
-    /// in production environments.
-    #[cfg(feature = "simulation")]
-    pub fn resources(&self) -> Arc<DaemonResources> {
-        self.resources.clone()
     }
 
     /// Get the current status of a service by its `ServiceId`.
     pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
         self.handle().get_service_status(id).await
+    }
+
+    /// Return a read-only snapshot of daemon diagnostics.
+    pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
+        self.diagnostics.snapshot().into()
+    }
+
+    /// Return read-only daemon runtime facts.
+    pub fn runtime(&self) -> DaemonRuntimeSnapshot {
+        self.handle().runtime()
+    }
+
+    /// Return a facts-only readiness grouping.
+    pub fn runtime_readiness(&self) -> ReadinessSnapshot {
+        self.handle().runtime_readiness()
+    }
+
+    /// Return read-only runtime facts for all registered services.
+    pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
+        self.handle().runtime_services()
+    }
+
+    /// Return read-only runtime facts for a service.
+    pub fn runtime_service(&self, id: ServiceId) -> Option<ServiceRuntimeSnapshot> {
+        self.handle().runtime_service(id)
+    }
+
+    /// Return read-only runtime facts for all observed triggers.
+    pub fn runtime_triggers(&self) -> Vec<TriggerRuntimeSnapshot> {
+        self.handle().runtime_triggers()
+    }
+
+    /// Return read-only runtime facts for an observed trigger.
+    pub fn runtime_trigger(&self, id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+        self.handle().runtime_trigger(id)
     }
 
     /// Start the daemon in the background (non-blocking).
@@ -265,42 +257,27 @@ impl ServiceDaemon {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
 
-        // Validate the provider dependency graph. Cycles in the provider graph
-        // would deadlock at runtime, so we surface them as a pre-startup failure
-        // that triggers a graceful shutdown (observable via the daemon handle /
-        // status plane rather than blocking `run()`).
-        if let Err(err) = validate_dependency_graph(&self.services, PROVIDER_REGISTRY.iter()) {
-            tracing::error!(error = %err, "ServiceDaemon provider dependency graph validation failed");
+        if let Err(err) = self.run_startup_pipeline().await {
+            match err {
+                StartupError::ProviderGraph(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon provider dependency graph validation failed");
+                }
+                StartupError::EagerProviderInit(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon eager provider initialization failed");
+                }
+                StartupError::ControlRuntime(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon control runtime creation failed");
+                }
+                StartupError::HighPriorityRuntime(err) => {
+                    tracing::error!(error = %err, "ServiceDaemon high-priority runtime creation failed");
+                }
+                StartupError::StartupOrchestration(err) => {
+                    tracing::error!(error = ?err, "ServiceDaemon startup orchestration failed");
+                }
+            }
             self.shutdown();
             return self;
         }
-
-        // Eager-initialize reachable providers before spawning services.
-        //
-        // This is opt-in (providers must specify `eager = true`).
-        if let Err(err) = self.eager_init_reachable_providers().await {
-            tracing::error!(error = %err, "ServiceDaemon eager provider initialization failed");
-            self.shutdown();
-            return self;
-        }
-
-        // Spawn all services in the background
-        runner::spawn_all_services(
-            &self.services,
-            self.restart_policy,
-            self.running_tasks.clone(),
-            self.resources.clone(),
-            self.high_priority_runtime
-                .as_ref()
-                .expect("high_priority_runtime must exist while daemon is running")
-                .handle()
-                .clone(),
-            &self.cancellation_token,
-        )
-        .await;
-
-        #[cfg(feature = "diagnostics")]
-        super::topology_collector::start_topology_collector();
 
         info!(
             "ServiceDaemon running with {} service(s).",
@@ -398,39 +375,46 @@ impl ServiceDaemon {
 
     /// Internal helper: perform the actual graceful shutdown sequence.
     async fn do_shutdown(&mut self) {
-        runner::stop_all_services(
-            &self.services,
-            self.running_tasks.clone(),
-            self.resources.clone(),
-            self.cancellation_token.clone(),
-            self.restart_policy.wave_stop_timeout,
-        )
-        .await;
+        if let Some(control_runtime) = self.control_runtime.as_ref() {
+            let services = clone_service_descriptions(&self.services);
+            let running_tasks = self.running_tasks.clone();
+            let resources = self.resources.clone();
+            let cancellation_token = self.cancellation_token.clone();
+            let wave_stop_timeout = self.restart_policy.wave_stop_timeout;
+            let shutdown = control_runtime.spawn(async move {
+                runner::stop_all_services(
+                    &services,
+                    running_tasks,
+                    resources,
+                    cancellation_token,
+                    wave_stop_timeout,
+                )
+                .await;
+            });
 
+            if let Err(err) = shutdown.await {
+                tracing::error!(error = ?err, "ServiceDaemon shutdown orchestration failed");
+            }
+        } else {
+            runner::stop_all_services(
+                &self.services,
+                self.running_tasks.clone(),
+                self.resources.clone(),
+                self.cancellation_token.clone(),
+                self.restart_policy.wave_stop_timeout,
+            )
+            .await;
+        }
+
+        self.stop_adaptive_recommendation_loop().await;
+        self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime();
+        self.shutdown_control_runtime();
 
         #[cfg(feature = "diagnostics")]
-        if let Some(mermaid) = super::topology_collector::export_mermaid() {
-            println!("\n=== BEHAVIORAL TOPOLOGY (MERMAID) ===\n");
-            println!("{}\n", mermaid);
-            println!("====================================\n");
-        }
+        emit_shutdown_topology();
 
         info!("ServiceDaemon stopped.");
-    }
-
-    fn shutdown_high_priority_runtime(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take() {
-            std::thread::spawn(move || drop(runtime))
-                .join()
-                .expect("failed to shut down high-priority runtime");
-        }
-    }
-
-    fn shutdown_high_priority_runtime_detached(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take() {
-            let _ = std::thread::spawn(move || drop(runtime));
-        }
     }
 
     /// Internal helper: wait on an external CancellationToken if present.
@@ -448,29 +432,8 @@ impl ServiceDaemon {
     pub async fn run_for_duration(mut self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
-        let daemon_token = self.cancellation_token.clone();
 
-        for service in &self.services {
-            runner::spawn_service(parts::SpawnServiceParts {
-                service_id: service.id,
-                name: service.name(),
-                run: service.entry.wrapper,
-                watcher: service.entry.watcher,
-                policy: test_policy,
-                scheduling: service.entry.scheduling,
-                running_tasks: self.running_tasks.clone(),
-                resources: self.resources.clone(),
-                cancellation_token: service.cancellation_token.clone(),
-                daemon_token: daemon_token.clone(),
-                runtime: self
-                    .high_priority_runtime
-                    .as_ref()
-                    .expect("high_priority_runtime must exist while daemon is running")
-                    .handle()
-                    .clone(),
-            })
-            .await;
-        }
+        self.run_simulation_startup(test_policy).await?;
 
         tokio::time::sleep(duration).await;
 
@@ -483,336 +446,160 @@ impl ServiceDaemon {
         )
         .await;
 
+        self.stop_adaptive_recommendation_loop().await;
+        self.stop_runtime_probes().await;
         self.shutdown_high_priority_runtime_detached();
+        self.shutdown_control_runtime_detached();
 
         Ok(())
     }
 }
 
-// ---------------------------------------------------------------------------
-// ServiceDaemonBuilder -- Infallible, zero-config default
-// ---------------------------------------------------------------------------
-
-/// Builder for constructing a `ServiceDaemon`.
-///
-/// The `.build()` method is **infallible** -- it always returns a valid daemon.
-pub struct ServiceDaemonBuilder {
-    registry: Option<Registry>,
-    restart_policy: RestartPolicy,
-    /// External cancellation token for hierarchical lifecycle management.
-    external_cancel_token: Option<CancellationToken>,
-    /// Type-erased trigger configuration overrides.
-    trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    /// Infrastructure tags whose services are always included in the final
-    /// registry, regardless of the user-provided tag filters. Used by
-    /// `MockContext` to auto-include `log_service` in simulation tests.
-    infra_tags: Vec<&'static str>,
-    /// Pre-filled resources for simulation (only available with `simulation` feature).
-    #[cfg(feature = "simulation")]
-    resources: Option<Arc<DaemonResources>>,
+fn clone_service_descriptions(services: &[ServiceDescription]) -> Vec<ServiceDescription> {
+    services
+        .iter()
+        .map(|service| ServiceDescription {
+            id: service.id,
+            entry: service.entry,
+            cancellation_token: service.cancellation_token.clone(),
+        })
+        .collect()
 }
 
-impl ServiceDaemonBuilder {
-    fn new() -> Self {
-        Self {
-            registry: None,
-            restart_policy: RestartPolicy::default(),
-            external_cancel_token: None,
-            trigger_configs: DashMap::new(),
-            infra_tags: Vec::new(),
-            #[cfg(feature = "simulation")]
-            resources: None,
-        }
-    }
-
-    /// **[Simulation Only]** Creates an isolated builder with an empty registry.
-    ///
-    /// This prevents auto-discovery of statically registered services, ensuring
-    /// the simulation sandbox only runs explicitly added services.
-    #[cfg(feature = "simulation")]
-    pub(crate) fn new_isolated() -> Self {
-        Self {
-            registry: Some(
-                Registry::builder()
-                    .with_tag("__simulation_isolation__")
-                    .build(),
-            ),
-            restart_policy: RestartPolicy::default(),
-            external_cancel_token: None,
-            trigger_configs: DashMap::new(),
-            infra_tags: Vec::new(),
-            resources: None,
-        }
-    }
-
-    /// Use a pre-built `Registry` for service discovery.
-    ///
-    /// If not called, the daemon will automatically include all services
-    /// discovered via the static `SERVICE_REGISTRY` (linkme).
-    #[must_use]
-    pub fn with_registry(mut self, registry: Registry) -> Self {
-        self.registry = Some(registry);
-        self
-    }
-
-    /// Set a custom restart policy for the daemon.
-    #[must_use]
-    pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
-        self.restart_policy = policy;
-        self
-    }
-
-    /// **[Simulation Only]** Inject pre-filled `DaemonResources` into the daemon.
-    ///
-    /// This allows `MockContext` to pre-populate shelf data, status plane entries,
-    /// and other resources before the daemon starts running services.
-    ///
-    /// # Safety
-    /// This method is gated behind the `simulation` feature to prevent misuse
-    /// in production environments.
-    #[cfg(feature = "simulation")]
-    #[must_use]
-    pub fn with_resources(mut self, resources: Arc<DaemonResources>) -> Self {
-        self.resources = Some(resources);
-        self
-    }
-
-    /// Link the daemon to an external `CancellationToken` for hierarchical
-    /// lifecycle management.
-    ///
-    /// When the external token is cancelled, the daemon will treat it as a
-    /// shutdown signal and begin graceful termination. Conversely, when the
-    /// daemon's [`shutdown()`](ServiceDaemon::shutdown) is called, it will
-    /// also cancel this token, propagating the signal to all other components
-    /// sharing it.
-    #[must_use]
-    pub fn with_cancel_token(mut self, token: CancellationToken) -> Self {
-        self.external_cancel_token = Some(token);
-        self
-    }
-
-    /// Register a trigger-specific configuration override.
-    ///
-    /// The registered config can be retrieved at runtime via
-    /// [`context::trigger_config::<C>()`](crate::core::context::trigger_config).
-    /// This is how users override the defaults declared by trigger templates
-    /// (e.g. [`ScalingPolicy`](crate::models::ScalingPolicy)).
-    ///
-    /// This method can be called multiple times with different config types.
-    /// Each call replaces the previous registration for that type.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let mut daemon = ServiceDaemon::builder()
-    ///     .with_trigger_config(ScalingPolicy::builder()
-    ///         .initial_concurrency(4)
-    ///         .build())
-    ///     .build();
-    /// ```
-    #[must_use]
-    pub fn with_trigger_config<C: 'static + Clone + Send + Sync>(self, config: C) -> Self {
-        self.trigger_configs
-            .insert(TypeId::of::<C>(), Box::new(config));
-        self
-    }
-
-    /// Registers infrastructure tags whose services are always included,
-    /// regardless of the user-provided Registry's include filters.
-    ///
-    /// This is used internally by `MockContext` to auto-include framework
-    /// services (e.g., `log_service`) in simulation tests. The tagged services
-    /// are merged into the final service list in `build()`, deduplicated by
-    /// `ServiceId`.
-    #[must_use]
-    pub fn with_infra_tags(mut self, tags: &[&'static str]) -> Self {
-        self.infra_tags.extend_from_slice(tags);
-        self
-    }
-
-    /// Build the `ServiceDaemon`.
-    ///
-    /// This method is **infallible** -- it always returns a valid daemon.
-    /// If no registry was provided, all statically registered services are included.
-    ///
-    /// Provider dependency cycles are checked later in [`ServiceDaemon::run`]
-    /// (not here) so that `build()` stays allocation-only and non-blocking.
-    /// A cycle surfaces as a `tracing::error!` followed by `shutdown()`; users
-    /// observe the outcome via the daemon handle / status plane.
-    #[must_use]
-    pub fn build(self) -> ServiceDaemon {
-        let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
-        let mut services = registry.into_services();
-
-        // Merge infrastructure services that bypass tag filtering.
-        // Each infra tag is resolved against the global SERVICE_REGISTRY,
-        // and matching services are appended (deduplicated by ServiceId).
-        if !self.infra_tags.is_empty() {
-            let infra_services = Registry::builder()
-                .with_tags(self.infra_tags)
-                .build()
-                .into_services();
-            for svc in infra_services {
-                if !services.iter().any(|s| s.id == svc.id) {
-                    services.push(svc);
-                }
-            }
-        }
-
-        #[cfg(feature = "simulation")]
-        let resources = self.resources.unwrap_or_else(DaemonResources::new);
-        #[cfg(not(feature = "simulation"))]
-        let resources = DaemonResources::new();
-
-        // Inject user-registered trigger configs into the shared resources.
-        for entry in self.trigger_configs {
-            resources.trigger_configs.insert(entry.0, entry.1);
-        }
-
-        ServiceDaemon {
-            services,
-            running_tasks: Arc::new(Mutex::new(HashMap::new())),
-            restart_policy: self.restart_policy,
-            cancellation_token: process_token().child_token(),
-            high_priority_runtime: Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name("svc-high-priority")
-                    .build()
-                    .expect("Failed to create high-priority tokio runtime"),
-            ),
-            external_cancel_token: self.external_cancel_token,
-            resources,
-        }
-    }
-}
-
-/// Validates the provider dependency graph for cycles.
-///
-/// Services themselves do not depend on each other; only providers depend on
-/// other providers. This function builds a directed graph where:
-/// - Services are included only as the **roots** that anchor reachability
-///   (service -> provider edges).
-/// - Providers are nodes; edges go from a provider to each of its dependency
-///   provider types.
-///
-/// `petgraph::algo::toposort` then reports any cycle as an error. On success,
-/// the dependency summary is logged for observability.
-///
-/// The `providers` iterator is injected (rather than read from the global
-/// `PROVIDER_REGISTRY`) so unit tests can exercise the cycle path without
-/// polluting the static slice.
-fn validate_dependency_graph<'a>(
-    services: &[ServiceDescription],
-    providers: impl IntoIterator<Item = &'a ProviderEntry>,
-) -> Result<(), ProviderInitError> {
-    let providers: Vec<&ProviderEntry> = providers.into_iter().collect();
-
-    let mut graph = DiGraph::<&str, ()>::new();
-    let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
-    let mut type_nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
-
-    // Phase 1: Service -> Provider edges (roots).
-    for service in services {
-        let svc_node = *service_nodes
-            .entry(service.name())
-            .or_insert_with(|| graph.add_node(service.name()));
-
-        for param in service.params() {
-            let type_node = *type_nodes
-                .entry(param.type_id)
-                .or_insert_with(|| graph.add_node(param.type_name));
-            graph.add_edge(svc_node, type_node, ());
-        }
-    }
-
-    // Phase 2: Provider -> Provider edges (cycle-bearing subgraph).
-    for provider in &providers {
-        let prov_node = *type_nodes
-            .entry(provider.type_id)
-            .or_insert_with(|| graph.add_node(provider.name));
-
-        for param in provider.params {
-            let dep_node = *type_nodes
-                .entry(param.type_id)
-                .or_insert_with(|| graph.add_node(param.type_name));
-            graph.add_edge(prov_node, dep_node, ());
-        }
-    }
-
-    match toposort(&graph, None) {
-        Ok(_order) => {
-            for service in services {
-                if !service.params().is_empty() {
-                    let dep_names: Vec<&str> =
-                        service.params().iter().map(|p| p.type_name).collect();
-                    info!(
-                        service = %service.name(),
-                        dependencies = ?dep_names,
-                        "Service dependency edge"
-                    );
-                }
-            }
-            for provider in &providers {
-                if !provider.params.is_empty() {
-                    let dep_names: Vec<&str> =
-                        provider.params.iter().map(|p| p.type_name).collect();
-                    info!(
-                        provider = %provider.name,
-                        dependencies = ?dep_names,
-                        "Provider dependency edge"
-                    );
-                }
-            }
-            info!(
-                total_services = services.len(),
-                total_providers = providers.len(),
-                total_graph_nodes = graph.node_count(),
-                total_graph_edges = graph.edge_count(),
-                "Provider dependency graph validated - no cycles detected"
-            );
-            Ok(())
-        }
-        Err(cycle_node) => {
-            let cycle_label = graph[cycle_node.node_id()];
-            let involved: Vec<&str> = graph
-                .node_indices()
-                .filter(|&n| {
-                    graph.contains_edge(n, cycle_node.node_id())
-                        || graph.contains_edge(cycle_node.node_id(), n)
-                })
-                .map(|n| graph[n])
-                .collect();
-
-            Err(ProviderInitError::Fatal {
-                provider: cycle_label.to_owned(),
-                message: format!(
-                    "Circular dependency detected in provider dependency graph. \
-                     Cycle involves '{cycle_label}', related nodes: {involved:?}. \
-                     This would deadlock at runtime; review the #[provider] chain for these types."
-                ),
-            })
-        }
+#[cfg(feature = "diagnostics")]
+fn emit_shutdown_topology() {
+    if let Some(mermaid) = super::topology_collector::export_mermaid() {
+        tracing::info!(
+            target: "service_daemon::diagnostics",
+            topology_mermaid = %mermaid,
+            "behavioral topology exported during shutdown"
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::ServiceParam;
-    use crate::service;
+    use crate::models::{
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceParam, ServiceScheduling,
+    };
+    use crate::{TT::*, provider, service, trigger};
+    use std::any::TypeId;
+    #[cfg(feature = "diagnostics")]
+    use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicU32, Ordering};
+    #[cfg(feature = "diagnostics")]
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
     use tracing::debug;
+    #[cfg(feature = "diagnostics")]
+    use tracing::field::{Field, Visit};
+    #[cfg(feature = "diagnostics")]
+    use tracing_subscriber::Layer;
+    #[cfg(feature = "diagnostics")]
+    use tracing_subscriber::layer::Context;
+    #[cfg(feature = "diagnostics")]
+    use tracing_subscriber::prelude::*;
+
+    use super::provider_graph::validate_dependency_graph;
+    use super::runtime::ISOLATED_STARTUP_CONCURRENCY_LIMIT;
 
     /// Helper: Create an isolated registry that filters out all auto-registered services.
     fn isolated_registry() -> Registry {
         Registry::builder().with_tag("__test_isolation__").build()
     }
 
+    fn noop_service(
+        _: CancellationToken,
+    ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    static STANDARD_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "standard_test_service",
+        module: "test",
+        params: &[],
+        wrapper: noop_service,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        tags: &["__unit_runtime_standard__"],
+    };
+
+    static HIGH_PRIORITY_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "high_priority_test_service",
+        module: "test",
+        params: &[],
+        wrapper: noop_service,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::HighPriority,
+        tags: &["__unit_runtime_high_priority__"],
+    };
+
+    static ISOLATED_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "isolated_test_service",
+        module: "test",
+        params: &[],
+        wrapper: noop_service,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Isolated,
+        tags: &["__unit_runtime_isolated__"],
+    };
+
+    fn test_service(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
+        ServiceDescription {
+            id: ServiceId::new(id),
+            entry,
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[derive(Clone, Default)]
+    struct CapturedTraceFields {
+        events: Arc<StdMutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[derive(Default)]
+    struct TraceFieldVisitor {
+        fields: BTreeMap<String, String>,
+    }
+
+    #[cfg(feature = "diagnostics")]
+    impl Visit for TraceFieldVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    #[cfg(feature = "diagnostics")]
+    impl<S> Layer<S> for CapturedTraceFields
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = TraceFieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+                .push(visitor.fields);
+        }
+    }
+
     /// A no-op initializer suitable for fake `ProviderEntry` values in graph tests.
     fn noop_init(
-        _: crate::models::RestartPolicy,
+        _: RestartPolicy,
         _: tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>> {
         Box::pin(async { Ok(()) })
@@ -821,6 +608,143 @@ mod tests {
     /// Leak a params slice to satisfy `&'static [ServiceParam]` without a const context.
     fn leaked_params(params: Vec<ServiceParam>) -> &'static [ServiceParam] {
         Box::leak(params.into_boxed_slice())
+    }
+
+    fn non_zero(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).expect("test worker count should be non-zero")
+    }
+
+    #[service(tags = ["__unit_high_priority_capacity_primary__"], scheduling = HighPriority)]
+    async fn capacity_primary_high_priority_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[service(tags = ["__unit_high_priority_capacity_primary__"], scheduling = Standard)]
+    async fn capacity_primary_standard_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[service(tags = ["__unit_high_priority_capacity_infra__"], scheduling = HighPriority)]
+    async fn capacity_infra_high_priority_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[provider(Notify)]
+    pub struct CapacitySignal;
+
+    #[service(tags = ["__unit_high_priority_capacity_parity__"], scheduling = HighPriority)]
+    async fn capacity_parity_high_priority_service() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[trigger(
+        Event(CapacitySignal),
+        tags = ["__unit_high_priority_capacity_parity__"],
+        scheduling = HighPriority
+    )]
+    async fn capacity_parity_high_priority_trigger() -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_skips_runtime_for_zero_entries() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(0, Some(non_zero(4)));
+
+        assert_eq!(plan.entry_count(), 0);
+        assert_eq!(plan.worker_count(), None);
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_uses_one_worker_for_one_entry() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(1, Some(non_zero(8)));
+
+        assert_eq!(plan.entry_count(), 1);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(1));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_uses_entry_count_within_parallelism() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(3, Some(non_zero(8)));
+
+        assert_eq!(plan.entry_count(), 3);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(3));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_caps_workers_by_parallelism() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(8, Some(non_zero(2)));
+
+        assert_eq!(plan.entry_count(), 8);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(2));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_falls_back_to_one_worker_without_parallelism() {
+        let plan = HighPriorityCapacityPlan::from_entry_count(4, None);
+
+        assert_eq!(plan.entry_count(), 4);
+        assert_eq!(plan.worker_count().map(NonZeroUsize::get), Some(1));
+    }
+
+    #[test]
+    fn high_priority_capacity_plan_counts_only_declared_high_priority_entries() {
+        let services = vec![
+            test_service(1, &STANDARD_TEST_ENTRY),
+            test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
+            test_service(3, &ISOLATED_TEST_ENTRY),
+            test_service(4, &HIGH_PRIORITY_TEST_ENTRY),
+        ];
+
+        let plan = HighPriorityCapacityPlan::from_services(&services);
+
+        assert_eq!(plan.entry_count(), 2);
+        assert!(plan.worker_count().is_some());
+    }
+
+    #[test]
+    fn builder_capacity_plan_uses_filtered_final_registry() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .build();
+
+        assert_eq!(daemon.high_priority_capacity.entry_count(), 1);
+        assert!(daemon.high_priority_capacity.worker_count().is_some());
+    }
+
+    #[test]
+    fn builder_capacity_plan_merges_infra_tags_without_double_counting() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_infra_tags(&[
+                "__unit_high_priority_capacity_primary__",
+                "__unit_high_priority_capacity_infra__",
+            ])
+            .build();
+
+        assert_eq!(daemon.high_priority_capacity.entry_count(), 2);
+        assert!(daemon.high_priority_capacity.worker_count().is_some());
+    }
+
+    #[test]
+    fn builder_capacity_plan_counts_high_priority_triggers_and_services_equally() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_parity__")
+                    .build(),
+            )
+            .build();
+
+        assert_eq!(daemon.high_priority_capacity.entry_count(), 2);
+        assert!(daemon.high_priority_capacity.worker_count().is_some());
     }
 
     #[test]
@@ -850,6 +774,45 @@ mod tests {
         };
 
         validate_dependency_graph(&[], [&a, &b]).expect("linear chain must validate");
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn shutdown_topology_is_emitted_as_tracing_event() {
+        crate::core::topology_collector::reset_topology();
+        crate::core::topology_collector::record_topology_edge_for_test(
+            ServiceId::new(0),
+            ServiceId::new(1),
+        );
+
+        let capture = CapturedTraceFields::default();
+        let events = capture.events.clone();
+        let subscriber = tracing_subscriber::registry().with(capture);
+
+        tracing::subscriber::with_default(subscriber, emit_shutdown_topology);
+
+        let events = events
+            .lock()
+            .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
+            .clone();
+        let topology_event = events
+            .iter()
+            .find(|event| event.get("topology_mermaid").is_some())
+            .unwrap_or_else(|| panic!("expected topology_mermaid event, got: {events:?}"));
+        let mermaid = topology_event
+            .get("topology_mermaid")
+            .expect("topology event should carry Mermaid text");
+
+        assert!(
+            mermaid.contains("graph LR"),
+            "Mermaid topology should be carried as a tracing field, got: {mermaid}"
+        );
+        assert_eq!(
+            topology_event.get("message").map(String::as_str),
+            Some("behavioral topology exported during shutdown")
+        );
+
+        crate::core::topology_collector::reset_topology();
     }
 
     #[test]
@@ -914,6 +877,122 @@ mod tests {
         let _ = daemon;
     }
 
+    #[test]
+    fn build_does_not_create_high_priority_runtime() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[test]
+    fn ensure_high_priority_runtime_skips_standard_only_services() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        daemon.services = vec![test_service(1, &STANDARD_TEST_ENTRY)];
+        daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
+
+        let runtime = daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime check should not fail for standard-only services");
+
+        assert!(runtime.is_none());
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[test]
+    fn ensure_high_priority_runtime_creates_for_high_priority_services() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        daemon.services = vec![test_service(1, &HIGH_PRIORITY_TEST_ENTRY)];
+        daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
+
+        let runtime = daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime creation should succeed for high-priority services");
+
+        assert!(runtime.is_some());
+        assert!(daemon.high_priority_runtime.is_some());
+        daemon.shutdown_high_priority_runtime();
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_keeps_high_priority_runtime_absent_for_empty_registry() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        daemon.run().await;
+
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[test]
+    fn shutdown_high_priority_runtime_is_noop_when_never_created() {
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        daemon.shutdown_high_priority_runtime();
+
+        assert!(daemon.high_priority_runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn do_shutdown_drops_high_priority_runtime_before_control_runtime() {
+        let drop_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let high_priority_drop_order = drop_order.clone();
+        let control_drop_order = drop_order.clone();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        daemon.high_priority_runtime = Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .thread_name("test-high-priority-drop")
+                .on_thread_stop(move || {
+                    high_priority_drop_order
+                        .lock()
+                        .expect("drop order mutex should not be poisoned")
+                        .push("high_priority");
+                })
+                .build()
+                .expect("high-priority runtime should build"),
+        );
+        daemon.control_runtime = Some(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(1)
+                .thread_name("test-control-drop")
+                .on_thread_stop(move || {
+                    control_drop_order
+                        .lock()
+                        .expect("drop order mutex should not be poisoned")
+                        .push("control");
+                })
+                .build()
+                .expect("control runtime should build"),
+        );
+
+        daemon.do_shutdown().await;
+
+        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.control_runtime.is_none());
+        assert_eq!(
+            drop_order
+                .lock()
+                .expect("drop order mutex should not be poisoned")
+                .as_slice(),
+            ["high_priority", "control"]
+        );
+    }
+
     #[tokio::test]
     async fn test_service_daemon_handle() {
         setup_tracing();
@@ -959,6 +1038,149 @@ mod tests {
             .insert(ServiceId(0), ServiceStatus::Healthy);
         let status = handle.get_service_status(&ServiceId(0)).await;
         assert_eq!(status, ServiceStatus::Healthy);
+    }
+
+    #[test]
+    fn runtime_snapshots_are_available_from_daemon_and_handle() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        daemon.services = vec![
+            test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
+            test_service(1, &STANDARD_TEST_ENTRY),
+        ];
+        daemon
+            .resources
+            .runtime_facts
+            .register_services(&daemon.services);
+        daemon
+            .resources
+            .status_plane
+            .insert(ServiceId::new(1), ServiceStatus::Healthy);
+        daemon.resources.status_plane.insert(
+            ServiceId::new(2),
+            ServiceStatus::Recovering("temporary failure".to_owned()),
+        );
+
+        let daemon_runtime = daemon.runtime();
+        let handle = daemon.handle();
+        let handle_runtime = handle.runtime();
+        assert_eq!(daemon_runtime.daemon_id, handle_runtime.daemon_id);
+        assert_eq!(handle_runtime.service_count, 2);
+        assert!(!handle_runtime.shutdown_requested);
+
+        let services = handle.runtime_services();
+        assert_eq!(
+            services
+                .iter()
+                .map(|snapshot| snapshot.service_id)
+                .collect::<Vec<_>>(),
+            vec![ServiceId::new(1), ServiceId::new(2)]
+        );
+        assert_eq!(
+            handle
+                .runtime_service(ServiceId::new(1))
+                .map(|snapshot| snapshot.status),
+            Some(ServiceStatus::Healthy)
+        );
+        assert!(handle.runtime_service(ServiceId::new(999)).is_none());
+
+        let readiness = handle.runtime_readiness();
+        assert_eq!(readiness.healthy.len(), 1);
+        assert_eq!(readiness.recovering.len(), 1);
+        assert_eq!(readiness.recent_errors.len(), 1);
+        assert_eq!(readiness.recent_errors[0].message, "temporary failure");
+    }
+
+    #[test]
+    fn runtime_snapshot_reports_shutdown_requested() {
+        setup_tracing();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let handle = daemon.handle();
+
+        assert!(!handle.runtime().shutdown_requested);
+        daemon.shutdown();
+        assert!(handle.runtime().shutdown_requested);
+    }
+
+    #[test]
+    fn diagnostics_snapshot_is_available_from_daemon_and_handle() {
+        setup_tracing();
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let handle = daemon.handle();
+
+        let daemon_snapshot = daemon.diagnostics_snapshot();
+        let handle_snapshot = handle.diagnostics_snapshot();
+
+        assert_eq!(daemon_snapshot, handle_snapshot);
+        assert_eq!(daemon_snapshot.services.len(), 0);
+        assert_eq!(daemon_snapshot.generations.len(), 0);
+        assert!(
+            daemon_snapshot
+                .lanes
+                .iter()
+                .any(|lane| { lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Control })
+        );
+    }
+
+    #[test]
+    fn default_advisory_profile_spawns_recommendation_loop() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let control_runtime = daemon
+            .ensure_control_runtime()
+            .expect("control runtime should build");
+
+        daemon.spawn_adaptive_recommendation_loop(&control_runtime);
+
+        assert!(daemon.adaptive_recommendation_task.is_some());
+        daemon.shutdown();
+    }
+
+    #[test]
+    fn disabled_advisory_profile_skips_recommendation_loop() {
+        setup_tracing();
+        let mut daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_scheduling_advisory_profile(SchedulingAdvisoryProfile::disabled())
+            .build();
+        let control_runtime = daemon
+            .ensure_control_runtime()
+            .expect("control runtime should build");
+
+        daemon.spawn_adaptive_recommendation_loop(&control_runtime);
+
+        assert!(daemon.adaptive_recommendation_task.is_none());
+    }
+
+    #[test]
+    fn default_isolated_startup_limit_uses_internal_default() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+
+        assert_eq!(
+            daemon.isolated_startup_permits.available_permits(),
+            ISOLATED_STARTUP_CONCURRENCY_LIMIT
+        );
+    }
+
+    #[test]
+    fn builder_configures_isolated_startup_limit() {
+        let limit = NonZeroUsize::new(2).expect("test limit should be non-zero");
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .with_isolated_startup_concurrency_limit(limit)
+            .build();
+
+        assert_eq!(daemon.isolated_startup_permits.available_permits(), 2);
     }
 
     /// Global counter for the `counting_service` test service.

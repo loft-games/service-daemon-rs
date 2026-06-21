@@ -10,11 +10,12 @@ async fn test_listen_addr_resolution() {
     // By using a free high port, we ensure no fatal provider error is returned.
     let result = <ConflictListener as ManagedProvided>::resolve_managed().await;
 
-    assert!(
-        result.is_ok(),
-        "Expected successful resolution on high port, got {:?}",
-        result
-    );
+    let provider = result
+        .unwrap_or_else(|err| panic!("Expected successful resolution on high port, got {err:?}"));
+    let listener = provider
+        .get()
+        .expect("expected cloned TCP listener to convert into tokio listener");
+    assert!(listener.local_addr().is_ok());
 }
 
 #[derive(Debug)]

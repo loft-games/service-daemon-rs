@@ -1,7 +1,9 @@
 use parking_lot::RwLock as PlRwLock;
 use std::future::Future;
+use std::num::NonZeroUsize;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{
     Notify as TokioNotify, OnceCell, RwLock as TokioRwLock,
     RwLockReadGuard as TokioRwLockReadGuard, RwLockWriteGuard as TokioRwLockWriteGuard, watch,
@@ -10,20 +12,17 @@ use uuid::Uuid;
 
 use crate::{ProviderError, models::ServiceId};
 
-/// Manages intelligent promotion and synchronization for shared state.
+/// Manages provider snapshots and tracked mutable state.
 ///
-/// `StateManager` handles the transition between immutable singletons and
-/// mutable tracked state. It provides a "Macro Illusion" that allows services
-/// to interact with state as if it were a standard `RwLock` or `Mutex`, while
-/// internally managing snapshots and change notifications for the `Watch` trigger system.
-///
-/// T must be `Clone` to support snapshot-based reading when the state is promoted
-/// to managed (mutable) state.
+/// `StateManager` starts with immutable snapshots and can promote a provider to
+/// tracked `RwLock`/`Mutex` state when mutable injection is requested. `T` must
+/// be `Clone` so readers can receive snapshot values after promotion.
 pub struct StateManager<T: 'static + Send + Sync + Clone> {
     lock: OnceCell<Arc<TrackedRwLock<T>>>,
     snapshot_cache: OnceCell<Arc<T>>,
     watch_rx: OnceCell<watch::Receiver<Arc<T>>>,
     change_notify: OnceCell<Arc<TokioNotify>>,
+    value_epoch: OnceLock<Arc<AtomicU64>>,
 }
 
 impl<T: 'static + Send + Sync + Clone> Default for StateManager<T> {
@@ -39,15 +38,29 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             snapshot_cache: OnceCell::const_new(),
             watch_rx: OnceCell::const_new(),
             change_notify: OnceCell::const_new(),
+            value_epoch: OnceLock::new(),
         }
     }
 
     /// Create a new StateManager with an initial value.
     pub fn with_value(val: T) -> Self {
+        Self::with_arc(Arc::new(val))
+    }
+
+    pub(crate) fn with_arc(arc: Arc<T>) -> Self {
         let manager = Self::new();
-        let arc = Arc::new(val);
         manager.snapshot_cache.set(arc).ok();
         manager
+    }
+
+    fn epoch_counter(&self) -> Arc<AtomicU64> {
+        self.value_epoch
+            .get_or_init(|| Arc::new(AtomicU64::new(0)))
+            .clone()
+    }
+
+    pub(crate) fn value_epoch(&self) -> u64 {
+        self.epoch_counter().load(Ordering::Acquire)
     }
 
     /// Internal helper to get or initialize the shared notification handle.
@@ -75,6 +88,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
                 let val = initial_arc.clone();
                 let notify = self.get_notify().await;
+                let value_epoch = self.epoch_counter();
                 let (tx, rx) = watch::channel(initial_arc);
 
                 // Ensure watch_rx is also populated
@@ -83,6 +97,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
                 Arc::new(TrackedRwLock {
                     inner: TokioRwLock::new(val),
                     notify,
+                    value_epoch,
                     watch_tx: tx,
                 })
             })
@@ -119,6 +134,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
                 let val = initial_arc.clone();
                 let notify = self.get_notify().await;
+                let value_epoch = self.epoch_counter();
                 let (tx, rx) = watch::channel(initial_arc);
 
                 // Ensure watch_rx is also populated
@@ -127,6 +143,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
                 Ok(Arc::new(TrackedRwLock {
                     inner: TokioRwLock::new(val),
                     notify,
+                    value_epoch,
                     watch_tx: tx,
                 }))
             })
@@ -145,8 +162,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             .map(|lock| Arc::new(TrackedMutex { inner: lock }))
     }
 
-    /// Resolves as a snapshot `Arc<T>`.
-    /// Provides "Zero Lockdown" reads - never blocks even if a writer is holding the lock.
+    /// Resolves as a snapshot `Arc<T>` without waiting on the write lock.
     pub async fn resolve_snapshot<F, Fut>(&self, init: F) -> Arc<T>
     where
         F: FnOnce() -> Fut,
@@ -157,7 +173,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
             return rx.borrow().clone();
         }
 
-        // 2. Fast Path: Plain immutable singleton
+        // 2. Fast Path: Plain immutable snapshot cache
         self.snapshot_cache.get_or_init(init).await.clone()
     }
 
@@ -221,8 +237,29 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
     /// Returns a future that resolves when the state is modified.
     pub async fn changed(&self) {
-        let notify = self.get_notify().await;
-        notify.notified().await;
+        let observed_epoch = self.value_epoch();
+        let _ = self.changed_since(observed_epoch).await;
+    }
+
+    pub(crate) async fn changed_since(&self, observed_epoch: u64) -> u64 {
+        loop {
+            let current_epoch = self.value_epoch();
+            if current_epoch != observed_epoch {
+                return current_epoch;
+            }
+
+            let notify = self.get_notify().await;
+            let changed = notify.notified();
+            tokio::pin!(changed);
+            let _ = changed.as_mut().enable();
+
+            let current_epoch = self.value_epoch();
+            if current_epoch != observed_epoch {
+                return current_epoch;
+            }
+
+            changed.await;
+        }
     }
 }
 
@@ -237,6 +274,7 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 pub struct TrackedRwLock<T: Clone> {
     inner: TokioRwLock<Arc<T>>,
     notify: Arc<TokioNotify>,
+    value_epoch: Arc<AtomicU64>,
     watch_tx: watch::Sender<Arc<T>>,
 }
 
@@ -252,7 +290,7 @@ impl<T: Clone> TrackedRwLock<T> {
 
     /// Locks this `RwLock` with exclusive write access.
     ///
-    /// When the returned [TrackedWriteGuard] is dropped, any `Watch` triggers
+    /// When the returned `TrackedWriteGuard` is dropped, any `Watch` triggers
     /// listening to this state will be notified **only if the data was actually
     /// mutated** (i.e., `DerefMut` was invoked). This prevents spurious wakeups
     /// when write locks are acquired but no modification occurs.
@@ -262,8 +300,8 @@ impl<T: Clone> TrackedRwLock<T> {
         TrackedWriteGuard {
             inner: self.inner.write().await,
             notify: self.notify.clone(),
+            value_epoch: self.value_epoch.clone(),
             watch_tx: &self.watch_tx,
-            is_committed: false,
             is_dirty: false,
         }
     }
@@ -285,26 +323,31 @@ impl<T: Clone> Deref for TrackedReadGuard<'_, T> {
 /// and notify state observers.
 ///
 /// Tracks whether the data was actually mutated via `DerefMut` using an
-/// internal `is_dirty` flag. On `Drop`, auto-commit only fires if the
-/// guard is both dirty and not yet manually committed, preventing
-/// spurious wakeups and unnecessary clones.
+/// internal `is_dirty` flag. Publications clear the flag so `Drop` only emits
+/// a change when there is unpublished dirty state.
 pub struct TrackedWriteGuard<'a, T: Clone> {
     inner: TokioRwLockWriteGuard<'a, Arc<T>>,
     notify: Arc<TokioNotify>,
+    value_epoch: Arc<AtomicU64>,
     watch_tx: &'a watch::Sender<Arc<T>>,
-    is_committed: bool,
     is_dirty: bool,
 }
 
 impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
+    fn publish_current(&mut self) {
+        let new_val = (*self.inner).clone();
+        self.watch_tx.send_replace(new_val);
+        self.value_epoch.fetch_add(1, Ordering::AcqRel);
+        self.notify.notify_waiters();
+        self.is_dirty = false;
+    }
+
     /// Commits the current state to the snapshot channel and notifies listeners.
     /// This can be called multiple times during a single write lock.
     pub fn commit(&mut self) {
-        let new_val = (*self.inner).clone();
-        self.watch_tx.send_replace(new_val);
-        self.notify.notify_waiters();
-        self.is_committed = true;
-        self.is_dirty = true;
+        if self.is_dirty {
+            self.publish_current();
+        }
     }
 
     /// Replaces the entire state with a new Arc and commits it.
@@ -312,8 +355,9 @@ impl<'a, T: Clone> TrackedWriteGuard<'a, T> {
     pub fn publish(&mut self, new_val: Arc<T>) {
         *self.inner = new_val.clone();
         self.watch_tx.send_replace(new_val);
+        self.value_epoch.fetch_add(1, Ordering::AcqRel);
         self.notify.notify_waiters();
-        self.is_committed = true;
+        self.is_dirty = false;
     }
 }
 
@@ -333,14 +377,8 @@ impl<T: Clone> DerefMut for TrackedWriteGuard<'_, T> {
 
 impl<T: Clone> Drop for TrackedWriteGuard<'_, T> {
     fn drop(&mut self) {
-        if self.is_dirty && !self.is_committed {
-            // Automatically commit on drop only if data was actually mutated
-            // (DerefMut was called) and not yet manually committed.
-            // This prevents spurious wakeups and unnecessary clones when
-            // a write lock is acquired but no modification occurs.
-            let new_val = (*self.inner).clone();
-            self.watch_tx.send_replace(new_val);
-            self.notify.notify_waiters();
+        if self.is_dirty {
+            self.publish_current();
         }
     }
 }
@@ -360,7 +398,7 @@ pub struct TrackedMutex<T: Clone> {
 impl<T: Clone> TrackedMutex<T> {
     /// Locks this `Mutex`, causing the current task to yield until the lock has been acquired.
     ///
-    /// When the returned [TrackedMutexGuard] is dropped, any `Watch` triggers
+    /// When the returned `TrackedMutexGuard` is dropped, any `Watch` triggers
     /// listening to this state will be notified.
     ///
     /// See also [tokio::sync::Mutex::lock].
@@ -404,15 +442,14 @@ fn capture_message_identity() -> (Uuid, ServiceId) {
 }
 
 // ===========================================================================
-// TrackedNotify -- Notify wrapper with automatic message_id injection
+// TrackedNotify -- Notify wrapper with message identity capture
 // ===========================================================================
 
-/// A tracked version of [`tokio::sync::Notify`] that automatically generates
-/// a UUID v7 message ID on every `notify_waiters()` / `notify_one()` call.
+/// A tracked version of [`tokio::sync::Notify`] that records a UUID v7 message
+/// ID on every `notify_waiters()` / `notify_one()` call.
 ///
-/// This is the core primitive for the "Macro Illusion" pattern: macro-generated
-/// provider code uses `Notify` (which is aliased to this type), so signal
-/// emissions transparently produce causal trace IDs without user code changes.
+/// Template-generated signal providers use this type so signal emissions keep
+/// the emitting service ID and message ID for trigger tracing.
 ///
 /// # Thread Safety
 ///
@@ -486,15 +523,14 @@ impl Clone for TrackedNotify {
 }
 
 // ===========================================================================
-// TrackedSender -- broadcast::Sender wrapper with automatic message_id injection
+// TrackedSender -- broadcast::Sender wrapper with message identity capture
 // ===========================================================================
 
-/// A tracked version of [`tokio::sync::broadcast::Sender<P>`] that automatically
-/// generates a UUID v7 message ID on every `send()` call.
+/// A tracked version of [`tokio::sync::broadcast::Sender<P>`] that records a
+/// UUID v7 message ID on every `send()` call.
 ///
-/// Follows the same "Macro Illusion" pattern as [`TrackedNotify`]: queue-based
-/// providers use this type transparently via macro-generated code, so every
-/// message emission produces a causal trace ID.
+/// Queue providers use this type in generated code so message emissions keep
+/// the emitting service ID and message ID for trigger tracing.
 pub struct TrackedSender<P> {
     inner: tokio::sync::broadcast::Sender<P>,
     /// The most recently generated message ID and emitting service's ID.
@@ -503,9 +539,9 @@ pub struct TrackedSender<P> {
 
 impl<P: Clone> TrackedSender<P> {
     /// Creates a new `TrackedSender` wrapping a broadcast channel with the
-    /// given capacity.
-    pub fn new(capacity: usize) -> Self {
-        let (tx, _) = tokio::sync::broadcast::channel(capacity);
+    /// given non-zero capacity.
+    pub fn new(capacity: NonZeroUsize) -> Self {
+        let (tx, _) = tokio::sync::broadcast::channel(capacity.get());
         Self {
             inner: tx,
             last_id: PlRwLock::new(None),
@@ -564,7 +600,6 @@ impl<P: Clone> Clone for TrackedSender<P> {
 
 // Aliases for the macro "illusion"
 pub use TrackedMutex as Mutex;
-pub use TrackedNotify as Notify;
 pub use TrackedRwLock as RwLock;
 
 #[cfg(test)]
@@ -602,12 +637,30 @@ mod tests {
     }
 
     #[tokio::test]
+    #[should_panic(expected = "StateManager::snapshot() called before initialization")]
+    async fn snapshot_panics_before_initialization() {
+        let manager = StateManager::<i32>::new();
+        let _ = manager.snapshot().await;
+    }
+
+    #[tokio::test]
+    async fn snapshot_returns_initialized_snapshot() {
+        let manager = StateManager::<i32>::new();
+        let initial = manager.resolve_snapshot(|| async { Arc::new(7) }).await;
+        let snapshot = manager.snapshot().await;
+
+        assert_eq!(*snapshot, 7);
+        assert!(Arc::ptr_eq(&initial, &snapshot));
+    }
+
+    #[tokio::test]
     async fn test_tracked_rwlock_notification() {
         let notify = Arc::new(Notify::new());
         let (tx, _rx) = watch::channel(Arc::new(0));
         let lock = TrackedRwLock {
             inner: TokioRwLock::new(Arc::new(0)),
             notify: notify.clone(),
+            value_epoch: Arc::new(AtomicU64::new(0)),
             watch_tx: tx,
         };
 
@@ -659,6 +712,7 @@ mod tests {
         let lock = TrackedRwLock {
             inner: TokioRwLock::new(Arc::new(10)),
             notify: notify.clone(),
+            value_epoch: Arc::new(AtomicU64::new(0)),
             watch_tx: tx,
         };
 
@@ -685,6 +739,7 @@ mod tests {
         let rw = Arc::new(TrackedRwLock {
             inner: TokioRwLock::new(Arc::new(0)),
             notify: notify.clone(),
+            value_epoch: Arc::new(AtomicU64::new(0)),
             watch_tx: tx,
         });
         let lock = TrackedMutex { inner: rw };
@@ -717,5 +772,90 @@ mod tests {
                 "Mutex lock with mutation should notify"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn changed_since_returns_after_already_committed_mutation() {
+        let manager = StateManager::<i32>::with_value(1);
+        let lock = manager.resolve_rwlock(|| async { Arc::new(1) }).await;
+        let observed_epoch = manager.value_epoch();
+
+        {
+            let mut guard = lock.write().await;
+            *guard = 2;
+        }
+
+        let changed_epoch = tokio::time::timeout(
+            Duration::from_millis(50),
+            manager.changed_since(observed_epoch),
+        )
+        .await
+        .expect("changed_since should return for an already advanced epoch");
+
+        assert_eq!(changed_epoch, observed_epoch + 1);
+    }
+
+    #[tokio::test]
+    async fn changed_since_waits_when_epoch_is_unchanged() {
+        let manager = StateManager::<i32>::with_value(1);
+        let observed_epoch = manager.value_epoch();
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                manager.changed_since(observed_epoch)
+            )
+            .await
+            .is_err(),
+            "changed_since should wait while the observed epoch is current"
+        );
+    }
+
+    #[tokio::test]
+    async fn value_epoch_ignores_noop_write_lock() {
+        let manager = StateManager::<i32>::with_value(1);
+        let lock = manager.resolve_rwlock(|| async { Arc::new(1) }).await;
+        let observed_epoch = manager.value_epoch();
+
+        {
+            let guard = lock.write().await;
+            let _value = *guard;
+        }
+
+        assert_eq!(manager.value_epoch(), observed_epoch);
+    }
+
+    #[tokio::test]
+    async fn value_epoch_advances_once_per_publication() {
+        let manager = StateManager::<i32>::with_value(1);
+        let lock = manager.resolve_rwlock(|| async { Arc::new(1) }).await;
+
+        assert_eq!(manager.value_epoch(), 0);
+
+        {
+            let mut guard = lock.write().await;
+            *guard = 2;
+            guard.commit();
+            assert_eq!(manager.value_epoch(), 1);
+        }
+        assert_eq!(manager.value_epoch(), 1);
+
+        {
+            let mut guard = lock.write().await;
+            guard.commit();
+        }
+        assert_eq!(manager.value_epoch(), 1);
+
+        {
+            let mut guard = lock.write().await;
+            guard.publish(Arc::new(3));
+        }
+        assert_eq!(manager.value_epoch(), 2);
+
+        {
+            let mut guard = lock.write().await;
+            *guard = 4;
+        }
+        assert_eq!(manager.value_epoch(), 3);
     }
 }

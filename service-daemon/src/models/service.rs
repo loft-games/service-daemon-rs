@@ -1,4 +1,5 @@
-use crate::models::ProviderInitError;
+use crate::ProviderDependencyWatchSet;
+use crate::models::{ProviderInitError, RestartPolicy};
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
@@ -65,7 +66,7 @@ impl fmt::Display for ServiceId {
 }
 
 // ---------------------------------------------------------------------------
-// InstanceId: Zero-allocation trigger instance identifier.
+// InstanceId: numeric trigger instance identifier.
 // Combines ServiceId + monotonic sequence for unique instance identification.
 // ---------------------------------------------------------------------------
 
@@ -170,23 +171,31 @@ impl ServicePriority {
 // ServiceScheduling: Execution and isolation policy
 // ---------------------------------------------------------------------------
 
-/// Defines how a service should be scheduled and isolated.
+/// Defines the static execution mode for a service or trigger body.
 ///
-/// This policy determines whether the service shares the global multi-threaded
-/// `tokio` runtime or receives a dedicated OS thread for isolation.
+/// This value is generated into the registry by `#[service]` or `#[trigger]`.
+/// It is a declared execution contract, not a runtime policy hint: the daemon
+/// does not override it to move a service across scheduling modes.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub enum ServiceScheduling {
-    /// The default: scheduled on the shared multi-threaded `tokio` runtime.
-    /// Best for most services that don't have strict latency requirements.
+    /// The default host-runtime integration mode.
+    ///
+    /// The body runs on the Tokio runtime that calls `ServiceDaemon::run()`.
+    /// Best for most services that do not need a dedicated framework-owned lane.
     #[default]
     Standard,
-    /// High priority: runs on the daemon's shared high-priority runtime.
-    /// Use this for latency-sensitive work that should stay off the standard lane.
+    /// Runs the body on the daemon-owned low-contention high-priority runtime lane.
+    ///
+    /// The runtime is created lazily by `ServiceDaemon::run()` only when the
+    /// final registry contains at least one high-priority service or trigger.
+    /// This is an explicit declaration, not an overflow target for `Standard`.
     HighPriority,
-    /// Isolated: spawned in a dedicated OS thread with a private tokio runtime.
-    /// Use this for deterministic responsiveness (e.g., 50ms polling loops).
+    /// Runs each generation body in a dedicated OS thread with a private Tokio runtime.
+    ///
+    /// Supervision, reload, restart, and shutdown coordination remain daemon-managed.
+    /// Use this for deterministic responsiveness or strong runtime isolation.
     Isolated,
 }
 
@@ -203,7 +212,7 @@ pub struct ServiceEntry {
     pub module: &'static str,
     pub params: &'static [ServiceParam],
     pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
-    pub watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub priority: u8,
     /// Execution scheduling and isolation policy.
     pub scheduling: ServiceScheduling,
@@ -246,12 +255,6 @@ impl ServiceDescription {
         self.entry.priority
     }
 
-    /// Compile-time tags for filtering.
-    #[inline]
-    pub fn tags(&self) -> &'static [&'static str] {
-        self.entry.tags
-    }
-
     /// Dependency parameters with `TypeId` for graph analysis.
     #[inline]
     pub fn params(&self) -> &'static [ServiceParam] {
@@ -262,12 +265,6 @@ impl ServiceDescription {
     #[inline]
     pub fn scheduling(&self) -> ServiceScheduling {
         self.entry.scheduling
-    }
-
-    /// Module path where the service is defined.
-    #[inline]
-    pub fn module(&self) -> &'static str {
-        self.entry.module
     }
 }
 
@@ -306,7 +303,7 @@ pub enum ServiceStatus {
 #[distributed_slice]
 pub static SERVICE_REGISTRY: [ServiceEntry];
 
-/// The global provider registry -- providers register themselves here via `#[provider]` macro.
+/// The link-time provider registry -- providers register themselves here via `#[provider]` macro.
 ///
 /// Each entry records the provider's type identity and its dependency parameters,
 /// enabling full dependency graph construction (including Provider->Provider edges)
@@ -338,12 +335,14 @@ pub struct ProviderEntry {
     /// Whether this provider should be initialized during daemon startup
     /// (when reachable from the selected service set).
     pub eager: bool,
-    /// Type-erased initializer that seeds the provider singleton.
+    /// Type-erased initializer that seeds the effective provider slot.
     ///
     /// Implementations are macro-generated and are expected to call into the
-    /// provider's `StateManager` to populate the snapshot cache.
+    /// scoped provider bridge so daemon startup initializes the current daemon's
+    /// effective slot, falling back to the generated root slot when no daemon
+    /// scope is active.
     pub init: fn(
-        crate::models::RestartPolicy,
+        RestartPolicy,
         tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
 }
