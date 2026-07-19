@@ -11,12 +11,11 @@ mod struct_gen;
 mod templates;
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote, quote_spanned};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{Item, ItemFn, parse_macro_input};
 
 use crate::common::{WrapperKind, decompose_type, extract_sync_handler_flag};
-use crate::diagnostics::abort;
 use impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 pub use parser::ProviderArgs;
 use struct_gen::generate_struct_provider;
@@ -78,23 +77,48 @@ fn provider_error_type_assertion(err_ty: &syn::Type) -> proc_macro2::TokenStream
     }
 }
 
+fn provider_help_error(
+    span: impl ToTokens,
+    message: &'static str,
+    help: &'static str,
+) -> syn::Error {
+    syn::Error::new_spanned(span, format!("{message}\n\n  = help: {help}\n"))
+}
+
+fn provider_help_note_error(
+    span: impl ToTokens,
+    message: &'static str,
+    help: &'static str,
+    note: &'static str,
+) -> syn::Error {
+    syn::Error::new_spanned(
+        span,
+        format!("{message}\n\n  = help: {help}\n  = note: {note}\n"),
+    )
+}
+
 pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parsed_item = parse_macro_input!(item as Item);
     let args = parse_macro_input!(attr as ProviderArgs);
 
-    match parsed_item {
-        Item::Struct(item_struct) => generate_struct_provider(item_struct, args),
+    let expanded = match parsed_item {
+        Item::Struct(item_struct) => Ok(generate_struct_provider(item_struct, args)),
         Item::Fn(item_fn) => generate_async_fn_provider(item_fn, args.named.eager),
-        other => abort!(
+        other => Err(provider_help_note_error(
             other,
-            "#[provider] can only be applied to struct or function items";
-            help = "Use #[provider] on a struct definition or a function returning the provider type";
-            note = "Example: #[provider(8080)] pub struct Port(pub i32);"
-        ),
+            "#[provider] can only be applied to struct or function items",
+            "Use #[provider] on a struct definition or a function returning the provider type",
+            "Example: #[provider(8080)] pub struct Port(pub i32);",
+        )),
+    };
+
+    match expanded {
+        Ok(tokens) => tokens,
+        Err(err) => TokenStream::from(err.to_compile_error()),
     }
 }
 
-fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
+fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<TokenStream> {
     let fn_name = &item_fn.sig.ident;
     let fn_vis = &item_fn.vis;
     let fn_sig = &item_fn.sig;
@@ -103,21 +127,21 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let fn_inputs = &item_fn.sig.inputs;
 
     if let syn::Safety::Unsafe(unsafety) = &item_fn.sig.safety {
-        abort!(
+        return Err(provider_help_error(
             unsafety,
-            "#[provider] fn cannot be unsafe";
-            help = "Move unsafe operations behind a safe provider function boundary"
-        );
+            "#[provider] fn cannot be unsafe",
+            "Move unsafe operations behind a safe provider function boundary",
+        ));
     }
 
     let return_type = match &item_fn.sig.output {
         syn::ReturnType::Type(_, ty) => ty.clone(),
         syn::ReturnType::Default => {
-            abort!(
+            return Err(provider_help_error(
                 &item_fn.sig,
-                "#[provider] fn must have a return type";
-                help = "Add a return type, e.g., `async fn config() -> MyConfig { ... }`"
-            );
+                "#[provider] fn must have a return type",
+                "Add a return type, e.g., `async fn config() -> MyConfig { ... }`",
+            ));
         }
     };
 
@@ -125,11 +149,11 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     if let Some(result_return) = &result_return
         && !is_provider_error_type(&result_return.err_ty)
     {
-        abort!(
-            result_return.err_ty,
-            "#[provider] function Result error type must be service_daemon::ProviderError";
-            help = "Use Result<T, service_daemon::ProviderError> for provider-init retry/fatal semantics, or wrap non-framework Result values in a local provider type"
-        );
+        return Err(provider_help_error(
+            &result_return.err_ty,
+            "#[provider] function Result error type must be service_daemon::ProviderError",
+            "Use Result<T, service_daemon::ProviderError> for provider-init retry/fatal semantics, or wrap non-framework Result values in a local provider type",
+        ));
     }
 
     let fallible_return = result_return;
@@ -152,11 +176,11 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
 
     for arg in fn_inputs {
         if let syn::FnArg::Receiver(_) = arg {
-            abort!(
+            return Err(provider_help_error(
                 arg,
-                "#[provider] fn must be a free function, not a method";
-                help = "Remove the `self` parameter"
-            );
+                "#[provider] fn must be a free function, not a method",
+                "Remove the `self` parameter",
+            ));
         }
 
         if let syn::FnArg::Typed(syn::PatType { pat, ty, .. }) = arg
@@ -210,11 +234,11 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
                     });
                 }
                 None => {
-                    abort!(
+                    return Err(provider_help_error(
                         arg,
-                        "Provider function parameters must be Arc-wrapped dependencies";
-                        help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>"
-                    );
+                        "Provider function parameters must be Arc-wrapped dependencies",
+                        "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>",
+                    ));
                 }
             }
 
@@ -314,5 +338,5 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
         #provided_impl
     };
 
-    TokenStream::from(expanded)
+    Ok(TokenStream::from(expanded))
 }
