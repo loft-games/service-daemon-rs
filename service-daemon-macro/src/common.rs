@@ -1,5 +1,5 @@
 use proc_macro_error2::abort;
-use quote::{format_ident, quote, quote_spanned};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
 
@@ -592,6 +592,67 @@ impl TagsList {
         } else {
             quote::quote! { &[#(#tag_strs),*] }
         }
+    }
+}
+
+/// Common named attributes shared by `#[service]` and `#[trigger]`.
+#[derive(Debug)]
+pub struct CommonEntryAttrs {
+    pub priority: proc_macro2::TokenStream,
+    pub scheduling: proc_macro2::TokenStream,
+    pub tags: proc_macro2::TokenStream,
+}
+
+impl Default for CommonEntryAttrs {
+    fn default() -> Self {
+        Self {
+            priority: quote!(50),
+            scheduling: quote!(service_daemon::ServiceScheduling::Standard),
+            tags: quote!(&[]),
+        }
+    }
+}
+
+impl syn::parse::Parse for CommonEntryAttrs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut attrs = Self::default();
+        let tokens: proc_macro2::TokenStream = input.parse()?;
+        syn::meta::parser(|meta| attrs.parse_meta(meta)).parse2(tokens)?;
+        Ok(attrs)
+    }
+}
+
+impl CommonEntryAttrs {
+    pub fn parse_meta(&mut self, meta: syn::meta::ParseNestedMeta<'_>) -> syn::Result<()> {
+        if meta.path.is_ident("priority") {
+            let value: syn::Expr = meta.value()?.parse()?;
+            self.priority = quote!(#value);
+            return Ok(());
+        }
+
+        if meta.path.is_ident("scheduling") {
+            let ident: syn::Ident = meta.value()?.parse()?;
+            self.scheduling = parse_scheduling_policy(&ident)?;
+            return Ok(());
+        }
+
+        if meta.path.is_ident("tags") {
+            let tag_list: TagsList = meta.value()?.parse()?;
+            self.tags = tag_list.to_tokens();
+            return Ok(());
+        }
+
+        let attr_name = meta.path.get_ident().map_or_else(
+            || meta.path.to_token_stream().to_string(),
+            ToString::to_string,
+        );
+        Err(syn::Error::new_spanned(
+            meta.path,
+            format!(
+                "Unknown service attribute '{}'. Supported: priority, scheduling, tags",
+                attr_name
+            ),
+        ))
     }
 }
 

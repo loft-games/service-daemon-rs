@@ -1,10 +1,6 @@
 //! Parser for `#[service]` macro attributes.
 
-use quote::quote;
-use syn::Token;
-use syn::parse::Parse;
-
-use crate::common::{TagsList, parse_scheduling_policy};
+use crate::common::CommonEntryAttrs;
 
 /// Parsed result of `#[service(...)]` attributes.
 ///
@@ -16,62 +12,7 @@ use crate::common::{TagsList, parse_scheduling_policy};
 /// #[service(tags = ["infra", "core"])]              // tags only
 /// #[service(priority = 80, scheduling = HighPriority, tags = ["infra"])]
 /// ```
-#[derive(Debug)]
-pub struct ServiceAttr {
-    pub priority: proc_macro2::TokenStream,
-    pub scheduling: proc_macro2::TokenStream,
-    pub tags: proc_macro2::TokenStream,
-}
-
-impl Parse for ServiceAttr {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        let mut priority: proc_macro2::TokenStream = quote!(50);
-        let mut scheduling: proc_macro2::TokenStream =
-            quote!(service_daemon::ServiceScheduling::Standard);
-        let mut tags: proc_macro2::TokenStream = quote!(&[]);
-
-        // Parse comma-separated key=value pairs
-        while !input.is_empty() {
-            let key: syn::Ident = input.parse()?;
-            input.parse::<Token![=]>()?;
-
-            match key.to_string().as_str() {
-                "priority" => {
-                    let value: syn::Expr = input.parse()?;
-                    priority = quote!(#value);
-                }
-                "scheduling" => {
-                    let ident: syn::Ident = input.parse()?;
-                    scheduling = parse_scheduling_policy(&ident)?;
-                }
-                "tags" => {
-                    let tag_list: TagsList = input.parse()?;
-                    tags = tag_list.to_tokens();
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!(
-                            "Unknown service attribute '{}'. Supported: priority, scheduling, tags",
-                            other
-                        ),
-                    ));
-                }
-            }
-
-            // Consume optional trailing comma
-            if input.peek(Token![,]) {
-                input.parse::<Token![,]>()?;
-            }
-        }
-
-        Ok(ServiceAttr {
-            priority,
-            scheduling,
-            tags,
-        })
-    }
-}
+pub type ServiceAttr = CommonEntryAttrs;
 
 #[cfg(test)]
 mod tests {
