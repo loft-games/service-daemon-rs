@@ -8,7 +8,6 @@
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
-use proc_macro_error2::proc_macro_error;
 
 mod common;
 mod diagnostics;
@@ -61,7 +60,6 @@ mod trigger;
 /// daemon.wait().await?;
 /// ```
 #[proc_macro_attribute]
-#[proc_macro_error]
 pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
     service::service_impl(attr, item)
 }
@@ -136,7 +134,6 @@ pub fn service(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
-#[proc_macro_error]
 pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     provider::provider_impl(attr, item)
 }
@@ -192,7 +189,6 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 #[proc_macro_attribute]
-#[proc_macro_error]
 pub fn trigger(attr: TokenStream, item: TokenStream) -> TokenStream {
     trigger::trigger_impl(attr, item)
 }

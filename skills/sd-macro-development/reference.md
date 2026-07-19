@@ -78,6 +78,12 @@ Run with `cargo test -p example-macro-tests`.
 
 ## 5. Error reporting
 
-The crate uses `proc_macro_error2` (`#[proc_macro_error]` on each entry). Emit
-user-facing diagnostics with spanned errors so the message points at the offending
-token, not the whole item — the `tests/fail/*.stderr` snapshots assert on these.
+The crate owns diagnostics through `service-daemon-macro/src/diagnostics.rs`,
+`syn::Result` control flow, and generated `compile_error!` tokens. Emit
+user-facing diagnostics with spanned errors so the message points at the
+offending token, not the whole item — the `tests/fail/*.stderr` snapshots assert
+on these.
+
+Rust stable does not expose proc-macro warnings. The local facade keeps
+provider-template warning call sites classified, but the stable backend is a
+no-op that preserves the previous behavior.

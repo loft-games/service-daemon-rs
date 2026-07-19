@@ -13,14 +13,16 @@ that the generated code writes into at link time.
 
 ## Entry points (`service-daemon-macro/src/lib.rs`)
 
-Each `#[proc_macro_attribute]` is a thin delegator (all `#[proc_macro_error]`,
-crate is `#![forbid(unsafe_code)]`, errors via `proc_macro_error2`):
+Each `#[proc_macro_attribute]` is a thin delegator. The crate is
+`#![forbid(unsafe_code)]`; user-facing errors flow through the local diagnostics
+facade, `syn::Result` control flow, and generated `compile_error!` tokens rather
+than a third-party diagnostics shim.
 
 | Attribute | Entry fn | Delegates to |
 | :--- | :--- | :--- |
 | `#[service]` | `service` (lib.rs:63) | `service::service_impl(attr, item)` |
-| `#[provider]` | `provider` (lib.rs:138) | `provider::provider_impl(attr, item)` |
-| `#[trigger]` | `trigger` (lib.rs:194) | `trigger::trigger_impl(attr, item)` |
+| `#[provider]` | `provider` (lib.rs:137) | `provider::provider_impl(attr, item)` |
+| `#[trigger]` | `trigger` (lib.rs:192) | `trigger::trigger_impl(attr, item)` |
 
 ## Parse / codegen split
 

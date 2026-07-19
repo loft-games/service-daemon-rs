@@ -69,11 +69,10 @@ Known temporary advisory exceptions:
 | Advisory | Path | Release stance | Removal condition |
 | :--- | :--- | :--- | :--- |
 | `RUSTSEC-2024-0436` | `example-web-api -> utoipa-axum -> paste` | Example-only unmaintained dependency, allowed by `deny.toml`. | Remove the ignore when `utoipa-axum` no longer pulls `paste`, or replace the example dependency path. |
-| `RUSTSEC-2026-0173` | `service-daemon-macro -> proc-macro-error2` | Compile-time proc-macro diagnostics dependency, allowed by `deny.toml`. | Remove the ignore when macro diagnostics no longer depend on `proc-macro-error2`, or when a patched maintained release is available and adopted. |
 
-As of the current baseline, `cargo audit` reports those same two advisories as
-warnings, while `cargo audit -D warnings` fails until the temporary exceptions
-above are removed. Treat that failure as expected and documented, not as a
+As of the current baseline, `cargo audit` reports the example-only advisory as
+a warning, while `cargo audit -D warnings` fails until the temporary exception
+above is removed. Treat that failure as expected and documented, not as a
 separate release blocker while `cargo deny --locked check` remains green.
 
 ## Linkme Platform Contract Monitoring
