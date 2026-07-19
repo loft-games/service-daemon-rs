@@ -40,7 +40,10 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         param_entries,
         watcher_arms,
         ..
-    } = crate::common::extract_params(sig, false);
+    } = match crate::common::try_extract_service_params(sig) {
+        Ok(params) => params,
+        Err(err) => return TokenStream::from(err.to_compile_error()),
+    };
 
     let mut clean_sig = sig.clone();
     clean_sig.inputs = clean_inputs;

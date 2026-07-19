@@ -357,12 +357,12 @@ impl ParamProcessor {
     }
 
     /// Processes a dependency parameter.
-    fn process_dependency(
+    fn try_process_dependency(
         &mut self,
         arg_name: syn::Ident,
         inner_type: Box<Type>,
         wrapper: WrapperKind,
-    ) {
+    ) -> syn::Result<()> {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
 
@@ -375,35 +375,34 @@ impl ParamProcessor {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
                 });
-                self.clean_inputs.push(
-                    syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
+                let clean_arg = syn::parse2(
+                    quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
+                )
+                .map_err(|e| {
+                    syn::Error::new_spanned(
+                        &arg_name,
+                        format!("Internal macro error parsing Arc dependency: {}", e),
                     )
-                    .unwrap_or_else(|e| {
-                        abort!(
-                            arg_name,
-                            format!("Internal macro error parsing Arc dependency: {}", e)
-                        )
-                    }),
-                );
+                })?;
+                self.clean_inputs.push(clean_arg);
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
                     let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
                 });
                 let rw_path = quote_spanned! { rwlock_span => service_daemon::RwLock<#inner_type> };
-                self.clean_inputs.push(
+                let clean_arg =
                     syn::parse2(quote_spanned! { arc_span => #arg_name: std::sync::Arc<#rw_path> })
-                        .unwrap_or_else(|e| {
-                            abort!(
-                                arg_name,
+                        .map_err(|e| {
+                            syn::Error::new_spanned(
+                                &arg_name,
                                 format!(
                                     "Internal macro error parsing Arc<RwLock> dependency: {}",
                                     e
-                                )
+                                ),
                             )
-                        }),
-                );
+                        })?;
+                self.clean_inputs.push(clean_arg);
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
@@ -411,17 +410,16 @@ impl ParamProcessor {
                 });
                 let mutex_path =
                     quote_spanned! { mutex_span => service_daemon::Mutex<#inner_type> };
-                self.clean_inputs.push(
-                    syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#mutex_path> },
+                let clean_arg = syn::parse2(
+                    quote_spanned! { arc_span => #arg_name: std::sync::Arc<#mutex_path> },
+                )
+                .map_err(|e| {
+                    syn::Error::new_spanned(
+                        &arg_name,
+                        format!("Internal macro error parsing Arc<Mutex> dependency: {}", e),
                     )
-                    .unwrap_or_else(|e| {
-                        abort!(
-                            arg_name,
-                            format!("Internal macro error parsing Arc<Mutex> dependency: {}", e)
-                        )
-                    }),
-                );
+                })?;
+                self.clean_inputs.push(clean_arg);
             }
         }
 
@@ -434,6 +432,47 @@ impl ParamProcessor {
                 type_id: std::any::TypeId::of::<#inner_type>(),
             }
         });
+
+        Ok(())
+    }
+
+    fn process_dependency(
+        &mut self,
+        arg_name: syn::Ident,
+        inner_type: Box<Type>,
+        wrapper: WrapperKind,
+    ) {
+        self.try_process_dependency(arg_name.clone(), inner_type, wrapper)
+            .unwrap_or_else(|e| {
+                abort!(
+                    arg_name,
+                    format!("Internal macro error parsing dependency: {}", e)
+                )
+            });
+    }
+
+    /// Processes a single service parameter without depending on proc-macro
+    /// diagnostic side effects. This is the migration path for `#[service]`.
+    fn try_process_service_param(&mut self, arg: &FnArg) -> syn::Result<()> {
+        let Some((arg_name, intent)) = analyze_param(arg) else {
+            return Err(service_param_error(
+                arg,
+                "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.",
+                "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies.",
+            ));
+        };
+
+        match intent {
+            ParamIntent::Payload { .. } => Err(service_param_error(
+                arg,
+                "#[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].",
+                "Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead.",
+            )),
+            ParamIntent::Dependency {
+                inner_type,
+                wrapper,
+            } => self.try_process_dependency(arg_name, inner_type, wrapper),
+        }
     }
 
     /// Processes a single parameter.
@@ -471,6 +510,19 @@ impl ParamProcessor {
             di_idents: self.di_idents,
         }
     }
+}
+
+fn service_param_error(arg: &FnArg, message: &str, help: &str) -> syn::Error {
+    syn::Error::new_spanned(arg, format!("{message}\n\n  = help: {help}\n"))
+}
+
+/// Extracts service parameters with stable `syn::Error` diagnostics.
+pub fn try_extract_service_params(sig: &syn::Signature) -> syn::Result<ExtractedParams> {
+    let mut processor = ParamProcessor::new(false);
+    for arg in &sig.inputs {
+        processor.try_process_service_param(arg)?;
+    }
+    Ok(processor.finish())
 }
 
 /// Extracts parameters from the function signature using the shared parser.
