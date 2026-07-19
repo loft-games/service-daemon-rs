@@ -8,7 +8,7 @@ use syn::ItemStruct;
 use syn::spanned::Spanned;
 
 use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
-use super::parser::{ProviderArgs, ProviderKind, TemplateArg};
+use super::parser::{ProviderArgs, ProviderHead, TemplateArg};
 use super::templates::{
     generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
     generate_unix_connect_template, generate_unix_listen_template,
@@ -25,20 +25,20 @@ fn try_generate_template(
     attrs: &[syn::Attribute],
     provider_args: &ProviderArgs,
 ) -> Option<TokenStream> {
-    let ProviderKind::Template { name, arg } = &provider_args.kind else {
+    let ProviderHead::BuiltinTemplate { name, arg } = &provider_args.head else {
         return None;
     };
 
     match name.to_string().as_str() {
         // Signal templates - no named arguments are useful
         "Notify" | "Event" => {
-            if provider_args.env.is_some() {
+            if provider_args.named.env.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
                     "Notify/Event template does not use `env`; it will be ignored"
                 );
             }
-            if provider_args.capacity.is_some() {
+            if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
                     "Notify/Event template does not use `capacity`; it will be ignored"
@@ -48,7 +48,7 @@ fn try_generate_template(
                 struct_name,
                 vis,
                 attrs,
-                provider_args.eager,
+                provider_args.named.eager,
             ))
         }
         // Broadcast queue templates (fanout - all handlers receive the event)
@@ -57,11 +57,12 @@ fn try_generate_template(
                 Some(TemplateArg::Type(ty)) => (*ty).clone(),
                 _ => syn::parse_quote!(String),
             };
-            let cap = match std::num::NonZeroUsize::new(provider_args.capacity.unwrap_or(100)) {
+            let cap = match std::num::NonZeroUsize::new(provider_args.named.capacity.unwrap_or(100))
+            {
                 Some(cap) => cap,
                 None => proc_macro_error2::abort!(name, "Queue capacity must be greater than zero"),
             };
-            if provider_args.env.is_some() {
+            if provider_args.named.env.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
                     "Queue template does not use `env`; it will be ignored"
@@ -73,7 +74,7 @@ fn try_generate_template(
                 attrs,
                 &item_type,
                 cap,
-                provider_args.eager,
+                provider_args.named.eager,
             ))
         }
         // Listen template (TCP listener with FD cloning)
@@ -88,7 +89,7 @@ fn try_generate_template(
                     );
                 }
             };
-            if provider_args.capacity.is_some() {
+            if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
                     "Listen template does not use `capacity`; it will be ignored"
@@ -99,8 +100,8 @@ fn try_generate_template(
                 vis,
                 attrs,
                 bind_addr,
-                provider_args.env.as_ref(),
-                provider_args.eager,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
             ))
         }
         // UnixListen template (Unix domain socket listener with FD cloning)
@@ -115,7 +116,7 @@ fn try_generate_template(
                     );
                 }
             };
-            if provider_args.capacity.is_some() {
+            if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
                     "UnixListen template does not use `capacity`; it will be ignored"
@@ -126,8 +127,8 @@ fn try_generate_template(
                 vis,
                 attrs,
                 bind_path,
-                provider_args.env.as_ref(),
-                provider_args.eager,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
             ))
         }
         // UnixConnect template (Unix domain socket client; reachability probe at init)
@@ -142,7 +143,7 @@ fn try_generate_template(
                     );
                 }
             };
-            if provider_args.capacity.is_some() {
+            if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
                     "UnixConnect template does not use `capacity`; it will be ignored"
@@ -153,8 +154,8 @@ fn try_generate_template(
                 vis,
                 attrs,
                 connect_path,
-                provider_args.env.as_ref(),
-                provider_args.eager,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
             ))
         }
         _ => {
@@ -275,7 +276,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     );
 
     let type_tokens = quote! { #struct_name };
-    let eager = args.eager;
+    let eager = args.named.eager;
     let helper_style = struct_provider_helper_style(fields, &tuple_info, &args);
     let provider_origin = format!("#[provider] struct {struct_name}");
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
@@ -366,13 +367,14 @@ fn required_env_value_provider<'a>(
     provider_args: &'a ProviderArgs,
 ) -> Option<(&'a syn::LitStr, &'a syn::Type, bool)> {
     let info = tuple_info.as_ref()?;
-    match &provider_args.kind {
-        ProviderKind::Value {
+    match &provider_args.head {
+        ProviderHead::DefaultExpr {
             default_value: None,
         } => {}
         _ => return None,
     }
     provider_args
+        .named
         .env
         .as_ref()
         .map(|env| (env, &info.inner_type, info.is_string))
@@ -410,15 +412,15 @@ fn generate_default_impl(
     };
 
     // Extract default value expression from args.
-    let default_expr_opt = match &provider_args.kind {
-        ProviderKind::Value { default_value } => default_value.as_ref(),
+    let default_expr_opt = match &provider_args.head {
+        ProviderHead::DefaultExpr { default_value } => default_value.as_ref(),
         _ => None,
     };
     // Read env from the shared field.
-    let env_opt = provider_args.env.as_ref();
+    let env_opt = provider_args.named.env.as_ref();
 
     // Capacity on Value providers is semantically invalid - emit error.
-    if provider_args.capacity.is_some() {
+    if provider_args.named.capacity.is_some() {
         proc_macro_error2::emit_error!(
             struct_name,
             "`capacity` is not supported on value providers; use a template like Queue instead"

@@ -84,7 +84,7 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     match parsed_item {
         Item::Struct(item_struct) => generate_struct_provider(item_struct, args),
-        Item::Fn(item_fn) => generate_async_fn_provider(item_fn, args.eager),
+        Item::Fn(item_fn) => generate_async_fn_provider(item_fn, args.named.eager),
         other => abort!(
             other,
             "#[provider] can only be applied to struct or function items";
