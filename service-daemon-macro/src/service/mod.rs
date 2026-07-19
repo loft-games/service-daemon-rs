@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{ItemFn, parse_macro_input};
+use syn::{ItemFn, Visibility, parse_macro_input};
 
 use crate::common::{ExtractedParams, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
@@ -73,6 +73,24 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         body,
     );
 
+    let user_fn_projection = if matches!(vis, Visibility::Inherited) {
+        let bridge_call = if is_async {
+            quote! { #scope_mod::#fn_name(#(#call_args),*).await }
+        } else {
+            quote! { #scope_mod::#fn_name(#(#call_args),*) }
+        };
+
+        quote! {
+            #clean_sig {
+                #bridge_call
+            }
+        }
+    } else {
+        quote! {
+            #vis use #scope_mod::#fn_name;
+        }
+    };
+
     let wrapper_fn = crate::common::generate_wrapper_fn(
         &wrapper_name,
         &quote! {
@@ -96,7 +114,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #user_scope
 
-        #vis use #scope_mod::#fn_name;
+        #user_fn_projection
 
         #wrapper_fn
 
