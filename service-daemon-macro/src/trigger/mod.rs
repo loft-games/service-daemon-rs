@@ -42,7 +42,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let scheduling_tokens = args.scheduling;
     let tags_tokens = args.tags;
 
-    // `extract_params(..., true)` uses the shared parser in trigger mode.
+    // `try_extract_trigger_params` uses the shared parser in trigger mode.
     // Here the shared payload lane is the real trigger payload semantics:
     // exactly one bare or `#[payload]` parameter may be accepted, while
     // Arc-based parameters are treated as framework-managed dependencies.
@@ -53,7 +53,10 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         param_entries,
         mut watcher_arms,
         di_idents,
-    } = crate::common::extract_params(sig, true);
+    } = match crate::common::try_extract_trigger_params(sig) {
+        Ok(params) => params,
+        Err(err) => return TokenStream::from(err.to_compile_error()),
+    };
 
     let is_async = input.sig.asyncness.is_some();
     let call_expr = generate_call_expr(
@@ -66,7 +69,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     // Triggers always watch their target for configuration changes,
-    // in addition to any DI dependency watch handles from extract_params.
+    // in addition to any DI dependency watch handles from trigger parameter extraction.
     if is_watch_host {
         watcher_arms.push(quote! {
             watch_set.push(<#target_type as service_daemon::WatchableProvided>::watch_dependency());

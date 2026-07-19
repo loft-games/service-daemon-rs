@@ -2,8 +2,6 @@ use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
 
-use crate::diagnostics::abort;
-
 /// Result of extracting and categorizing function parameters.
 ///
 /// Used by `#[service]` and `#[trigger]` macros to collect:
@@ -278,7 +276,6 @@ pub(crate) fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
 
 /// Processes function parameters and generates the necessary tokens.
 struct ParamProcessor {
-    allow_payload: bool,
     clean_inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
     resolve_tokens: Vec<proc_macro2::TokenStream>,
     call_args: Vec<proc_macro2::TokenStream>,
@@ -289,9 +286,8 @@ struct ParamProcessor {
 }
 
 impl ParamProcessor {
-    fn new(allow_payload: bool) -> Self {
+    fn new() -> Self {
         Self {
-            allow_payload,
             clean_inputs: syn::punctuated::Punctuated::new(),
             resolve_tokens: Vec::new(),
             call_args: Vec::new(),
@@ -299,60 +295,6 @@ impl ParamProcessor {
             watcher_arms: Vec::new(),
             di_idents: Vec::new(),
             payload_arg_name: None,
-        }
-    }
-
-    /// Processes a payload parameter.
-    ///
-    /// The framework now wraps every payload in `Arc<P>` internally.
-    /// This method generates the correct extraction code based on
-    /// whether the user's handler expects `Arc<T>` or bare `T`:
-    ///
-    /// - **`is_arc == true`**: user declared `Arc<T>` - pass the
-    ///   framework's `Arc` directly (zero-copy, no `Clone` needed).
-    /// - **`is_arc == false`**: user declared `T` - dereference the
-    ///   `Arc` and clone the data. Uses a descriptive trait call
-    ///   to produce a friendly compiler error if `T: Clone` is missing.
-    fn process_payload(&mut self, arg: &FnArg, arg_name: syn::Ident, is_arc: bool) {
-        if !self.allow_payload {
-            // `#[service]` and `#[trigger]` share the same parameter processor.
-            // Bare or `#[payload]` parameters arrive here because they use the
-            // shared payload classification lane. For services, that lane exists
-            // only so we can reject unsupported signatures with accurate wording;
-            // it does not mean services semantically support payloads.
-            abort!(
-                arg,
-                "#[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].";
-                help = "Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead."
-            );
-        }
-
-        if self.payload_arg_name.is_some() {
-            abort!(
-                arg,
-                "Multiple payload parameters detected. A trigger can accept only one payload parameter.";
-                help = "Keep one bare or #[payload] parameter and convert the others to Arc<T> dependencies."
-            );
-        }
-        self.payload_arg_name = Some(arg_name);
-
-        let mut clean_arg = arg.clone();
-        if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
-            attrs.retain(|a| !a.path().is_ident("payload"));
-        }
-        self.clean_inputs.push(clean_arg);
-
-        if is_arc {
-            // User wants Arc<T> - pass the framework's Arc pointer
-            // directly. This is a zero-copy path and does NOT require
-            // the inner type to implement Clone.
-            self.call_args.push(quote! { payload });
-        } else {
-            // User wants bare T - must clone out of the Arc.
-            // Uses a descriptive helper to produce a clear compiler
-            // error when T does not implement Clone.
-            self.call_args
-                .push(quote! { service_daemon::__private::trigger_clone_payload(&*payload) });
         }
     }
 
@@ -436,21 +378,6 @@ impl ParamProcessor {
         Ok(())
     }
 
-    fn process_dependency(
-        &mut self,
-        arg_name: syn::Ident,
-        inner_type: Box<Type>,
-        wrapper: WrapperKind,
-    ) {
-        self.try_process_dependency(arg_name.clone(), inner_type, wrapper)
-            .unwrap_or_else(|e| {
-                abort!(
-                    arg_name,
-                    format!("Internal macro error parsing dependency: {}", e)
-                )
-            });
-    }
-
     /// Processes a single service parameter without depending on proc-macro
     /// diagnostic side effects. This is the migration path for `#[service]`.
     fn try_process_service_param(&mut self, arg: &FnArg) -> syn::Result<()> {
@@ -475,28 +402,49 @@ impl ParamProcessor {
         }
     }
 
-    /// Processes a single parameter.
-    fn process_param(&mut self, arg: &FnArg) {
-        if let Some((arg_name, intent)) = analyze_param(arg) {
-            match intent {
-                ParamIntent::Payload { is_arc } => {
-                    self.process_payload(arg, arg_name, is_arc);
-                }
-                ParamIntent::Dependency {
-                    inner_type,
-                    wrapper,
-                } => {
-                    self.process_dependency(arg_name, inner_type, wrapper);
-                }
-            }
-            return;
-        }
+    /// Processes a single trigger parameter without depending on proc-macro
+    /// diagnostic side effects. This is the migration path for `#[trigger]`.
+    fn try_process_trigger_param(&mut self, arg: &FnArg) -> syn::Result<()> {
+        let Some((arg_name, intent)) = analyze_param(arg) else {
+            return Err(trigger_param_error(
+                arg,
+                "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.",
+                "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies. Use one bare parameter only when defining a trigger payload.",
+            ));
+        };
 
-        abort!(
-            arg,
-            "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.";
-            help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies. Use one bare parameter only when defining a trigger payload."
-        );
+        match intent {
+            ParamIntent::Payload { is_arc } => {
+                if self.payload_arg_name.is_some() {
+                    return Err(trigger_param_error(
+                        arg,
+                        "Multiple payload parameters detected. A trigger can accept only one payload parameter.",
+                        "Keep one bare or #[payload] parameter and convert the others to Arc<T> dependencies.",
+                    ));
+                }
+                self.payload_arg_name = Some(arg_name);
+
+                let mut clean_arg = arg.clone();
+                if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
+                    attrs.retain(|a| !a.path().is_ident("payload"));
+                }
+                self.clean_inputs.push(clean_arg);
+
+                if is_arc {
+                    self.call_args.push(quote! { payload });
+                } else {
+                    self.call_args.push(
+                        quote! { service_daemon::__private::trigger_clone_payload(&*payload) },
+                    );
+                }
+
+                Ok(())
+            }
+            ParamIntent::Dependency {
+                inner_type,
+                wrapper,
+            } => self.try_process_dependency(arg_name, inner_type, wrapper),
+        }
     }
 
     /// Consumes the processor and returns the extracted parameters.
@@ -516,27 +464,26 @@ fn service_param_error(arg: &FnArg, message: &str, help: &str) -> syn::Error {
     syn::Error::new_spanned(arg, format!("{message}\n\n  = help: {help}\n"))
 }
 
+fn trigger_param_error(arg: &FnArg, message: &str, help: &str) -> syn::Error {
+    syn::Error::new_spanned(arg, format!("{message}\n\n  = help: {help}\n"))
+}
+
 /// Extracts service parameters with stable `syn::Error` diagnostics.
 pub fn try_extract_service_params(sig: &syn::Signature) -> syn::Result<ExtractedParams> {
-    let mut processor = ParamProcessor::new(false);
+    let mut processor = ParamProcessor::new();
     for arg in &sig.inputs {
         processor.try_process_service_param(arg)?;
     }
     Ok(processor.finish())
 }
 
-/// Extracts parameters from the function signature using the shared parser.
-///
-/// Both `#[service]` and `#[trigger]` use this function. The `allow_payload`
-/// flag determines whether the shared payload lane is accepted as real trigger
-/// payload semantics or reused as the rejection path for unsupported service
-/// signatures.
-pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedParams {
-    let mut processor = ParamProcessor::new(allow_payload);
+/// Extracts trigger parameters with stable `syn::Error` diagnostics.
+pub fn try_extract_trigger_params(sig: &syn::Signature) -> syn::Result<ExtractedParams> {
+    let mut processor = ParamProcessor::new();
     for arg in &sig.inputs {
-        processor.process_param(arg);
+        processor.try_process_trigger_param(arg)?;
     }
-    processor.finish()
+    Ok(processor.finish())
 }
 
 // -----------------------------------------------------------------------------

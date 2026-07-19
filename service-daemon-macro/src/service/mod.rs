@@ -29,7 +29,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Detect #[allow(sync_handler)] and strip it from the attribute list
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
-    // `extract_params(..., false)` uses the shared parser in service mode.
+    // `try_extract_service_params` uses the shared parser in service mode.
     // Bare or `#[payload]` parameters still flow through the shared payload
     // lane internally, but that lane is only used to reject invalid service
     // signatures. `#[service]` parameters must be Arc-based dependencies.
