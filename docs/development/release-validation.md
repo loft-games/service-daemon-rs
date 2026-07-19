@@ -36,12 +36,45 @@ Current baseline notes:
 - All-features adds `tracing-appender` and `serde_json` through
   `file-logging`; `simulation` and `diagnostics` do not currently add external
   dependencies.
-- `cargo audit` and `cargo deny` are not part of the current release-validation
-  gate.
+- `cargo deny --locked check` is the CI dependency-policy gate.
+- `cargo audit` is retained as a maintainer comparison signal. Its warnings are
+  reconciled through `deny.toml` rather than used as a separate CI gate.
 
 Changing `default = ["cron"]` or minimizing `tokio = { features = ["full",
 "tracing"] }` changes public behavior and dependencies. Handle that as a
 separate compatibility review, not a release-validation cleanup.
+
+## Dependency Policy Gate
+
+The `Dependency Policy` job in `rust.yml` installs the current `cargo-deny`
+release and runs:
+
+```bash
+cargo deny --locked check
+```
+
+The policy is defined in `deny.toml`:
+
+- advisories are checked with stale ignored advisory hygiene enabled;
+- duplicate crate versions are warning-level so the release gate exposes drift
+  without blocking on upstream dependency fan-out alone;
+- wildcard dependencies are warning-level, mostly to keep local workspace path
+  dependencies visible;
+- unknown registries and unknown git sources are denied;
+- crates.io is the only allowed registry source;
+- licenses are allowlisted.
+
+Known temporary advisory exceptions:
+
+| Advisory | Path | Release stance | Removal condition |
+| :--- | :--- | :--- | :--- |
+| `RUSTSEC-2024-0436` | `example-web-api -> utoipa-axum -> paste` | Example-only unmaintained dependency, allowed by `deny.toml`. | Remove the ignore when `utoipa-axum` no longer pulls `paste`, or replace the example dependency path. |
+| `RUSTSEC-2026-0173` | `service-daemon-macro -> proc-macro-error2` | Compile-time proc-macro diagnostics dependency, allowed by `deny.toml`. | Remove the ignore when macro diagnostics no longer depend on `proc-macro-error2`, or when a patched maintained release is available and adopted. |
+
+As of the current baseline, `cargo audit` reports those same two advisories as
+warnings, while `cargo audit -D warnings` fails until the temporary exceptions
+above are removed. Treat that failure as expected and documented, not as a
+separate release blocker while `cargo deny --locked check` remains green.
 
 ## Linkme Platform Contract Monitoring
 
@@ -90,6 +123,8 @@ cargo test --workspace --all-features
 cargo clippy --workspace --all-features -- -D warnings
 cargo test -p service-daemon --no-default-features
 cargo test -p service-daemon --features file-logging
+cargo deny --locked check
+cargo audit
 ```
 
 Also confirm that the linkme platform smoke jobs are either green or, for the
