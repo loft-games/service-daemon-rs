@@ -128,7 +128,7 @@ Providers are lazy-initialized upon their first injection by default. For provid
 
 ```rust
 #[derive(Clone)]
-#[provider(Listen("0.0.0.0:8080"), eager = true)]
+#[provider(Listen("127.0.0.1:8080"), eager = true)]
 pub struct HealthListener;
 
 #[provider(eager = true)]
@@ -141,7 +141,7 @@ pub async fn telemetry_init() -> StatsClient {
 ```rust
 // In your providers definition:
 #[derive(Clone)]
-#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]
+#[provider(Listen("127.0.0.1:8080"), env = "LISTEN_ADDR")]
 pub struct ApiListener;
 
 // In your service:

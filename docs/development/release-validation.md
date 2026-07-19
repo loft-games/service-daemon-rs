@@ -94,3 +94,18 @@ cargo test -p service-daemon --features file-logging
 
 Also confirm that the linkme platform smoke jobs are either green or, for the
 Windows GNU XFAIL job, still failing in the expected no-workaround direction.
+
+## Manual Security and Deployment Checklist
+
+Before cutting a release that changes deployment-facing behavior, review
+[Security and Deployment Contract](security-deployment.md) and check:
+
+- framework logs still do not promise automatic secret redaction;
+- file logging still degrades to console-only when the appender cannot
+  initialize, and remains documented as best-effort operational logging;
+- Unix socket examples and docs do not present shared `/tmp` paths as
+  production-safe;
+- TCP listener examples default to loopback unless the text explicitly discusses
+  firewall, authentication, rate-limit, TLS or reverse-proxy controls;
+- adoption examples, especially `web-api`, are described as integration
+  references rather than production-ready API templates.

@@ -65,9 +65,14 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 
 The `Listen` provider gives you a `std::net::TcpListener` wrapped so that multiple services can share the same port across reloads. Two relevant properties:
 1. **OS-level sharing**: `get()` clones the underlying file descriptor via the kernel's `dup` syscall, so multiple services or reload generations can hold a `tokio::net::TcpListener` for the same physical port without conflicts.
-2. **Environment fallback**: `#[provider(Listen("0.0.0.0:80"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise.
+2. **Environment fallback**: `#[provider(Listen("127.0.0.1:8080"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise.
 
 Like every provider, `Listen` is **lazy by default** -- the bind happens the first time a service requests it. To bind the port during the system startup wave (the case you actually want for health probes and supervisor-style liveness checks), declare it with `eager = true` (see below).
+
+Use loopback addresses for local-only services. Binding to `0.0.0.0` exposes
+the listener on external interfaces and belongs in deployment-specific
+configuration with firewall, authentication, rate-limit, TLS or reverse-proxy
+controls already designed.
 
 ### The `UnixListen` and `UnixConnect` Templates (Unix Domain Sockets)
 
@@ -128,7 +133,7 @@ By default, providers are **lazy**; they are only initialized when a service fir
 > **Reachable Eager**: A provider marked as `eager` is only initialized if it is **reachable** from your registered services. If no service depends on it (directly or indirectly), it will stay uninitialized to save resources.
 
 ```rust
-#[provider(Listen("0.0.0.0:80"), eager = true)]
+#[provider(Listen("127.0.0.1:8080"), eager = true)]
 pub struct WebListener;
 ```
 
@@ -181,8 +186,8 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 | Inject a DB Connection | `#[provider] async fn db() -> Pool { ... }` |
 | Signal between services | `#[provider(Notify)] struct Signal;` |
 | Fan-out events | `#[provider(Queue(String))] struct Bus;` |
-| TCP Port Binding (lazy, on first inject) | `#[provider(Listen("0.0.0.0:80"))] struct HttpListener;` |
-| TCP Port Binding (early-bound for probes) | `#[provider(Listen("0.0.0.0:80"), eager = true)] struct HealthListener;` |
+| TCP Port Binding (lazy, on first inject) | `#[provider(Listen("127.0.0.1:8080"))] struct HttpListener;` |
+| TCP Port Binding (early-bound for probes) | `#[provider(Listen("127.0.0.1:8080"), eager = true)] struct HealthListener;` |
 | Unix Socket Listening (lazy) | `#[provider(UnixListen("/run/myapp/sock"))] struct ApiSocket;` |
 | Unix Socket Listening (early-bound) | `#[provider(UnixListen("/run/myapp/sock"), eager = true)] struct ApiSocket;` |
 | Unix Socket Connecting (lazy) | `#[provider(UnixConnect("/run/peer/sock"))] struct PeerClient;` |

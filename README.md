@@ -86,6 +86,11 @@ The `examples/` directory contains focused examples organized by use case:
 | **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
+Examples demonstrate framework topology. They are not production deployment
+templates; see
+[Security and Deployment Contract](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/security-deployment.md)
+for security and operations boundaries.
+
 > **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
 
 ---
