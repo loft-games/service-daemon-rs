@@ -8,13 +8,13 @@ description = "Neutral Web API example: Axum service, listener provider, and mai
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.52.3", features = ["full"] }
-axum = "0.8.4"
-tower-http = { version = "0.6.6", features = ["cors"] }
-serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.53.0", features = ["full"] }
+axum = "0.8.9"
+tower-http = { version = "0.6.11", features = ["cors"] }
+serde = { version = "1.0.229", features = ["derive"] }
 tracing = "0.1.44"
-anyhow = "1.0.102"
-utoipa = "5.4.0"
+anyhow = "1.0.104"
+utoipa = "5.5.0"
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 
@@ -24,5 +24,5 @@ devtools = []
 docs = ["devtools"]
 
 [dev-dependencies]
-tower = { version = "0.5.2", features = ["util"] }
+tower = { version = "0.5.3", features = ["util"] }
 serde_json = "1.0.150"

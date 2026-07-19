@@ -25,21 +25,21 @@ diagnostics = []
 
 [dependencies]
 service-daemon-macro = { version = "0.1.0-alpha.5", path = "../service-daemon-macro" }
-tokio = { version = "1.52.3", features = ["full", "tracing"] }
+tokio = { version = "1.53.0", features = ["full", "tracing"] }
 tokio-cron-scheduler = { version = "0.15.1", optional = true }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-anyhow = "1.0.102"
-thiserror = "2.0.18"
-futures = "0.3.32"
-linkme = "0.3.36"
-uuid = { version = "1.23.2", features = ["v7", "serde"] }
+anyhow = "1.0.104"
+thiserror = "2.0.19"
+futures = "0.3.33"
+linkme = "0.3.37"
+uuid = { version = "1.24.0", features = ["v7", "serde"] }
 tokio-util = "0.7.18"
-rand = "0.10.1"
+rand = "0.10.2"
 dashmap = "6.2.1"
 parking_lot = "0.12.5"
-chrono = { version = "0.4.44", features = ["serde"] }
-serde = { version = "1.0.228", features = ["derive"] }
+chrono = { version = "0.4.45", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive"] }
 tracing-appender = { version = "0.2.5", optional = true }
 serde_json = { version = "1.0.150", optional = true }
 petgraph = "0.8.3"

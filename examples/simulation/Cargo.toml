@@ -10,7 +10,7 @@ description = "Simulation example: demonstrates MockContext for unit testing ser
 service-daemon = { path = "../../service-daemon", features = [
     "simulation",
 ] }
-tokio = { version = "1.52.3", features = ["full"] }
+tokio = { version = "1.53.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-anyhow = "1.0.102"
+anyhow = "1.0.104"

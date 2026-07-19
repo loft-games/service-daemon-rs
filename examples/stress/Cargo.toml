@@ -24,8 +24,8 @@ s1000 = ["s900"]
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.52.3", features = ["full"] }
+tokio = { version = "1.53.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 pastey = "0.2.3"
