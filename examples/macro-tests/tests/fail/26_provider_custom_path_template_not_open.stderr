@@ -1,0 +1,5 @@
+error: provider attribute `capacity` is only supported on Queue providers
+ --> tests/fail/26_provider_custom_path_template_not_open.rs:9:39
+  |
+9 | #[provider(templates::Custom(String), capacity = 1)]
+  |                                       ^^^^^^^^
