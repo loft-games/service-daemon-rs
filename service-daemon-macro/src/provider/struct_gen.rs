@@ -15,6 +15,7 @@ use super::templates::{
     generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
+use crate::diagnostics::{abort, emit_error, emit_warning};
 
 fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T> {
     let parser = |input: syn::parse::ParseStream| {
@@ -40,11 +41,11 @@ fn parse_template_arg_or_abort<T: syn::parse::Parse>(
     help: &str,
 ) -> T {
     let Some(arg) = arg else {
-        proc_macro_error2::abort!(name, "{}", missing_message; help = help);
+        abort!(name, "{}", missing_message; help = help);
     };
 
     parse_template_arg(arg).unwrap_or_else(|err| {
-        proc_macro_error2::abort!(err.span(), "{}", err);
+        abort!(err.span(), "{}", err);
     })
 }
 
@@ -67,17 +68,17 @@ fn try_generate_template(
         "Notify" | "Event" => {
             if let Some(arg) = arg {
                 parse_template_arg::<syn::Type>(arg).unwrap_or_else(|err| {
-                    proc_macro_error2::abort!(err.span(), "{}", err);
+                    abort!(err.span(), "{}", err);
                 });
             }
             if provider_args.named.env.is_some() {
-                proc_macro_error2::emit_warning!(
+                emit_warning!(
                     name,
                     "Notify/Event template does not use `env`; it will be ignored"
                 );
             }
             if provider_args.named.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
+                emit_warning!(
                     name,
                     "Notify/Event template does not use `capacity`; it will be ignored"
                 );
@@ -103,10 +104,10 @@ fn try_generate_template(
             let cap = match std::num::NonZeroUsize::new(provider_args.named.capacity.unwrap_or(100))
             {
                 Some(cap) => cap,
-                None => proc_macro_error2::abort!(name, "Queue capacity must be greater than zero"),
+                None => abort!(name, "Queue capacity must be greater than zero"),
             };
             if provider_args.named.env.is_some() {
-                proc_macro_error2::emit_warning!(
+                emit_warning!(
                     name,
                     "Queue template does not use `env`; it will be ignored"
                 );
@@ -129,7 +130,7 @@ fn try_generate_template(
                 r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#,
             );
             if provider_args.named.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
+                emit_warning!(
                     name,
                     "Listen template does not use `capacity`; it will be ignored"
                 );
@@ -152,7 +153,7 @@ fn try_generate_template(
                 r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#,
             );
             if provider_args.named.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
+                emit_warning!(
                     name,
                     "UnixListen template does not use `capacity`; it will be ignored"
                 );
@@ -175,7 +176,7 @@ fn try_generate_template(
                 r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#,
             );
             if provider_args.named.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
+                emit_warning!(
                     name,
                     "UnixConnect template does not use `capacity`; it will be ignored"
                 );
@@ -191,7 +192,7 @@ fn try_generate_template(
         }
         _ => {
             // Unknown template name - emit helpful error at the exact span
-            proc_macro_error2::abort!(
+            abort!(
                 name,
                 "Unknown provider template '{}'", name;
                 help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect"
@@ -452,7 +453,7 @@ fn generate_default_impl(
 
     // Capacity on Value providers is semantically invalid - emit error.
     if provider_args.named.capacity.is_some() {
-        proc_macro_error2::emit_error!(
+        emit_error!(
             struct_name,
             "`capacity` is not supported on value providers; use a template like Queue instead"
         );

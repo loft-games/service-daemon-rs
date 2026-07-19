@@ -11,6 +11,7 @@ use proc_macro::TokenStream;
 use proc_macro_error2::proc_macro_error;
 
 mod common;
+mod diagnostics;
 mod provider;
 mod service;
 mod trigger;

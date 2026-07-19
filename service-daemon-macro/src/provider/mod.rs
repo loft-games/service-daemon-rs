@@ -11,12 +11,12 @@ mod struct_gen;
 mod templates;
 
 use proc_macro::TokenStream;
-use proc_macro_error2::abort;
 use quote::{format_ident, quote, quote_spanned};
 use syn::spanned::Spanned;
 use syn::{Item, ItemFn, parse_macro_input};
 
 use crate::common::{WrapperKind, decompose_type, extract_sync_handler_flag};
+use crate::diagnostics::abort;
 use impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 pub use parser::ProviderArgs;
 use struct_gen::generate_struct_provider;

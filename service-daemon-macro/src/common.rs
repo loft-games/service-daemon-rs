@@ -1,7 +1,8 @@
-use proc_macro_error2::abort;
 use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
+
+use crate::diagnostics::abort;
 
 /// Result of extracting and categorizing function parameters.
 ///
