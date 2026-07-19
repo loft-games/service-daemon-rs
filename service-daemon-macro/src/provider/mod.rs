@@ -102,7 +102,7 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ProviderArgs);
 
     let expanded = match parsed_item {
-        Item::Struct(item_struct) => Ok(generate_struct_provider(item_struct, args)),
+        Item::Struct(item_struct) => generate_struct_provider(item_struct, args),
         Item::Fn(item_fn) => generate_async_fn_provider(item_fn, args.named.eager),
         other => Err(provider_help_note_error(
             other,

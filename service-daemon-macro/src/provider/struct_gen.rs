@@ -15,7 +15,7 @@ use super::templates::{
     generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
-use crate::diagnostics::{abort, compile_error_at, emit_unused_provider_template_arg_warning};
+use crate::diagnostics::{compile_error_at, emit_unused_provider_template_arg_warning};
 
 fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T> {
     let parser = |input: syn::parse::ParseStream| {
@@ -34,19 +34,20 @@ fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T>
     parser.parse2(arg.tokens.clone())
 }
 
-fn parse_template_arg_or_abort<T: syn::parse::Parse>(
+fn parse_required_template_arg<T: syn::parse::Parse>(
     name: &syn::Ident,
     arg: Option<&TemplateArg>,
     missing_message: &str,
     help: &str,
-) -> T {
+) -> syn::Result<T> {
     let Some(arg) = arg else {
-        abort!(name, "{}", missing_message; help = help);
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{missing_message}\n\n  = help: {help}\n"),
+        ));
     };
 
-    parse_template_arg(arg).unwrap_or_else(|err| {
-        abort!(err.span(), "{}", err);
-    })
+    parse_template_arg(arg)
 }
 
 /// Attempts to generate a template-based provider if the args specify a known template.
@@ -58,18 +59,16 @@ fn try_generate_template(
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     provider_args: &ProviderArgs,
-) -> Option<TokenStream> {
+) -> syn::Result<Option<TokenStream>> {
     let ProviderHead::BuiltinTemplate { name, arg } = &provider_args.head else {
-        return None;
+        return Ok(None);
     };
 
-    match name.to_string().as_str() {
+    let template = match name.to_string().as_str() {
         // Signal templates - no named arguments are useful
         "Notify" | "Event" => {
             if let Some(arg) = arg {
-                parse_template_arg::<syn::Type>(arg).unwrap_or_else(|err| {
-                    abort!(err.span(), "{}", err);
-                });
+                parse_template_arg::<syn::Type>(arg)?;
             }
             if provider_args.named.env.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "Notify/Event", "env");
@@ -87,18 +86,23 @@ fn try_generate_template(
         // Broadcast queue templates (fanout - all handlers receive the event)
         "BroadcastQueue" | "Queue" | "BQueue" => {
             let item_type = match arg {
-                Some(arg) => parse_template_arg_or_abort::<syn::Type>(
+                Some(arg) => parse_required_template_arg::<syn::Type>(
                     name,
                     Some(arg),
                     "Queue template requires an item type",
                     "Usage: #[provider(Queue(String))]",
-                ),
+                )?,
                 _ => syn::parse_quote!(String),
             };
             let cap = match std::num::NonZeroUsize::new(provider_args.named.capacity.unwrap_or(100))
             {
                 Some(cap) => cap,
-                None => abort!(name, "Queue capacity must be greater than zero"),
+                None => {
+                    return Err(syn::Error::new_spanned(
+                        name,
+                        "Queue capacity must be greater than zero",
+                    ));
+                }
             };
             if provider_args.named.env.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "Queue", "env");
@@ -114,12 +118,12 @@ fn try_generate_template(
         }
         // Listen template (TCP listener with FD cloning)
         "Listen" => {
-            let bind_addr = parse_template_arg_or_abort::<syn::LitStr>(
+            let bind_addr = parse_required_template_arg::<syn::LitStr>(
                 name,
                 arg.as_ref(),
                 "Listen template requires a bind address",
                 r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#,
-            );
+            )?;
             if provider_args.named.capacity.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "Listen", "capacity");
             }
@@ -134,12 +138,12 @@ fn try_generate_template(
         }
         // UnixListen template (Unix domain socket listener with FD cloning)
         "UnixListen" => {
-            let bind_path = parse_template_arg_or_abort::<syn::LitStr>(
+            let bind_path = parse_required_template_arg::<syn::LitStr>(
                 name,
                 arg.as_ref(),
                 "UnixListen template requires a bind path",
                 r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#,
-            );
+            )?;
             if provider_args.named.capacity.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "UnixListen", "capacity");
             }
@@ -154,12 +158,12 @@ fn try_generate_template(
         }
         // UnixConnect template (Unix domain socket client; reachability probe at init)
         "UnixConnect" => {
-            let connect_path = parse_template_arg_or_abort::<syn::LitStr>(
+            let connect_path = parse_required_template_arg::<syn::LitStr>(
                 name,
                 arg.as_ref(),
                 "UnixConnect template requires a target path",
                 r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#,
-            );
+            )?;
             if provider_args.named.capacity.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "UnixConnect", "capacity");
             }
@@ -174,13 +178,17 @@ fn try_generate_template(
         }
         _ => {
             // Unknown template name - emit helpful error at the exact span
-            abort!(
+            return Err(syn::Error::new_spanned(
                 name,
-                "Unknown provider template '{}'", name;
-                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect"
-            );
+                format!(
+                    "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect\n",
+                    name
+                ),
+            ));
         }
-    }
+    };
+
+    Ok(template)
 }
 
 /// Information about a single-element tuple struct.
@@ -223,7 +231,7 @@ impl TupleStructInfo {
 }
 
 /// Generates a provider for a struct with automatic field injection.
-pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenStream {
+pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> syn::Result<TokenStream> {
     let struct_name = &item.ident;
     let vis = &item.vis;
     let attrs = &item.attrs;
@@ -232,8 +240,8 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     let semi = &item.semi_token;
 
     // Template providers replace the normal struct-provider expansion.
-    if let Some(template_output) = try_generate_template(struct_name, vis, attrs, &args) {
-        return template_output;
+    if let Some(template_output) = try_generate_template(struct_name, vis, attrs, &args)? {
+        return Ok(template_output);
     }
 
     // Generate struct definition with proper syntax
@@ -315,7 +323,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         #provided_impl
     };
 
-    TokenStream::from(expanded)
+    Ok(TokenStream::from(expanded))
 }
 
 /// Generates the struct definition with proper syntax for different struct kinds.
