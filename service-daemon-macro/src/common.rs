@@ -617,13 +617,17 @@ impl syn::parse::Parse for CommonEntryAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut attrs = Self::default();
         let tokens: proc_macro2::TokenStream = input.parse()?;
-        syn::meta::parser(|meta| attrs.parse_meta(meta)).parse2(tokens)?;
+        syn::meta::parser(|meta| attrs.parse_meta_for("service", meta)).parse2(tokens)?;
         Ok(attrs)
     }
 }
 
 impl CommonEntryAttrs {
-    pub fn parse_meta(&mut self, meta: syn::meta::ParseNestedMeta<'_>) -> syn::Result<()> {
+    pub fn parse_meta_for(
+        &mut self,
+        attr_kind: &str,
+        meta: syn::meta::ParseNestedMeta<'_>,
+    ) -> syn::Result<()> {
         if meta.path.is_ident("priority") {
             let value: syn::Expr = meta.value()?.parse()?;
             self.priority = quote!(#value);
@@ -649,11 +653,28 @@ impl CommonEntryAttrs {
         Err(syn::Error::new_spanned(
             meta.path,
             format!(
-                "Unknown service attribute '{}'. Supported: priority, scheduling, tags",
-                attr_name
+                "Unknown {} attribute '{}'. Supported: priority, scheduling, tags",
+                attr_kind, attr_name
             ),
         ))
     }
+}
+
+pub fn parse_optional_named_tail(
+    input: syn::parse::ParseStream,
+    handle: impl FnMut(syn::meta::ParseNestedMeta<'_>) -> syn::Result<()>,
+) -> syn::Result<()> {
+    if !input.peek(syn::Token![,]) {
+        return Ok(());
+    }
+
+    input.parse::<syn::Token![,]>()?;
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let tokens: proc_macro2::TokenStream = input.parse()?;
+    syn::meta::parser(handle).parse2(tokens)
 }
 
 // -----------------------------------------------------------------------------

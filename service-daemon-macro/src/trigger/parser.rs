@@ -9,11 +9,10 @@
 //! Optional named arguments like `priority = N`, `scheduling = HighPriority`, and `tags = [...]` follow after a comma.
 
 use proc_macro2::TokenStream;
-use quote::quote;
+use syn::parenthesized;
 use syn::parse::{Parse, ParseStream};
-use syn::{Ident, Token, parenthesized};
 
-use crate::common::{TagsList, parse_scheduling_policy};
+use crate::common::{CommonEntryAttrs, parse_optional_named_tail};
 
 /// Parsed result of `#[trigger(...)]` attributes.
 ///
@@ -66,52 +65,16 @@ impl Parse for TriggerArgs {
         let target: TokenStream = content.parse()?;
 
         // Step 3: Parse optional trailing named arguments.
-        let mut priority: TokenStream = quote!(50);
-        let mut scheduling: TokenStream = quote!(service_daemon::ServiceScheduling::Standard);
-        let mut tags: TokenStream = quote!(&[]);
-        while input.peek(Token![,]) {
-            input.parse::<Token![,]>()?;
-
-            // Allow trailing comma with nothing after it
-            if input.is_empty() {
-                break;
-            }
-
-            let key: Ident = input.parse()?;
-            input.parse::<Token![=]>()?;
-
-            match key.to_string().as_str() {
-                "priority" => {
-                    let value: syn::Expr = input.parse()?;
-                    priority = quote!(#value);
-                }
-                "scheduling" => {
-                    let ident: syn::Ident = input.parse()?;
-                    scheduling = parse_scheduling_policy(&ident)?;
-                }
-                "tags" => {
-                    let tag_list: TagsList = input.parse()?;
-                    tags = tag_list.to_tokens();
-                }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!(
-                            "Unknown trigger attribute '{}'. Supported: priority, scheduling, tags",
-                            other
-                        ),
-                    ));
-                }
-            }
-        }
+        let mut common = CommonEntryAttrs::default();
+        parse_optional_named_tail(input, |meta| common.parse_meta_for("trigger", meta))?;
 
         Ok(TriggerArgs {
             host_path,
             is_watch_host,
             target,
-            priority,
-            scheduling,
-            tags,
+            priority: common.priority,
+            scheduling: common.scheduling,
+            tags: common.tags,
         })
     }
 }
