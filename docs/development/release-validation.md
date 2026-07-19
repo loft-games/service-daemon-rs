@@ -37,8 +37,9 @@ Current baseline notes:
   `file-logging`; `simulation` and `diagnostics` do not currently add external
   dependencies.
 - `cargo deny --locked check` is the CI dependency-policy gate.
-- `cargo audit` is retained as a maintainer comparison signal. Its warnings are
-  reconciled through `deny.toml` rather than used as a separate CI gate.
+- `cargo audit` is retained as a maintainer comparison signal. Use
+  `cargo audit -D warnings` only when no reviewed temporary advisory exceptions
+  are active.
 
 Changing `default = ["cron"]` or minimizing `tokio = { features = ["full",
 "tracing"] }` changes public behavior and dependencies. Handle that as a
