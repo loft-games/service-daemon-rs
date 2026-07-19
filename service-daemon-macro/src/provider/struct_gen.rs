@@ -15,7 +15,7 @@ use super::templates::{
     generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
-use crate::diagnostics::{abort, emit_error, emit_unused_provider_template_arg_warning};
+use crate::diagnostics::{abort, compile_error_at, emit_unused_provider_template_arg_warning};
 
 fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T> {
     let parser = |input: syn::parse::ParseStream| {
@@ -434,15 +434,17 @@ fn generate_default_impl(
     let env_opt = provider_args.named.env.as_ref();
 
     // Capacity on Value providers is semantically invalid - emit error.
-    if provider_args.named.capacity.is_some() {
-        emit_error!(
+    let capacity_error = if provider_args.named.capacity.is_some() {
+        compile_error_at(
             struct_name,
-            "`capacity` is not supported on value providers; use a template like Queue instead"
-        );
-    }
+            "`capacity` is not supported on value providers; use a template like Queue instead",
+        )
+    } else {
+        quote! {}
+    };
 
     if required_env_value_provider(tuple_info, provider_args).is_some() {
-        return quote! {};
+        return capacity_error;
     }
 
     // Helper to wrap string literals with .to_owned() for String fields
@@ -490,10 +492,12 @@ fn generate_default_impl(
         quote! { #default_tokens }
     } else {
         // No default specified, skip Default impl
-        return quote! {};
+        return capacity_error;
     };
 
     quote! {
+        #capacity_error
+
         impl Default for #struct_name {
             fn default() -> Self {
                 Self(#default_body)
