@@ -54,6 +54,7 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/17_provider_fallible_helpers.rs",
     "tests/pass/22_provider_return_type_contracts.rs",
     "tests/pass/24_provider_default_expression_boundary.rs",
+    "tests/pass/25_provider_explicit_key_forms.rs",
 ];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[

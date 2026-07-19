@@ -10,7 +10,9 @@ The public macro forms remain the source of truth:
 #[service(priority = 80, scheduling = HighPriority, tags = ["infra"])]
 #[trigger(TT::Queue(JobQueue), priority = 60)]
 #[provider(8080, env = "PORT")]
+#[provider(default = 8080, env = "PORT")]
 #[provider(Queue(String), capacity = 128)]
+#[provider(template = Queue(String), capacity = 128)]
 #[provider(Listen("127.0.0.1:8080"), eager = true)]
 ```
 
@@ -40,11 +42,19 @@ contract. Do not add an internal trigger-host name registry. `TT::*` is the
 built-in alias namespace, not the parser's authority.
 
 `#[provider(...)]` has an optional provider head and a provider-specific named
-tail. The unnamed head slot intentionally has two meanings:
+tail. The shorthand head slot intentionally has two meanings:
 
 - default expression, such as `8080`, `"localhost"`, or `make_config()`;
 - built-in provider template shorthand, such as `Notify`, `Queue(String)`, or
   `Listen("127.0.0.1:8080")`.
+
+The same heads may also be written explicitly as named heads:
+
+- `default = 8080`
+- `template = Queue(String)`
+
+The shorthand and explicit forms are public equivalents. Both normalize to the
+same internal `ProviderHead` model before semantic validation and codegen.
 
 Provider templates are currently macro-crate built-ins. The central provider
 parser may classify a head as built-in template sugar using `TEMPLATE_NAMES`,
@@ -83,10 +93,9 @@ Use small canonical models before codegen consumes parsed attributes:
   - `capacity`
   - `eager`
 
-These models are internal. They do not imply that users should write explicit
-forms such as `default = ...` or `template = ...`. If such forms ever become
-accepted during a separate migration, treat that as an API decision to review,
-not as the direction of this cleanup.
+These models are internal. The public API supports both the ergonomic shorthand
+heads and the explicit head keys, but users should not rely on internal model
+names beyond the documented `default = ...` and `template = ...` spellings.
 
 ## Migration Order
 
@@ -94,7 +103,8 @@ not as the direction of this cleanup.
 2. Move trigger named tails onto the same helper while keeping the custom
    `Host(Target)` head parser.
 3. Normalize provider parsing into `ProviderHead` and `ProviderNamedAttrs`
-   without changing accepted syntax.
+   while preserving shorthand heads and accepting explicit `default = ...` /
+   `template = ...` head keys as equivalent forms.
 4. Add focused compile-fail fixtures before moving each built-in provider
    template's argument parsing behind the template implementation.
 5. Stop when the shared model removes real drift and diagnostics are stable.

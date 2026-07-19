@@ -4,12 +4,14 @@
 //!
 //! - **Empty**: `#[provider]`
 //! - **Template**: `#[provider(Notify)]`, `#[provider(Queue(String))]`,
+//!   `#[provider(template = Queue(String))]`,
 //!   `#[provider(Queue(ComplexJob), capacity = 500)]`,
 //!   `#[provider(Listen("0.0.0.0:8080"))]`,
 //!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`,
 //!   `#[provider(UnixListen("/run/myapp/sock"))]`,
 //!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
+//!   `#[provider(default = 8080)]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
 //!
 //! ## Two-phase parsing
@@ -38,6 +40,21 @@ const TEMPLATE_NAMES: &[&str] = &[
 /// Returns `true` if the identifier matches a known template name.
 fn is_template_name(ident: &Ident) -> bool {
     TEMPLATE_NAMES.iter().any(|&name| ident == name)
+}
+
+fn unknown_provider_attr_error(key: &Ident, include_head_keys: bool) -> syn::Error {
+    let supported = if include_head_keys {
+        "default, template, env, capacity, eager"
+    } else {
+        "env, capacity, eager"
+    };
+    syn::Error::new(
+        key.span(),
+        format!(
+            "Unknown provider attribute '{}'. Supported: {}",
+            key, supported
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +160,35 @@ fn set_eager(eager: &mut bool, eager_seen: &mut bool, key: &Ident, value: bool) 
     Ok(())
 }
 
+fn parse_template_head(input: ParseStream, name: Ident) -> syn::Result<ProviderHead> {
+    // Capture the parenthesized argument without interpreting it.
+    // Template-specific parsing belongs to the template codegen
+    // branch, not to the central provider head classifier.
+    let mut arg = None;
+    if input.peek(syn::token::Paren) {
+        let content;
+        syn::parenthesized!(content in input);
+        let tokens: proc_macro2::TokenStream = content.parse()?;
+        arg = Some(TemplateArg { tokens });
+    }
+
+    Ok(ProviderHead::BuiltinTemplate { name, arg })
+}
+
+fn parse_explicit_template_head(input: ParseStream) -> syn::Result<ProviderHead> {
+    let name: Ident = input.parse()?;
+    if !is_template_name(&name) {
+        return Err(syn::Error::new(
+            name.span(),
+            format!(
+                "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect\n",
+                name
+            ),
+        ));
+    }
+    parse_template_head(input, name)
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
@@ -152,7 +198,9 @@ fn set_eager(eager: &mut bool, eager_seen: &mut bool, key: &Ident, value: bool) 
 /// Grammar:
 ///   - Empty
 ///   - `TemplateIdent` [`(` TokenStream `)`] [`,` NamedArg]*
-///   - `Ident` `=` Value [`,` NamedArg]*  (env-only shorthand)
+///   - `default` `=` Expr [`,` NamedArg]*
+///   - `template` `=` TemplateIdent [`(` TokenStream `)`] [`,` NamedArg]*
+///   - `Ident` `=` Value [`,` NamedArg]*  (env/eager-only shorthand)
 ///   - Literal [`,` NamedArg]*
 ///
 /// Named args: `env = "..."`, `capacity = N`
@@ -174,21 +222,11 @@ impl Parse for ProviderArgs {
             if is_template_name(&ident) {
                 // Consume the identifier from the real stream
                 let name: Ident = input.parse()?;
-
-                // Capture the parenthesized argument without interpreting it.
-                // Template-specific parsing belongs to the template codegen
-                // branch, not to the central provider head classifier.
-                let mut arg = None;
-                if input.peek(syn::token::Paren) {
-                    let content;
-                    syn::parenthesized!(content in input);
-                    let tokens: proc_macro2::TokenStream = content.parse()?;
-                    arg = Some(TemplateArg { tokens });
-                }
-
-                ProviderHead::BuiltinTemplate { name, arg }
+                parse_template_head(input, name)?
             } else if input.peek2(Token![=]) {
-                // Named-arg-only - e.g., `#[provider(env = "API_KEY")]`
+                // Named head or named-arg-only - e.g.,
+                // `#[provider(default = 8080)]`, `#[provider(template = Queue(String))]`,
+                // or `#[provider(env = "API_KEY")]`.
                 // Consume the key=value directly (no comma prefix).
                 let key: Ident = input.parse()?;
                 input.parse::<Token![=]>()?;
@@ -196,9 +234,16 @@ impl Parse for ProviderArgs {
                 let mut named = ProviderNamedAttrs::default();
                 let mut capacity_span = None;
                 let mut eager_seen = false;
-                match key.to_string().as_str() {
+                let head = match key.to_string().as_str() {
+                    "default" => ProviderHead::DefaultExpr {
+                        default_value: Some(input.parse::<syn::Expr>()?),
+                    },
+                    "template" => parse_explicit_template_head(input)?,
                     "env" => {
                         set_once(&mut named.env, &key, "env", input.parse::<syn::LitStr>()?)?;
+                        ProviderHead::DefaultExpr {
+                            default_value: None,
+                        }
                     }
                     "capacity" => {
                         let lit: syn::LitInt = input.parse()?;
@@ -209,32 +254,24 @@ impl Parse for ProviderArgs {
                             parse_capacity_literal(lit)?,
                         )?;
                         capacity_span = Some(key.span());
+                        ProviderHead::DefaultExpr {
+                            default_value: None,
+                        }
                     }
                     "eager" => {
                         let value = parse_eager_literal(input, &key)?;
                         set_eager(&mut named.eager, &mut eager_seen, &key, value)?;
+                        ProviderHead::DefaultExpr {
+                            default_value: None,
+                        }
                     }
-                    other => {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            format!(
-                                "Unknown provider attribute '{}'. Supported: env, capacity, eager",
-                                other
-                            ),
-                        ));
+                    _ => {
+                        return Err(unknown_provider_attr_error(&key, true));
                     }
-                }
+                };
 
                 // Continue with phase 2 for any remaining `, key = value` pairs
-                return Self::parse_trailing_attrs(
-                    input,
-                    ProviderHead::DefaultExpr {
-                        default_value: None,
-                    },
-                    named,
-                    capacity_span,
-                    eager_seen,
-                );
+                return Self::parse_trailing_attrs(input, head, named, capacity_span, eager_seen);
             } else {
                 // Not a template name - treat as an expression
                 // (e.g., a constant identifier used as a default value)
@@ -296,14 +333,8 @@ impl ProviderArgs {
                     let value = parse_eager_literal(input, &key)?;
                     set_eager(&mut named.eager, &mut eager_seen, &key, value)?;
                 }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!(
-                            "Unknown provider attribute '{}'. Supported: env, capacity, eager",
-                            other
-                        ),
-                    ));
+                _ => {
+                    return Err(unknown_provider_attr_error(&key, false));
                 }
             }
         }
@@ -386,6 +417,19 @@ mod tests {
     }
 
     #[test]
+    fn explicit_template_key_with_capacity() {
+        let args = parse_args(quote! { template = Queue(String), capacity = 500 }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "Queue");
+                assert!(matches!(arg, Some(TemplateArg { .. })));
+            }
+            _ => panic!("Expected explicit template head"),
+        }
+        assert_eq!(args.named.capacity, Some(500));
+    }
+
+    #[test]
     fn capacity_zero_is_rejected() {
         let err = parse_args(quote! { Queue(String), capacity = 0 }).unwrap_err();
         assert!(
@@ -430,6 +474,18 @@ mod tests {
     fn string_default_with_env() {
         let args = parse_args(quote! { "fallback", env = "MY_VAR" }).unwrap();
         assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "MY_VAR");
+    }
+
+    #[test]
+    fn explicit_default_key_with_env() {
+        let args = parse_args(quote! { default = "fallback", env = "MY_VAR" }).unwrap();
+        assert!(matches!(
+            &args.head,
+            ProviderHead::DefaultExpr {
+                default_value: Some(_)
+            }
+        ));
         assert_eq!(args.named.env.as_ref().unwrap().value(), "MY_VAR");
     }
 
@@ -479,6 +535,18 @@ mod tests {
         assert!(
             err_msg.contains("Unknown provider attribute"),
             "Error message should mention unknown provider attribute, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn explicit_unknown_template_is_error() {
+        let result = parse_args(quote! { template = Custom(String) });
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unknown provider template"),
+            "Error message should mention unknown provider template, got: {}",
             err_msg
         );
     }
