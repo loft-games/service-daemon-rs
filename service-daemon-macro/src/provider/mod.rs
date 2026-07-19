@@ -102,7 +102,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> TokenStream {
     let fn_asyncness = &item_fn.sig.asyncness;
     let fn_inputs = &item_fn.sig.inputs;
 
-    if let Some(unsafety) = &item_fn.sig.unsafety {
+    if let syn::Safety::Unsafe(unsafety) = &item_fn.sig.safety {
         abort!(
             unsafety,
             "#[provider] fn cannot be unsafe";
