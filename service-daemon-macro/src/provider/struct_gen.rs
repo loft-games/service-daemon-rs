@@ -5,6 +5,7 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote, quote_spanned};
 use syn::ItemStruct;
+use syn::parse::Parser;
 use syn::spanned::Spanned;
 
 use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
@@ -14,6 +15,38 @@ use super::templates::{
     generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
+
+fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T> {
+    let parser = |input: syn::parse::ParseStream| {
+        let value = input.parse::<T>()?;
+        if !input.is_empty() {
+            return Err(syn::Error::new(
+                input.span(),
+                "Unexpected tokens inside template parentheses; \
+                 named attributes like `env` belong outside: \
+                 #[provider(Listen(\"addr\"), env = \"VAR\")]",
+            ));
+        }
+        Ok(value)
+    };
+
+    parser.parse2(arg.tokens.clone())
+}
+
+fn parse_template_arg_or_abort<T: syn::parse::Parse>(
+    name: &syn::Ident,
+    arg: Option<&TemplateArg>,
+    missing_message: &str,
+    help: &str,
+) -> T {
+    let Some(arg) = arg else {
+        proc_macro_error2::abort!(name, "{}", missing_message; help = help);
+    };
+
+    parse_template_arg(arg).unwrap_or_else(|err| {
+        proc_macro_error2::abort!(err.span(), "{}", err);
+    })
+}
 
 /// Attempts to generate a template-based provider if the args specify a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
@@ -32,6 +65,11 @@ fn try_generate_template(
     match name.to_string().as_str() {
         // Signal templates - no named arguments are useful
         "Notify" | "Event" => {
+            if let Some(arg) = arg {
+                parse_template_arg::<syn::Type>(arg).unwrap_or_else(|err| {
+                    proc_macro_error2::abort!(err.span(), "{}", err);
+                });
+            }
             if provider_args.named.env.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
@@ -54,7 +92,12 @@ fn try_generate_template(
         // Broadcast queue templates (fanout - all handlers receive the event)
         "BroadcastQueue" | "Queue" | "BQueue" => {
             let item_type = match arg {
-                Some(TemplateArg::Type(ty)) => (*ty).clone(),
+                Some(arg) => parse_template_arg_or_abort::<syn::Type>(
+                    name,
+                    Some(arg),
+                    "Queue template requires an item type",
+                    "Usage: #[provider(Queue(String))]",
+                ),
                 _ => syn::parse_quote!(String),
             };
             let cap = match std::num::NonZeroUsize::new(provider_args.named.capacity.unwrap_or(100))
@@ -79,16 +122,12 @@ fn try_generate_template(
         }
         // Listen template (TCP listener with FD cloning)
         "Listen" => {
-            let bind_addr = match arg {
-                Some(TemplateArg::Addr(lit)) => lit,
-                _ => {
-                    proc_macro_error2::abort!(
-                        name,
-                        "Listen template requires a bind address";
-                        help = r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#
-                    );
-                }
-            };
+            let bind_addr = parse_template_arg_or_abort::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "Listen template requires a bind address",
+                r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#,
+            );
             if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
@@ -99,23 +138,19 @@ fn try_generate_template(
                 struct_name,
                 vis,
                 attrs,
-                bind_addr,
+                &bind_addr,
                 provider_args.named.env.as_ref(),
                 provider_args.named.eager,
             ))
         }
         // UnixListen template (Unix domain socket listener with FD cloning)
         "UnixListen" => {
-            let bind_path = match arg {
-                Some(TemplateArg::Addr(lit)) => lit,
-                _ => {
-                    proc_macro_error2::abort!(
-                        name,
-                        "UnixListen template requires a bind path";
-                        help = r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#
-                    );
-                }
-            };
+            let bind_path = parse_template_arg_or_abort::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "UnixListen template requires a bind path",
+                r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#,
+            );
             if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
@@ -126,23 +161,19 @@ fn try_generate_template(
                 struct_name,
                 vis,
                 attrs,
-                bind_path,
+                &bind_path,
                 provider_args.named.env.as_ref(),
                 provider_args.named.eager,
             ))
         }
         // UnixConnect template (Unix domain socket client; reachability probe at init)
         "UnixConnect" => {
-            let connect_path = match arg {
-                Some(TemplateArg::Addr(lit)) => lit,
-                _ => {
-                    proc_macro_error2::abort!(
-                        name,
-                        "UnixConnect template requires a target path";
-                        help = r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#
-                    );
-                }
-            };
+            let connect_path = parse_template_arg_or_abort::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "UnixConnect template requires a target path",
+                r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#,
+            );
             if provider_args.named.capacity.is_some() {
                 proc_macro_error2::emit_warning!(
                     name,
@@ -153,7 +184,7 @@ fn try_generate_template(
                 struct_name,
                 vis,
                 attrs,
-                connect_path,
+                &connect_path,
                 provider_args.named.env.as_ref(),
                 provider_args.named.eager,
             ))

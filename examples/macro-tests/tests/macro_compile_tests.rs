@@ -72,6 +72,7 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/24_provider_unsafe_fn.rs",
     "tests/fail/25_provider_result_non_provider_error.rs",
     "tests/fail/26_provider_custom_path_template_not_open.rs",
+    "tests/fail/27_provider_template_named_attr_inside_parens.rs",
 ];
 
 const INTEGRATION_PASS_CASES: &[&str] = &[

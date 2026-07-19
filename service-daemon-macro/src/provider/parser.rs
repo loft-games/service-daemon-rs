@@ -15,7 +15,7 @@
 //! ## Two-phase parsing
 //!
 //! 1. **Phase 1 (Primary)**: Identify `ProviderHead` (Template, DefaultExpr, or Empty)
-//!    and parse any parenthesized positional argument.
+//!    and capture any parenthesized positional argument tokens.
 //! 2. **Phase 2 (Attributes)**: A single unified loop captures all trailing
 //!    named arguments (`env = "..."`, `capacity = N`). These are stored on
 //!    `ProviderNamedAttrs` regardless of the head.
@@ -35,23 +35,9 @@ const TEMPLATE_NAMES: &[&str] = &[
     "UnixConnect",
 ];
 
-/// Templates whose parenthesized argument is a string literal (path / address)
-/// rather than a Rust type. Determines which arm of phase-1 parsing runs.
-//
-// Why centralize: parser must decide between `LitStr` and `Type` parsing
-// before it knows what the template generator wants. Listing the addr-based
-// names in one place avoids a 3-way conditional and prevents drift when a
-// future template (e.g. `Open(Path)`) joins the family.
-const ADDR_TEMPLATE_NAMES: &[&str] = &["Listen", "UnixListen", "UnixConnect"];
-
 /// Returns `true` if the identifier matches a known template name.
 fn is_template_name(ident: &Ident) -> bool {
     TEMPLATE_NAMES.iter().any(|&name| ident == name)
-}
-
-/// Returns `true` if the template expects a `LitStr` (path/address) argument.
-fn template_takes_addr(ident: &Ident) -> bool {
-    ADDR_TEMPLATE_NAMES.iter().any(|&name| ident == name)
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +68,7 @@ pub enum ProviderHead {
     BuiltinTemplate {
         /// The template identifier (e.g., `Queue`, `Notify`, `Event`, `Listen`).
         name: Ident,
-        /// Parenthesized argument, polymorphic: Type for Queue, LitStr for Listen.
+        /// Raw parenthesized argument tokens owned by the selected template.
         arg: Option<TemplateArg>,
     },
 
@@ -106,18 +92,11 @@ pub struct ProviderNamedAttrs {
     pub eager: bool,
 }
 
-/// Polymorphic template argument inside parentheses.
-///
-/// Different templates expect different argument types in the same
-/// syntactic position:
-/// - `Queue(String)` -> `TemplateArg::Type`
-/// - `Listen("0.0.0.0:8080")` -> `TemplateArg::Addr`
+/// Raw template argument tokens inside parentheses.
 #[derive(Debug)]
-pub enum TemplateArg {
-    /// A type argument: `Queue(String)`, `Queue(ComplexJob)`
-    Type(Box<syn::Type>),
-    /// A string literal address: `Listen("0.0.0.0:8080")`
-    Addr(syn::LitStr),
+pub struct TemplateArg {
+    /// The tokens inside the template parentheses.
+    pub tokens: proc_macro2::TokenStream,
 }
 
 fn parse_capacity_literal(lit: syn::LitInt) -> syn::Result<usize> {
@@ -172,7 +151,7 @@ fn set_eager(eager: &mut bool, eager_seen: &mut bool, key: &Ident, value: bool) 
 ///
 /// Grammar:
 ///   - Empty
-///   - `TemplateIdent` [`(` Type | LitStr `)`] [`,` NamedArg]*
+///   - `TemplateIdent` [`(` TokenStream `)`] [`,` NamedArg]*
 ///   - `Ident` `=` Value [`,` NamedArg]*  (env-only shorthand)
 ///   - Literal [`,` NamedArg]*
 ///
@@ -195,33 +174,16 @@ impl Parse for ProviderArgs {
             if is_template_name(&ident) {
                 // Consume the identifier from the real stream
                 let name: Ident = input.parse()?;
-                let takes_addr = template_takes_addr(&name);
 
-                // Parse parenthesized argument:
-                // - Listen / UnixListen / UnixConnect: expects a string literal
-                //   address or path
-                // - Queue/others: expects a type
+                // Capture the parenthesized argument without interpreting it.
+                // Template-specific parsing belongs to the template codegen
+                // branch, not to the central provider head classifier.
                 let mut arg = None;
                 if input.peek(syn::token::Paren) {
                     let content;
                     syn::parenthesized!(content in input);
-                    if takes_addr {
-                        arg = Some(TemplateArg::Addr(content.parse::<syn::LitStr>()?));
-                    } else {
-                        arg = Some(TemplateArg::Type(Box::new(content.parse::<syn::Type>()?)));
-                    }
-
-                    // Reject unexpected trailing tokens inside parentheses.
-                    // Named attributes like `env` must be placed outside:
-                    //   #[provider(Listen("addr"), env = "VAR")]
-                    if !content.is_empty() {
-                        return Err(syn::Error::new(
-                            content.span(),
-                            "Unexpected tokens inside template parentheses; \
-                             named attributes like `env` belong outside: \
-                             #[provider(Listen(\"addr\"), env = \"VAR\")]",
-                        ));
-                    }
+                    let tokens: proc_macro2::TokenStream = content.parse()?;
+                    arg = Some(TemplateArg { tokens });
                 }
 
                 ProviderHead::BuiltinTemplate { name, arg }
@@ -408,8 +370,8 @@ mod tests {
             ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Queue");
                 assert!(
-                    matches!(arg, Some(TemplateArg::Type(_))),
-                    "arg should be Some(Type) for Queue(String)"
+                    matches!(arg, Some(TemplateArg { .. })),
+                    "arg should be captured for Queue(String)"
                 );
             }
             _ => panic!("Expected Template variant"),
@@ -594,8 +556,8 @@ mod tests {
             ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Listen");
                 match arg {
-                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "0.0.0.0:8080"),
-                    _ => panic!("Expected Addr arg"),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"0.0.0.0:8080\""),
+                    _ => panic!("Expected captured arg"),
                 }
             }
             _ => panic!("Expected Template variant"),
@@ -611,8 +573,8 @@ mod tests {
             ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Listen");
                 match arg {
-                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "0.0.0.0:8080"),
-                    _ => panic!("Expected Addr arg"),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"0.0.0.0:8080\""),
+                    _ => panic!("Expected captured arg"),
                 }
             }
             _ => panic!("Expected Template variant with env"),
@@ -633,17 +595,14 @@ mod tests {
     }
 
     #[test]
-    fn listen_template_env_inside_parens_is_error() {
-        // Old syntax `Listen("addr", env = "VAR")` should now be rejected.
-        // The correct form is `Listen("addr"), env = "VAR"` (outside parentheses).
-        let result = parse_args(quote! { Listen("0.0.0.0:8080", env = "LISTEN_ADDR") });
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("Unexpected tokens inside template parentheses"),
-            "Error should mention unexpected tokens inside parentheses, got: {}",
-            err_msg,
-        );
+    fn listen_template_captures_inner_named_tokens_for_template_validation() {
+        let args = parse_args(quote! { Listen("0.0.0.0:8080", env = "LISTEN_ADDR") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
+                assert!(arg.tokens.to_string().contains("env"));
+            }
+            _ => panic!("Expected captured template arg"),
+        }
     }
 
     // -- Cross-template tests (env on non-Listen templates) -----------------------
@@ -681,8 +640,8 @@ mod tests {
             ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "UnixListen");
                 match arg {
-                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "/run/myapp/sock"),
-                    _ => panic!("Expected Addr arg for UnixListen"),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"/run/myapp/sock\""),
+                    _ => panic!("Expected captured arg for UnixListen"),
                 }
             }
             _ => panic!("Expected Template variant"),
@@ -697,7 +656,7 @@ mod tests {
         match &args.head {
             ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "UnixConnect");
-                assert!(matches!(arg, Some(TemplateArg::Addr(_))));
+                assert!(matches!(arg, Some(TemplateArg { .. })));
             }
             _ => panic!("Expected Template variant"),
         }
@@ -706,9 +665,13 @@ mod tests {
     }
 
     #[test]
-    fn unix_listen_env_inside_parens_is_error() {
-        // Parentheses must contain only the path literal; named attrs go outside.
-        let result = parse_args(quote! { UnixListen("/sock", env = "VAR") });
-        assert!(result.is_err());
+    fn unix_listen_captures_inner_named_tokens_for_template_validation() {
+        let args = parse_args(quote! { UnixListen("/sock", env = "VAR") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
+                assert!(arg.tokens.to_string().contains("env"));
+            }
+            _ => panic!("Expected captured template arg"),
+        }
     }
 }
