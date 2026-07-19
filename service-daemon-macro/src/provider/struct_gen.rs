@@ -15,7 +15,7 @@ use super::templates::{
     generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
-use crate::diagnostics::{abort, emit_error, emit_warning};
+use crate::diagnostics::{abort, emit_error, emit_unused_provider_template_arg_warning};
 
 fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T> {
     let parser = |input: syn::parse::ParseStream| {
@@ -72,16 +72,10 @@ fn try_generate_template(
                 });
             }
             if provider_args.named.env.is_some() {
-                emit_warning!(
-                    name,
-                    "Notify/Event template does not use `env`; it will be ignored"
-                );
+                emit_unused_provider_template_arg_warning!(name, "Notify/Event", "env");
             }
             if provider_args.named.capacity.is_some() {
-                emit_warning!(
-                    name,
-                    "Notify/Event template does not use `capacity`; it will be ignored"
-                );
+                emit_unused_provider_template_arg_warning!(name, "Notify/Event", "capacity");
             }
             Some(generate_notify_template(
                 struct_name,
@@ -107,10 +101,7 @@ fn try_generate_template(
                 None => abort!(name, "Queue capacity must be greater than zero"),
             };
             if provider_args.named.env.is_some() {
-                emit_warning!(
-                    name,
-                    "Queue template does not use `env`; it will be ignored"
-                );
+                emit_unused_provider_template_arg_warning!(name, "Queue", "env");
             }
             Some(generate_broadcast_queue_template(
                 struct_name,
@@ -130,10 +121,7 @@ fn try_generate_template(
                 r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#,
             );
             if provider_args.named.capacity.is_some() {
-                emit_warning!(
-                    name,
-                    "Listen template does not use `capacity`; it will be ignored"
-                );
+                emit_unused_provider_template_arg_warning!(name, "Listen", "capacity");
             }
             Some(generate_listen_template(
                 struct_name,
@@ -153,10 +141,7 @@ fn try_generate_template(
                 r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#,
             );
             if provider_args.named.capacity.is_some() {
-                emit_warning!(
-                    name,
-                    "UnixListen template does not use `capacity`; it will be ignored"
-                );
+                emit_unused_provider_template_arg_warning!(name, "UnixListen", "capacity");
             }
             Some(generate_unix_listen_template(
                 struct_name,
@@ -176,10 +161,7 @@ fn try_generate_template(
                 r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#,
             );
             if provider_args.named.capacity.is_some() {
-                emit_warning!(
-                    name,
-                    "UnixConnect template does not use `capacity`; it will be ignored"
-                );
+                emit_unused_provider_template_arg_warning!(name, "UnixConnect", "capacity");
             }
             Some(generate_unix_connect_template(
                 struct_name,

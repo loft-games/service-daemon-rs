@@ -16,12 +16,17 @@ macro_rules! emit_error {
     };
 }
 
-macro_rules! emit_warning {
-    ($($tokens:tt)*) => {
-        proc_macro_error2::emit_warning!($($tokens)*)
+macro_rules! emit_unused_provider_template_arg_warning {
+    ($span:expr, $template:expr, $arg:literal) => {
+        proc_macro_error2::emit_warning!(
+            $span,
+            "{} template does not use `{}`; it will be ignored",
+            $template,
+            $arg
+        )
     };
 }
 
 pub(crate) use abort;
 pub(crate) use emit_error;
-pub(crate) use emit_warning;
+pub(crate) use emit_unused_provider_template_arg_warning;
