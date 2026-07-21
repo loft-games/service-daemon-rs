@@ -105,8 +105,10 @@ release-validation risk; prefer OS/linker/object-format coverage families.
 `NamedPipeListen` and `NamedPipeConnect` use Tokio's Windows-only named pipe
 runtime APIs. Linux/macOS can cover parser behavior and non-Windows compile
 errors, but they cannot execute the provider runtime contract. The release gate
-for these templates is the `Windows named pipe provider` job in `rust.yml`,
-which runs:
+for these templates is the `Windows named pipe provider` job in `rust.yml`.
+`Rust CI` also supports `workflow_dispatch`, so maintainers can manually run the
+same Windows gate on a release candidate branch before cutting a release. The
+job runs:
 
 ```bash
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
