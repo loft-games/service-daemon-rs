@@ -122,6 +122,27 @@ pub async fn supervisor_caller(peer: Arc<PeerClient>) -> anyhow::Result<()> {
 
 Error classification details for both sides live in [Resilience Guide § 2.3-2.4](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener). Note one subtlety: `io::ErrorKind::NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory does not exist).
 
+### `NamedPipeListen` and `NamedPipeConnect` (Windows named pipes, Windows-only)
+
+These two templates are the Windows-side local IPC pair. They are explicit
+Windows named pipe templates, not alternate behavior for `UnixListen` or
+`UnixConnect`. Both are gated by `#[cfg(windows)]`; on non-Windows targets the
+macro emits a `compile_error!` at the provider declaration site.
+
+- **`NamedPipeListen(r"\\.\pipe\name")`**: wraps the server side. `accept().await?`
+  returns a connected `tokio::net::windows::named_pipe::NamedPipeServer` and the
+  generated wrapper keeps another pending server instance available for the next
+  client.
+
+- **`NamedPipeConnect(r"\\.\pipe\name")`**: wraps the client side. `connect().await?`
+  opens a fresh `NamedPipeClient` on each call. At init time the template
+  performs one reachability probe and immediately drops the client. Pair with
+  `eager = true` when startup should wait for the peer pipe.
+
+Use these templates for Windows local IPC only. Use `UnixListen` / `UnixConnect`
+for Unix domain sockets and `Listen` for TCP sockets. Error classification
+details live in [Resilience Guide § 2.5](resilience.md#25-namedpipelistennamedpipeconnect-strategy-windows-named-pipes).
+
 ### Eager Initialization: `eager = true`
 
 Providers are lazy-initialized upon their first injection by default. For providers that must start regardless of injection (e.g., health-check listeners or global telemetry), the `eager = true` parameter forces initialization during the system startup wave.

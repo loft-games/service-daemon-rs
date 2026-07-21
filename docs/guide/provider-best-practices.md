@@ -60,6 +60,8 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
 | `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `get()?` for manual FD cloning. |
 | `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `tokio::net::UnixStream` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks the startup wave until the peer is ready. |
+| `NamedPipeListen(Name)` | - | **Windows-only.** A `tokio::net::windows::named_pipe::NamedPipeServer` wrapper for local IPC. Use `accept().await?` to receive a connected server instance that implements `AsyncRead` and `AsyncWrite`. |
+| `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<PathBuf>` pipe name; `connect().await?` opens a fresh `NamedPipeClient` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks startup until the peer pipe is reachable. |
 
 ### The `Listen` Template
 
@@ -115,6 +117,55 @@ Three behaviors that distinguish them from the TCP `Listen` template:
 
 > [!NOTE]
 > **API form: listener handle cloning is synchronous; socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths. `get()?` and `try_connect().await?` remain available when you need the lower-level listener clone or explicitly named connection helper.
+
+### The `NamedPipeListen` and `NamedPipeConnect` Templates (Windows Named Pipes)
+
+Windows named pipes are the Windows-side local IPC templates. They are explicit
+Windows templates, not aliases for `UnixListen` or `UnixConnect`:
+
+```rust
+// Server side
+#[derive(Clone)]
+#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]
+pub struct ApiPipe;
+
+#[service]
+pub async fn pipe_server(listener: Arc<ApiPipe>) -> anyhow::Result<()> {
+    loop {
+        let pipe = listener.accept().await?;
+        // read/write on pipe...
+    }
+}
+
+// Client side
+#[derive(Clone)]
+#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)]
+pub struct PeerPipe;
+
+#[service]
+pub async fn peer_caller(client: Arc<PeerPipe>) -> anyhow::Result<()> {
+    let mut conn = client.connect().await?;
+    // write/read on conn...
+    Ok(())
+}
+```
+
+Use these templates when the target deployment is Windows and the dependency is
+a local named pipe endpoint. Use the Unix templates for Unix domain sockets, and
+use `Listen` for TCP sockets. The framework intentionally does not make one
+template name change behavior across operating systems.
+
+`NamedPipeListen` keeps a pending server instance available before returning a
+connected instance to user code, matching Tokio's named pipe guidance and
+avoiding intermittent client `NotFound` gaps between accepts. The generated
+server uses `reject_remote_clients(true)` for the first local-only
+implementation; ACL and security-descriptor customization is not part of the
+template API yet.
+
+Both named pipe templates are gated by `#[cfg(windows)]`. On non-Windows
+targets, the macro emits a declaration-site `compile_error!`. To keep a
+cross-platform crate compiling, place the declaration in a `#[cfg(windows)]`
+module and provide a Unix or TCP alternative in a separate cfg branch.
 
 **Avoid creating new built-in templates unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
@@ -192,4 +243,6 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 | Unix Socket Listening (early-bound) | `#[provider(UnixListen("/run/myapp/sock"), eager = true)] struct ApiSocket;` |
 | Unix Socket Connecting (lazy) | `#[provider(UnixConnect("/run/peer/sock"))] struct PeerClient;` |
 | Unix Socket Connecting (block startup until peer ready) | `#[provider(UnixConnect("/run/peer/sock"), eager = true)] struct PeerClient;` |
+| Windows Named Pipe Listening (lazy) | `#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))] struct ApiPipe;` |
+| Windows Named Pipe Connecting (block startup until peer ready) | `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)] struct PeerPipe;` |
 | Early Background Task | `#[provider(eager = true)] async fn setup() -> () { ... }` |

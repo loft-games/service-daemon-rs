@@ -153,6 +153,47 @@ Peer servers will observe a single `accept()` followed by an instant close from 
 
 After init succeeds, `connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. `try_connect().await?` remains available as the explicitly named lower-level helper. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
 
+### 2.5. NamedPipeListen / NamedPipeConnect Strategy (Windows Named Pipes)
+
+The Windows named pipe templates mirror the Unix socket split, but they use
+Tokio's Windows named pipe API and have Windows-specific error meaning. They are
+not a cross-platform spelling of `UnixListen` or `UnixConnect`.
+
+`NamedPipeListen` creates a local-only server-side pipe wrapper. Provider
+initialization creates the first server instance with
+`first_pipe_instance(true)` and explicitly sets `reject_remote_clients(true)`.
+Each `accept().await?` returns a connected `NamedPipeServer` and keeps another
+pending server instance available before handing the connected one to user code.
+
+| Server Init Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| raw `ERROR_PIPE_BUSY` | **Retryable** | Instance pressure or a concurrent startup race. |
+| `AddrInUse`, `Interrupted`, `TimedOut` | **Retryable** | Startup race or transient OS interruption. |
+| `PermissionDenied` | **Fatal** | Access rights or local security policy are wrong. |
+| `InvalidInput` | **Fatal** | Invalid pipe name or unsupported options. |
+| Other I/O | **Fatal** | Unknown Windows pipe failures should remain visible until tests justify treating them as transient. |
+
+`NamedPipeConnect` holds only the pipe name. Provider initialization performs a
+single reachability probe and drops the connected client, matching
+`UnixConnect`'s startup-probe behavior. With `eager = true`, this blocks startup
+until the peer pipe exists and can be opened, or until
+`provider_init_timeout` expires.
+
+| Client Init Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| `NotFound` | **Retryable** | Peer has not created the pipe yet. |
+| raw `ERROR_PIPE_BUSY` | **Retryable** | All server instances are busy; retry after the server accepts a connection. |
+| `ConnectionRefused`, `ConnectionAborted` | **Retryable** | Peer startup or immediate close race. |
+| `Interrupted`, `TimedOut` | **Retryable** | Transient OS interruption or timeout. |
+| `PermissionDenied` | **Fatal** | Security policy or access rights are wrong. |
+| `InvalidInput` | **Fatal** | Invalid pipe name or unsupported options. |
+| Other I/O | **Fatal** | Preserve unknown pipe failures as operator-visible configuration/runtime errors. |
+
+After init succeeds, `connect().await?` opens a fresh independent
+`NamedPipeClient` on each call. The framework does not pool named pipe clients.
+Named pipe templates are Windows-only; wrap provider declarations in
+`#[cfg(windows)]` when building cross-platform crates.
+
 ## 3. Advanced Resilience: Wave Timeouts
 
 The `RestartPolicy` also controls how long the daemon waits for services during startup and shutdown waves.
