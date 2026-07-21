@@ -126,6 +126,7 @@ For contributors maintaining release validation and framework internals.
 
 - [Release Validation](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/release-validation.md) -- Feature-to-test matrix, linkme platform smoke coverage, dependency baseline, and example layers.
 - [Macro Attribute Normalization](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/macro-attribute-normalization.md) -- Maintainer contract for proc-macro parser cleanup without public syntax churn.
+- [Windows Named Pipe Provider Contract](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/windows-named-pipe-provider.md) -- Maintainer design for future Windows local IPC provider templates.
 
 For contribution workflow and development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 
