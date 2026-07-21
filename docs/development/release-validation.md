@@ -105,7 +105,7 @@ release-validation risk; prefer OS/linker/object-format coverage families.
 | Layer | Examples | Responsibility |
 | :--- | :--- | :--- |
 | Tutorial path | `minimal`, `complete`, `triggers`, `simulation` | Teach the basic service, lifecycle, trigger, and test patterns. |
-| Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket` | Keep non-default or focused framework features compiling and runnable. |
+| Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket`, `named-pipe` | Keep non-default or focused framework features compiling and runnable. |
 | Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
 | Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
 | Adoption reference | `web-api`, `controller-bridge` | Show realistic integration shapes without turning every detail into a framework contract. |

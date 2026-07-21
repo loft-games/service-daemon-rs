@@ -13,6 +13,7 @@ members = [
     "examples/diagnostics",
     "examples/scheduling",
     "examples/unix-domain-socket",
+    "examples/named-pipe",
     "examples/web-api",
     "examples/controller-bridge",
 ]

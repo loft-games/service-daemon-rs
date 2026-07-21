@@ -84,6 +84,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **controller-bridge** | Simulated controller bridge: fake transport, framing, protobuf, bounded command correlation, custom `TriggerHost`, and status watch side effects | `cargo run -p example-controller-bridge` |
 | **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
 | **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |
+| **named-pipe** | Windows named pipe listener and connector pair | `cargo run -p example-named-pipe` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
 Examples demonstrate framework topology. They are not production deployment
