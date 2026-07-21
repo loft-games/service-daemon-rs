@@ -100,6 +100,24 @@ Required platform signals:
 Do not mirror every Rust target triple. CPU architecture is not the primary
 release-validation risk; prefer OS/linker/object-format coverage families.
 
+## Windows Named Pipe Provider Gate
+
+`NamedPipeListen` and `NamedPipeConnect` use Tokio's Windows-only named pipe
+runtime APIs. Linux/macOS can cover parser behavior and non-Windows compile
+errors, but they cannot execute the provider runtime contract. The release gate
+for these templates is the `Windows named pipe provider` job in `rust.yml`,
+which runs:
+
+```bash
+cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
+cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
+cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+```
+
+Do not introduce a cross-platform `LocalIpcListen` / `LocalIpcConnect` facade
+until this Windows MSVC runtime gate has passed for the explicit Windows named
+pipe templates.
+
 ## Example Layers
 
 | Layer | Examples | Responsibility |

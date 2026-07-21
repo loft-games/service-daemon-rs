@@ -105,6 +105,21 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-linkme-registry-sections "${{ matrix.target }}"
 
+  named-pipe-msvc:
+    name: Windows named pipe provider
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (x86_64-pc-windows-msvc)
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc
+      - name: Run named pipe strategy tests
+        run: cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
+      - name: Run named pipe roundtrip tests
+        run: cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
+      - name: Run named pipe example tests
+        run: cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
