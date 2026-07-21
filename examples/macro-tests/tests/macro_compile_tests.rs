@@ -55,7 +55,6 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/22_provider_return_type_contracts.rs",
     "tests/pass/24_provider_default_expression_boundary.rs",
     "tests/pass/25_provider_explicit_key_forms.rs",
-    "tests/pass/24_provider_named_pipe_templates.rs",
 ];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[
@@ -75,9 +74,8 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/25_provider_result_non_provider_error.rs",
     "tests/fail/26_provider_custom_path_template_not_open.rs",
     "tests/fail/27_provider_template_named_attr_inside_parens.rs",
-    "tests/fail/26_provider_named_pipe_inner_attr.rs",
-    "tests/fail/27_provider_named_pipe_tuning_attr.rs",
-    "tests/fail/28_provider_named_pipe_capacity_attr.rs",
+    "tests/fail/30_provider_named_pipe_listen_non_windows.rs",
+    "tests/fail/31_provider_named_pipe_connect_non_windows.rs",
 ];
 
 const INTEGRATION_PASS_CASES: &[&str] = &[

@@ -1,85 +1,73 @@
-// End-to-end test: NamedPipeListen and NamedPipeConnect cooperating on the
-// same Windows local named pipe.
+// End-to-end test: NamedPipeListen and NamedPipeConnect cooperating on one
+// Windows named pipe.
 //
-// This mirrors the Unix domain socket roundtrip shape: the first connection is
-// the client provider's init-time probe, and the second connection carries the
-// application exchange.
+// `NamedPipeConnect` performs an init-time probe and drops it. The server-side
+// accept loop therefore expects two connections: the probe and the real
+// roundtrip stream.
 
 #![cfg(windows)]
 
 use service_daemon::{ManagedProvided, provider};
 use std::ffi::OsString;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-static ENV_VAR_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-const ROUNDTRIP_NAME_ENV: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B2301705";
+const ROUNDTRIP_ENV_VAR: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B1741D2A";
+
+static PIPE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 struct EnvVarGuard {
-    key: &'static str,
     previous: Option<OsString>,
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        let _lock = ENV_VAR_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Rust 2024 marks environment mutation unsafe because it is process-global.
         unsafe {
             if let Some(previous) = &self.previous {
-                std::env::set_var(self.key, previous);
+                std::env::set_var(ROUNDTRIP_ENV_VAR, previous);
             } else {
-                std::env::remove_var(self.key);
+                std::env::remove_var(ROUNDTRIP_ENV_VAR);
             }
         }
     }
 }
 
-fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
-    let _lock = ENV_VAR_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let previous = std::env::var_os(key);
-    unsafe {
-        std::env::set_var(key, value);
-    }
-    EnvVarGuard { key, previous }
-}
-
-fn unique_pipe_name(name: &str) -> String {
-    format!(
-        r"\\.\pipe\service-daemon-rs-{name}-{}-{}",
+fn set_roundtrip_pipe_name() -> EnvVarGuard {
+    let counter = PIPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pipe_name = format!(
+        r"\\.\pipe\service-daemon-rs-roundtrip-provider-{}-{counter}",
         std::process::id(),
-        std::thread::current().name().unwrap_or("unnamed")
-    )
+    );
+    let previous = std::env::var_os(ROUNDTRIP_ENV_VAR);
+    // Rust 2024 marks environment mutation unsafe because it is process-global.
+    unsafe {
+        std::env::set_var(ROUNDTRIP_ENV_VAR, pipe_name);
+    }
+    EnvVarGuard { previous }
 }
 
 #[derive(Debug)]
 #[provider(
-    NamedPipeListen(r"\\.\pipe\service-daemon-rs-roundtrip-fallback"),
-    env = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B2301705"
+    NamedPipeListen(r"\\.\pipe\service-daemon-rs-roundtrip-provider"),
+    env = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B1741D2A"
 )]
 pub struct RoundtripServer;
 
 #[derive(Debug)]
 #[provider(
-    NamedPipeConnect(r"\\.\pipe\service-daemon-rs-roundtrip-fallback"),
-    env = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B2301705"
+    NamedPipeConnect(r"\\.\pipe\service-daemon-rs-roundtrip-provider"),
+    env = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B1741D2A"
 )]
 pub struct RoundtripClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn named_pipe_listen_connect_roundtrip() {
-    let name = unique_pipe_name("roundtrip");
-    let _env = set_test_env(ROUNDTRIP_NAME_ENV, &name);
+async fn test_named_pipe_listen_connect_roundtrip() {
+    let _env_var = set_roundtrip_pipe_name();
 
     let server = <RoundtripServer as ManagedProvided>::resolve_managed()
         .await
         .expect("RoundtripServer resolve failed");
-
-    let probe_accepted = Arc::new(tokio::sync::Notify::new());
-    let probe_accepted_task = Arc::clone(&probe_accepted);
 
     let server_task = tokio::spawn(async move {
         let probe = server
@@ -87,14 +75,13 @@ async fn named_pipe_listen_connect_roundtrip() {
             .await
             .expect("Failed to accept the init-time probe connection");
         drop(probe);
-        probe_accepted_task.notify_one();
 
         let mut pipe = server
             .accept()
             .await
             .expect("Failed to accept the real roundtrip connection");
 
-        let mut buf = [0u8; 5];
+        let mut buf = [0_u8; 5];
         pipe.read_exact(&mut buf)
             .await
             .expect("Server read_exact failed");
@@ -107,20 +94,17 @@ async fn named_pipe_listen_connect_roundtrip() {
     let client = <RoundtripClient as ManagedProvided>::resolve_managed()
         .await
         .expect("RoundtripClient resolve failed");
-    tokio::time::timeout(Duration::from_secs(5), probe_accepted.notified())
-        .await
-        .expect("server did not accept the init-time probe");
 
-    let mut pipe = client
+    let mut conn = client
         .connect()
         .await
         .expect("RoundtripClient.connect failed");
-    pipe.write_all(b"hello")
+    conn.write_all(b"hello")
         .await
         .expect("Client write_all failed");
 
-    let mut response = [0u8; 5];
-    pipe.read_exact(&mut response)
+    let mut response = [0_u8; 5];
+    conn.read_exact(&mut response)
         .await
         .expect("Client read_exact failed");
 

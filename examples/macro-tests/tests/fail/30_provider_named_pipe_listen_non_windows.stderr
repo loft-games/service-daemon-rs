@@ -1,0 +1,7 @@
+error: `NamedPipeListen` provider template is only available on Windows targets. Wrap the `#[provider(NamedPipeListen(r"\\.\pipe\..."))]` declaration in `#[cfg(windows)]`, or use the Unix-specific `UnixListen` / `UnixConnect` templates on Unix targets.
+ --> tests/fail/30_provider_named_pipe_listen_non_windows.rs:5:1
+  |
+5 | #[provider(NamedPipeListen(r"\\.\pipe\sd-test-listen"))]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `provider` (in Nightly builds, run with -Z macro-backtrace for more info)

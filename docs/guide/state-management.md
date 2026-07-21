@@ -124,41 +124,25 @@ Error classification details for both sides live in [Resilience Guide § 2.3-2.4
 
 ### `NamedPipeListen` and `NamedPipeConnect` (Windows named pipes, Windows-only)
 
-These two templates are the Windows-side local IPC pair. They use Tokio named pipes directly and are gated by `#[cfg(windows)]`; on non-Windows targets the macro emits a `compile_error!` at the declaration site.
+These two templates are the Windows-side local IPC pair. They are explicit
+Windows named pipe templates, not alternate behavior for `UnixListen` or
+`UnixConnect`. Both are gated by `#[cfg(windows)]`; on non-Windows targets the
+macro emits a `compile_error!` at the provider declaration site.
 
-- **`NamedPipeListen(r"\\.\pipe\name")`**: stores the pipe name plus a Tokio mutex around the optional next available `NamedPipeServer`. `try_new()` validates the local pipe name, creates the first instance with `reject_remote_clients(true)` and `first_pipe_instance(true)`, and fails fatally if another server already owns the pipe. `accept().await?` waits for one client and normally creates the next instance before returning the connected server end; if replacement creation fails after the connection, the following `accept()` retries pending-instance creation.
+- **`NamedPipeListen(r"\\.\pipe\name")`**: wraps the server side. `accept().await?`
+  returns a connected `tokio::net::windows::named_pipe::NamedPipeServer` and the
+  generated wrapper keeps another pending server instance available for the next
+  client.
 
-- **`NamedPipeConnect(r"\\.\pipe\name")`**: stores an `Arc<String>` pipe name. `try_new().await` performs a one-shot `ClientOptions::open` probe and drops it; `connect().await?` and `try_connect().await?` open fresh independent `NamedPipeClient`s.
+- **`NamedPipeConnect(r"\\.\pipe\name")`**: wraps the client side. `connect().await?`
+  opens a fresh `NamedPipeClient` on each call. At init time the template
+  performs one reachability probe and immediately drops the client. Pair with
+  `eager = true` when startup should wait for the peer pipe.
 
-```rust
-#[cfg(windows)]
-mod windows_ipc {
-    use service_daemon::{provider, service};
-    use std::sync::Arc;
+Use these templates for Windows local IPC only. Use `UnixListen` / `UnixConnect`
+for Unix domain sockets and `Listen` for TCP sockets. Error classification
+details live in [Resilience Guide § 2.5](resilience.md#25-namedpipelistennamedpipeconnect-strategy-windows-named-pipes).
 
-    #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"), eager = true)]
-    pub struct ApiPipe;
-
-    #[provider(NamedPipeConnect(r"\\.\pipe\myapp-api"), env = "MYAPP_PIPE")]
-    pub struct ApiClient;
-
-    #[service]
-    pub async fn server(pipe: Arc<ApiPipe>) -> anyhow::Result<()> {
-        let conn = pipe.accept().await?;
-        // read/write on conn ...
-        Ok(())
-    }
-
-    #[service]
-    pub async fn client(pipe: Arc<ApiClient>) -> anyhow::Result<()> {
-        let conn = pipe.connect().await?;
-        // read/write on conn ...
-        Ok(())
-    }
-}
-```
-
-Error classification details for both sides live in [Resilience Guide § 2.5-2.6](resilience.md#25-namedpipelisten-strategy-windows-named-pipe-server). The first contract is local-only and does not expose ACL/security descriptors, pipe mode, buffer sizes, maximum instances, or QoS flags.
 ### Eager Initialization: `eager = true`
 
 Providers are lazy-initialized upon their first injection by default. For providers that must start regardless of injection (e.g., health-check listeners or global telemetry), the `eager = true` parameter forces initialization during the system startup wave.

@@ -10,8 +10,8 @@
 //!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`,
 //!   `#[provider(UnixListen("/run/myapp/sock"))]`,
 //!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`,
-//!   `#[provider(NamedPipeListen(r"\\.\pipe\myapp"))]`,
-//!   `#[provider(NamedPipeConnect(r"\\.\pipe\peer"), env = "PEER_PIPE", eager = true)]`
+//!   `#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]`,
+//!   `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
 //!   `#[provider(default = 8080)]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
@@ -751,23 +751,25 @@ mod tests {
 
     #[test]
     fn named_pipe_listen_template_with_name() {
-        let args = parse_args(quote! { NamedPipeListen(r"\\.\pipe\myapp") }).unwrap();
+        let args = parse_args(quote! { NamedPipeListen(r"\\.\pipe\myapp-api") }).unwrap();
         match &args.head {
             ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "NamedPipeListen");
                 match arg {
-                    Some(arg) => assert!(arg.tokens.to_string().contains("pipe")),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "r\"\\\\.\\pipe\\myapp-api\""),
                     _ => panic!("Expected captured arg for NamedPipeListen"),
                 }
             }
             _ => panic!("Expected Template variant"),
         }
+        assert!(args.named.env.is_none());
+        assert!(!args.named.eager);
     }
 
     #[test]
     fn named_pipe_connect_template_with_name_env_eager() {
         let args = parse_args(
-            quote! { NamedPipeConnect(r"\\.\pipe\peer"), env = "PEER_PIPE", eager = true },
+            quote! { NamedPipeConnect(r"\\.\pipe\peer-api"), env = "PEER_PIPE", eager = true },
         )
         .unwrap();
         match &args.head {
@@ -779,17 +781,5 @@ mod tests {
         }
         assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_PIPE");
         assert!(args.named.eager);
-    }
-
-    #[test]
-    fn named_pipe_listen_captures_inner_named_tokens_for_template_validation() {
-        let args =
-            parse_args(quote! { NamedPipeListen(r"\\.\pipe\app", env = "PIPE_NAME") }).unwrap();
-        match &args.head {
-            ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
-                assert!(arg.tokens.to_string().contains("env"));
-            }
-            _ => panic!("Expected captured template arg"),
-        }
     }
 }

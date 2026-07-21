@@ -6,7 +6,7 @@
 //! - The initialization probe connection opened by `NamedPipeConnect`.
 //! - A separate business connection opened through `connect().await?`.
 //!
-//! **Run**: `cargo run -p example-named-pipe`
+//! **Run**: `cargo run -p example-named-pipe` on Windows.
 
 #[cfg(windows)]
 use service_daemon::ServiceDaemon;
@@ -26,7 +26,6 @@ async fn main() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
     daemon.shutdown();
     daemon.wait().await?;
-
     Ok(())
 }
 

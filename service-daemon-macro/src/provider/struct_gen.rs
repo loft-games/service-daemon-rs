@@ -177,20 +177,16 @@ fn try_generate_template(
                 provider_args.named.eager,
             ))
         }
-        // NamedPipeListen template (Windows named pipe server)
+        // Windows named pipe listener template
         "NamedPipeListen" => {
             let pipe_name = parse_required_template_arg::<syn::LitStr>(
                 name,
                 arg.as_ref(),
                 "NamedPipeListen template requires a pipe name",
-                r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp"))]"#,
+                r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
-                return Err(syn::Error::new_spanned(
-                    name,
-                    "NamedPipeListen template does not support `capacity`; \
-                     Phase 4 named pipe providers only accept pipe name, `env`, and `eager`",
-                ));
+                emit_unused_provider_template_arg_warning!(name, "NamedPipeListen", "capacity");
             }
             Some(generate_named_pipe_listen_template(
                 struct_name,
@@ -201,20 +197,16 @@ fn try_generate_template(
                 provider_args.named.eager,
             ))
         }
-        // NamedPipeConnect template (Windows named pipe client; reachability probe at init)
+        // Windows named pipe client template
         "NamedPipeConnect" => {
             let pipe_name = parse_required_template_arg::<syn::LitStr>(
                 name,
                 arg.as_ref(),
                 "NamedPipeConnect template requires a pipe name",
-                r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer"))]"#,
+                r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer-api"))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
-                return Err(syn::Error::new_spanned(
-                    name,
-                    "NamedPipeConnect template does not support `capacity`; \
-                     Phase 4 named pipe providers only accept pipe name, `env`, and `eager`",
-                ));
+                emit_unused_provider_template_arg_warning!(name, "NamedPipeConnect", "capacity");
             }
             Some(generate_named_pipe_connect_template(
                 struct_name,
@@ -353,6 +345,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> syn::Re
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &param_entries,
         eager,

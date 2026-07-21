@@ -1,0 +1,23 @@
+name: Windows Named Pipe Provider
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  named-pipe-msvc:
+    name: Windows named pipe provider
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (x86_64-pc-windows-msvc)
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc
+      - name: Run named pipe provider tests
+        shell: bash
+        run: bash .github/scripts/run-windows-named-pipe-provider-tests
