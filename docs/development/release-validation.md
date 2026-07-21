@@ -106,9 +106,9 @@ release-validation risk; prefer OS/linker/object-format coverage families.
 runtime APIs. Linux/macOS can cover parser behavior and non-Windows compile
 errors, but they cannot execute the provider runtime contract. The release gate
 for these templates is the `Windows named pipe provider` job in `rust.yml`.
-`Rust CI` also supports `workflow_dispatch`, so maintainers can manually run the
-same Windows gate on a release candidate branch before cutting a release. The
-job runs:
+For release-candidate evidence, maintainers can manually run the focused
+`Windows Named Pipe Provider` workflow. Both workflows call
+`.github/scripts/run-windows-named-pipe-provider-tests`, whose command set is:
 
 ```bash
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests

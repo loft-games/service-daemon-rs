@@ -114,12 +114,9 @@ jobs:
       - name: Install Rust (x86_64-pc-windows-msvc)
         shell: bash
         run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc
-      - name: Run named pipe strategy tests
-        run: cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
-      - name: Run named pipe roundtrip tests
-        run: cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
-      - name: Run named pipe example tests
-        run: cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+      - name: Run named pipe provider tests
+        shell: bash
+        run: bash .github/scripts/run-windows-named-pipe-provider-tests
 
   fmt:
     name: Format
