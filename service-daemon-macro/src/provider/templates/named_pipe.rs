@@ -20,18 +20,22 @@ fn pipe_name_expr(addr: &syn::LitStr, env: Option<&syn::LitStr>) -> proc_macro2:
 }
 
 fn windows_only_compile_error_guard(template_name: &str) -> proc_macro2::TokenStream {
-    let message = format!(
-        "`{}` provider template is only available on Windows targets. \
-         Wrap the `#[provider({}(r\"\\\\.\\pipe\\...\"))]` declaration in `#[cfg(windows)]`, \
-         or use the Unix-specific `UnixListen` / `UnixConnect` templates on Unix targets.",
-        template_name, template_name
-    );
+    let message = windows_only_compile_error_message(template_name);
     quote! {
         #[cfg(not(windows))]
         const _: () = {
             ::std::compile_error!(#message);
         };
     }
+}
+
+fn windows_only_compile_error_message(template_name: &str) -> String {
+    format!(
+        "`{}` provider template is only available on Windows targets. \
+         Wrap the `#[provider({}(r\"\\\\.\\pipe\\...\"))]` declaration in `#[cfg(windows)]`, \
+         or use the Unix-specific `UnixListen` / `UnixConnect` templates on Unix targets.",
+        template_name, template_name
+    )
 }
 
 pub(in crate::provider) fn generate_named_pipe_listen_template(
@@ -196,6 +200,47 @@ pub(in crate::provider) fn generate_named_pipe_listen_template(
     };
 
     TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipe_name_expr_uses_literal_without_env_override() {
+        let addr = syn::LitStr::new(r"\\.\pipe\default", proc_macro2::Span::call_site());
+
+        let expr = pipe_name_expr(&addr, None).to_string();
+
+        assert_eq!(expr, r#""\\\\.\\pipe\\default" . to_owned ()"#);
+    }
+
+    #[test]
+    fn pipe_name_expr_prefers_env_with_literal_fallback() {
+        let addr = syn::LitStr::new(r"\\.\pipe\default", proc_macro2::Span::call_site());
+        let env = syn::LitStr::new("PIPE_NAME", proc_macro2::Span::call_site());
+
+        let expr = pipe_name_expr(&addr, Some(&env)).to_string();
+
+        assert!(expr.contains(r#"std :: env :: var ("PIPE_NAME")"#));
+        assert!(expr.contains(r#"unwrap_or_else"#));
+        assert!(expr.contains(r#""\\\\.\\pipe\\default" . to_owned ()"#));
+    }
+
+    #[test]
+    fn windows_only_guard_mentions_template_and_cfg_escape() {
+        let message = windows_only_compile_error_message("NamedPipeListen");
+
+        assert!(
+            message.contains(
+                "`NamedPipeListen` provider template is only available on Windows targets"
+            )
+        );
+        assert!(message.contains(r#"#[cfg(windows)]"#));
+        assert!(message.contains(r#"#[provider(NamedPipeListen(r"\\.\pipe\..."))]"#));
+        assert!(message.contains("UnixListen"));
+        assert!(message.contains("UnixConnect"));
+    }
 }
 
 pub(in crate::provider) fn generate_named_pipe_connect_template(

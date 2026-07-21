@@ -3,8 +3,9 @@
 #![cfg(windows)]
 
 use example_named_pipe::providers::EXAMPLE_NAMED_PIPE_ENV;
-use service_daemon::ServiceDaemon;
+use service_daemon::{ManagedProvided, ServiceDaemon};
 use std::ffi::OsString;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -43,7 +44,12 @@ fn set_example_pipe_name() -> EnvVarGuard {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_pipe_example_starts_and_roundtrips() -> anyhow::Result<()> {
-    let _env_var = set_example_pipe_name();
+    let env_var = set_example_pipe_name();
+    let pipe_name = std::env::var(EXAMPLE_NAMED_PIPE_ENV)?;
+    let listener =
+        <example_named_pipe::providers::ExampleNamedPipeListener as ManagedProvided>::resolve_managed()
+            .await?;
+    assert_eq!(listener.name(), Path::new(&pipe_name));
 
     let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await;
@@ -51,5 +57,6 @@ async fn named_pipe_example_starts_and_roundtrips() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
     daemon.shutdown();
     tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await??;
+    drop(env_var);
     Ok(())
 }

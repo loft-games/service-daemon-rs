@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-use example_named_pipe::providers::EXAMPLE_NAMED_PIPE_NAME_ENV;
+use example_named_pipe::providers::EXAMPLE_NAMED_PIPE_ENV;
 use service_daemon::{RestartPolicy, ServiceDaemon};
 use std::ffi::OsString;
 use std::time::Duration;
@@ -43,7 +43,7 @@ async fn named_pipe_example_smoke() -> anyhow::Result<()> {
 
     service_daemon::init_logging();
     let pipe_name = unique_pipe_name("smoke");
-    let _env = set_test_env(EXAMPLE_NAMED_PIPE_NAME_ENV, &pipe_name);
+    let _env = set_test_env(EXAMPLE_NAMED_PIPE_ENV, &pipe_name);
 
     let mut daemon = ServiceDaemon::builder()
         .with_restart_policy(
