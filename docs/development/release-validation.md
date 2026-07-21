@@ -108,7 +108,9 @@ errors, but they cannot execute the provider runtime contract. The release gate
 for these templates is the `Windows named pipe provider` job in `rust.yml`.
 For release-candidate evidence, maintainers can manually run the focused
 `Windows Named Pipe Provider` workflow. Both workflows call
-`.github/scripts/run-windows-named-pipe-provider-tests`, whose command set is:
+`.github/scripts/run-windows-named-pipe-provider-tests`, which writes the target,
+command set, and final pass marker to the GitHub step summary. Its command set
+is:
 
 ```bash
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests

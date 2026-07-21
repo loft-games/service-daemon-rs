@@ -1,6 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
-cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
-cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+TARGET="x86_64-pc-windows-msvc"
+
+write_step_summary_header() {
+    if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        return
+    fi
+
+    {
+        echo "## Windows named pipe provider gate"
+        echo
+        echo "- Target: \`${TARGET}\`"
+        echo "- Commands:"
+        echo "  - \`cargo test --target ${TARGET} -p service-daemon --test named_pipe_strategy_tests\`"
+        echo "  - \`cargo test --target ${TARGET} -p service-daemon --test named_pipe_roundtrip_tests\`"
+        echo "  - \`cargo test --target ${TARGET} -p example-named-pipe\`"
+        echo
+    } >> "${GITHUB_STEP_SUMMARY}"
+}
+
+write_step_summary_success() {
+    if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        return
+    fi
+
+    echo "- Result: passed" >> "${GITHUB_STEP_SUMMARY}"
+}
+
+run() {
+    echo "+ $*"
+    "$@"
+}
+
+write_step_summary_header
+
+run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_strategy_tests
+run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_roundtrip_tests
+run cargo test --target "${TARGET}" -p example-named-pipe
+
+write_step_summary_success
