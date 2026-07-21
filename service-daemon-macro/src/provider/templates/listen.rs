@@ -79,6 +79,7 @@ pub(in crate::provider) fn generate_listen_template(
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,

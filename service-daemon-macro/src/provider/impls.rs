@@ -12,6 +12,7 @@ pub(super) enum HelperStyle {
 pub(super) struct ProvidedImplConfig<'a> {
     pub type_tokens: &'a proc_macro2::TokenStream,
     pub singleton_name: &'a syn::Ident,
+    pub item_attrs: &'a [proc_macro2::TokenStream],
     pub user_span: proc_macro2::Span,
     pub param_entries: &'a [proc_macro2::TokenStream],
     pub eager: bool,
@@ -28,6 +29,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
     let ProvidedImplConfig {
         type_tokens,
         singleton_name,
+        item_attrs,
         user_span,
         param_entries,
         eager,
@@ -47,6 +49,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
     };
 
     let watchable_impl = quote! {
+        #(#item_attrs)*
         impl service_daemon::WatchableProvided for #type_tokens {
             fn watch_dependency() -> service_daemon::ProviderDependencyWatch {
                 service_daemon::__private::provider_dependency_watch(&#singleton_name)
@@ -102,6 +105,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
     let helper_impl = match helper_style {
         HelperStyle::Infallible => {
             quote! {
+                #(#item_attrs)*
                 impl #type_tokens {
                     /// Resolves an immutable snapshot for this provider.
                     #[track_caller]
@@ -148,6 +152,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         }
         HelperStyle::Fallible => {
             quote! {
+                #(#item_attrs)*
                 impl #type_tokens {
                     /// Resolves an immutable snapshot for this provider.
                     pub async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
@@ -173,10 +178,13 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         }
     };
     quote! {
+        #(#item_attrs)*
         #bounds_assertion
 
+        #(#item_attrs)*
         static #singleton_name: service_daemon::__private::StateManager<#type_tokens> = service_daemon::__private::StateManager::new();
 
+        #(#item_attrs)*
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
                 service_daemon::__private::resolve_provider_snapshot(&#singleton_name, || async {
@@ -206,6 +214,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             }
         }
 
+        #(#item_attrs)*
         impl service_daemon::ManagedProvided for #type_tokens {
             async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
                 service_daemon::__private::resolve_provider_rwlock(&#singleton_name, || async {
@@ -275,6 +284,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
 
         #helper_impl
 
+        #(#item_attrs)*
         fn #init_fn_name(
             policy: service_daemon::RestartPolicy,
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
@@ -307,6 +317,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         }
 
         /// Auto-generated provider registry entry for dependency graph analysis.
+        #(#item_attrs)*
         #[allow(unsafe_code)] // linkme uses #[link_section] internally
         #[service_daemon::__private::linkme::distributed_slice(service_daemon::__private::PROVIDER_REGISTRY)]
         #[linkme(crate = service_daemon::__private::linkme)]

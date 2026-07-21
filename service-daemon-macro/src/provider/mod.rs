@@ -320,6 +320,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: return_type.span(),
         param_entries: &param_entries,
         eager,

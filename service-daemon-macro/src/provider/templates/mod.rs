@@ -5,14 +5,19 @@
 //! - Broadcast Queue template
 //! - Listen (TCP Listener) template
 //! - UnixListen / UnixConnect templates
+//! - NamedPipeListen / NamedPipeConnect templates
 //!
 //! Templates share common initialization logic via [`context::TemplateContext`].
 
 mod context;
 mod listen;
 mod memory;
+mod named_pipe;
 mod unix;
 
 pub(super) use listen::generate_listen_template;
 pub(super) use memory::{generate_broadcast_queue_template, generate_notify_template};
+pub(super) use named_pipe::{
+    generate_named_pipe_connect_template, generate_named_pipe_listen_template,
+};
 pub(super) use unix::{generate_unix_connect_template, generate_unix_listen_template};
