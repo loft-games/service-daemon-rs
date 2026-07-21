@@ -83,7 +83,8 @@ The `examples/` directory contains focused examples organized by use case:
 | **web-api** | Axum HTTP API with explicit CORS, OpenAPI docs, request envelopes, graceful shutdown, and maintenance triggers | `cargo run -p example-web-api` |
 | **controller-bridge** | Simulated controller bridge: fake transport, framing, protobuf, bounded command correlation, custom `TriggerHost`, and status watch side effects | `cargo run -p example-controller-bridge` |
 | **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
-| **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |
+| **unix-domain-socket** | Unix socket listener and connector pair (Unix-only runtime) | `cargo run -p example-unix-domain-socket` |
+| **named-pipe** | Windows named pipe listener and connector pair (Windows-only runtime) | `cargo run -p example-named-pipe` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
 
 Examples demonstrate framework topology. They are not production deployment
@@ -126,6 +127,7 @@ For contributors maintaining release validation and framework internals.
 
 - [Release Validation](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/release-validation.md) -- Feature-to-test matrix, linkme platform smoke coverage, dependency baseline, and example layers.
 - [Macro Attribute Normalization](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/macro-attribute-normalization.md) -- Maintainer contract for proc-macro parser cleanup without public syntax churn.
+- [Windows Named Pipe IPC](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/windows-named-pipe-ipc.md) -- Maintainer note for the Windows local IPC provider contract.
 
 For contribution workflow and development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 

@@ -11,8 +11,9 @@ use syn::spanned::Spanned;
 use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 use super::parser::{ProviderArgs, ProviderHead, TemplateArg};
 use super::templates::{
-    generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
-    generate_unix_connect_template, generate_unix_listen_template,
+    generate_broadcast_queue_template, generate_listen_template,
+    generate_named_pipe_connect_template, generate_named_pipe_listen_template,
+    generate_notify_template, generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
 use crate::diagnostics::{compile_error_at, emit_unused_provider_template_arg_warning};
@@ -176,12 +177,60 @@ fn try_generate_template(
                 provider_args.named.eager,
             ))
         }
+        // NamedPipeListen template (Windows named pipe server)
+        "NamedPipeListen" => {
+            let pipe_name = parse_required_template_arg::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "NamedPipeListen template requires a pipe name",
+                r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp"))]"#,
+            )?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "NamedPipeListen template does not support `capacity`; \
+                     Phase 4 named pipe providers only accept pipe name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_named_pipe_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                &pipe_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
+        // NamedPipeConnect template (Windows named pipe client; reachability probe at init)
+        "NamedPipeConnect" => {
+            let pipe_name = parse_required_template_arg::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "NamedPipeConnect template requires a pipe name",
+                r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer"))]"#,
+            )?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "NamedPipeConnect template does not support `capacity`; \
+                     Phase 4 named pipe providers only accept pipe name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_named_pipe_connect_template(
+                struct_name,
+                vis,
+                attrs,
+                &pipe_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
         _ => {
             // Unknown template name - emit helpful error at the exact span
             return Err(syn::Error::new_spanned(
                 name,
                 format!(
-                    "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect\n",
+                    "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect\n",
                     name
                 ),
             ));

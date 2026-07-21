@@ -480,6 +480,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-named-pipe"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "service-daemon",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "example-simulation"
 version = "0.1.0"
 dependencies = [

@@ -9,7 +9,9 @@
 //!   `#[provider(Listen("0.0.0.0:8080"))]`,
 //!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`,
 //!   `#[provider(UnixListen("/run/myapp/sock"))]`,
-//!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`
+//!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`,
+//!   `#[provider(NamedPipeListen(r"\\.\pipe\myapp"))]`,
+//!   `#[provider(NamedPipeConnect(r"\\.\pipe\peer"), env = "PEER_PIPE", eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
 //!   `#[provider(default = 8080)]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
@@ -35,6 +37,8 @@ const TEMPLATE_NAMES: &[&str] = &[
     "Listen",
     "UnixListen",
     "UnixConnect",
+    "NamedPipeListen",
+    "NamedPipeConnect",
 ];
 
 /// Returns `true` if the identifier matches a known template name.
@@ -181,7 +185,7 @@ fn parse_explicit_template_head(input: ParseStream) -> syn::Result<ProviderHead>
         return Err(syn::Error::new(
             name.span(),
             format!(
-                "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect\n",
+                "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect\n",
                 name
             ),
         ));
@@ -735,6 +739,52 @@ mod tests {
     #[test]
     fn unix_listen_captures_inner_named_tokens_for_template_validation() {
         let args = parse_args(quote! { UnixListen("/sock", env = "VAR") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
+                assert!(arg.tokens.to_string().contains("env"));
+            }
+            _ => panic!("Expected captured template arg"),
+        }
+    }
+
+    // -- NamedPipeListen / NamedPipeConnect template branches ---------------------
+
+    #[test]
+    fn named_pipe_listen_template_with_name() {
+        let args = parse_args(quote! { NamedPipeListen(r"\\.\pipe\myapp") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "NamedPipeListen");
+                match arg {
+                    Some(arg) => assert!(arg.tokens.to_string().contains("pipe")),
+                    _ => panic!("Expected captured arg for NamedPipeListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+    }
+
+    #[test]
+    fn named_pipe_connect_template_with_name_env_eager() {
+        let args = parse_args(
+            quote! { NamedPipeConnect(r"\\.\pipe\peer"), env = "PEER_PIPE", eager = true },
+        )
+        .unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "NamedPipeConnect");
+                assert!(matches!(arg, Some(TemplateArg { .. })));
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_PIPE");
+        assert!(args.named.eager);
+    }
+
+    #[test]
+    fn named_pipe_listen_captures_inner_named_tokens_for_template_validation() {
+        let args =
+            parse_args(quote! { NamedPipeListen(r"\\.\pipe\app", env = "PIPE_NAME") }).unwrap();
         match &args.head {
             ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
                 assert!(arg.tokens.to_string().contains("env"));

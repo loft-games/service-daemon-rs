@@ -18,6 +18,31 @@ combination-specific gap appears. The current release baseline is default,
 all-features, and no-default-features, plus the examples that exercise the
 non-default features.
 
+## General Platform CI
+
+`rust.yml` treats Linux GNU and Windows MSVC as cross-platform general CI
+platforms:
+
+```bash
+cargo check --workspace
+cargo check --workspace --all-features
+cargo check -p service-daemon --no-default-features
+cargo test --workspace
+cargo test --workspace --all-features
+cargo test -p service-daemon --no-default-features
+cargo clippy --workspace -- -D warnings
+```
+
+The Windows MSVC job runs these gates with
+`--target x86_64-pc-windows-msvc` for the cross-platform workspace surface. It
+explicitly excludes Unix-only example crates such as `example-unix-domain-socket`
+and keeps the Windows named-pipe example in the named-pipe-specific job. Its
+test steps use `.github/scripts/cargo-test-windows-msvc-general` so
+`service-daemon` integration tests can run on Windows while skipping
+platform-specific IPC targets (`named_pipe_*` and `unix_*`). Keep OS-specific
+IPC checks separate from this baseline so generic runtime regressions,
+Unix-socket regressions, and named-pipe regressions fail in clearly named jobs.
+
 ## Dependency Baseline
 
 The release baseline is recorded with:
@@ -105,13 +130,33 @@ release-validation risk; prefer OS/linker/object-format coverage families.
 | Layer | Examples | Responsibility |
 | :--- | :--- | :--- |
 | Tutorial path | `minimal`, `complete`, `triggers`, `simulation` | Teach the basic service, lifecycle, trigger, and test patterns. |
-| Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket` | Keep non-default or focused framework features compiling and runnable. |
+| Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket`, `named-pipe` | Keep non-default or focused framework features compiling and runnable. |
 | Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
 | Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
 | Adoption reference | `web-api`, `controller-bridge` | Show realistic integration shapes without turning every detail into a framework contract. |
 
 When adding an example, classify it here first. Do not treat every example as a
 production compatibility promise.
+
+## Platform-specific IPC Provider Checks
+
+Unix socket and Windows named pipe provider templates are platform-specific contracts. Keep their tests separate so failures identify the OS-specific surface:
+
+```bash
+cargo test -p service-daemon --test unix_listen_strategy_tests
+cargo test -p service-daemon --test unix_connect_strategy_tests
+cargo test -p service-daemon --test unix_roundtrip_tests
+cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
+cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
+cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+```
+
+The Windows commands are wired into `.github/workflows/rust.yml` as the
+`windows-named-pipe` job and must stay on the `x86_64-pc-windows-msvc` target.
+
+The Windows commands need real named-pipe permissions. A restricted-token sandbox can turn otherwise valid local pipe opens into `PermissionDenied`, so release validation should run them in a normal Windows test context.
+
+`docs/development/windows-named-pipe-ipc.md` records why the Windows named pipe provider contract uses explicit `NamedPipeListen` / `NamedPipeConnect` templates instead of remapping Unix templates or introducing a `LocalIpc*` facade.
 
 ## Release Checklist
 

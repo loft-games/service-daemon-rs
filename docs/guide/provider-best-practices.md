@@ -60,6 +60,8 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
 | `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `get()?` for manual FD cloning. |
 | `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `tokio::net::UnixStream` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks the startup wave until the peer is ready. |
+| `NamedPipeListen(Name)` | - | **Windows-only.** Holds a local named pipe server wrapper. `accept().await?` waits for one client, normally creates the next server instance before returning, then yields the connected `NamedPipeServer`. |
+| `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<String>` pipe name. Init performs one `ClientOptions::open` probe; each `connect().await?` opens a fresh `NamedPipeClient`. |
 
 ### The `Listen` Template
 
@@ -115,6 +117,51 @@ Three behaviors that distinguish them from the TCP `Listen` template:
 
 > [!NOTE]
 > **API form: listener handle cloning is synchronous; socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths. `get()?` and `try_connect().await?` remain available when you need the lower-level listener clone or explicitly named connection helper.
+
+### The `NamedPipeListen` and `NamedPipeConnect` Templates (Windows Named Pipes)
+
+These two templates are the Windows-side local IPC pair. They are explicit Windows templates; `UnixListen` and `UnixConnect` remain Unix-only and are not remapped to named pipes.
+
+```rust
+#[cfg(windows)]
+mod ipc {
+    use service_daemon::{provider, service};
+    use std::sync::Arc;
+
+    #[provider(NamedPipeListen(r"\\.\pipe\myapp-control"), eager = true)]
+    pub struct ControlPipe;
+
+    #[provider(NamedPipeConnect(r"\\.\pipe\myapp-control"), env = "CONTROL_PIPE")]
+    pub struct ControlClient;
+
+    #[service]
+    pub async fn control_server(pipe: Arc<ControlPipe>) -> anyhow::Result<()> {
+        let server = pipe.accept().await?;
+        // read/write on server...
+        Ok(())
+    }
+
+    #[service]
+    pub async fn control_client(client: Arc<ControlClient>) -> anyhow::Result<()> {
+        let stream = client.connect().await?;
+        // read/write on stream...
+        Ok(())
+    }
+}
+```
+
+Key behaviors:
+
+1. **Local-only pipe names**: names must start with `\\.\pipe\` and have a non-empty suffix. Remote paths such as `\\server\pipe\name` are rejected as fatal configuration errors.
+2. **Server ownership check**: the first server instance is created with `first_pipe_instance(true)` and `reject_remote_clients(true)`. If another server already owns the pipe name, initialization fails fatally instead of sharing ownership silently.
+3. **Instance rotation in `accept()`**: `accept().await?` waits for the current instance and normally creates the next instance before returning the connected `NamedPipeServer`. If replacement creation fails after a client has connected, the connected server is still returned; the next `accept()` retries pending-instance creation instead of leaving a connected handle stored as the next available server.
+4. **Client init probe**: `NamedPipeConnect::try_new().await` opens one client as a reachability probe and drops it. The server side should treat that first connection like a health probe.
+5. **Fresh client per call**: `connect().await?` and `try_connect().await?` open independent `NamedPipeClient`s. They do not pool or share a stream.
+
+The first contract intentionally does not expose pipe mode, buffer sizing, maximum instances, ACL/security descriptor APIs, client QoS flags, or raw security attributes. Use a custom `async fn` provider if an application needs those knobs before the framework grows a reviewed public API for them.
+
+> [!NOTE]
+> A fresh business `connect().await?` can still observe Windows `ERROR_PIPE_BUSY` if every server instance is currently occupied. Treat that as a normal transient runtime connection error and retry at the call site when the workflow requires it. Provider initialization classifies the same raw OS error as `ProviderError::Retryable`.
 
 **Avoid creating new built-in templates unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
@@ -192,4 +239,6 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 | Unix Socket Listening (early-bound) | `#[provider(UnixListen("/run/myapp/sock"), eager = true)] struct ApiSocket;` |
 | Unix Socket Connecting (lazy) | `#[provider(UnixConnect("/run/peer/sock"))] struct PeerClient;` |
 | Unix Socket Connecting (block startup until peer ready) | `#[provider(UnixConnect("/run/peer/sock"), eager = true)] struct PeerClient;` |
+| Windows Named Pipe Listening | `#[provider(NamedPipeListen(r"\\.\pipe\myapp"))] struct ControlPipe;` |
+| Windows Named Pipe Connecting (block startup until peer ready) | `#[provider(NamedPipeConnect(r"\\.\pipe\peer"), eager = true)] struct PeerClient;` |
 | Early Background Task | `#[provider(eager = true)] async fn setup() -> () { ... }` |

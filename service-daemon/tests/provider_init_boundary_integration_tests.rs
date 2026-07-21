@@ -9,6 +9,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard, Once};
 use std::time::Duration;
@@ -264,6 +265,12 @@ async fn run_until_provider_init_shutdown(tag: &'static str) -> anyhow::Result<S
     Ok(daemon)
 }
 
+fn provider_init_boundary_source_location(prefix: &str) -> String {
+    let file = Path::new("service-daemon")
+        .join("tests")
+        .join("provider_init_boundary_integration_tests.rs");
+    format!("{prefix}{}:", file.display())
+}
 fn assert_provider_init_exit(daemon: &ServiceDaemon, service_name: &str) {
     let diagnostics = daemon.diagnostics_snapshot();
     let service = diagnostics
@@ -357,16 +364,15 @@ async fn test_infallible_helper_panic_message_points_to_provider_definition() {
         message.contains("provider_origin=#[provider] function panic_source_provider"),
         "panic message should point to the provider function: {message}"
     );
+
     assert!(
-        message.contains(
-            "provider_defined_at=service-daemon/tests/provider_init_boundary_integration_tests.rs:"
-        ),
+        message.contains(&provider_init_boundary_source_location(
+            "provider_defined_at="
+        )),
         "panic message should include the provider definition file: {message}"
     );
     assert!(
-        message.contains(
-            "helper_called_at=service-daemon/tests/provider_init_boundary_integration_tests.rs:"
-        ),
+        message.contains(&provider_init_boundary_source_location("helper_called_at=")),
         "panic message should include the direct helper callsite: {message}"
     );
     assert!(

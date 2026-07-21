@@ -52,6 +52,36 @@ jobs:
       - name: Linkme smoke (release)
         run: cargo test -p service-daemon --release --test linkme_smoke
 
+  windows-msvc:
+    name: Windows MSVC
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (Windows MSVC)
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc clippy
+      - name: Rust Check
+        run: cargo check --target x86_64-pc-windows-msvc --workspace --exclude example-unix-domain-socket --exclude example-named-pipe
+      - name: Rust Check All Features
+        run: cargo check --target x86_64-pc-windows-msvc --workspace --all-features --exclude example-unix-domain-socket --exclude example-named-pipe
+      - name: Rust Check No Default Features
+        run: cargo check --target x86_64-pc-windows-msvc -p service-daemon --no-default-features
+      - name: Run tests
+        shell: bash
+        run: bash .github/scripts/cargo-test-windows-msvc-general x86_64-pc-windows-msvc
+      - name: Run tests with all features
+        shell: bash
+        run: bash .github/scripts/cargo-test-windows-msvc-general x86_64-pc-windows-msvc --all-features
+      - name: Run service-daemon tests without default features
+        shell: bash
+        run: bash .github/scripts/cargo-test-windows-msvc-general x86_64-pc-windows-msvc --no-default-features
+      - name: Rust Clippy
+        run: cargo clippy --target x86_64-pc-windows-msvc --workspace --exclude example-unix-domain-socket --exclude example-named-pipe -- -D warnings
+      - name: Rust Clippy All Features
+        run: cargo clippy --target x86_64-pc-windows-msvc --workspace --all-features --exclude example-unix-domain-socket --exclude example-named-pipe -- -D warnings
+      - name: Rust Clippy No Default Features
+        run: cargo clippy --target x86_64-pc-windows-msvc -p service-daemon --no-default-features -- -D warnings
+
   deny:
     name: Dependency Policy
     runs-on: ubuntu-latest
@@ -104,6 +134,21 @@ jobs:
       - name: Inspect linkme registry sections (${{ matrix.label }})
         shell: bash
         run: bash .github/scripts/check-linkme-registry-sections "${{ matrix.target }}"
+
+  windows-named-pipe:
+    name: Windows Named Pipe IPC
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (Windows MSVC)
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc
+      - name: Named pipe strategy tests
+        run: cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
+      - name: Named pipe roundtrip tests
+        run: cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
+      - name: Named pipe example smoke
+        run: cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
 
   fmt:
     name: Format

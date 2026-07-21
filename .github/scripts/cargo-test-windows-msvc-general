@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+target="${1:-x86_64-pc-windows-msvc}"
+shift || true
+
+cargo_flags=(--target "$target")
+if [[ "$#" -gt 0 ]]; then
+  cargo_flags+=("$@")
+fi
+
+cargo test "${cargo_flags[@]}" --workspace \
+  --exclude service-daemon \
+  --exclude example-unix-domain-socket \
+  --exclude example-named-pipe
+
+cargo test "${cargo_flags[@]}" -p service-daemon --lib
+cargo test "${cargo_flags[@]}" -p service-daemon --doc
+
+# Platform-specific IPC suites have dedicated jobs. Keep this job focused on
+# cross-platform runtime behavior that should work on Windows MSVC.
+for test_file in service-daemon/tests/*.rs; do
+  test_name="$(basename "${test_file%.rs}")"
+  case "$test_name" in
+    named_pipe_* | unix_*)
+      echo "Skipping platform-specific IPC test target: ${test_name}"
+      ;;
+    *)
+      cargo test "${cargo_flags[@]}" -p service-daemon --test "$test_name"
+      ;;
+  esac
+done

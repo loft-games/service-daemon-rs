@@ -153,6 +153,35 @@ Peer servers will observe a single `accept()` followed by an instant close from 
 
 After init succeeds, `connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. `try_connect().await?` remains available as the explicitly named lower-level helper. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
 
+### 2.5. NamedPipeListen Strategy (Windows Named Pipe Server)
+
+The `NamedPipeListen` template is Windows-only and uses Tokio's `tokio::net::windows::named_pipe::ServerOptions`. It validates local-only names at runtime: the path must begin with `\\.\pipe\` and must have a non-empty suffix. Remote pipe paths are rejected as fatal configuration errors.
+
+The first server instance is created with `reject_remote_clients(true)` and `first_pipe_instance(true)`. That first-instance flag is the ownership check: if another server already owns the pipe name, Windows reports a permission-style create failure and the framework treats it as **Fatal**. Later instances created by `accept().await` do not use `first_pipe_instance(true)`.
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| Initial first-instance collision | **Fatal** | Another server already owns the pipe name; retrying would hide a deployment ownership conflict. |
+| Invalid or remote pipe name | **Fatal** | The provider contract is local-only `\\.\pipe\...`. |
+| `Interrupted`, `TimedOut` during create | **Retryable** | Transient system interruption while creating the server instance. |
+| Other create/configuration/access errors | **Fatal** | The operator or configuration must change. |
+
+`accept().await?` waits for the current server instance and normally creates the next instance before returning the connected `NamedPipeServer`. If replacement creation fails after a client has connected, the connected server is still returned and the next `accept()` retries pending-instance creation. Provider-init classification applies to initialization; runtime connect or pending-create failures surface as `std::io::Error` to the service.
+
+### 2.6. NamedPipeConnect Strategy (Windows Named Pipe Client)
+
+The `NamedPipeConnect` template stores only the local pipe name. Initialization performs a one-shot `ClientOptions::new().open(...)` probe and drops it, matching the Unix connector pattern: `eager = true` can block startup until a peer process is reachable, while lazy initialization validates the peer on first resolution.
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| `NotFound` | **Retryable** | The peer has not created the named pipe yet. |
+| Raw OS `ERROR_PIPE_BUSY` (`231`) | **Retryable** | The pipe exists, but every server instance is currently occupied. |
+| `Interrupted`, `TimedOut` | **Retryable** | Transient system interruption during open. |
+| `PermissionDenied` | **Fatal** | Access or security configuration is wrong, including denied local access. |
+| Invalid or remote pipe name | **Fatal** | The provider contract is local-only `\\.\pipe\...`. |
+| Other configuration/access errors | **Fatal** | Retrying cannot fix malformed configuration or incompatible security settings. |
+
+After init succeeds, `connect().await?` and `try_connect().await?` open fresh independent `NamedPipeClient`s. A runtime `connect()` can still hit `ERROR_PIPE_BUSY` if all server instances are occupied; retry that at the call site when the workflow expects short-lived busy windows.
 ## 3. Advanced Resilience: Wave Timeouts
 
 The `RestartPolicy` also controls how long the daemon waits for services during startup and shutdown waves.

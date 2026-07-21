@@ -36,6 +36,8 @@ The supported provider attribute forms are:
 #[provider(Listen("127.0.0.1:8080"), env = "BIND_ADDR", eager = true)]
 #[provider(UnixListen("/run/app.sock"), eager = true)]
 #[provider(UnixConnect("/run/peer.sock"), env = "PEER_SOCK")]
+#[provider(NamedPipeListen(r"\\.\pipe\app"), eager = true)]
+#[provider(NamedPipeConnect(r"\\.\pipe\peer"), env = "PEER_PIPE")]
 ```
 
 Shared attributes are parsed once and rejected at compile time if duplicated:
@@ -46,7 +48,7 @@ Shared attributes are parsed once and rejected at compile time if duplicated:
 | `capacity = N` | `Queue(...)` only | `N` must be greater than zero; value providers reject `capacity`. |
 | `eager = true` / `eager = false` | all provider forms | The value must be a boolean literal, not an identifier or expression. |
 
-Unsupported attributes keep the stable parser diagnostic that lists the supported shared attributes: `env`, `capacity`, and `eager`.
+Unsupported attributes keep the stable parser diagnostic that lists the supported shared attributes: `env`, `capacity`, and `eager`. Named pipe templates intentionally reject first-version tuning attributes such as pipe mode, buffer sizing, ACL/security descriptors, max instances, QoS, or raw security attributes.
 
 Function providers opt into framework fallibility only with `Result<T, ProviderError>` or an equivalent path ending in `ProviderError`. The error type must resolve to `service_daemon::ProviderError`: either directly, through an imported `ProviderError`, or through a type alias named `ProviderError`. Same-named custom types fail type checking at the provider return.
 
@@ -77,6 +79,7 @@ Provider helper signatures are part of the macro public contract and depend on d
 | Provider with DI dependencies | `Result<Arc<T>, ProviderInitError>` | Dependency resolution can fail, so the helper is fallible. |
 | Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
 | `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
+| `NamedPipeListen` / `NamedPipeConnect` templates | `Result<Arc<T>, ProviderInitError>` | Windows named pipe create/probe errors are provider-init failures with Fatal/Retryable classification. |
 | Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Documented opt-in to retryable/fatal provider-init semantics. |
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.

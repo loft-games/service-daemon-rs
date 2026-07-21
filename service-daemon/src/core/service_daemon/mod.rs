@@ -38,7 +38,7 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::DaemonResources;
 use crate::core::diagnostics::DiagnosticsStore;
-#[cfg(any(unix, feature = "simulation"))]
+#[cfg(unix)]
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
