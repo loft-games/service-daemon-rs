@@ -5,7 +5,6 @@
 use example_named_pipe::providers::EXAMPLE_NAMED_PIPE_ENV;
 use service_daemon::{ManagedProvided, ServiceDaemon};
 use std::ffi::OsString;
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -48,8 +47,11 @@ async fn named_pipe_example_starts_and_roundtrips() -> anyhow::Result<()> {
     let pipe_name = std::env::var(EXAMPLE_NAMED_PIPE_ENV)?;
     let listener =
         <example_named_pipe::providers::ExampleNamedPipeListener as ManagedProvided>::resolve_managed()
-            .await?;
-    assert_eq!(listener.name(), Path::new(&pipe_name));
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("ExampleNamedPipeListener resolve_managed failed: {error:?}")
+            })?;
+    assert_eq!(listener.name(), pipe_name);
 
     let mut daemon = ServiceDaemon::builder().build();
     daemon.run().await;

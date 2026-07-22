@@ -74,9 +74,16 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/25_provider_result_non_provider_error.rs",
     "tests/fail/26_provider_custom_path_template_not_open.rs",
     "tests/fail/27_provider_template_named_attr_inside_parens.rs",
+];
+
+#[cfg(not(windows))]
+const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[
     "tests/fail/30_provider_named_pipe_listen_non_windows.rs",
     "tests/fail/31_provider_named_pipe_connect_non_windows.rs",
 ];
+
+#[cfg(windows)]
+const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[];
 
 const INTEGRATION_PASS_CASES: &[&str] = &[
     "tests/pass/06_trigger_templates.rs",
@@ -109,7 +116,9 @@ fn trigger_macro_cases() {
 
 #[test]
 fn provider_macro_cases() {
-    run_cases(PROVIDER_PASS_CASES, PROVIDER_FAIL_CASES);
+    let mut fail_cases = Vec::from(PROVIDER_FAIL_CASES);
+    fail_cases.extend_from_slice(PROVIDER_PLATFORM_FAIL_CASES);
+    run_cases(PROVIDER_PASS_CASES, &fail_cases);
 }
 
 #[test]

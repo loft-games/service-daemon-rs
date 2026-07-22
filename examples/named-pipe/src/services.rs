@@ -5,7 +5,28 @@ use crate::providers::{
 };
 use service_daemon::{ServicePriority, service};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::windows::named_pipe::NamedPipeClient;
 use tracing::info;
+
+const ERROR_PIPE_BUSY: i32 = 231;
+
+async fn connect_with_busy_retry(
+    connector: &ExampleNamedPipeConnector,
+) -> std::io::Result<NamedPipeClient> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match connector.connect().await {
+            Ok(connection) => return Ok(connection),
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 #[service(priority = ServicePriority::STORAGE)]
 pub async fn named_pipe_server_service(
@@ -39,7 +60,7 @@ pub async fn named_pipe_server_service(
 pub async fn named_pipe_client_service(
     connector: Arc<ExampleNamedPipeConnector>,
 ) -> anyhow::Result<()> {
-    let mut connection = connector.connect().await?;
+    let mut connection = connect_with_busy_retry(&connector).await?;
     connection.write_all(b"hello").await?;
 
     let mut response = [0_u8; 5];

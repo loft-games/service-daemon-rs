@@ -123,7 +123,7 @@ Server-side `NamedPipeListen` provider init:
 | raw `ERROR_PIPE_BUSY` | Retryable | Instance pressure or concurrent creation race. |
 | Other I/O | Fatal by default | Do not hide unknown Windows pipe failures as transient until tests justify it. |
 
-Client-side `NamedPipeConnect` provider init and connect:
+Client-side `NamedPipeConnect` provider init:
 
 | Error | Strategy | Reason |
 | :--- | :--- | :--- |
@@ -134,7 +134,12 @@ Client-side `NamedPipeConnect` provider init and connect:
 | `InvalidInput` | Fatal | Invalid pipe name or unsupported options. |
 | Other I/O | Fatal by default | Unknown Windows pipe failures should be visible first. |
 
-The final mapping should use the same provider-init boundary as `Listen`,
+Runtime `connect().await` opens one fresh client and returns the raw I/O result.
+Callers that expect short listener-replacement windows should retry raw
+`ERROR_PIPE_BUSY` at the call site, as the named-pipe example and roundtrip test
+do.
+
+The final provider-init mapping should use the same boundary as `Listen`,
 `UnixListen`, and `UnixConnect`: retryable errors feed `ProviderError::Retryable`
 until `RestartPolicy::provider_init_timeout`, fatal errors become
 `ProviderInitError::Fatal`.
@@ -175,7 +180,9 @@ Windows-only integration tests should cover:
 - client provider succeeds when the server is already available;
 - roundtrip read/write between `NamedPipeListen` and `NamedPipeConnect`;
 - `NamedPipeConnect` retries `NotFound` until the server appears;
-- `NamedPipeConnect` retries raw `ERROR_PIPE_BUSY`;
+- `NamedPipeConnect` classifies raw `ERROR_PIPE_BUSY` as retryable during provider init;
+- runtime `NamedPipeConnect::connect()` call sites retry raw `ERROR_PIPE_BUSY`
+  where short listener-replacement windows are expected;
 - `PermissionDenied` is fatal where practical to trigger deterministically;
 - generated non-Windows guard emits a clear compile error at the provider
   declaration site.

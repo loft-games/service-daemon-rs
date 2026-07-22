@@ -60,8 +60,8 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
 | `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `get()?` for manual FD cloning. |
 | `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `tokio::net::UnixStream` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks the startup wave until the peer is ready. |
-| `NamedPipeListen(Name)` | - | **Windows-only.** A `tokio::net::windows::named_pipe::NamedPipeServer` wrapper for local IPC. Use `accept().await?` to receive a connected server instance that implements `AsyncRead` and `AsyncWrite`. |
-| `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<PathBuf>` pipe name; `connect().await?` opens a fresh `NamedPipeClient` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks startup until the peer pipe is reachable. |
+| `NamedPipeListen(Name)` | - | **Windows-only.** Holds a local named pipe listener wrapper. `accept().await?` yields an already connected `NamedPipeServer`; an internal manager replenishes the next pending instance and retries replacement create failures. |
+| `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<String>` pipe name. Init performs one `ClientOptions::open` probe; each `connect().await?` opens a fresh `NamedPipeClient`. |
 
 ### The `Listen` Template
 
@@ -155,12 +155,18 @@ a local named pipe endpoint. Use the Unix templates for Unix domain sockets, and
 use `Listen` for TCP sockets. The framework intentionally does not make one
 template name change behavior across operating systems.
 
-`NamedPipeListen` keeps a pending server instance available before returning a
-connected instance to user code, matching Tokio's named pipe guidance and
-avoiding intermittent client `NotFound` gaps between accepts. The generated
-server uses `reject_remote_clients(true)` for the first local-only
-implementation; ACL and security-descriptor customization is not part of the
-template API yet.
+`NamedPipeListen` validates local-only pipe names, creates the first instance
+with `reject_remote_clients(true)` and `first_pipe_instance(true)`, then lazily
+starts a listener manager on the first `accept().await?`. Successful accepts
+return already connected `NamedPipeServer`s. The manager owns pending instances,
+replenishes the next one after each connection, and retries replacement-create
+failures internally instead of pushing those transient failures onto business
+handlers. ACL and security-descriptor customization is not part of the template
+API yet.
+
+`NamedPipeConnect` validates the same local-only pipe name form. Initialization
+performs a one-shot reachability probe and drops it; `connect().await?` and
+`try_connect().await?` open fresh independent clients.
 
 Both named pipe templates are gated by `#[cfg(windows)]`. On non-Windows
 targets, the macro emits a declaration-site `compile_error!`. To keep a

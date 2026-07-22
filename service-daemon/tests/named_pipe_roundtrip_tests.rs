@@ -3,18 +3,24 @@
 //
 // `NamedPipeConnect` performs an init-time probe and drops it. The server-side
 // accept loop therefore expects two connections: the probe and the real
-// roundtrip stream.
+// roundtrip stream. On Windows, the real connect may briefly observe
+// ERROR_PIPE_BUSY while the listener manager replenishes the next server
+// instance, so the test retries that documented transient state.
 
 #![cfg(windows)]
 
 use service_daemon::{ManagedProvided, provider};
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::windows::named_pipe::NamedPipeClient;
 
 const ROUNDTRIP_ENV_VAR: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_ROUNDTRIP_NAME_B1741D2A";
 
 static PIPE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+const ERROR_PIPE_BUSY: i32 = 231;
 
 struct EnvVarGuard {
     previous: Option<OsString>,
@@ -45,6 +51,24 @@ fn set_roundtrip_pipe_name() -> EnvVarGuard {
         std::env::set_var(ROUNDTRIP_ENV_VAR, pipe_name);
     }
     EnvVarGuard { previous }
+}
+
+async fn connect_roundtrip_client_with_busy_retry(
+    client: &RoundtripClient,
+) -> std::io::Result<NamedPipeClient> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match client.connect().await {
+            Ok(conn) => return Ok(conn),
+            Err(error)
+                if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
+                    && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -95,10 +119,9 @@ async fn test_named_pipe_listen_connect_roundtrip() {
         .await
         .expect("RoundtripClient resolve failed");
 
-    let mut conn = client
-        .connect()
+    let mut conn = connect_roundtrip_client_with_busy_retry(&client)
         .await
-        .expect("RoundtripClient.connect failed");
+        .expect("RoundtripClient.connect failed after retrying transient ERROR_PIPE_BUSY");
     conn.write_all(b"hello")
         .await
         .expect("Client write_all failed");

@@ -1,4 +1,4 @@
-error: NamedPipeListen template does not support `capacity`; Phase 4 named pipe providers only accept pipe name, `env`, and `eager`
+error: NamedPipeListen template does not support `capacity`; Windows named pipe providers only accept pipe name, `env`, and `eager`
  --> tests/fail/28_provider_named_pipe_capacity_attr.rs:5:12
   |
 5 | #[provider(NamedPipeListen(r"\\.\pipe\bad"), capacity = 8)]

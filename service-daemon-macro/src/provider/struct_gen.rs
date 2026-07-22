@@ -186,7 +186,11 @@ fn try_generate_template(
                 r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
-                emit_unused_provider_template_arg_warning!(name, "NamedPipeListen", "capacity");
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "NamedPipeListen template does not support `capacity`; \
+                     Windows named pipe providers only accept pipe name, `env`, and `eager`",
+                ));
             }
             Some(generate_named_pipe_listen_template(
                 struct_name,
@@ -206,7 +210,11 @@ fn try_generate_template(
                 r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer-api"))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
-                emit_unused_provider_template_arg_warning!(name, "NamedPipeConnect", "capacity");
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "NamedPipeConnect template does not support `capacity`; \
+                     Windows named pipe providers only accept pipe name, `env`, and `eager`",
+                ));
             }
             Some(generate_named_pipe_connect_template(
                 struct_name,
