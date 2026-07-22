@@ -238,7 +238,7 @@ async fn test_unix_listen_permission_denied_fatal() {
 }
 
 // ---------------------------------------------------------------------------
-// try_get clones the underlying FD so multiple clones coexist.
+// get clones the underlying FD so multiple clones coexist.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -254,12 +254,9 @@ async fn test_unix_listen_fd_clone() {
         .await
         .expect("resolve_managed failed for CloneListener");
 
-    // try_get clones via dup(); both must yield valid tokio listeners.
-    let l1 = provider.try_get().await.expect("first try_get failed");
-    let l2 = provider
-        .try_get()
-        .await
-        .expect("second try_get failed (FD exhaustion?)");
+    // get clones via dup(); both must yield valid tokio listeners.
+    let l1 = provider.get().expect("first get failed");
+    let l2 = provider.get().expect("second get failed (FD exhaustion?)");
 
     // Both clones share the kernel listen queue. We don't drive accept() in
     // this test (would require an external connector) -- the assertion is

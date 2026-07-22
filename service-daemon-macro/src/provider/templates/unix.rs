@@ -270,12 +270,10 @@ pub(in crate::provider) fn generate_unix_listen_template(
             /// multiple services or reload generations to accept on the
             /// same physical path concurrently.
             //
-            // Keep the API symmetric with UnixConnect::connect.
-            //
             // We explicitly set_nonblocking(true) on the cloned FD because
             // POSIX dup() is not guaranteed to inherit O_NONBLOCK across libc
             // implementations, so relying on inheritance is not portable.
-            pub async fn try_get(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixListener> {
+            pub fn get(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixListener> {
                 let cloned = self.0.try_clone()?;
                 cloned.set_nonblocking(true)?;
                 service_daemon::__private::tokio::net::UnixListener::from_std(cloned)
@@ -286,7 +284,7 @@ pub(in crate::provider) fn generate_unix_listen_template(
                 service_daemon::__private::tokio::net::UnixStream,
                 service_daemon::__private::tokio::net::unix::SocketAddr,
             )> {
-                self.try_get().await?.accept().await
+                self.get()?.accept().await
             }
 
             /// Returns the local address this socket is bound to.

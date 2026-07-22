@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
+
 ## [0.1.0-alpha.5] - 2026-06-21
 
 ### Added

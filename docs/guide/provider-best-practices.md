@@ -58,7 +58,7 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `Notify` | `Event` | A `tokio::sync::Notify` wrapper for one-to-one or one-to-all signaling. |
 | `Queue(T)` | `BQueue`, `BroadcastQueue` | A `tokio::sync::broadcast` channel for fan-out event distribution. |
 | `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
-| `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `try_get().await?` for manual FD cloning. |
+| `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `get()?` for manual FD cloning. |
 | `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `tokio::net::UnixStream` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks the startup wave until the peer is ready. |
 
 ### The `Listen` Template
@@ -114,7 +114,7 @@ Three behaviors that distinguish them from the TCP `Listen` template:
 3. **Cross-platform builds**: both templates are gated by `#[cfg(unix)]`. On non-Unix targets the macro emits a `compile_error!` at the declaration site rather than silently producing a broken type. To write cross-platform code, wrap the declaration in `#[cfg(unix)] mod uds {...}` so the entire module is excluded on Windows.
 
 > [!NOTE]
-> **API form: socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths. `try_get().await?` and `try_connect().await?` remain available when you need the lower-level listener clone or explicitly named connection helper.
+> **API form: listener handle cloning is synchronous; socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths. `get()?` and `try_connect().await?` remain available when you need the lower-level listener clone or explicitly named connection helper.
 
 **Avoid creating new built-in templates unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.
