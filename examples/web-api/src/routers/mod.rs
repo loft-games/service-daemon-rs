@@ -40,10 +40,11 @@ fn cors_layer(config: &ExampleConfig) -> CorsLayer {
 
 #[cfg(any(debug_assertions, feature = "devtools"))]
 fn build_swagger_ui(api_doc: OpenApi) -> SwaggerUi {
-    let openapi = OpenApiBuilder::new()
+    let mut openapi = OpenApiBuilder::new()
         .info(Info::new("Service Daemon Web API Example", "1.0.0"))
         .paths(Paths::new())
         .build();
+    openapi.merge(api_doc);
 
-    SwaggerUi::new("/docs").url("/swagger_doc", openapi.nest("/api", api_doc))
+    SwaggerUi::new("/docs").url("/swagger_doc", openapi)
 }
