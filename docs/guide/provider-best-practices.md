@@ -165,8 +165,8 @@ handlers. ACL and security-descriptor customization is not part of the template
 API yet.
 
 `NamedPipeConnect` validates the same local-only pipe name form. Initialization
-performs a one-shot reachability probe and drops it; `connect().await?` and
-`try_connect().await?` open fresh independent clients.
+performs a one-shot reachability probe and drops it; each `connect().await?`
+opens a fresh independent client.
 
 Both named pipe templates are gated by `#[cfg(windows)]`. On non-Windows
 targets, the macro emits a declaration-site `compile_error!`. To keep a

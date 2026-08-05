@@ -136,10 +136,10 @@ macro emits a `compile_error!` at the provider declaration site.
   already connected server end; an internal listener manager replenishes the
   next pending instance and retries replacement creation failures internally.
 
-- **`NamedPipeConnect(r"\\.\pipe\name")`**: wraps the client side. `connect().await?`
-  and `try_connect().await?` open fresh `NamedPipeClient`s. At init time the
-  template performs one reachability probe and immediately drops the client.
-  Pair with `eager = true` when startup should wait for the peer pipe.
+- **`NamedPipeConnect(r"\\.\pipe\name")`**: wraps the client side. Each
+  `connect().await?` opens a fresh `NamedPipeClient`. At init time the template
+  performs one reachability probe and immediately drops the client. Pair with
+  `eager = true` when startup should wait for the peer pipe.
 
 Use these templates for Windows local IPC only. Use `UnixListen` / `UnixConnect`
 for Unix domain sockets and `Listen` for TCP sockets. Error classification

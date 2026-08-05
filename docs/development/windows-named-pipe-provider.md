@@ -41,17 +41,13 @@ sockets, so they need explicit template names and Windows-specific tests.
 `NamedPipeListen(Path)` should generate a Windows-only wrapper around a small
 framework-owned server factory, not a single reusable connected server handle.
 
-Proposed generated public shape:
+Generated public shape:
 
 ```rust
 impl ApiPipe {
-    pub fn name(&self) -> &std::path::Path;
+    pub fn name(&self) -> &str;
 
     pub async fn accept(
-        &self,
-    ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeServer>;
-
-    pub async fn try_get(
         &self,
     ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeServer>;
 }
@@ -86,17 +82,13 @@ through the provider instance.
 `NamedPipeConnect(Path)` should mirror `UnixConnect`: hold the pipe name and open
 a fresh client stream per call.
 
-Proposed generated public shape:
+Generated public shape:
 
 ```rust
 impl PeerPipe {
-    pub fn name(&self) -> &std::path::Path;
+    pub fn name(&self) -> &str;
 
     pub async fn connect(
-        &self,
-    ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient>;
-
-    pub async fn try_connect(
         &self,
     ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient>;
 }

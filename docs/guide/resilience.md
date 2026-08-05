@@ -198,10 +198,10 @@ is reachable, while lazy initialization validates the peer on first resolution.
 | Invalid or remote pipe name | **Fatal** | The provider contract is local-only `\\.\pipe\...`. |
 | Other configuration/access errors | **Fatal** | Retrying cannot fix malformed configuration or incompatible security settings. |
 
-After init succeeds, `connect().await?` and `try_connect().await?` open fresh
-independent `NamedPipeClient`s. A runtime `connect()` can still hit
-`ERROR_PIPE_BUSY` if all server instances are occupied; retry that at the call
-site when the workflow expects short-lived busy windows.
+After init succeeds, each `connect().await?` opens a fresh independent
+`NamedPipeClient`. A runtime `connect()` can still hit `ERROR_PIPE_BUSY` if all
+server instances are occupied; retry that at the call site when the workflow
+expects short-lived busy windows.
 
 ## 3. Advanced Resilience: Wave Timeouts
 

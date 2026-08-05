@@ -532,17 +532,10 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
             }
 
             /// Open a fresh client connection to the configured named pipe.
-            pub async fn try_connect(
-                &self,
-            ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
-                Self::open_client(&self.name)
-            }
-
-            /// Open a fresh client connection to the configured named pipe.
             pub async fn connect(
                 &self,
             ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
-                self.try_connect().await
+                Self::open_client(&self.name)
             }
 
             /// Returns the configured local named pipe path.
