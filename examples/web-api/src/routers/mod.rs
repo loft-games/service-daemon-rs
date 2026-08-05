@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::http::{Method, header};
 use tower_http::cors::CorsLayer;
-use utoipa::openapi::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
 
 use crate::providers::ExampleConfig;
 use crate::services::api::HttpApiState;
@@ -9,29 +9,26 @@ use crate::services::api::HttpApiState;
 mod v1;
 
 #[cfg(any(debug_assertions, feature = "devtools"))]
-use utoipa::openapi::{Info, OpenApiBuilder, Paths};
+use utoipa::openapi::{Info, OpenApi, OpenApiBuilder, Paths};
 #[cfg(any(debug_assertions, feature = "devtools"))]
 use utoipa_swagger_ui::SwaggerUi;
 
 pub fn build_router(api_state: HttpApiState) -> Router {
     let cors = cors_layer(&api_state.config);
-    let (api_router, api_doc) = api_router();
-    let mut app = Router::new().nest("/api", api_router);
-
+    let api_router = OpenApiRouter::new().nest("/api", api_router());
     #[cfg(any(debug_assertions, feature = "devtools"))]
-    {
-        app = app.merge(build_swagger_ui(api_doc));
-    }
+    let app = {
+        let (api_router, api_doc) = api_router.split_for_parts();
+        api_router.merge(build_swagger_ui(api_doc))
+    };
+    #[cfg(not(any(debug_assertions, feature = "devtools")))]
+    let app: Router<HttpApiState> = api_router.into();
 
     app.layer(cors).with_state(api_state)
 }
 
-fn api_router() -> (Router<HttpApiState>, OpenApi) {
-    let (router, doc) = v1::router();
-    (
-        Router::new().nest("/v1", router),
-        OpenApi::default().nest("/v1", doc),
-    )
+fn api_router() -> OpenApiRouter<HttpApiState> {
+    OpenApiRouter::new().nest("/v1", v1::router())
 }
 
 fn cors_layer(config: &ExampleConfig) -> CorsLayer {
