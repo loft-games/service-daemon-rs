@@ -36,12 +36,13 @@ cargo clippy --workspace -- -D warnings
 The Windows MSVC job runs these gates with
 `--target x86_64-pc-windows-msvc` for the cross-platform workspace surface. It
 explicitly excludes Unix-only example crates such as `example-unix-domain-socket`
-and keeps the Windows named-pipe example in the named-pipe-specific job. Its
+and keeps the local IPC examples in the IPC-specific job. Its
 test steps use `.github/scripts/cargo-test-windows-msvc-general` so
 `service-daemon` integration tests can run on Windows while skipping
-platform-specific IPC targets (`named_pipe_*` and `unix_*`). Keep OS-specific
-IPC checks separate from this baseline so generic runtime regressions,
-Unix-socket regressions, and named-pipe regressions fail in clearly named jobs.
+platform-specific IPC targets (`local_ipc_*`, `named_pipe_*`, and `unix_*`).
+Keep OS-specific IPC checks separate from this baseline so generic runtime
+regressions, Unix-socket regressions, named-pipe regressions, and LocalIpc
+mapping regressions fail in clearly named jobs.
 
 ## Dependency Baseline
 
@@ -125,14 +126,15 @@ Required platform signals:
 Do not mirror every Rust target triple. CPU architecture is not the primary
 release-validation risk; prefer OS/linker/object-format coverage families.
 
-## Windows Named Pipe Provider Gate
+## Windows Local IPC Provider Gate
 
-`NamedPipeListen` and `NamedPipeConnect` use Tokio's Windows-only named pipe
-runtime APIs. Linux/macOS can cover parser behavior and non-Windows compile
-errors, but they cannot execute the provider runtime contract. The release gate
-for these templates is the `Windows named pipe provider` job in `rust.yml`.
+`NamedPipeListen`, `NamedPipeConnect`, and the Windows side of `LocalIpcListen`
+/ `LocalIpcConnect` use Tokio's Windows-only named pipe runtime APIs.
+Linux/macOS can cover parser behavior and non-Windows compile errors, but they
+cannot execute the Windows provider runtime contract. The release gate for these
+templates is the `Windows local IPC providers` job in `rust.yml`.
 For release-candidate evidence, maintainers can manually run the focused
-`Windows Named Pipe Provider` workflow. Both workflows call
+`Windows Local IPC Providers` workflow. Both workflows call
 `.github/scripts/run-windows-named-pipe-provider-tests`, which writes the target,
 command set, and final pass marker to the GitHub step summary. Its command set
 is:
@@ -140,19 +142,21 @@ is:
 ```bash
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
+cargo test --target x86_64-pc-windows-msvc -p service-daemon --test local_ipc_roundtrip_tests
 cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+cargo test --target x86_64-pc-windows-msvc -p example-local-ipc
 ```
 
-Do not introduce a cross-platform `LocalIpcListen` / `LocalIpcConnect` facade
-until this Windows MSVC runtime gate has passed for the explicit Windows named
-pipe templates.
+`LocalIpc*` remains a logical-name facade only. Platform-native endpoint control
+stays in `UnixListen` / `UnixConnect` / `NamedPipeListen` /
+`NamedPipeConnect`.
 
 ## Example Layers
 
 | Layer | Examples | Responsibility |
 | :--- | :--- | :--- |
 | Tutorial path | `minimal`, `complete`, `triggers`, `simulation` | Teach the basic service, lifecycle, trigger, and test patterns. |
-| Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket`, `named-pipe` | Keep non-default or focused framework features compiling and runnable. |
+| Feature verification | `logging`, `diagnostics`, `scheduling`, `local-ipc`, `unix-domain-socket`, `named-pipe` | Keep non-default or focused framework features compiling and runnable. |
 | Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
 | Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
 | Adoption reference | `web-api`, `controller-bridge` | Show realistic integration shapes without turning every detail into a framework contract. |
@@ -162,23 +166,29 @@ production compatibility promise.
 
 ## Platform-specific IPC Provider Checks
 
-Unix socket and Windows named pipe provider templates are platform-specific contracts. Keep their tests separate so failures identify the OS-specific surface:
+Unix socket, Windows named pipe, and cross-platform logical LocalIpc provider
+templates have platform-specific runtime contracts. Keep their tests separate so
+failures identify the OS-specific surface:
 
 ```bash
 cargo test -p service-daemon --test unix_listen_strategy_tests
 cargo test -p service-daemon --test unix_connect_strategy_tests
 cargo test -p service-daemon --test unix_roundtrip_tests
+cargo test -p service-daemon --test local_ipc_roundtrip_tests
+cargo test -p example-local-ipc
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_strategy_tests
 cargo test --target x86_64-pc-windows-msvc -p service-daemon --test named_pipe_roundtrip_tests
+cargo test --target x86_64-pc-windows-msvc -p service-daemon --test local_ipc_roundtrip_tests
 cargo test --target x86_64-pc-windows-msvc -p example-named-pipe
+cargo test --target x86_64-pc-windows-msvc -p example-local-ipc
 ```
 
 The Windows commands are wired into `.github/workflows/rust.yml` as the
-`windows-named-pipe` job and must stay on the `x86_64-pc-windows-msvc` target.
+`named-pipe-msvc` job and must stay on the `x86_64-pc-windows-msvc` target.
 
 The Windows commands need real named-pipe permissions. A restricted-token sandbox can turn otherwise valid local pipe opens into `PermissionDenied`, so release validation should run them in a normal Windows test context.
 
-`docs/development/windows-named-pipe-ipc.md` records why the Windows named pipe provider contract uses explicit `NamedPipeListen` / `NamedPipeConnect` templates instead of remapping Unix templates or introducing a `LocalIpc*` facade.
+`docs/development/windows-named-pipe-ipc.md` records why the Windows named pipe provider contract uses explicit `NamedPipeListen` / `NamedPipeConnect` templates, and how the `LocalIpc*` facade now layers logical names over Unix sockets or Windows named pipes.
 
 ## Release Checklist
 

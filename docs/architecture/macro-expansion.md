@@ -38,6 +38,8 @@ The supported provider attribute forms are:
 #[provider(UnixConnect("/run/peer.sock"), env = "PEER_SOCK")]
 #[provider(NamedPipeListen(r"\\.\pipe\app"), eager = true)]
 #[provider(NamedPipeConnect(r"\\.\pipe\peer"), env = "PEER_PIPE")]
+#[provider(LocalIpcListen("app-api"), eager = true)]
+#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC")]
 ```
 
 Shared attributes are parsed once and rejected at compile time if duplicated:
@@ -80,6 +82,7 @@ Provider helper signatures are part of the macro public contract and depend on d
 | Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
 | `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
 | `NamedPipeListen` / `NamedPipeConnect` templates | `Result<Arc<T>, ProviderInitError>` | Windows named pipe create/probe errors are provider-init failures with Fatal/Retryable classification. |
+| `LocalIpcListen` / `LocalIpcConnect` templates | `Result<Arc<T>, ProviderInitError>` | Logical-name local IPC maps to Unix socket or Windows named pipe setup/probe errors at provider init. |
 | Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Documented opt-in to retryable/fatal provider-init semantics. |
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.

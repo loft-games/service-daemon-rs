@@ -1,4 +1,4 @@
-error: Unexpected tokens inside template parentheses; named attributes like `env` belong outside: #[provider(Listen("addr"), env = "VAR")]
+error: Unexpected tokens inside Listen template parentheses; named attributes like `env` belong outside: #[provider(Listen(...), env = "VAR")]
  --> tests/fail/27_provider_template_named_attr_inside_parens.rs:5:35
   |
 5 | #[provider(Listen("127.0.0.1:8080", env = "LISTEN_ADDR"))]

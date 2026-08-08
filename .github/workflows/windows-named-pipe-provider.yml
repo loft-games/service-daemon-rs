@@ -1,4 +1,4 @@
-name: Windows Named Pipe Provider
+name: Windows Local IPC Providers
 
 on:
   workflow_dispatch:
@@ -11,13 +11,13 @@ permissions:
 
 jobs:
   named-pipe-msvc:
-    name: Windows named pipe provider
+    name: Windows local IPC providers
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust (x86_64-pc-windows-msvc)
         shell: bash
         run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc
-      - name: Run named pipe provider tests
+      - name: Run Windows local IPC provider tests
         shell: bash
         run: bash .github/scripts/run-windows-named-pipe-provider-tests

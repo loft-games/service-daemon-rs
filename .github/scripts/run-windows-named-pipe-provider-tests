@@ -9,13 +9,15 @@ write_step_summary_header() {
     fi
 
     {
-        echo "## Windows named pipe provider gate"
+        echo "## Windows local IPC provider gate"
         echo
         echo "- Target: \`${TARGET}\`"
         echo "- Commands:"
         echo "  - \`cargo test --target ${TARGET} -p service-daemon --test named_pipe_strategy_tests\`"
         echo "  - \`cargo test --target ${TARGET} -p service-daemon --test named_pipe_roundtrip_tests\`"
+        echo "  - \`cargo test --target ${TARGET} -p service-daemon --test local_ipc_roundtrip_tests\`"
         echo "  - \`cargo test --target ${TARGET} -p example-named-pipe\`"
+        echo "  - \`cargo test --target ${TARGET} -p example-local-ipc\`"
         echo
     } >> "${GITHUB_STEP_SUMMARY}"
 }
@@ -37,6 +39,8 @@ write_step_summary_header
 
 run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_strategy_tests
 run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_roundtrip_tests
+run cargo test --target "${TARGET}" -p service-daemon --test local_ipc_roundtrip_tests
 run cargo test --target "${TARGET}" -p example-named-pipe
+run cargo test --target "${TARGET}" -p example-local-ipc
 
 write_step_summary_success

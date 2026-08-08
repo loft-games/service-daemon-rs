@@ -1,6 +1,7 @@
 // Template providers (signal / queue / socket sources) and a composed struct
 // provider. Template names: Notify, Event, Queue, BQueue, BroadcastQueue,
-// Listen, UnixListen, UnixConnect.
+// Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect,
+// LocalIpcListen, LocalIpcConnect.
 use service_daemon::provider;
 use std::sync::Arc;
 
@@ -23,6 +24,10 @@ pub struct ApiListener;
 // Unix socket peer connection, initialized eagerly.
 #[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]
 pub struct PeerSocket;
+
+// Cross-platform local IPC by logical name; env overrides the logical name.
+#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true)]
+pub struct PeerIpc;
 
 // Struct provider composed from other providers. Arc<_> fields are resolved as
 // dependencies; any non-Arc field must implement Default.

@@ -38,7 +38,8 @@ pub struct ApiKey(pub String);
 ### Template providers
 
 Template names recognized by the macro: `Notify`, `Event`, `Queue`, `BQueue`,
-`BroadcastQueue`, `Listen`, `UnixListen`, `UnixConnect`. The macro replaces the
+`BroadcastQueue`, `Listen`, `UnixListen`, `UnixConnect`, `NamedPipeListen`,
+`NamedPipeConnect`, `LocalIpcListen`, `LocalIpcConnect`. The macro replaces the
 struct body with generated code.
 
 ```rust
@@ -68,12 +69,26 @@ pub struct ControlSocket;
 
 #[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]
 pub struct PeerSocket;
+
+#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]
+pub struct WindowsControlPipe;
+
+#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), env = "PEER_PIPE", eager = true)]
+pub struct WindowsPeerPipe;
+
+#[provider(LocalIpcListen("myapp-api"))]
+pub struct LocalControlIpc;
+
+#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true)]
+pub struct LocalPeerIpc;
 ```
 
 Syntax rules (enforced by the parser):
 
 - `capacity = N` is only valid on `Queue`/`BQueue` templates and must be `> 0`.
-- `Listen`/`UnixListen`/`UnixConnect` take a **string literal** address/path;
+- `Listen`/`UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect` take
+  a **string literal** address/path; `LocalIpcListen`/`LocalIpcConnect` take a
+  logical name containing only ASCII letters, digits, `.`, `_`, and `-`;
   `Queue`/`BQueue` take a **type**.
 - Named attributes (`env`, `capacity`, `eager`) go **outside** the template
   parentheses: `#[provider(Listen("addr"), env = "VAR")]`, never

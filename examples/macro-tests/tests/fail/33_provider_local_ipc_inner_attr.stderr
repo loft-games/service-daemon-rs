@@ -1,0 +1,5 @@
+error: Unexpected tokens inside LocalIpcListen template parentheses; named attributes like `env` belong outside: #[provider(LocalIpcListen(...), env = "VAR")]
+ --> tests/fail/33_provider_local_ipc_inner_attr.rs:5:32
+  |
+5 | #[provider(LocalIpcListen("bad", env = "LOCAL_IPC_NAME"))]
+  |                                ^

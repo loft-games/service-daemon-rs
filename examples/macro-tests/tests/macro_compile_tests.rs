@@ -55,6 +55,7 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/22_provider_return_type_contracts.rs",
     "tests/pass/24_provider_default_expression_boundary.rs",
     "tests/pass/25_provider_explicit_key_forms.rs",
+    "tests/pass/26_provider_local_ipc_templates.rs",
 ];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[
@@ -74,6 +75,9 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/25_provider_result_non_provider_error.rs",
     "tests/fail/26_provider_custom_path_template_not_open.rs",
     "tests/fail/27_provider_template_named_attr_inside_parens.rs",
+    "tests/fail/29_provider_local_ipc_capacity_attr.rs",
+    "tests/fail/32_provider_local_ipc_invalid_name.rs",
+    "tests/fail/33_provider_local_ipc_inner_attr.rs",
 ];
 
 #[cfg(not(windows))]

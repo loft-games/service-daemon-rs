@@ -14,6 +14,7 @@ members = [
     "examples/scheduling",
     "examples/unix-domain-socket",
     "examples/named-pipe",
+    "examples/local-ipc",
     "examples/web-api",
     "examples/controller-bridge",
 ]

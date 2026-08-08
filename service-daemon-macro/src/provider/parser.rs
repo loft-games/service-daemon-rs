@@ -11,7 +11,9 @@
 //!   `#[provider(UnixListen("/run/myapp/sock"))]`,
 //!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`,
 //!   `#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]`,
-//!   `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)]`
+//!   `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)]`,
+//!   `#[provider(LocalIpcListen("myapp-api"))]`,
+//!   `#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
 //!   `#[provider(default = 8080)]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
@@ -39,6 +41,8 @@ const TEMPLATE_NAMES: &[&str] = &[
     "UnixConnect",
     "NamedPipeListen",
     "NamedPipeConnect",
+    "LocalIpcListen",
+    "LocalIpcConnect",
 ];
 
 /// Returns `true` if the identifier matches a known template name.
@@ -185,7 +189,7 @@ fn parse_explicit_template_head(input: ParseStream) -> syn::Result<ProviderHead>
         return Err(syn::Error::new(
             name.span(),
             format!(
-                "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect\n",
+                "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect, LocalIpcListen, LocalIpcConnect\n",
                 name
             ),
         ));
@@ -780,6 +784,41 @@ mod tests {
             _ => panic!("Expected Template variant"),
         }
         assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_PIPE");
+        assert!(args.named.eager);
+    }
+
+    // -- LocalIpcListen / LocalIpcConnect template branches ----------------------
+
+    #[test]
+    fn local_ipc_listen_template_with_name() {
+        let args = parse_args(quote! { LocalIpcListen("myapp-api") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "LocalIpcListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"myapp-api\""),
+                    _ => panic!("Expected captured arg for LocalIpcListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert!(args.named.env.is_none());
+        assert!(!args.named.eager);
+    }
+
+    #[test]
+    fn local_ipc_connect_template_with_name_env_eager() {
+        let args =
+            parse_args(quote! { LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true })
+                .unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "LocalIpcConnect");
+                assert!(matches!(arg, Some(TemplateArg { .. })));
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_IPC");
         assert!(args.named.eager);
     }
 }

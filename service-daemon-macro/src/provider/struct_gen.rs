@@ -12,21 +12,27 @@ use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 use super::parser::{ProviderArgs, ProviderHead, TemplateArg};
 use super::templates::{
     generate_broadcast_queue_template, generate_listen_template,
+    generate_local_ipc_connect_template, generate_local_ipc_listen_template,
     generate_named_pipe_connect_template, generate_named_pipe_listen_template,
     generate_notify_template, generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
 use crate::diagnostics::{compile_error_at, emit_unused_provider_template_arg_warning};
 
-fn parse_template_arg<T: syn::parse::Parse>(arg: &TemplateArg) -> syn::Result<T> {
+fn parse_template_arg<T: syn::parse::Parse>(
+    template_name: &syn::Ident,
+    arg: &TemplateArg,
+) -> syn::Result<T> {
     let parser = |input: syn::parse::ParseStream| {
         let value = input.parse::<T>()?;
         if !input.is_empty() {
             return Err(syn::Error::new(
                 input.span(),
-                "Unexpected tokens inside template parentheses; \
-                 named attributes like `env` belong outside: \
-                 #[provider(Listen(\"addr\"), env = \"VAR\")]",
+                format!(
+                    "Unexpected tokens inside {template_name} template parentheses; \
+                     named attributes like `env` belong outside: \
+                     #[provider({template_name}(...), env = \"VAR\")]"
+                ),
             ));
         }
         Ok(value)
@@ -48,7 +54,27 @@ fn parse_required_template_arg<T: syn::parse::Parse>(
         ));
     };
 
-    parse_template_arg(arg)
+    parse_template_arg(name, arg)
+}
+
+fn validate_local_ipc_literal(
+    template_name: &syn::Ident,
+    logical_name: &syn::LitStr,
+) -> syn::Result<()> {
+    let value = logical_name.value();
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(syn::Error::new_spanned(
+            logical_name,
+            format!(
+                "{template_name} template requires a non-empty logical name containing only ASCII letters, digits, '.', '_', and '-'"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Attempts to generate a template-based provider if the args specify a known template.
@@ -69,7 +95,7 @@ fn try_generate_template(
         // Signal templates - no named arguments are useful
         "Notify" | "Event" => {
             if let Some(arg) = arg {
-                parse_template_arg::<syn::Type>(arg)?;
+                parse_template_arg::<syn::Type>(name, arg)?;
             }
             if provider_args.named.env.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "Notify/Event", "env");
@@ -225,12 +251,62 @@ fn try_generate_template(
                 provider_args.named.eager,
             ))
         }
+        // Cross-platform local IPC listener template
+        "LocalIpcListen" => {
+            let logical_name = parse_required_template_arg::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "LocalIpcListen template requires a logical name",
+                r#"Usage: #[provider(LocalIpcListen("myapp-api"))]"#,
+            )?;
+            validate_local_ipc_literal(name, &logical_name)?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "LocalIpcListen template does not support `capacity`; \
+                     local IPC providers only accept logical name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_local_ipc_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                &logical_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
+        // Cross-platform local IPC client template
+        "LocalIpcConnect" => {
+            let logical_name = parse_required_template_arg::<syn::LitStr>(
+                name,
+                arg.as_ref(),
+                "LocalIpcConnect template requires a logical name",
+                r#"Usage: #[provider(LocalIpcConnect("peer-api"))]"#,
+            )?;
+            validate_local_ipc_literal(name, &logical_name)?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "LocalIpcConnect template does not support `capacity`; \
+                     local IPC providers only accept logical name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_local_ipc_connect_template(
+                struct_name,
+                vis,
+                attrs,
+                &logical_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
         _ => {
             // Unknown template name - emit helpful error at the exact span
             return Err(syn::Error::new_spanned(
                 name,
                 format!(
-                    "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect\n",
+                    "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect, LocalIpcListen, LocalIpcConnect\n",
                     name
                 ),
             ));

@@ -203,6 +203,31 @@ After init succeeds, each `connect().await?` opens a fresh independent
 server instances are occupied; retry that at the call site when the workflow
 expects short-lived busy windows.
 
+### 2.7. LocalIpc Strategy (Cross-platform Logical Local IPC)
+
+`LocalIpcListen` and `LocalIpcConnect` validate a logical name first, then map it
+to the platform-native local IPC endpoint. Literal logical names are rejected at
+macro expansion if they are empty or contain anything outside ASCII letters,
+digits, `.`, `_`, and `-`. Environment overrides are checked during provider
+initialization and produce `ProviderError::Fatal` when invalid.
+
+On Unix, the provider creates the `service-daemon-rs` runtime directory under
+`XDG_RUNTIME_DIR` or, when that is unavailable, under `std::env::temp_dir()`.
+Listener startup then follows the `UnixListen` stale-socket cleanup and
+live-process refusal strategy, while connector startup follows the `UnixConnect`
+probe strategy.
+
+On Windows, the provider maps the logical name to
+`\\.\pipe\service-daemon-rs-<name>`. Listener startup follows the
+`NamedPipeListen` local-only first-instance ownership strategy, while connector
+startup follows the `NamedPipeConnect` probe and `ERROR_PIPE_BUSY` retryable
+classification.
+
+The runtime `accept().await?` and `connect().await?` methods return raw
+`std::io::Error`s from the platform transport. Service code that expects a short
+Windows listener-replenishment window should retry raw `ERROR_PIPE_BUSY` at the
+call site, just as it would for `NamedPipeConnect`.
+
 ## 3. Advanced Resilience: Wave Timeouts
 
 The `RestartPolicy` also controls how long the daemon waits for services during startup and shutdown waves.

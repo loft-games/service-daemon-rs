@@ -1,6 +1,8 @@
 # Windows Named Pipe IPC Provider Contract
 
-This note records why the Windows named pipe provider contract adds explicit provider templates instead of changing the existing Unix socket templates or introducing a cross-platform facade.
+This note records why the Windows named pipe provider contract keeps explicit
+provider templates for native named-pipe control, and how the cross-platform
+`LocalIpc` facade layers logical names over that contract.
 
 ## Provider Contract
 
@@ -42,6 +44,16 @@ The Windows named pipe provider contract accepts only local pipe paths beginning
 
 This keeps the first version focused on local daemon/sidecar IPC. Remote named pipes, custom ACLs, explicit security descriptors, and QoS tuning need a separate API review because they change deployment and security expectations.
 
-## No LocalIpc Facade Yet
+## LocalIpc Facade
 
-The phase does not add `LocalIpcListen` or `LocalIpcConnect`. A later facade can be considered only after Unix and Windows contracts have enough real usage to compare method shape, error taxonomy, ownership, and security needs without hiding important platform differences.
+`LocalIpcListen(Name)` and `LocalIpcConnect(Name)` now provide the
+cross-platform facade for local byte-stream IPC. They accept a logical name, not
+a platform endpoint. On Windows that logical name maps to
+`\\.\pipe\service-daemon-rs-<name>` and reuses the named-pipe local-only,
+first-instance ownership, probe, `ERROR_PIPE_BUSY` classification, and listener
+manager semantics described above.
+
+This does not replace `NamedPipeListen` or `NamedPipeConnect`. Use the explicit
+Windows templates when code or deployment needs a specific pipe path. Use
+`LocalIpc*` when the service only needs a local stream shape shared with Unix,
+typically written against `AsyncRead + AsyncWrite + Unpin`.

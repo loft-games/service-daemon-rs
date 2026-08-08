@@ -22,7 +22,7 @@ cargo test "${cargo_flags[@]}" -p service-daemon --doc
 for test_file in service-daemon/tests/*.rs; do
   test_name="$(basename "${test_file%.rs}")"
   case "$test_name" in
-    named_pipe_* | unix_*)
+    local_ipc_* | named_pipe_* | unix_*)
       echo "Skipping platform-specific IPC test target: ${test_name}"
       ;;
     *)

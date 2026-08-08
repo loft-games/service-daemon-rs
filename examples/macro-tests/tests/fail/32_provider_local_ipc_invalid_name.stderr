@@ -1,0 +1,5 @@
+error: LocalIpcConnect template requires a non-empty logical name containing only ASCII letters, digits, '.', '_', and '-'
+ --> tests/fail/32_provider_local_ipc_invalid_name.rs:5:28
+  |
+5 | #[provider(LocalIpcConnect("bad/name"))]
+  |                            ^^^^^^^^^^

@@ -145,6 +145,35 @@ Use these templates for Windows local IPC only. Use `UnixListen` / `UnixConnect`
 for Unix domain sockets and `Listen` for TCP sockets. Error classification
 details live in [Resilience Guide § 2.5-2.6](resilience.md#25-namedpipelisten-strategy-windows-named-pipe-server).
 
+### `LocalIpcListen` and `LocalIpcConnect` (logical local IPC, cross-platform)
+
+Use `LocalIpcListen(Name)` and `LocalIpcConnect(Name)` when the service code only
+needs a local byte stream and does not care whether the platform transport is a
+Unix domain socket or a Windows named pipe.
+
+```rust
+#[provider(LocalIpcListen("myapp-api"))]
+pub struct ApiIpc;
+
+#[provider(LocalIpcConnect("myapp-api"), env = "MYAPP_IPC", eager = true)]
+pub struct ApiClient;
+
+async fn handle_stream<S>(stream: &mut S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // request/response framing ...
+    Ok(())
+}
+```
+
+The logical name is validated as non-empty ASCII with only letters, digits, `.`,
+`_`, and `-`. The optional `env` value overrides that logical name, not the
+derived platform endpoint. The generated listener exposes `name()` and
+`accept().await?`; the connector exposes `name()` and `connect().await?`.
+Platform-specific endpoint control remains in `UnixListen` / `UnixConnect` /
+`NamedPipeListen` / `NamedPipeConnect`.
+
 ### Eager Initialization: `eager = true`
 
 Providers are lazy-initialized upon their first injection by default. For providers that must start regardless of injection (e.g., health-check listeners or global telemetry), the `eager = true` parameter forces initialization during the system startup wave.

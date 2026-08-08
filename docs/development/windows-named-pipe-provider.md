@@ -1,8 +1,7 @@
 # Windows Named Pipe Provider Contract
 
-This note locks the design direction for adding Windows local IPC provider
-templates. It must be settled before parser support, generated code, examples,
-or user-facing guide updates are added.
+This note records the design direction for Windows local IPC provider templates
+and the boundary they keep after the cross-platform `LocalIpc` facade was added.
 
 ## Decision
 
@@ -20,9 +19,10 @@ Do not make `UnixListen` or `UnixConnect` mean named pipes on Windows. Existing
 Unix socket templates stay Unix-only with their current `compile_error!` guard
 on non-Unix targets.
 
-Do not add a cross-platform `LocalIpcListen` / `LocalIpcConnect` facade in the
-first implementation. Revisit that only after explicit Windows templates pass
-Windows MSVC tests and the generated API has proven stable.
+`LocalIpcListen` / `LocalIpcConnect` now exist as a logical-name facade over
+Unix sockets and Windows named pipes. They do not accept raw platform endpoints;
+explicit `NamedPipe*` templates remain the low-level Windows API when code needs
+native pipe-path control.
 
 ## Why Not Windows AF_UNIX
 

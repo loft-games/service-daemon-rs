@@ -430,6 +430,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-local-ipc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "service-daemon",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "example-logging"
 version = "0.1.0"
 dependencies = [

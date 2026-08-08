@@ -62,6 +62,7 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `tokio::net::UnixStream` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks the startup wave until the peer is ready. |
 | `NamedPipeListen(Name)` | - | **Windows-only.** Holds a local named pipe listener wrapper. `accept().await?` yields an already connected `NamedPipeServer`; an internal manager replenishes the next pending instance and retries replacement create failures. |
 | `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<String>` pipe name. Init performs one `ClientOptions::open` probe; each `connect().await?` opens a fresh `NamedPipeClient`. |
+| `LocalIpcListen(Name)` / `LocalIpcConnect(Name)` | - | **Cross-platform local IPC.** Accepts a logical name and maps it to a Unix domain socket on Unix or a Windows named pipe on Windows. Use when business code only needs an `AsyncRead + AsyncWrite` stream. |
 
 ### The `Listen` Template
 
@@ -151,9 +152,9 @@ pub async fn peer_caller(client: Arc<PeerPipe>) -> anyhow::Result<()> {
 ```
 
 Use these templates when the target deployment is Windows and the dependency is
-a local named pipe endpoint. Use the Unix templates for Unix domain sockets, and
-use `Listen` for TCP sockets. The framework intentionally does not make one
-template name change behavior across operating systems.
+a specific named pipe endpoint. Use the Unix templates for specific Unix domain
+socket paths, use `LocalIpc*` for cross-platform logical local IPC names, and
+use `Listen` for TCP sockets.
 
 `NamedPipeListen` validates local-only pipe names, creates the first instance
 with `reject_remote_clients(true)` and `first_pipe_instance(true)`, then lazily
@@ -172,6 +173,41 @@ Both named pipe templates are gated by `#[cfg(windows)]`. On non-Windows
 targets, the macro emits a declaration-site `compile_error!`. To keep a
 cross-platform crate compiling, place the declaration in a `#[cfg(windows)]`
 module and provide a Unix or TCP alternative in a separate cfg branch.
+
+### The `LocalIpcListen` and `LocalIpcConnect` Templates (Cross-platform Local IPC)
+
+`LocalIpcListen(Name)` and `LocalIpcConnect(Name)` are for local daemon/sidecar
+links whose code only needs a byte stream. The template argument is a logical
+name, not a filesystem path or pipe path:
+
+```rust
+#[provider(LocalIpcListen("myapp-api"))]
+pub struct ApiIpc;
+
+#[provider(LocalIpcConnect("myapp-api"), env = "MYAPP_IPC", eager = true)]
+pub struct ApiClient;
+```
+
+Logical names must be non-empty ASCII and may contain only letters, digits, `.`,
+`_`, and `-`. Literal names are checked by the macro. If `env = "VAR"` is set,
+the environment value replaces the logical name and is validated at provider
+initialization; it does not provide a raw Unix socket path or named pipe path.
+
+On Unix, the logical name maps to
+`$XDG_RUNTIME_DIR/service-daemon-rs/<name>.sock`, falling back to
+`std::env::temp_dir()/service-daemon-rs/<name>.sock` when `XDG_RUNTIME_DIR` is
+missing. The provider creates that directory, then reuses the Unix socket stale
+cleanup, live-process refusal, connect-probe, and retry/fatal classification.
+
+On Windows, the logical name maps to
+`\\.\pipe\service-daemon-rs-<name>` and reuses the named-pipe local-only,
+first-instance ownership, probe, busy-retry classification, and listener manager
+semantics.
+
+The public generated surface is intentionally small: listeners expose
+`name()` and `accept().await?`; connectors expose `name()` and
+`connect().await?`. Use `UnixListen` / `UnixConnect` / `NamedPipeListen` /
+`NamedPipeConnect` when code needs exact platform endpoint control.
 
 **Avoid creating new built-in templates unless:**
 * You are implementing a **generic synchronization primitive** used across many different projects.

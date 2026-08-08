@@ -33,13 +33,17 @@ Conventions for adding a new example crate to this repo. Examples demonstrate
 
 Mixed and deliberate:
 
-- Handlers may return `anyhow::Result<()>` and use `?` for ergonomics.
-- But **resource-acquisition paths use an explicit `match`** that returns a
-  structured framework error, so the framework semantics stay visible rather than
-  being swallowed by `?`. See `examples/minimal/src/services.rs`
-  (`ServiceError::runtime_io(...)` branches on `listener.get()` / `local_addr()`).
+- Handlers may return `anyhow::Result<()>` and use `?` for ergonomics where the
+  error meaning is uninteresting.
+- Resource acquisition and IPC I/O paths should use explicit `match`/`if let`
+  branches and, when the example has its own operation semantics, an example-local
+  error enum under `src/models/`. This keeps each possible failure visible to the
+  reader instead of flattening it behind one opaque `?`.
 
-Use the explicit form whenever `?` would obscure what the supervisor observes.
+Use `ServiceError::runtime_io(...)` only when the failure is genuinely part of the
+framework service runtime boundary being demonstrated. Do not wrap example-level
+business or IPC operation errors as service-daemon framework errors just to avoid
+declaring an example-local error type.
 
 ## Source of truth
 

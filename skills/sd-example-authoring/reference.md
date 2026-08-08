@@ -42,27 +42,17 @@ mechanic** it teaches, not the pretend domain. See `examples/minimal/src/service
 Two deliberate idioms coexist:
 
 - **Ergonomic path** — handler bodies return `anyhow::Result<()>` and use `?` for
-brevity where the error meaning is uninteresting.
-- **Explicit framework-error path** — resource acquisition returns a *structured*
-  `ServiceError` so the supervisor's view stays visible instead of being flattened
-  by `?`. Two equivalent forms, both real:
-
-  ```rust
-  // examples/minimal/src/services.rs — explicit match
-  let l = match listener.get() {
-      Ok(l) => l,
-      Err(error) => return Err(ServiceError::runtime_io("clone TCP listener", error).into()),
-  };
-
-  // examples/web-api/src/services/daemon_services.rs — map_err + ?
-  let l = listener
-      .get()
-      .map_err(|error| ServiceError::runtime_io("clone HTTP listener", error))?;
-  ```
+  brevity where the error meaning is uninteresting.
+- **Explicit example-error path** — resource acquisition and IPC I/O branches use
+  `match`/`if let` and return an example-local error enum from `src/models/` when
+  each operation has distinct teaching value. This is the right shape for examples
+  such as `unix-domain-socket`, `named-pipe`, and `local-ipc`, where readers need
+  to see each accept/connect/read/write failure separately.
 
 `ServiceError::runtime_io(operation: impl Into<String>, source: std::io::Error)`
-lives at `service-daemon/src/models/error.rs:63`. Use the explicit form whenever a
-bare `?` would hide what the framework observes (restart/backoff classification).
+lives at `service-daemon/src/models/error.rs:63`, but it is for framework runtime
+I/O boundaries being demonstrated by the example. Do not use it to disguise
+example-level business or IPC operation failures as service-daemon-owned errors.
 
 ## 4. What to extract vs omit
 

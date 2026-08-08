@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-platform Local IPC Providers**: Added `LocalIpcListen` and `LocalIpcConnect` provider templates that accept logical names and map them to Unix domain sockets or Windows named pipes while exposing a shared `AsyncRead`/`AsyncWrite` service shape.
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, reachability probes, and focused Windows MSVC validation coverage.
 
 ### Changed

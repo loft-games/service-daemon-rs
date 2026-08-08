@@ -27,8 +27,9 @@ This SKILL.md is the entry point. Load the companion files for depth:
 | Async/fallible construction (clients, pools) | async fn | `#[provider] async fn pool() -> Result<Pool, ProviderError>` |
 
 Full syntax for each (templates `Notify`/`Event`/`Queue`/`BQueue`/`Listen`/
-`UnixListen`/`UnixConnect`, the `env`/`capacity`/`eager` attributes) is in
-`reference.md`.
+`UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect`/
+`LocalIpcListen`/`LocalIpcConnect`, the `env`/`capacity`/`eager` attributes) is
+in `reference.md`.
 
 ## The two decisions that matter most
 
