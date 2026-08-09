@@ -164,13 +164,13 @@ impl<P> TriggerContext<P> {
         }
     }
 
-    /// Produces a hierarchical instance identifier (e.g. `svcinst#1:42`).
+    /// Produces a hierarchical instance identifier (`svcinst#UUID:SEQ`).
     ///
     /// This links the handler invocation to a specific trigger service and
     /// a specific sequence number within that service's lifetime.
     ///
-    /// Returns a stack-allocated [`TriggerInstanceId`] (16 bytes, `Copy`) instead
-    /// of a heap-allocated `String`.
+    /// Returns a stack-allocated [`TriggerInstanceId`] instead of a
+    /// heap-allocated `String`.
     pub fn trigger_instance_id(&self) -> TriggerInstanceId {
         TriggerInstanceId::new(self.service_instance_id, self.instance_seq)
     }
@@ -388,11 +388,11 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
 // ---------------------------------------------------------------------------
 
 /// Attempts to retrieve the current service's `ServiceInstanceId` from the task-local
-/// context. Falls back to `ServiceInstanceId(0)` if called outside a service scope.
+/// context. Falls back to the default nil ID if called outside a service scope.
 fn current_service_instance_id() -> ServiceInstanceId {
     context::identity::CURRENT_SERVICE
         .try_with(|identity| identity.service_instance_id)
-        .unwrap_or(ServiceInstanceId::new(0))
+        .unwrap_or_default()
 }
 
 // ===========================================================================
@@ -447,23 +447,31 @@ mod tests {
     fn trigger_context_new_preserves_identity_fields() {
         let message = TriggerMessage {
             message_id: Uuid::now_v7(),
-            source_service_instance_id: ServiceInstanceId::new(7),
+            source_service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(7)),
             timestamp: Utc::now(),
             payload: Arc::new("payload"),
         };
 
-        let ctx = TriggerContext::new(ServiceInstanceId::new(42), 11, 3, message);
+        let ctx = TriggerContext::new(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(42)),
+            11,
+            3,
+            message,
+        );
 
-        assert_eq!(ctx.service_instance_id, ServiceInstanceId::new(42));
+        assert_eq!(
+            ctx.service_instance_id,
+            ServiceInstanceId::new(uuid::Uuid::from_u128(42))
+        );
         assert_eq!(ctx.generation, 11);
         assert_eq!(ctx.instance_seq, 3);
         assert_eq!(
             ctx.message.source_service_instance_id,
-            ServiceInstanceId::new(7)
+            ServiceInstanceId::new(uuid::Uuid::from_u128(7))
         );
         assert_eq!(
             ctx.trigger_instance_id(),
-            TriggerInstanceId::new(ServiceInstanceId::new(42), 3)
+            TriggerInstanceId::new(ServiceInstanceId::new(uuid::Uuid::from_u128(42)), 3)
         );
     }
 }

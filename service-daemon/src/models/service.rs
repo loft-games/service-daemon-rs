@@ -6,6 +6,7 @@ use std::any::TypeId;
 use std::fmt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use uuid::Uuid;
 
 pub type ServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
 
@@ -43,8 +44,7 @@ impl fmt::Display for ServiceEntryId {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceInstanceId: Unique, ID-based identity for runtime indexing.
-// Replaces String-based StatusPlane/Signal keys for safety and performance.
+// ServiceInstanceId: daemon-local runtime identity.
 // ---------------------------------------------------------------------------
 
 /// A unique identifier for a managed service instance within a daemon.
@@ -55,47 +55,42 @@ impl fmt::Display for ServiceEntryId {
 /// for logging / tracing purposes ("weak identity").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
-pub struct ServiceInstanceId(pub(crate) usize);
+pub struct ServiceInstanceId(pub(crate) Uuid);
 
 impl ServiceInstanceId {
     /// Explicitly construct a `ServiceInstanceId`.
-    ///
-    /// In production, auto-start singleton IDs are assigned by `Registry::build()`.
-    /// Future dynamic service instances should allocate fresh daemon-local IDs.
-    /// This constructor exists for testing scenarios where ad-hoc services
-    /// need to be created outside the Registry pipeline.
     #[inline]
-    pub const fn new(id: usize) -> Self {
+    pub const fn new(id: Uuid) -> Self {
         Self(id)
     }
 
-    /// Get the underlying numeric value.
+    /// Generate a fresh UUIDv7-backed service instance ID.
     #[inline]
-    pub const fn value(&self) -> usize {
+    pub fn new_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Get the underlying UUID value.
+    #[inline]
+    pub const fn as_uuid(&self) -> Uuid {
         self.0
     }
 }
 
 impl Default for ServiceInstanceId {
-    /// Returns ServiceInstanceId(0), which is the default for system/background tasks.
+    /// Returns the nil UUID for system/background tasks outside a managed service scope.
     fn default() -> Self {
-        Self(0)
-    }
-}
-
-impl From<ServiceEntryId> for ServiceInstanceId {
-    fn from(entry_id: ServiceEntryId) -> Self {
-        Self(entry_id.0)
+        Self(Uuid::nil())
     }
 }
 
 impl std::str::FromStr for ServiceInstanceId {
-    type Err = std::num::ParseIntError;
+    type Err = uuid::Error;
 
-    /// Parses a ServiceInstanceId from a string like "svcinst#1" or "1".
+    /// Parses a ServiceInstanceId from a string like "svcinst#UUID" or a bare UUID.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let numeric_part = s.strip_prefix("svcinst#").unwrap_or(s);
-        numeric_part.parse::<usize>().map(Self::new)
+        let uuid_part = s.strip_prefix("svcinst#").unwrap_or(s);
+        uuid_part.parse::<Uuid>().map(Self::new)
     }
 }
 
@@ -106,7 +101,7 @@ impl fmt::Display for ServiceInstanceId {
 }
 
 // ---------------------------------------------------------------------------
-// TriggerInstanceId: numeric trigger instance identifier.
+// TriggerInstanceId: trigger invocation identifier.
 // Combines ServiceInstanceId + monotonic sequence for unique instance identification.
 // ---------------------------------------------------------------------------
 
@@ -117,13 +112,13 @@ impl fmt::Display for ServiceInstanceId {
 ///
 /// # Performance
 ///
-/// `TriggerInstanceId` is 16 bytes, stack-allocated, and implements `Copy`. It
+/// `TriggerInstanceId` is stack-allocated and implements `Copy`. It
 /// replaces the previous `format!("{}:{}", service_instance_id, seq)` pattern that
 /// required a heap allocation on every trigger dispatch cycle.
 ///
 /// # Display Format
 ///
-/// Formats as `svcinst#N:SEQ` (e.g. `svcinst#1:42`).
+/// Formats as `svcinst#UUID:SEQ`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
 pub struct TriggerInstanceId {
@@ -146,7 +141,7 @@ impl TriggerInstanceId {
 impl std::str::FromStr for TriggerInstanceId {
     type Err = anyhow::Error;
 
-    /// Parses a `TriggerInstanceId` from a string like "svcinst#1:42".
+    /// Parses a `TriggerInstanceId` from a string like "svcinst#UUID:42".
     /// Support both with and without "svcinst#" prefix on the service component.
     fn from_str(s: &str) -> anyhow::Result<Self> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
@@ -438,6 +433,12 @@ impl Registry {
         self.services.is_empty()
     }
 
+    /// Borrow the materialized service descriptions in this registry.
+    #[must_use]
+    pub fn services(&self) -> &[ServiceDescription] {
+        &self.services
+    }
+
     /// Consume the registry and yield the service descriptions.
     pub(crate) fn into_services(self) -> Vec<ServiceDescription> {
         self.services
@@ -532,7 +533,7 @@ impl RegistryBuilder {
 
             services.push(ServiceDescription {
                 entry_id: ServiceEntryId(idx),
-                instance_id: ServiceInstanceId::from(ServiceEntryId(idx)),
+                instance_id: ServiceInstanceId::new_v7(),
                 entry,
                 cancellation_token: CancellationToken::new(),
             });
@@ -610,8 +611,9 @@ mod tests {
 
         assert_eq!(service.entry_id, ServiceEntryId::new(original_index));
         assert_eq!(
-            service.instance_id,
-            ServiceInstanceId::from(service.entry_id)
+            service.instance_id.as_uuid().get_version_num(),
+            7,
+            "auto-start singleton service instances should receive UUIDv7 IDs"
         );
     }
 }

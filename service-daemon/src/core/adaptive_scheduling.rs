@@ -988,7 +988,9 @@ mod tests {
         service_sleep: ObservationWindow,
     ) -> ServiceDiagnosticsWindow {
         ServiceDiagnosticsWindow {
-            service_instance_id: ServiceInstanceId::new(service_instance_id),
+            service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(
+                service_instance_id as u128,
+            )),
             service_name: "worker",
             current_generation: 1,
             runtime_lane,
@@ -1003,7 +1005,9 @@ mod tests {
         lifecycle: LifecycleWindow,
     ) -> ServiceDiagnosticsWindow {
         ServiceDiagnosticsWindow {
-            service_instance_id: ServiceInstanceId::new(service_instance_id),
+            service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(
+                service_instance_id as u128,
+            )),
             service_name: "worker",
             current_generation: 1,
             runtime_lane,
@@ -1102,7 +1106,7 @@ mod tests {
     fn sampler_computes_service_and_generation_windows() {
         let store = crate::core::diagnostics::DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(7),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(7)),
             "worker",
             1,
             RuntimeLane::Standard,
@@ -1121,10 +1125,9 @@ mod tests {
         handle.record_exit(GenerationExitKind::RecoverableError);
         let window = sampler.sample(store.snapshot());
 
-        let service = window
-            .services
-            .iter()
-            .find(|service| service.service_instance_id == ServiceInstanceId::new(7));
+        let service = window.services.iter().find(|service| {
+            service.service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(7))
+        });
         assert_eq!(
             service.map(|service| service.aggregate.service_sleep.completed),
             Some(1)
@@ -1134,10 +1137,9 @@ mod tests {
             Some(1)
         );
 
-        let generation = window
-            .generations
-            .iter()
-            .find(|generation| generation.service_instance_id == ServiceInstanceId::new(7));
+        let generation = window.generations.iter().find(|generation| {
+            generation.service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(7))
+        });
         assert_eq!(
             generation.map(|generation| generation.aggregate.service_sleep.avg_drift_ms),
             Some(8)
@@ -1245,7 +1247,7 @@ mod tests {
         assert_eq!(
             recommendations[0].target,
             SchedulingRecommendationTarget::Service {
-                service_instance_id: ServiceInstanceId::new(1),
+                service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
                 service_name: "worker",
                 current_generation: 1,
             }

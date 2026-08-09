@@ -24,14 +24,14 @@ use super::failure::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 /// # Span Fields
 ///
 /// - `name`: The trigger service name.
-/// - `trigger_instance_service_instance_id`: Numeric `ServiceInstanceId` value.
+/// - `source_service_instance_id`: Originating `ServiceInstanceId` value.
 /// - `instance_seq`: Monotonic sequence number within the service.
 /// - `message_id`: The globally unique event identifier.
 ///
 /// # Log Output
 ///
 /// ```text
-/// INFO trigger{name="my_trigger" trigger_instance_id=svcinst#1:0 message_id="msg-0"}: Trigger fired
+/// INFO trigger{name="my_trigger" service_instance_id=svcinst#... message_id="msg-0"}: Trigger fired
 /// ```
 pub(super) struct TracingInterceptor;
 
@@ -46,8 +46,8 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
             let span = tracing::info_span!(
                 "trigger",
                 name = %ctx.trigger_name,
-                service_instance_id_num = ctx.service_instance_id.value(),
-                source_service_instance_id = ctx.source_service_instance_id.value(),
+                service_instance_id = %ctx.service_instance_id,
+                source_service_instance_id = %ctx.source_service_instance_id,
                 instance_seq = ctx.instance_seq,
                 message_id = %ctx.message_id,
                 mid_hi = (mid_val >> 64) as u64,

@@ -578,7 +578,7 @@ where
 
 /// Returns the `ServiceInstanceId` of the calling service.
 ///
-/// Falls back to `ServiceInstanceId(0)` if called outside of a managed service scope
+/// Falls back to the default nil ID if called outside of a managed service scope.
 /// (e.g., in a background task spawned via `tokio::spawn` without context propagation).
 pub fn current_service_instance_id() -> ServiceInstanceId {
     CURRENT_SERVICE
@@ -618,7 +618,7 @@ mod tests {
         let resources = DaemonResources::new();
         let expected_scope_id = resources.provider_scope.id();
         let identity = ServiceIdentity::new(
-            ServiceInstanceId::new(17),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(17)),
             "provider_scope",
             CancellationToken::new(),
             CancellationToken::new(),
@@ -645,7 +645,7 @@ mod tests {
     #[tokio::test]
     async fn sleep_records_completed_diagnostics() {
         let store = DiagnosticsStore::new();
-        let service_instance_id = ServiceInstanceId::new(11);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(11));
         let diagnostics = store.register_generation(
             service_instance_id,
             "sleep_completed",
@@ -679,7 +679,7 @@ mod tests {
     #[tokio::test]
     async fn sleep_records_reload_interruption_diagnostics() {
         let store = DiagnosticsStore::new();
-        let service_instance_id = ServiceInstanceId::new(12);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(12));
         let diagnostics = store.register_generation(
             service_instance_id,
             "sleep_reload",

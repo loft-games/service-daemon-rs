@@ -300,7 +300,7 @@ Every log event inside a service or trigger Span is automatically tagged with:
 - **`service_instance_id`**: The `ServiceInstanceId` of the service instance that produced the event.
 - **`source_service_instance_id`**: The `ServiceInstanceId` of the service instance that originally emitted the event, when available.
 - **`message_id`**: The globally unique **UUID v7** (time-ordered) of the event that triggered this handler.
-- **`trigger_instance_id`**: A numeric composite identifier (e.g., `svcinst#1:42`) that uniquely identifies this trigger invocation generation.
+- **`trigger_instance_id`**: A composite identifier (`svcinst#<uuid>:<seq>`) that uniquely identifies this trigger invocation generation.
 
 These IDs are `None` for log events outside a service context (e.g., daemon initialization).
 

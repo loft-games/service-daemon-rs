@@ -816,7 +816,7 @@ mod tests {
         let reload_token = CancellationToken::new();
         reload_token.cancel();
         let identity = context::ServiceIdentity::new(
-            crate::models::ServiceInstanceId::new(700),
+            crate::models::ServiceInstanceId::new(uuid::Uuid::from_u128(700)),
             "reload_provider_phase",
             CancellationToken::new(),
             reload_token,
@@ -842,7 +842,7 @@ mod tests {
     #[tokio::test]
     async fn reload_provider_failure_projects_public_diagnostics_snapshot() {
         let store = Arc::new(crate::core::diagnostics::DiagnosticsStore::new());
-        let service_instance_id = crate::models::ServiceInstanceId::new(701);
+        let service_instance_id = crate::models::ServiceInstanceId::new(uuid::Uuid::from_u128(701));
         let generation_diagnostics = store.register_generation(
             service_instance_id,
             "reload_provider_failure",

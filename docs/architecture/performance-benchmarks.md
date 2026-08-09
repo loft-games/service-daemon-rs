@@ -96,11 +96,11 @@ stores behind pointers (`Arc`, `DashMap` buckets, etc.).
 
 | Type | Stack Size | Role |
 | :--- | ---: | :--- |
-| `BackoffController` | 128 B | Stateful retry engine: `RestartPolicy` (104 B) + current delay + attempt counter |
-| `ServiceIdentity` | 48 B | Task-local handle: `ServiceInstanceId`, `&'static str` name, 2x `CancellationToken`, `Arc<AtomicBool>` handshake flag |
-| `ServiceDescription` | 32 B | Runtime description: `ServiceEntryId` + `ServiceInstanceId` + `&'static ServiceEntry` ref + `CancellationToken` |
+| `BackoffController` | 144 B | Stateful retry engine: `RestartPolicy` (120 B) + current delay + attempt counter |
+| `ServiceIdentity` | 80 B | Task-local handle: `ServiceInstanceId`, `&'static str` name, 2x `CancellationToken`, `Arc<AtomicBool>` handshake flag |
+| `ServiceDescription` | 40 B | Runtime description: `ServiceEntryId` + UUID-backed `ServiceInstanceId` + `&'static ServiceEntry` ref + `CancellationToken` |
 | `ServiceStatus` | 24 B | Lifecycle enum (Initializing, Healthy, Recovering, etc.) |
-| `RestartPolicy` | 104 B | Stateless backoff configuration (7 fields: delays, multiplier, jitter, timeouts) |
+| `RestartPolicy` | 120 B | Stateless backoff configuration (7 fields: delays, multiplier, jitter, timeouts) |
 | `DaemonResources` | 192 B | Shared daemon state: 3x `DashMap` + `Notify` + `DashMap<TypeId, Box<dyn Any>>` |
 | `CancellationToken` | 8 B | Lightweight pointer to shared cancellation state |
 | `Arc<Notify>` | 8 B | Pointer to heap-allocated `Notify` instance (reload signal) |
@@ -114,12 +114,12 @@ allocator metadata, hash bucket overhead, and Arc control blocks.
 
 | Component | Per-Entry Cost | What It Measures |
 | :--- | ---: | :--- |
-| `DashMap<ServiceInstanceId, ServiceStatus>` | ~139 B | StatusPlane: hash bucket metadata + amortized empty slots + `ServiceStatus` value |
-| `DashMap<ServiceInstanceId, Arc<Notify>>` | ~33 B | ReloadSignals: bucket + `Arc` control block (16 B) + `Notify` inner state |
+| `DashMap<ServiceInstanceId, ServiceStatus>` | ~213 B | StatusPlane: hash bucket metadata + amortized empty slots + `ServiceStatus` value |
+| `DashMap<ServiceInstanceId, Arc<Notify>>` | ~45 B | ReloadSignals: bucket + `Arc` control block (16 B) + `Notify` inner state |
 | `CancellationToken::new()` | ~37 B | Shared cancellation state node (x2 per service: description + reload) |
 | `Arc<AtomicBool>::new()` | ~32 B | Handshake flag: `Arc` control block + 1 B payload (below page granularity, estimated) |
-| `tokio::spawn` (idle future) | ~459 B | Future boxing + task header + waker allocation |
-| `HashMap<ServiceInstanceId, JoinHandle>` entry | ~270 B | `running_tasks` map entry (includes JoinHandle bookkeeping) |
+| `tokio::spawn` (idle future) | ~483 B | Future boxing + task header + waker allocation |
+| `HashMap<ServiceInstanceId, JoinHandle>` entry | ~483 B | `running_tasks` map entry (includes JoinHandle bookkeeping) |
 
 > [!NOTE]
 > The `HashMap<ServiceInstanceId, JoinHandle>` measurement includes JoinHandle

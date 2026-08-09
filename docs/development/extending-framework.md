@@ -103,7 +103,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for MyInterceptor {
 
 The framework uses `linkme` for distributed registration, `ServiceEntryId` for static registry positions, and `ServiceInstanceId` for runtime identity.
 
-1. **Identity**: `ServiceEntryId` values come from the selected entry's original `SERVICE_REGISTRY` index. Auto-start singleton services currently map that entry ID to `ServiceInstanceId::from(entry_id)`.
+1. **Identity**: `ServiceEntryId` values come from the selected entry's original `SERVICE_REGISTRY` index. Auto-start singleton services receive fresh UUIDv7-backed `ServiceInstanceId` values when a `Registry` is materialized.
 2. **Context**: Use `current_service_instance_id()` from `service-daemon/src/core/context/api.rs` to retrieve the runtime ID of the running service instance.
 3. **Macro Generation**: Shared logic resides in `service-daemon-macro/src/common.rs`.
     - **`decompose_type`**: This utility is key to the DI system. It recursively inspects AST types to identify wrappers like `Arc`, `RwLock`, and `Mutex`, stripping the outer layers to reach the inner `T`.

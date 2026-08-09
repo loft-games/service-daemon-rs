@@ -52,20 +52,23 @@ async fn shelf_reader_service() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use service_daemon::{MockContext, Registry, ServiceEntryId, ServiceInstanceId};
+    use service_daemon::{MockContext, Registry, ServiceInstanceId};
 
     #[tokio::test]
     async fn simulation_can_seed_and_mutate_shelf() -> anyhow::Result<()> {
-        // Current auto-start singleton instances use the same numeric value as
-        // their static registry entry ID.
-        let shelf_reader_id = ServiceInstanceId::from(ServiceEntryId::new(0));
+        let registry = Registry::builder().with_tag("sim_shelf").build();
+        let shelf_reader_id = registry
+            .services()
+            .iter()
+            .find_map(|service| {
+                (service.name() == "shelf_reader_service").then_some(service.instance_id)
+            })
+            .expect("shelf_reader_service should be selected");
         let (builder, handle) = MockContext::builder()
             .with_shelf::<String>(shelf_reader_id, "config_key", "initial_val".into())
             .build();
 
-        let daemon = builder
-            .with_registry(Registry::builder().with_tag("sim_shelf").build())
-            .build();
+        let daemon = builder.with_registry(registry).build();
 
         let cancel = daemon.cancel_token();
         let daemon_task = tokio::spawn(async move {
@@ -100,7 +103,7 @@ The `SimulationHandle` lets tests inspect and mutate the running sandbox without
 ### Snapshot Inspection
 
 ```rust,ignore
-let service_instance_id = ServiceInstanceId::new(0);
+let service_instance_id = registry.services()[0].instance_id;
 let val: Option<String> = handle.get_shelf(service_instance_id, "key");
 let status = handle.get_status(service_instance_id);
 

@@ -147,7 +147,7 @@ mod tests {
     #[test]
     fn default_body_lane_resolver_returns_declared_scheduling() {
         let resolver = BodyLaneResolver::default();
-        let service_instance_id = ServiceInstanceId::new(9);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(9));
 
         assert_eq!(
             resolver.resolve(service_instance_id, 1, ServiceScheduling::Standard),
@@ -168,7 +168,11 @@ mod tests {
         let resolver = BodyLaneResolver::with_override(|_, _, _| ServiceScheduling::Isolated);
 
         assert_eq!(
-            resolver.resolve(ServiceInstanceId::new(10), 1, ServiceScheduling::Standard),
+            resolver.resolve(
+                ServiceInstanceId::new(uuid::Uuid::from_u128(10)),
+                1,
+                ServiceScheduling::Standard
+            ),
             ServiceScheduling::Isolated
         );
     }

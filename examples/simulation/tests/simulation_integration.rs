@@ -5,22 +5,15 @@
 
 // Import library crate so that `#[service]` registrations participate in linkme.
 use example_simulation as _;
-use service_daemon::{
-    __private::SERVICE_REGISTRY, MockContext, Registry, ServiceEntryId, ServiceInstanceId,
-    ServiceStatus,
-};
+use service_daemon::{MockContext, Registry, ServiceInstanceId, ServiceStatus};
 use std::time::Duration;
 
-fn service_entry_id(name: &str) -> ServiceEntryId {
-    SERVICE_REGISTRY
+fn service_instance_id(registry: &Registry, name: &str) -> ServiceInstanceId {
+    registry
+        .services()
         .iter()
-        .enumerate()
-        .find_map(|(idx, entry)| (entry.name == name).then_some(ServiceEntryId::new(idx)))
-        .expect("service should be registered")
-}
-
-fn singleton_service_instance_id(name: &str) -> ServiceInstanceId {
-    ServiceInstanceId::from(service_entry_id(name))
+        .find_map(|service| (service.name() == name).then_some(service.instance_id))
+        .expect("service should be materialized in registry")
 }
 
 /// E2E: A real `#[service]` reads pre-filled shelf data inside the sandbox.
@@ -35,15 +28,14 @@ async fn test_real_service_reads_pre_filled_shelf() {
     let _ = service_daemon::try_init_logging();
 
     // Build sandbox with pre-filled shelf data.
-    let shelf_reader_id = singleton_service_instance_id("shelf_reader_service");
+    let registry = Registry::builder().with_tag("sim_shelf").build();
+    let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
     let (builder, handle) = MockContext::builder()
         .with_shelf::<String>(shelf_reader_id, "config_key", "hello_from_mock".into())
         .build();
 
     // Override registry to discover ONLY our tagged service
-    let daemon = builder
-        .with_registry(Registry::builder().with_tag("sim_shelf").build())
-        .build();
+    let daemon = builder.with_registry(registry).build();
 
     // Run the daemon for enough time for the service to execute
     daemon
@@ -70,12 +62,11 @@ async fn test_real_service_reads_pre_filled_shelf() {
 async fn test_god_hand_shelf_mutation_with_real_service() {
     let _ = service_daemon::try_init_logging();
 
-    let shelf_reader_id = singleton_service_instance_id("shelf_reader_service");
+    let registry = Registry::builder().with_tag("sim_shelf").build();
+    let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
     let (builder, handle) = MockContext::builder().build();
 
-    let daemon = builder
-        .with_registry(Registry::builder().with_tag("sim_shelf").build())
-        .build();
+    let daemon = builder.with_registry(registry).build();
 
     let cancel = daemon.cancel_token();
 
@@ -116,14 +107,13 @@ async fn test_two_phase_god_hand_with_real_service() {
     let _ = service_daemon::try_init_logging();
 
     // Pre-fill initial config before startup.
-    let shelf_reader_id = singleton_service_instance_id("shelf_reader_service");
+    let registry = Registry::builder().with_tag("sim_shelf").build();
+    let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
     let (builder, handle) = MockContext::builder()
         .with_shelf::<String>(shelf_reader_id, "config_key", "phase1_value".into())
         .build();
 
-    let daemon = builder
-        .with_registry(Registry::builder().with_tag("sim_shelf").build())
-        .build();
+    let daemon = builder.with_registry(registry).build();
 
     let cancel = daemon.cancel_token();
 
@@ -166,12 +156,11 @@ async fn test_two_phase_god_hand_with_real_service() {
 async fn test_god_hand_status_flip_with_real_service() {
     let _ = service_daemon::try_init_logging();
 
-    let status_watcher_id = singleton_service_instance_id("status_watcher_service");
+    let registry = Registry::builder().with_tag("sim_status").build();
+    let status_watcher_id = service_instance_id(&registry, "status_watcher_service");
     let (builder, handle) = MockContext::builder().build();
 
-    let mut daemon = builder
-        .with_registry(Registry::builder().with_tag("sim_status").build())
-        .build();
+    let mut daemon = builder.with_registry(registry).build();
 
     let cancel = daemon.cancel_token();
 

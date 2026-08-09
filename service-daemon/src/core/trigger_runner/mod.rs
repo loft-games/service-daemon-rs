@@ -289,7 +289,7 @@ mod tests {
             .build();
         let runner = TriggerRunner::new(
             "failing_dispatch_trigger",
-            ServiceInstanceId::new(200),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(200)),
             handler,
             restart_policy,
             None,
@@ -297,7 +297,7 @@ mod tests {
 
         let result = __run_service_scope(
             ServiceIdentity::new(
-                ServiceInstanceId::new(200),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(200)),
                 "failing_dispatch_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -334,7 +334,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_instance_id = ServiceInstanceId::new(301);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(301));
         let (sender, receiver) = oneshot::channel::<TriggerPressureSnapshot>();
         let sender = Arc::new(StdMutex::new(Some(sender)));
         let handler_sender = sender.clone();
@@ -408,7 +408,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_instance_id = ServiceInstanceId::new(303);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(303));
         let (sender, receiver) = oneshot::channel::<usize>();
         let sender = Arc::new(StdMutex::new(Some(sender)));
         let first_overlay_accepted = Arc::new(Notify::new());
@@ -499,7 +499,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_instance_id = ServiceInstanceId::new(304);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(304));
         let first_overlay_accepted = Arc::new(Notify::new());
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let handler_overlay_accepted = first_overlay_accepted.clone();
@@ -585,7 +585,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_instance_id = ServiceInstanceId::new(305);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(305));
         let first_overlay_accepted = Arc::new(Notify::new());
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let second_handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -665,7 +665,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_instance_id = ServiceInstanceId::new(302);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(302));
         let handler: TriggerHandler<()> =
             Arc::new(|_ctx| Box::pin(async { Err(anyhow::anyhow!("retry me")) }));
         let restart_policy = RestartPolicy::builder()
@@ -730,7 +730,7 @@ mod tests {
         });
         let runner = TriggerRunner::new(
             "panicking_dispatch_trigger",
-            ServiceInstanceId::new(201),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(201)),
             handler,
             RestartPolicy::for_testing(),
             None,
@@ -738,7 +738,7 @@ mod tests {
 
         let result = __run_service_scope(
             ServiceIdentity::new(
-                ServiceInstanceId::new(201),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(201)),
                 "panicking_dispatch_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -788,7 +788,7 @@ mod tests {
             .build();
         let runner = TriggerRunner::new(
             "shutdown_interrupted_retry_trigger",
-            ServiceInstanceId::new(202),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(202)),
             handler,
             restart_policy,
             None,
@@ -798,7 +798,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new(
-                ServiceInstanceId::new(202),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(202)),
                 "shutdown_interrupted_retry_trigger",
                 cancellation_token,
                 CancellationToken::new(),
@@ -845,7 +845,7 @@ mod tests {
         });
         let runner = TriggerRunner::new(
             "reload_cancels_dispatch_trigger",
-            ServiceInstanceId::new(203),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(203)),
             handler,
             RestartPolicy::for_testing(),
             None,
@@ -855,7 +855,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new(
-                ServiceInstanceId::new(203),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(203)),
                 "reload_cancels_dispatch_trigger",
                 CancellationToken::new(),
                 reload_token,
@@ -911,7 +911,7 @@ mod tests {
             .build();
         let runner = TriggerRunner::new(
             "stop_drains_dispatch_trigger",
-            ServiceInstanceId::new(204),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(204)),
             handler,
             restart_policy,
             None,
@@ -921,7 +921,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new(
-                ServiceInstanceId::new(204),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(204)),
                 "stop_drains_dispatch_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -969,7 +969,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use tokio_util::sync::CancellationToken;
 
-        let service_instance_id = ServiceInstanceId::new(206);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(206));
         let handler_started = Arc::new(Notify::new());
         let release_handler = Arc::new(Notify::new());
         let handler_finished = Arc::new(AtomicBool::new(false));
@@ -1057,7 +1057,9 @@ mod tests {
         let generation = snapshot
             .generations
             .iter()
-            .find(|generation| generation.service_instance_id == ServiceInstanceId::new(206))
+            .find(|generation| {
+                generation.service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(206))
+            })
             .expect("trigger generation diagnostics should be projected");
         let boundary = generation
             .aggregate

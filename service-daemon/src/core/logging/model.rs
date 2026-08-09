@@ -111,7 +111,7 @@ pub struct LogEvent {
     )]
     pub message_id: Option<Uuid>,
     /// The trigger instance identifier, combining `ServiceInstanceId` and sequence
-    /// number. Extracted from numeric fields or native TriggerInstanceId extension.
+    /// number. Extracted from span fields or native TriggerInstanceId extension.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")

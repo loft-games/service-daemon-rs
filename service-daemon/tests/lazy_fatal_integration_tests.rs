@@ -1,6 +1,6 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, ProviderError, ServiceDaemon, ServiceInstanceId, ServiceStatus,
-    provider, service,
+    DiagnosticGenerationExitKind, ProviderError, Registry, ServiceDaemon, ServiceStatus, provider,
+    service,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -89,7 +89,19 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
     LAZY_HEALTHY_STARTED.store(false, Ordering::SeqCst);
     LAZY_HEALTHY_STOPPED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let registry = Registry::builder().build();
+    let healthy_service_id = registry
+        .services()
+        .iter()
+        .find_map(|service| (service.name() == "healthy_service").then_some(service.instance_id))
+        .expect("healthy_service should be materialized");
+    let fatal_service_id = registry
+        .services()
+        .iter()
+        .find_map(|service| (service.name() == "fatal_service").then_some(service.instance_id))
+        .expect("fatal_service should be materialized");
+
+    let mut daemon = ServiceDaemon::builder().with_registry(registry).build();
 
     daemon.run().await;
 
@@ -106,15 +118,12 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
     assert_eq!(
         daemon
             .handle()
-            .get_service_status(&ServiceInstanceId::new(0))
+            .get_service_status(&healthy_service_id)
             .await,
         ServiceStatus::Terminated
     );
     assert_eq!(
-        daemon
-            .handle()
-            .get_service_status(&ServiceInstanceId::new(1))
-            .await,
+        daemon.handle().get_service_status(&fatal_service_id).await,
         ServiceStatus::Terminated
     );
 

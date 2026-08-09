@@ -57,7 +57,7 @@ mod tests {
 
     fn create_test_identity(name: &'static str) -> ServiceIdentity {
         ServiceIdentity::new(
-            ServiceInstanceId::new(0),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
             name,
             CancellationToken::new(),
             CancellationToken::new(),
@@ -100,13 +100,13 @@ mod tests {
     async fn test_shelf_isolated_by_service_instance_id_for_duplicate_names() {
         let resources = create_test_resources();
         let first = ServiceIdentity::new(
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             "duplicate_name",
             CancellationToken::new(),
             CancellationToken::new(),
         );
         let second = ServiceIdentity::new(
-            ServiceInstanceId::new(2),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
             "duplicate_name",
             CancellationToken::new(),
             CancellationToken::new(),
@@ -126,7 +126,7 @@ mod tests {
 
         in_scope(
             ServiceIdentity::new(
-                ServiceInstanceId::new(1),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
                 "duplicate_name",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -145,9 +145,10 @@ mod tests {
         let resources = create_test_resources();
         let identity = create_test_identity("state_service");
 
-        resources
-            .status_plane
-            .insert(ServiceInstanceId::new(0), ServiceStatus::NeedReload);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::NeedReload,
+        );
 
         in_scope(identity, resources, || async {
             assert!(matches!(state(), ServiceStatus::NeedReload));
@@ -160,9 +161,10 @@ mod tests {
         let resources = create_test_resources();
 
         // Start in Initializing
-        resources
-            .status_plane
-            .insert(ServiceInstanceId::new(0), ServiceStatus::Initializing);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
         let identity = create_test_identity("handshake_service");
         let resources_clone = resources.clone();
@@ -171,16 +173,17 @@ mod tests {
             done();
             let status = resources_clone
                 .status_plane
-                .get(&ServiceInstanceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status, Some(ServiceStatus::Healthy));
         })
         .await;
 
         // Now test the descending phase
-        resources
-            .status_plane
-            .insert(ServiceInstanceId::new(0), ServiceStatus::NeedReload);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::NeedReload,
+        );
 
         let identity2 = create_test_identity("handshake_service");
         let resources_clone2 = resources.clone();
@@ -189,7 +192,7 @@ mod tests {
             done();
             let status = resources_clone2
                 .status_plane
-                .get(&ServiceInstanceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status, Some(ServiceStatus::Terminated));
         })
@@ -203,12 +206,14 @@ mod tests {
         let resources_a = create_test_resources();
         let resources_b = create_test_resources();
 
-        resources_a
-            .status_plane
-            .insert(ServiceInstanceId::new(0), ServiceStatus::Healthy);
-        resources_b
-            .status_plane
-            .insert(ServiceInstanceId::new(0), ServiceStatus::Initializing);
+        resources_a.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Healthy,
+        );
+        resources_b.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
         let identity_a = create_test_identity("isolated_svc");
         let identity_b = create_test_identity("isolated_svc");
@@ -224,9 +229,10 @@ mod tests {
     async fn test_is_shutdown_handshake_optimization() {
         // Verify that is_shutdown only performs the handshake once
         let resources = create_test_resources();
-        resources
-            .status_plane
-            .insert(ServiceInstanceId::new(0), ServiceStatus::Initializing);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
         let identity = create_test_identity("opt_svc");
         let resources_clone = resources.clone();
@@ -238,14 +244,15 @@ mod tests {
             // Status should now be Healthy
             let status = resources_clone
                 .status_plane
-                .get(&ServiceInstanceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status, Some(ServiceStatus::Healthy));
 
             // Revert status to Initializing to prove the flag prevents re-handshake
-            resources_clone
-                .status_plane
-                .insert(ServiceInstanceId::new(0), ServiceStatus::Initializing);
+            resources_clone.status_plane.insert(
+                ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+                ServiceStatus::Initializing,
+            );
 
             // Second call should NOT re-handshake (flag is set)
             assert!(!is_shutdown());
@@ -253,7 +260,7 @@ mod tests {
             // Status should remain Initializing because handshake was skipped
             let status2 = resources_clone
                 .status_plane
-                .get(&ServiceInstanceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status2, Some(ServiceStatus::Initializing));
         })
@@ -392,7 +399,7 @@ mod simulation_tests {
     #[test]
     fn test_mock_context_shelf_pre_filling() {
         // Verify that pre-filled shelf data is accessible through the handle.
-        let svc_id = ServiceInstanceId::new(7);
+        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
         let (builder, handle) = MockContext::builder()
             .with_shelf::<i32>(svc_id, "counter", 42)
             .with_shelf::<String>(svc_id, "name", "hello".to_string())
@@ -410,7 +417,7 @@ mod simulation_tests {
 
     #[test]
     fn test_mock_context_status_pre_filling() {
-        let svc_id = ServiceInstanceId::new(1);
+        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
         let (_, handle) = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Healthy)
             .build();
@@ -421,7 +428,7 @@ mod simulation_tests {
     #[test]
     fn test_simulation_handle_dynamic_shelf_update() {
         let (_, handle) = MockContext::builder().build();
-        let svc_id = ServiceInstanceId::new(7);
+        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
 
         assert!(!handle.has_shelf(svc_id, "counter"));
 
@@ -432,7 +439,7 @@ mod simulation_tests {
 
     #[test]
     fn test_simulation_handle_dynamic_status_update() {
-        let svc_id = ServiceInstanceId::new(42);
+        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
         let (_, handle) = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Initializing)
             .build();
@@ -448,24 +455,33 @@ mod simulation_tests {
     fn test_mock_context_isolation() {
         // Two MockContexts should have completely separate resources.
         let (_, handle_a) = MockContext::builder()
-            .with_status(ServiceInstanceId::new(1), ServiceStatus::Healthy)
+            .with_status(
+                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+                ServiceStatus::Healthy,
+            )
             .build();
         let (_, handle_b) = MockContext::builder()
-            .with_status(ServiceInstanceId::new(1), ServiceStatus::Initializing)
+            .with_status(
+                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+                ServiceStatus::Initializing,
+            )
             .build();
 
         assert_eq!(
-            handle_a.get_status(ServiceInstanceId::new(1)),
+            handle_a.get_status(ServiceInstanceId::new(uuid::Uuid::from_u128(1))),
             Some(ServiceStatus::Healthy)
         );
         assert_eq!(
-            handle_b.get_status(ServiceInstanceId::new(1)),
+            handle_b.get_status(ServiceInstanceId::new(uuid::Uuid::from_u128(1))),
             Some(ServiceStatus::Initializing)
         );
 
-        handle_a.set_status(ServiceInstanceId::new(1), ServiceStatus::Terminated);
+        handle_a.set_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            ServiceStatus::Terminated,
+        );
         assert_eq!(
-            handle_b.get_status(ServiceInstanceId::new(1)),
+            handle_b.get_status(ServiceInstanceId::new(uuid::Uuid::from_u128(1))),
             Some(ServiceStatus::Initializing)
         );
     }

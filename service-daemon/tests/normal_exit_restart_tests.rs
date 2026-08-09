@@ -1,6 +1,5 @@
 use service_daemon::{
-    DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceInstanceId,
-    ServiceStatus, service,
+    DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceStatus, service,
 };
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -29,12 +28,19 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
         .jitter_factor(0.0)
         .build();
 
+    let registry = Registry::builder()
+        .with_tag("__test_normal_exit_restart__")
+        .build();
+    let service_instance_id = registry
+        .services()
+        .iter()
+        .find_map(|service| {
+            (service.name() == "normal_exit_service").then_some(service.instance_id)
+        })
+        .expect("normal_exit_service should be materialized");
+
     let mut daemon = ServiceDaemon::builder()
-        .with_registry(
-            Registry::builder()
-                .with_tag("__test_normal_exit_restart__")
-                .build(),
-        )
+        .with_registry(registry)
         .with_restart_policy(policy)
         .build();
 
@@ -69,7 +75,7 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
     assert_eq!(
         daemon
             .handle()
-            .get_service_status(&ServiceInstanceId::new(0))
+            .get_service_status(&service_instance_id)
             .await,
         ServiceStatus::Terminated
     );

@@ -34,11 +34,16 @@ use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+use uuid::Uuid;
 
 use service_daemon::{
     BackoffController, RestartPolicy, ServiceDaemon, ServiceEntryId, ServiceInstanceId,
     ServiceScheduling, ServiceStatus,
 };
+
+fn service_instance_id(index: usize) -> ServiceInstanceId {
+    ServiceInstanceId::new(Uuid::from_u128(index as u128))
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -341,7 +346,7 @@ fn measure_dashmap_status_plane() -> Option<f64> {
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            map.insert(ServiceInstanceId::new(i), ServiceStatus::Healthy);
+            map.insert(service_instance_id(i), ServiceStatus::Healthy);
         }
         std::hint::black_box(&map);
     })?;
@@ -355,10 +360,7 @@ fn measure_dashmap_reload_signals() -> Option<f64> {
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            map.insert(
-                ServiceInstanceId::new(i),
-                Arc::new(tokio::sync::Notify::new()),
-            );
+            map.insert(service_instance_id(i), Arc::new(tokio::sync::Notify::new()));
         }
         std::hint::black_box(&map);
     })?;
@@ -391,7 +393,7 @@ fn measure_supervisor_heap_box() -> Option<f64> {
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
             boxes.push(Box::new(MockSupervisor {
-                service_instance_id: ServiceInstanceId::new(i),
+                service_instance_id: service_instance_id(i),
                 name: "bench",
                 run: |_| Box::pin(async { Ok(()) }),
                 watcher: None,
@@ -470,7 +472,7 @@ async fn measure_hashmap_join_handles() -> Option<f64> {
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        map.insert(ServiceInstanceId::new(i), handle);
+        map.insert(service_instance_id(i), handle);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     let after = read_rss_bytes()?;

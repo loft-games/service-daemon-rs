@@ -12,7 +12,7 @@ Each event carries the fields needed to identify where it came from and which ha
    - **service_instance_id** (`ServiceInstanceId`): the trigger service instance currently handling the event.
    - **instance_seq** (`u64`): a monotonic sequence number for the current trigger invocation.
 
-Together, `service_instance_id` and `instance_seq` form the **TriggerInstanceId**, a compact numeric identity for one trigger invocation.
+Together, `service_instance_id` and `instance_seq` form the **TriggerInstanceId**, a runtime identity for one trigger invocation.
 
 ## 2. Propagation
 

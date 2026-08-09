@@ -271,10 +271,11 @@ mod tests {
 
     #[test]
     fn render_includes_service_instance_id_when_present() {
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(123));
         let event = make_event(
             LogLevel::Info,
             "msg",
-            Some(ServiceInstanceId::new(123)),
+            Some(service_instance_id),
             None,
             None,
             None,
@@ -282,7 +283,7 @@ mod tests {
         );
         let output = render_to_string(&event);
         assert!(
-            output.contains("service_instance_id=svcinst#123"),
+            output.contains(&format!("service_instance_id={service_instance_id}")),
             "output should contain service_instance_id, got: {}",
             output
         );
@@ -290,12 +291,14 @@ mod tests {
 
     #[test]
     fn render_includes_all_ids_when_present() {
-        let test_iid = TriggerInstanceId::new(ServiceInstanceId::new(3), 0);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
+        let trigger_service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(3));
+        let test_iid = TriggerInstanceId::new(trigger_service_instance_id, 0);
         let msg_id = Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
         let event = make_event(
             LogLevel::Info,
             "triggered",
-            Some(ServiceInstanceId::new(1)),
+            Some(service_instance_id),
             None,
             Some(msg_id),
             Some(test_iid),
@@ -303,7 +306,7 @@ mod tests {
         );
         let output = render_to_string(&event);
         assert!(
-            output.contains("service_instance_id=svcinst#1"),
+            output.contains(&format!("service_instance_id={service_instance_id}")),
             "missing service_instance_id"
         );
         assert!(
@@ -311,7 +314,7 @@ mod tests {
             "missing message_id"
         );
         assert!(
-            output.contains("trigger_instance_id=svcinst#3:0"),
+            output.contains(&format!("trigger_instance_id={test_iid}")),
             "missing trigger_instance_id, got: {}",
             output
         );
@@ -387,8 +390,11 @@ mod tests {
 
     #[test]
     fn daemon_layer_captures_service_instance_id_from_span() {
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
+        let service_instance_id_field = service_instance_id.to_string();
         let events = collect_events_with_daemon_layer(|| {
-            let span = tracing::info_span!("service", service_instance_id = "svcinst#42",);
+            let span =
+                tracing::info_span!("service", service_instance_id = service_instance_id_field);
             let _enter = span.enter();
             tracing::info!("svc_id_test_marker");
         });
@@ -400,7 +406,7 @@ mod tests {
 
         assert_eq!(
             event.service_instance_id,
-            Some(ServiceInstanceId::new(42)),
+            Some(service_instance_id),
             "service_instance_id should be extracted from Span"
         );
     }
@@ -409,16 +415,19 @@ mod tests {
     fn daemon_layer_captures_message_id_from_nested_span() {
         let msg_id_str = "0195e342-8874-7065-a86d-3e6a457b0195";
         let msg_id = Uuid::parse_str(msg_id_str).unwrap();
+        let outer_service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1)).to_string();
+        let trigger_service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(2));
+        let trigger_service_id_field = trigger_service_id.to_string();
 
         let events = collect_events_with_daemon_layer(|| {
-            let service_span = tracing::info_span!("service", service_instance_id = "svcinst#1",);
+            let service_span =
+                tracing::info_span!("service", service_instance_id = outer_service_id);
             let _svc_enter = service_span.enter();
 
             let trigger_span = tracing::info_span!(
                 "trigger",
-                service_instance_id = "svcinst#2",
+                service_instance_id = trigger_service_id_field,
                 message_id = msg_id_str,
-                trigger_instance_service_instance_id = 3u64,
                 instance_seq = 7u64,
             );
             let _trig_enter = trigger_span.enter();
@@ -432,7 +441,7 @@ mod tests {
 
         assert_eq!(
             event.service_instance_id,
-            Some(ServiceInstanceId::new(2)),
+            Some(trigger_service_id),
             "service_instance_id should come from innermost span"
         );
         assert_eq!(
@@ -440,11 +449,11 @@ mod tests {
             Some(msg_id),
             "message_id should be extracted from trigger span"
         );
-        let expected_iid = TriggerInstanceId::new(ServiceInstanceId::new(3), 7);
+        let expected_iid = TriggerInstanceId::new(trigger_service_id, 7);
         assert_eq!(
             event.trigger_instance_id,
             Some(expected_iid),
-            "trigger_instance_id should be reconstructed from numeric fields"
+            "trigger_instance_id should be reconstructed from span fields"
         );
     }
 

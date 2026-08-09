@@ -458,7 +458,7 @@ impl TriggerPolicyOverlayStore {
     ) {
         info!(
             event_kind = "trigger_policy_overlay_accepted",
-            service_instance_id = service_instance_id.value(),
+            service_instance_id = %service_instance_id,
             generation,
             reason = overlay.reason(),
             ttl_ms = Self::duration_ms(overlay.ttl()),
@@ -480,7 +480,7 @@ impl TriggerPolicyOverlayStore {
     ) {
         warn!(
             event_kind = "trigger_policy_overlay_rejected",
-            service_instance_id = service_instance_id.value(),
+            service_instance_id = %service_instance_id,
             generation,
             error_kind = error.kind(),
             error = %error,
@@ -518,7 +518,7 @@ impl TriggerPolicyOverlayStore {
     ) {
         info!(
             event_kind = "trigger_policy_overlay_cleared",
-            service_instance_id = service_instance_id.value(),
+            service_instance_id = %service_instance_id,
             generation,
             clear_source,
             clear_reason,
@@ -555,7 +555,7 @@ impl TriggerPolicyOverlayStore {
     ) {
         info!(
             event_kind = "trigger_policy_overlay_expired",
-            service_instance_id = service_instance_id.value(),
+            service_instance_id = %service_instance_id,
             generation,
             clear_source = "ttl_expired",
             reason = overlay.reason(),
@@ -689,7 +689,7 @@ mod tests {
         event_kind: &str,
         service_instance_id: ServiceInstanceId,
     ) -> &'a BTreeMap<String, String> {
-        let expected_service_id = service_instance_id.value().to_string();
+        let expected_service_id = service_instance_id.to_string();
         events
             .iter()
             .find(|event| {
@@ -724,7 +724,7 @@ mod tests {
 
     #[test]
     fn overlay_rejects_concurrency_above_base_max() {
-        let service_instance_id = ServiceInstanceId::new(7);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(ScalingPolicy::builder().max_concurrency(2).build()),
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn accepted_overlay_audit_includes_policy_fields() {
-        let service_instance_id = ServiceInstanceId::new(701);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(701));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(ScalingPolicy::builder().max_concurrency(4).build()),
@@ -771,9 +771,10 @@ mod tests {
             "trigger_policy_overlay_accepted",
             service_instance_id,
         );
+        let expected_service_instance_id = service_instance_id.to_string();
         assert_eq!(
             event.get("service_instance_id").map(String::as_str),
-            Some("701")
+            Some(expected_service_instance_id.as_str())
         );
         assert_eq!(event.get("generation").map(String::as_str), Some("9"));
         assert_eq!(
@@ -805,7 +806,7 @@ mod tests {
 
     #[test]
     fn rejected_overlay_audit_includes_context_unavailable_error_kind() {
-        let service_instance_id = ServiceInstanceId::new(702);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(702));
         let overlay = TriggerPolicyOverlay::builder("not registered", Duration::from_secs(1))
             .concurrency_limit(1)
             .build()
@@ -843,7 +844,7 @@ mod tests {
 
     #[test]
     fn rejected_overlay_audit_includes_bounds_fields() {
-        let service_instance_id = ServiceInstanceId::new(703);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(703));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(ScalingPolicy::builder().max_concurrency(2).build()),
@@ -885,7 +886,7 @@ mod tests {
 
     #[test]
     fn clear_overlay_audit_distinguishes_present_and_empty_manual_clear() {
-        let service_instance_id = ServiceInstanceId::new(704);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(704));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -952,7 +953,7 @@ mod tests {
 
     #[tokio::test]
     async fn overlay_expires_back_to_initial_concurrency() {
-        let service_instance_id = ServiceInstanceId::new(8);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(8));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -985,7 +986,7 @@ mod tests {
 
     #[test]
     fn ttl_expiry_audit_records_restore() {
-        let service_instance_id = ServiceInstanceId::new(705);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(705));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1041,7 +1042,7 @@ mod tests {
 
     #[test]
     fn generation_cleanup_audit_records_restore_and_removal() {
-        let service_instance_id = ServiceInstanceId::new(706);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(706));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1093,7 +1094,7 @@ mod tests {
     #[test]
     fn no_active_concurrency_overlay_preserves_scaling_fallback() {
         let store = TriggerPolicyOverlayStore::default();
-        let service_instance_id = ServiceInstanceId::new(10);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(10));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1125,7 +1126,7 @@ mod tests {
     #[test]
     fn non_concurrency_overlay_does_not_reset_scaled_limit() {
         let store = TriggerPolicyOverlayStore::default();
-        let service_instance_id = ServiceInstanceId::new(11);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(11));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1162,7 +1163,7 @@ mod tests {
 
     #[test]
     fn request_overlay_records_desired_state_until_reconcile() {
-        let service_instance_id = ServiceInstanceId::new(707);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(707));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1199,7 +1200,7 @@ mod tests {
 
     #[test]
     fn clear_overlay_restores_base_on_next_reconcile() {
-        let service_instance_id = ServiceInstanceId::new(708);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(708));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1238,7 +1239,7 @@ mod tests {
 
     #[test]
     fn reconcile_does_not_revoke_in_flight_dispatches_below_target() {
-        let service_instance_id = ServiceInstanceId::new(709);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(709));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1278,7 +1279,7 @@ mod tests {
 
     #[test]
     fn concurrent_requests_converge_without_permit_counter_split() {
-        let service_instance_id = ServiceInstanceId::new(710);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(710));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1326,7 +1327,7 @@ mod tests {
     #[test]
     fn clearing_overlay_requires_reason() {
         let store = TriggerPolicyOverlayStore::default();
-        let service_instance_id = ServiceInstanceId::new(9);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(9));
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: None,

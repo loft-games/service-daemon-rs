@@ -560,7 +560,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_no_scaling",
-            ServiceInstanceId::new(99),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(99)),
             handler,
             RestartPolicy::default(),
             None, // no scaling
@@ -583,7 +583,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_with_scaling",
-            ServiceInstanceId::new(100),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(100)),
             handler,
             RestartPolicy::default(),
             Some(sp),
@@ -604,7 +604,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_default_sp",
-            ServiceInstanceId::new(101),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(101)),
             handler,
             RestartPolicy::default(),
             Some(sp),
@@ -633,7 +633,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_builder_sp",
-            ServiceInstanceId::new(102),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(102)),
             handler,
             RestartPolicy::default(),
             Some(sp),
@@ -652,7 +652,7 @@ mod tests {
         let handler: TriggerHandler<()> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "scale_monitor_trigger",
-            ServiceInstanceId::new(205),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(205)),
             handler,
             RestartPolicy::for_testing(),
             Some(ScalingPolicy::default()),

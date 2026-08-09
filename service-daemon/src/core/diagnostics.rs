@@ -1018,7 +1018,7 @@ mod tests {
     fn service_sleep_observation_updates_generation_service_and_lane() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(7),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(7)),
             "worker",
             3,
             RuntimeLane::HighPriority,
@@ -1038,7 +1038,9 @@ mod tests {
         assert_eq!(generation.aggregate.service_sleep.total_drift_ms, 5);
         assert_eq!(generation.aggregate.service_sleep.max_drift_ms, 5);
 
-        let service = store.service_snapshot(ServiceInstanceId::new(7)).unwrap();
+        let service = store
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(7)))
+            .unwrap();
         assert_eq!(service.current_generation, 3);
         assert_eq!(service.runtime_lane, RuntimeLane::HighPriority);
         assert_eq!(service.aggregate.service_sleep.completed, 1);
@@ -1052,7 +1054,7 @@ mod tests {
     fn interrupted_sleep_does_not_add_drift() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             "reloading",
             1,
             RuntimeLane::Standard,
@@ -1077,7 +1079,7 @@ mod tests {
     fn lifecycle_classification_updates_counters() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(2),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
             "isolated",
             9,
             RuntimeLane::Isolated,
@@ -1115,7 +1117,7 @@ mod tests {
     #[test]
     fn trigger_dispatch_recoverable_exit_updates_existing_lifecycle_counters() {
         let store = DiagnosticsStore::new();
-        let service_instance_id = ServiceInstanceId::new(22);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(22));
         let handle = store.register_generation(
             service_instance_id,
             "email_trigger",
@@ -1165,7 +1167,7 @@ mod tests {
     #[test]
     fn trigger_dispatch_panic_exit_updates_panic_counter_and_last_exit_kind() {
         let store = DiagnosticsStore::new();
-        let service_instance_id = ServiceInstanceId::new(23);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(23));
         let handle = store.register_generation(
             service_instance_id,
             "panic_trigger",
@@ -1215,7 +1217,7 @@ mod tests {
     #[test]
     fn immediate_restart_decision_updates_aggregates_without_backoff() {
         let store = DiagnosticsStore::new();
-        let service_instance_id = ServiceInstanceId::new(24);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(24));
         let handle = store.register_generation(
             service_instance_id,
             "clean_exit",
@@ -1262,7 +1264,7 @@ mod tests {
 
         for generation in 1..=1030 {
             let handle = store.register_generation(
-                ServiceInstanceId::new(5),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(5)),
                 "crashing",
                 generation,
                 RuntimeLane::Standard,
@@ -1278,10 +1280,14 @@ mod tests {
         let retained_generations: Vec<_> = snapshot
             .generations
             .iter()
-            .filter(|generation| generation.service_instance_id == ServiceInstanceId::new(5))
+            .filter(|generation| {
+                generation.service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(5))
+            })
             .map(|generation| generation.generation)
             .collect();
-        let service = store.service_snapshot(ServiceInstanceId::new(5)).unwrap();
+        let service = store
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(5)))
+            .unwrap();
         let lane = store.lane_snapshot(RuntimeLane::Standard);
 
         assert_eq!(retained_generations.len(), 1024);
@@ -1297,7 +1303,7 @@ mod tests {
 
         for generation in 1..=1030 {
             let handle = store.register_generation(
-                ServiceInstanceId::new(5),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(5)),
                 "crashing",
                 generation,
                 RuntimeLane::Standard,
@@ -1318,7 +1324,7 @@ mod tests {
 
         for generation in 1..=3 {
             let handle = store.register_generation(
-                ServiceInstanceId::new(6),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(6)),
                 "stable",
                 generation,
                 RuntimeLane::HighPriority,
@@ -1335,13 +1341,17 @@ mod tests {
         let crashing_generations: Vec<_> = snapshot
             .generations
             .iter()
-            .filter(|generation| generation.service_instance_id == ServiceInstanceId::new(5))
+            .filter(|generation| {
+                generation.service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(5))
+            })
             .map(|generation| generation.generation)
             .collect();
         let stable_generations: Vec<_> = snapshot
             .generations
             .iter()
-            .filter(|generation| generation.service_instance_id == ServiceInstanceId::new(6))
+            .filter(|generation| {
+                generation.service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(6))
+            })
             .map(|generation| generation.generation)
             .collect();
 
@@ -1351,21 +1361,23 @@ mod tests {
         assert_eq!(stable_generations, vec![1, 2, 3]);
         assert!(
             store
-                .generation_snapshot(ServiceInstanceId::new(5), 1)
+                .generation_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(5)), 1)
                 .is_none()
         );
         assert!(
             store
-                .generation_snapshot(ServiceInstanceId::new(5), 7)
+                .generation_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(5)), 7)
                 .is_some()
         );
         assert!(
             store
-                .generation_snapshot(ServiceInstanceId::new(6), 1)
+                .generation_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(6)), 1)
                 .is_some()
         );
 
-        let crashing_service = store.service_snapshot(ServiceInstanceId::new(5)).unwrap();
+        let crashing_service = store
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(5)))
+            .unwrap();
         assert_eq!(crashing_service.current_generation, 1030);
         assert_eq!(crashing_service.aggregate.service_sleep.completed, 1030);
         assert_eq!(crashing_service.aggregate.lifecycle.panic, 1030);
@@ -1375,7 +1387,9 @@ mod tests {
             Some(RestartDecisionKind::BackoffPanic)
         );
 
-        let stable_service = store.service_snapshot(ServiceInstanceId::new(6)).unwrap();
+        let stable_service = store
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(6)))
+            .unwrap();
         assert_eq!(stable_service.current_generation, 3);
         assert_eq!(stable_service.aggregate.service_sleep.completed, 3);
         assert_eq!(stable_service.aggregate.lifecycle.normal_exit, 3);
@@ -1419,7 +1433,7 @@ mod tests {
     fn public_snapshot_distills_internal_diagnostics() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(4),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(4)),
             "priority",
             2,
             RuntimeLane::HighPriority,
@@ -1445,7 +1459,7 @@ mod tests {
         assert_eq!(snapshot.generations.len(), 1);
         assert_eq!(
             snapshot.services[0].service_instance_id,
-            ServiceInstanceId::new(4)
+            ServiceInstanceId::new(uuid::Uuid::from_u128(4))
         );
         assert_eq!(
             snapshot.services[0].declared_scheduling,
@@ -1495,7 +1509,7 @@ mod tests {
     fn public_snapshot_projects_shutdown_boundary_diagnostics() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(15),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(15)),
             "shutdown",
             1,
             RuntimeLane::Isolated,
@@ -1574,7 +1588,7 @@ mod tests {
     fn public_snapshot_labels_standard_service_local_wake_delay() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(10),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(10)),
             "standard",
             1,
             RuntimeLane::Standard,
@@ -1602,7 +1616,7 @@ mod tests {
     fn public_snapshot_labels_standard_service_impacted_by_lane_pressure() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(11),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(11)),
             "standard",
             1,
             RuntimeLane::Standard,
@@ -1631,7 +1645,7 @@ mod tests {
     fn public_snapshot_lifecycle_instability_takes_precedence_for_standard_service() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(12),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(12)),
             "standard",
             1,
             RuntimeLane::Standard,
@@ -1671,7 +1685,7 @@ mod tests {
     fn public_snapshot_does_not_apply_standard_labels_to_high_priority_service() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(13),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(13)),
             "priority",
             1,
             RuntimeLane::HighPriority,
@@ -1693,7 +1707,7 @@ mod tests {
     fn public_snapshot_conversion_does_not_mutate_internal_diagnostics() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(14),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(14)),
             "standard",
             1,
             RuntimeLane::Standard,
@@ -1732,7 +1746,7 @@ mod tests {
     async fn generation_runtime_probe_records_cancellation() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
-            ServiceInstanceId::new(3),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(3)),
             "isolated",
             1,
             RuntimeLane::Isolated,

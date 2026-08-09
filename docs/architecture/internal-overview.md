@@ -24,7 +24,7 @@ Both standard services and event-driven triggers are collected into a `SERVICE_R
 3. **Module reachability**: Any module included in the compilation tree via `mod` has its services and providers registered. No manual list maintenance is required.
 
 ### Registry identity
-Each selected entry receives a `ServiceEntryId` from its original `SERVICE_REGISTRY` index. The daemon then materializes an auto-start singleton with `ServiceInstanceId::from(entry_id)`, and that runtime instance ID is used as the primary key in the Status Plane, Shelf, reload signals, runtime facts, diagnostics, and trigger routing.
+Each selected entry receives a `ServiceEntryId` from its original `SERVICE_REGISTRY` index. The daemon then materializes an auto-start singleton with a fresh UUIDv7-backed `ServiceInstanceId`, and that runtime instance ID is used as the primary key in the Status Plane, Shelf, reload signals, runtime facts, diagnostics, and trigger routing. `ServiceEntryId` identifies the static registry entry; it cannot be converted into a `ServiceInstanceId`.
 
 ## 2. Decentralized Dependency Injection
 
@@ -161,11 +161,11 @@ The main internal modules are:
 - **`core/logging/`**: Logging and diagnostic event pipeline.
   - `mod.rs`: Public logging facade, subscriber initialization, and re-exports.
   - `model.rs`: Log event model, broadcast queue, and batch-size configuration.
-  - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUID v7 Message ID, numeric service instance ID, and trigger instance ID) for asynchronous tracing.
+  - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUIDv7 message IDs, UUID-backed service instance IDs, and trigger instance IDs) for asynchronous tracing.
   - `render.rs`: Console and feature-gated JSON rendering.
   - `services.rs`: Console log drain service.
   - `file.rs`: Feature-gated file logging configuration and drain service.
-  - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID and numeric fields instead of heap-allocated strings.
+  - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID-backed service instance fields and numeric sequence fields instead of heap-allocated composite strings.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
 - **`core/diagnostics.rs`**: Internal observation store for generation, service, and lane aggregates. Public APIs receive only distilled read-only snapshots.
 - **`core/trigger_runner/`**: Event loop driver and interceptor pipeline.

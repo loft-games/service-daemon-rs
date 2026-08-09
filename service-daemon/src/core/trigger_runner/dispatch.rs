@@ -282,7 +282,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         }
                         warn!(
                             trigger = %failure.trigger_name(),
-                            service_instance_id = failure.service_instance_id().value(),
+                            service_instance_id = %failure.service_instance_id(),
                             instance_seq = ?failure.instance_seq(),
                             message_id = ?failure.message_id(),
                             trigger_failure_kind = %failure.kind().as_str(),
@@ -306,7 +306,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         }
                         warn!(
                             trigger = %trigger_name,
-                            service_instance_id = service_instance_id.value(),
+                            service_instance_id = %service_instance_id,
                             instance_seq,
                             message_id = %message_id,
                             trigger_failure_kind = %failure.kind().as_str(),
@@ -335,7 +335,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     }
                     warn!(
                         trigger = %trigger_name,
-                        service_instance_id = service_instance_id.value(),
+                        service_instance_id = %service_instance_id,
                         instance_seq,
                         message_id = %message_id,
                         trigger_failure_kind = %failure.kind().as_str(),

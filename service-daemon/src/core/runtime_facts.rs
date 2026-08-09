@@ -476,7 +476,7 @@ mod tests {
         let entry_id = ServiceEntryId::new(id);
         ServiceDescription {
             entry_id,
-            instance_id: ServiceInstanceId::from(entry_id),
+            instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128)),
             entry,
             cancellation_token: CancellationToken::new(),
         }
@@ -498,7 +498,10 @@ mod tests {
                 .iter()
                 .map(|snapshot| snapshot.service_instance_id)
                 .collect::<Vec<_>>(),
-            vec![ServiceInstanceId::new(1), ServiceInstanceId::new(2)]
+            vec![
+                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(2))
+            ]
         );
     }
 
@@ -511,12 +514,12 @@ mod tests {
         ];
         store.register_services(&services);
         store.record_service_status(
-            ServiceInstanceId::new(2),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
             &ServiceStatus::Recovering("boom".into()),
         );
 
         let readiness = store.readiness_snapshot(|service_instance_id| {
-            if service_instance_id == ServiceInstanceId::new(1) {
+            if service_instance_id == ServiceInstanceId::new(uuid::Uuid::from_u128(1)) {
                 ServiceStatus::Healthy
             } else {
                 ServiceStatus::Recovering("boom".into())
@@ -535,12 +538,24 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceInstanceId::new(1), 3, &ServiceStatus::Initializing);
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
-        store.record_service_restart(ServiceInstanceId::new(1), Some(Duration::from_millis(25)));
+        store.record_service_started(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            3,
+            &ServiceStatus::Initializing,
+        );
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::Healthy,
+        );
+        store.record_service_restart(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            Some(Duration::from_millis(25)),
+        );
 
         let snapshot = store
-            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::Healthy)
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(1)), |_| {
+                ServiceStatus::Healthy
+            })
             .expect("registered service should have a snapshot");
         assert_eq!(snapshot.generation, 3);
         assert_eq!(snapshot.restart_count, 1);
@@ -555,15 +570,22 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceInstanceId::new(1), 1, &ServiceStatus::Initializing);
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
+        store.record_service_started(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            1,
+            &ServiceStatus::Initializing,
+        );
         store.record_service_status(
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::Healthy,
+        );
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             &ServiceStatus::Recovering("retryable failure".into()),
         );
 
         let snapshot = store
-            .service_snapshot(ServiceInstanceId::new(1), |_| {
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(1)), |_| {
                 ServiceStatus::Recovering("retryable failure".into())
             })
             .expect("registered service should have a snapshot");
@@ -578,21 +600,41 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceInstanceId::new(1), 1, &ServiceStatus::Initializing);
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::ShuttingDown);
+        store.record_service_started(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            1,
+            &ServiceStatus::Initializing,
+        );
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::Healthy,
+        );
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::ShuttingDown,
+        );
 
         let shutting_down = store
-            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::ShuttingDown)
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(1)), |_| {
+                ServiceStatus::ShuttingDown
+            })
             .expect("registered service should have a shutdown snapshot");
         assert_eq!(shutting_down.healthy_since, None);
         assert!(shutting_down.last_stopped_at.is_some());
 
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Terminated);
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::Healthy,
+        );
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::Terminated,
+        );
 
         let terminated = store
-            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::Terminated)
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(1)), |_| {
+                ServiceStatus::Terminated
+            })
             .expect("registered service should have a terminated snapshot");
         assert_eq!(terminated.healthy_since, None);
         assert!(terminated.last_stopped_at.is_some());
@@ -605,23 +647,35 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceInstanceId::new(1), 1, &ServiceStatus::Initializing);
-        store.record_service_restart(ServiceInstanceId::new(1), Some(Duration::from_millis(50)));
+        store.record_service_started(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            1,
+            &ServiceStatus::Initializing,
+        );
+        store.record_service_restart(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            Some(Duration::from_millis(50)),
+        );
         store.record_service_status(
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             &ServiceStatus::Recovering("boom".into()),
         );
 
         let recovering = store
-            .service_snapshot(ServiceInstanceId::new(1), |_| {
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(1)), |_| {
                 ServiceStatus::Recovering("boom".into())
             })
             .expect("registered service should have a recovering snapshot");
         assert_eq!(recovering.current_backoff, Some(Duration::from_millis(50)));
 
-        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Terminated);
+        store.record_service_status(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            &ServiceStatus::Terminated,
+        );
         let terminated = store
-            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::Terminated)
+            .service_snapshot(ServiceInstanceId::new(uuid::Uuid::from_u128(1)), |_| {
+                ServiceStatus::Terminated
+            })
             .expect("registered service should have a terminated snapshot");
         assert_eq!(terminated.current_backoff, None);
     }

@@ -1181,7 +1181,8 @@ mod tests {
         ];
 
         for (index, declared_scheduling) in declared_lanes.into_iter().enumerate() {
-            let service_instance_id = ServiceInstanceId::new(200 + index);
+            let service_instance_id =
+                ServiceInstanceId::new(uuid::Uuid::from_u128((200 + index) as u128));
             let diagnostics = Arc::new(DiagnosticsStore::new());
             let mut supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
                 service_instance_id,
@@ -1227,7 +1228,7 @@ mod tests {
         NO_LIVE_REMAP_THREADS.lock().await.clear();
         NO_LIVE_REMAP_RECORD_AGAIN.store(false, Ordering::SeqCst);
         let should_isolate_next_generation = Arc::new(AtomicBool::new(false));
-        let service_instance_id = ServiceInstanceId::new(210);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(210));
         let resources = DaemonResources::new();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
@@ -1273,7 +1274,7 @@ mod tests {
     #[tokio::test]
     async fn standard_to_isolated_remap_applies_only_after_reload_boundary() {
         STANDARD_TO_ISOLATED_THREADS.lock().await.clear();
-        let service_instance_id = ServiceInstanceId::new(220);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(220));
         let resources = DaemonResources::new();
         let reload_signal = resources
             .reload_signals
@@ -1332,7 +1333,7 @@ mod tests {
     #[tokio::test]
     async fn isolated_to_standard_remap_applies_only_after_reload_boundary() {
         ISOLATED_TO_STANDARD_THREADS.lock().await.clear();
-        let service_instance_id = ServiceInstanceId::new(230);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(230));
         let resources = DaemonResources::new();
         let reload_signal = resources
             .reload_signals
@@ -1391,7 +1392,7 @@ mod tests {
     #[tokio::test]
     async fn body_bridge_returns_scoped_generation_outcome() {
         let store = Arc::new(DiagnosticsStore::new());
-        let service_instance_id = ServiceInstanceId::new(42);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
         let parts = ServiceGenerationParts {
             service_instance_id,
             name: "body_bridge",
@@ -1454,7 +1455,7 @@ mod tests {
             .thread_name("test-control")
             .build()
             .expect("control runtime should build");
-        let service_instance_id = ServiceInstanceId::new(77);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(77));
         let running_tasks = Arc::new(Mutex::new(HashMap::new()));
         let resources = DaemonResources::new();
         let cancellation_token = CancellationToken::new();
@@ -1506,7 +1507,7 @@ mod tests {
 
     fn test_supervisor(policy: RestartPolicy) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
-            service_instance_id: ServiceInstanceId::new(1),
+            service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             name: "test_service",
             run: noop_service,
             watcher: None,
@@ -1711,7 +1712,7 @@ mod tests {
     #[tokio::test]
     async fn isolated_startup_errors_use_backoff_recovery() {
         let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-            service_instance_id: ServiceInstanceId::new(1),
+            service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             name: "isolated_startup",
             run: noop_service,
             watcher: None,
@@ -1805,7 +1806,7 @@ mod tests {
     #[tokio::test]
     async fn isolated_startup_gate_cancellation_returns_startup_failure() {
         let store = Arc::new(DiagnosticsStore::new());
-        let service_instance_id = ServiceInstanceId::new(1);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
         let cancellation_token = CancellationToken::new();
         cancellation_token.cancel();
         let generation_parts = ServiceGenerationParts {
@@ -1901,7 +1902,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::HandlerRetryExhausted,
             "test_trigger",
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             Some(7),
             Some(uuid::Uuid::nil()),
             "retry exhausted",
@@ -1931,7 +1932,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTaskPanic,
             "panic_trigger",
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             Some(8),
             Some(uuid::Uuid::nil()),
             "dispatch panicked",
@@ -2012,7 +2013,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTaskError,
             "reload_trigger",
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             Some(9),
             Some(uuid::Uuid::nil()),
             "dispatch failed during reload",

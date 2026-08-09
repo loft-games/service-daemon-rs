@@ -557,7 +557,7 @@ mod tests {
         let entry_id = ServiceEntryId::new(id);
         ServiceDescription {
             entry_id,
-            instance_id: ServiceInstanceId::from(entry_id),
+            instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128)),
             entry,
             cancellation_token: CancellationToken::new(),
         }
@@ -787,8 +787,8 @@ mod tests {
     fn shutdown_topology_is_emitted_as_tracing_event() {
         crate::core::topology_collector::reset_topology();
         crate::core::topology_collector::record_topology_edge_for_test(
-            ServiceInstanceId::new(0),
-            ServiceInstanceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
         );
 
         let capture = CapturedTraceFields::default();
@@ -1008,15 +1008,19 @@ mod tests {
         let handle = daemon.handle();
 
         // Initially, unknown service should be Terminated
-        let status = handle.get_service_status(&ServiceInstanceId(999)).await;
+        let status = handle
+            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(999)))
+            .await;
         assert_eq!(status, ServiceStatus::Terminated);
 
         // Insert a status manually and verify
-        daemon
-            .resources
-            .status_plane
-            .insert(ServiceInstanceId(1), ServiceStatus::Healthy);
-        let status = handle.get_service_status(&ServiceInstanceId(1)).await;
+        daemon.resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            ServiceStatus::Healthy,
+        );
+        let status = handle
+            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(1)))
+            .await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
@@ -1029,20 +1033,24 @@ mod tests {
         let handle = daemon.handle();
 
         // Insert status
-        daemon
-            .resources
-            .status_plane
-            .insert(ServiceInstanceId(0), ServiceStatus::Initializing);
+        daemon.resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
-        let status = handle.get_service_status(&ServiceInstanceId(0)).await;
+        let status = handle
+            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
+            .await;
         assert_eq!(status, ServiceStatus::Initializing);
 
         // Update status
-        daemon
-            .resources
-            .status_plane
-            .insert(ServiceInstanceId(0), ServiceStatus::Healthy);
-        let status = handle.get_service_status(&ServiceInstanceId(0)).await;
+        daemon.resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Healthy,
+        );
+        let status = handle
+            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
+            .await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
@@ -1060,12 +1068,12 @@ mod tests {
             .resources
             .runtime_facts
             .register_services(&daemon.services);
-        daemon
-            .resources
-            .status_plane
-            .insert(ServiceInstanceId::new(1), ServiceStatus::Healthy);
         daemon.resources.status_plane.insert(
-            ServiceInstanceId::new(2),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+            ServiceStatus::Healthy,
+        );
+        daemon.resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
             ServiceStatus::Recovering("temporary failure".to_owned()),
         );
 
@@ -1082,17 +1090,20 @@ mod tests {
                 .iter()
                 .map(|snapshot| snapshot.service_instance_id)
                 .collect::<Vec<_>>(),
-            vec![ServiceInstanceId::new(1), ServiceInstanceId::new(2)]
+            vec![
+                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(2))
+            ]
         );
         assert_eq!(
             handle
-                .runtime_service(ServiceInstanceId::new(1))
+                .runtime_service(ServiceInstanceId::new(uuid::Uuid::from_u128(1)))
                 .map(|snapshot| snapshot.status),
             Some(ServiceStatus::Healthy)
         );
         assert!(
             handle
-                .runtime_service(ServiceInstanceId::new(999))
+                .runtime_service(ServiceInstanceId::new(uuid::Uuid::from_u128(999)))
                 .is_none()
         );
 

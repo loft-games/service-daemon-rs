@@ -134,7 +134,6 @@ fn run_scoped_service_generation(
             "service",
             name = %name,
             service_instance_id = %service_instance_id,
-            service_instance_id_num = service_instance_id.value(),
             generation,
             runtime_lane = ?diagnostics.runtime_lane(),
         );
