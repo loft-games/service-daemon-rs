@@ -616,4 +616,59 @@ mod tests {
             "auto-start singleton service instances should receive UUIDv7 IDs"
         );
     }
+
+    #[test]
+    fn service_instance_id_display_and_parse_use_uuid_format() {
+        let uuid = Uuid::parse_str("019fe746-6158-7403-82c9-ac72cad515ec").unwrap();
+        let id = ServiceInstanceId::new(uuid);
+
+        assert_eq!(
+            id.to_string(),
+            "svcinst#019fe746-6158-7403-82c9-ac72cad515ec"
+        );
+        assert_eq!(
+            "svcinst#019fe746-6158-7403-82c9-ac72cad515ec"
+                .parse::<ServiceInstanceId>()
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            "019fe746-6158-7403-82c9-ac72cad515ec"
+                .parse::<ServiceInstanceId>()
+                .unwrap(),
+            id
+        );
+        assert!(
+            "1".parse::<ServiceInstanceId>().is_err(),
+            "numeric instance IDs should no longer be accepted"
+        );
+    }
+
+    #[test]
+    fn registry_builds_allocate_distinct_uuidv7_instance_ids_for_same_entry() {
+        let first_registry = Registry::builder()
+            .with_tag("__test_registry_entry_id_second__")
+            .build();
+        let second_registry = Registry::builder()
+            .with_tag("__test_registry_entry_id_second__")
+            .build();
+        let first_service = first_registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "test_registry_entry_id_second")
+            .expect("test service should be selected by first registry");
+        let second_service = second_registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "test_registry_entry_id_second")
+            .expect("test service should be selected by second registry");
+
+        assert_eq!(first_service.entry_id, second_service.entry_id);
+        assert_eq!(first_service.instance_id.as_uuid().get_version_num(), 7);
+        assert_eq!(second_service.instance_id.as_uuid().get_version_num(), 7);
+        assert_ne!(
+            first_service.instance_id, second_service.instance_id,
+            "materializing the same registry entry twice should not reuse a runtime instance ID"
+        );
+    }
 }

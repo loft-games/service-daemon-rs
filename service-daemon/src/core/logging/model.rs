@@ -182,6 +182,53 @@ impl fmt::Display for LogBatchSizeError {
 
 impl std::error::Error for LogBatchSizeError {}
 
+#[cfg(all(test, feature = "file-logging"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_logging_serializes_service_instance_ids_as_uuid_wrappers() {
+        let service_instance_id = ServiceInstanceId::new(
+            Uuid::parse_str("019fe746-6158-7403-82c9-ac72cad515ec").unwrap(),
+        );
+        let source_service_instance_id = ServiceInstanceId::new(
+            Uuid::parse_str("019fe746-6158-7403-82c9-ac6ccaa91ef5").unwrap(),
+        );
+        let trigger_instance_id = TriggerInstanceId::new(service_instance_id, 42);
+        let event = LogEvent {
+            timestamp: Utc::now(),
+            level: LogLevel::Info,
+            target: Cow::Borrowed("test"),
+            message: "serialized identity".to_string(),
+            module_path: None,
+            file: None,
+            line: None,
+            service_instance_id: Some(service_instance_id),
+            source_service_instance_id: Some(source_service_instance_id),
+            message_id: Some(Uuid::parse_str("019fe746-6158-7403-82c9-ac8b7e502cb3").unwrap()),
+            trigger_instance_id: Some(trigger_instance_id),
+            error_chain: None,
+        };
+
+        let json = serde_json::to_value(&event).expect("log event should serialize");
+        assert_eq!(
+            json["service_instance_id"],
+            serde_json::json!("019fe746-6158-7403-82c9-ac72cad515ec")
+        );
+        assert_eq!(
+            json["source_service_instance_id"],
+            serde_json::json!("019fe746-6158-7403-82c9-ac6ccaa91ef5")
+        );
+        assert_eq!(
+            json["trigger_instance_id"]["service_instance_id"],
+            serde_json::json!("019fe746-6158-7403-82c9-ac72cad515ec")
+        );
+        assert_eq!(json["trigger_instance_id"]["seq"], serde_json::json!(42));
+        assert!(json.get("service_instance_id_num").is_none());
+        assert!(json.get("trigger_instance_service_instance_id").is_none());
+    }
+}
+
 /// Global batch size override, set via [`set_log_batch_size()`].
 /// Must be configured before the first call to `get_log_queue()` (which is
 /// triggered by `init_logging()` or the first tracing event).

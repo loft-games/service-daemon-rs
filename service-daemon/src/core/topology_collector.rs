@@ -154,14 +154,18 @@ pub fn export_mermaid() -> Option<String> {
     let state = get_state();
     let guard = state.read().ok()?;
 
-    if guard.edges.is_empty() {
+    render_mermaid_edges(&guard.edges)
+}
+
+fn render_mermaid_edges(edges: &HashMap<Edge, u64>) -> Option<String> {
+    if edges.is_empty() {
         return None;
     }
 
     let mut lines = vec!["graph LR".to_string()];
 
     // Sort edges for deterministic output
-    let mut sorted_edges: Vec<_> = guard.edges.iter().collect();
+    let mut sorted_edges: Vec<_> = edges.iter().collect();
     sorted_edges.sort_by_key(|(edge, _)| *edge);
 
     for (edge, count) in sorted_edges {
@@ -235,5 +239,27 @@ mod tests {
             target: ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
         };
         assert_eq!(guard.edges.get(&edge), Some(&1));
+    }
+
+    #[test]
+    fn export_mermaid_uses_uuid_instance_ids_without_registry_index_lookup() {
+        let source = ServiceInstanceId::new(
+            Uuid::parse_str("019fe746-6158-7403-82c9-ac1111111111").unwrap(),
+        );
+        let target = ServiceInstanceId::new(
+            Uuid::parse_str("019fe746-6158-7403-82c9-ac2222222222").unwrap(),
+        );
+        let mut edges = HashMap::new();
+        edges.insert(Edge { source, target }, 1);
+
+        let mermaid = render_mermaid_edges(&edges).expect("topology should contain the local edge");
+        assert!(mermaid.contains(&format!("svc_{}", source.as_uuid().simple())));
+        assert!(mermaid.contains(&format!("svc_{}", target.as_uuid().simple())));
+        assert!(mermaid.contains(&format!("[\"{source}\"]")));
+        assert!(mermaid.contains(&format!("[\"{target}\"]")));
+        assert!(
+            !mermaid.contains("unknown"),
+            "topology export should not treat instance IDs as registry indexes"
+        );
     }
 }
