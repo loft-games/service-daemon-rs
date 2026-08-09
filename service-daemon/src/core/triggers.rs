@@ -64,7 +64,7 @@ where
     ) -> BoxFuture<'a, TriggerTransition<Self::Payload>> {
         Box::pin(async move {
             target.notified().await;
-            // Read the pre-generated (message_id, source_id) from notify_waiters()
+            // Read the pre-generated (message_id, source_service_instance_id) from notify_waiters()
             let identity = target.last_id();
             TriggerTransition::Next((), identity)
         })
@@ -142,7 +142,7 @@ where
             loop {
                 match rx.recv().await {
                     Ok(value) => {
-                        // Read the pre-generated (message_id, source_id) from the TrackedSender
+                        // Read the pre-generated (message_id, source_service_instance_id) from the TrackedSender
                         let identity = target.last_id();
                         return TriggerTransition::Next(value, identity);
                     }

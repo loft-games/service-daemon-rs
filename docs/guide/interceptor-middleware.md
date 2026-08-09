@@ -34,8 +34,8 @@ The data envelope that flows through the chain:
 
 ```rust
 pub struct DispatchContext<P> {
-    pub service_id: ServiceId,
-    pub source_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
+    pub source_service_instance_id: ServiceInstanceId,
     pub instance_seq: u64,
     pub message_id: uuid::Uuid,
     pub trigger_name: &'static str,

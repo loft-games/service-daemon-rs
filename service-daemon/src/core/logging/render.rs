@@ -59,17 +59,17 @@ pub(super) fn render_to_buf(event: &LogEvent, buf: &mut String) {
     );
 
     // Append IDs when present (inside a service/trigger Span)
-    if let Some(sid) = event.service_id {
-        let _ = write!(buf, " service_id={}", sid);
+    if let Some(sid) = event.service_instance_id {
+        let _ = write!(buf, " service_instance_id={}", sid);
     }
-    if let Some(src_sid) = event.source_service_id {
-        let _ = write!(buf, " source_service_id={}", src_sid);
+    if let Some(src_sid) = event.source_service_instance_id {
+        let _ = write!(buf, " source_service_instance_id={}", src_sid);
     }
     if let Some(mid) = event.message_id {
         let _ = write!(buf, " message_id={}", mid);
     }
-    if let Some(ref iid) = event.instance_id {
-        let _ = write!(buf, " instance_id={}", iid);
+    if let Some(ref iid) = event.trigger_instance_id {
+        let _ = write!(buf, " trigger_instance_id={}", iid);
     }
     if let Some(ref err) = event.error_chain {
         let _ = write!(buf, " error={}", err);

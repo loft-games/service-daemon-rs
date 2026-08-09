@@ -50,7 +50,7 @@ use tokio_util::sync::CancellationToken;
 use super::policy::{RestartPolicy, ScalingPolicy};
 use super::policy::{TriggerPolicyOverlay, TriggerPolicyOverlayError};
 use super::runtime::TriggerPressureSnapshot;
-use super::service::{InstanceId, ServiceId};
+use super::service::{ServiceInstanceId, TriggerInstanceId};
 use crate::core::context;
 use crate::core::trigger_runner::TriggerRunner;
 use uuid::Uuid;
@@ -95,12 +95,12 @@ pub fn trigger_clone_payload<T: Clone>(arc_payload: &T) -> T {
 /// A traceable event message that flows through the trigger system.
 ///
 /// Every signal emitted by a service is wrapped in a `TriggerMessage` so that
-/// downstream triggers can inspect the origin (`source_id`) and correlate
+/// downstream triggers can inspect the origin (`source_service_instance_id`) and correlate
 /// related events (`message_id`).
 ///
 /// # Identity Model
 /// - `message_id`: A globally unique identifier for this specific event instance.
-/// - `source_id`: The `ServiceId` of the service that published this message.
+/// - `source_service_instance_id`: The `ServiceInstanceId` of the service that published this message.
 ///
 /// These two fields together enable full-chain traceability: given any trigger
 /// invocation you can answer "which stone caused this ripple?".
@@ -108,8 +108,8 @@ pub fn trigger_clone_payload<T: Clone>(arc_payload: &T) -> T {
 pub struct TriggerMessage<P> {
     /// Globally unique identifier for this event instance (UUID v7, time-ordered).
     pub message_id: Uuid,
-    /// The `ServiceId` of the service that published this message.
-    pub source_id: ServiceId,
+    /// The `ServiceInstanceId` of the service that published this message.
+    pub source_service_instance_id: ServiceInstanceId,
     /// Timestamp when the message was created.
     pub timestamp: DateTime<Utc>,
     /// The business payload carried by this message.
@@ -129,14 +129,14 @@ pub struct TriggerMessage<P> {
 /// Combines the trigger service's own identity with the incoming message,
 /// providing everything the handler needs for processing and tracing.
 ///
-/// # Instance ID
+/// # Trigger Instance ID
 /// The `trigger_instance_id()` method produces a hierarchical identifier in
-/// the format `svc#N:SEQ`, linking each handler invocation back to its
+/// the format `svcinst#N:SEQ`, linking each handler invocation back to its
 /// owning trigger service.
 #[derive(Debug, Clone)]
 pub struct TriggerContext<P> {
-    /// The `ServiceId` of the trigger service that captured this event.
-    pub service_id: ServiceId,
+    /// The `ServiceInstanceId` of the trigger service that captured this event.
+    pub service_instance_id: ServiceInstanceId,
     /// Service generation that owns this trigger handler invocation.
     pub generation: u64,
     /// Monotonically increasing sequence number within this trigger service.
@@ -151,35 +151,35 @@ impl<P> TriggerContext<P> {
     /// Most users receive contexts from the framework. Custom trigger engines
     /// and tests should use this constructor instead of struct literals.
     pub fn new(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         instance_seq: u64,
         message: TriggerMessage<P>,
     ) -> Self {
         Self {
-            service_id,
+            service_instance_id,
             generation,
             instance_seq,
             message,
         }
     }
 
-    /// Produces a hierarchical instance identifier (e.g. `svc#1:42`).
+    /// Produces a hierarchical instance identifier (e.g. `svcinst#1:42`).
     ///
     /// This links the handler invocation to a specific trigger service and
     /// a specific sequence number within that service's lifetime.
     ///
-    /// Returns a stack-allocated [`InstanceId`] (16 bytes, `Copy`) instead
+    /// Returns a stack-allocated [`TriggerInstanceId`] (16 bytes, `Copy`) instead
     /// of a heap-allocated `String`.
-    pub fn trigger_instance_id(&self) -> InstanceId {
-        InstanceId::new(self.service_id, self.instance_seq)
+    pub fn trigger_instance_id(&self) -> TriggerInstanceId {
+        TriggerInstanceId::new(self.service_instance_id, self.instance_seq)
     }
 
     /// Returns read-only pressure facts for this trigger service.
     ///
     /// The snapshot is scoped to the current trigger service.
     pub fn pressure(&self) -> Option<TriggerPressureSnapshot> {
-        context::current_trigger_pressure(self.service_id)
+        context::current_trigger_pressure(self.service_instance_id)
     }
 
     /// Request a temporary policy overlay for this trigger service.
@@ -190,12 +190,12 @@ impl<P> TriggerContext<P> {
         &self,
         overlay: TriggerPolicyOverlay,
     ) -> Result<(), TriggerPolicyOverlayError> {
-        context::request_trigger_policy_overlay(self.service_id, self.generation, overlay)
+        context::request_trigger_policy_overlay(self.service_instance_id, self.generation, overlay)
     }
 
     /// Clear the current temporary policy overlay for this trigger service.
     pub fn clear_policy_overlay(&self, reason: &str) -> Result<(), TriggerPolicyOverlayError> {
-        context::clear_trigger_policy_overlay(self.service_id, self.generation, reason)
+        context::clear_trigger_policy_overlay(self.service_instance_id, self.generation, reason)
     }
 }
 
@@ -228,10 +228,10 @@ pub type TriggerHandler<P> = Arc<
 /// - [`Stop`](TriggerTransition::Stop): Exit the event loop cleanly.
 #[non_exhaustive]
 pub enum TriggerTransition<P> {
-    /// The optional `(Uuid, ServiceId)` carries a pre-generated message ID and
-    /// source service ID from a tracked primitive (e.g., `TrackedNotify`).
+    /// The optional `(Uuid, ServiceInstanceId)` carries a pre-generated message ID and
+    /// source service instance ID from a tracked primitive (e.g., `TrackedNotify`).
     /// When `None`, the `TriggerRunner` will generate a new ID automatically.
-    Next(P, Option<(Uuid, ServiceId)>),
+    Next(P, Option<(Uuid, ServiceInstanceId)>),
 
     /// Deliver the payload, then idle until the framework restarts us.
     ///
@@ -239,8 +239,8 @@ pub enum TriggerTransition<P> {
     /// then wait. When the target provider changes, the generation-scoped
     /// dependency watch path aborts this instance and spawns a fresh one with
     /// updated state.
-    /// The optional `(Uuid, ServiceId)` carries a pre-generated message identity.
-    Reload(P, Option<(Uuid, ServiceId)>),
+    /// The optional `(Uuid, ServiceInstanceId)` carries a pre-generated message identity.
+    Reload(P, Option<(Uuid, ServiceInstanceId)>),
 
     /// Exit the event loop without dispatching. The trigger stops entirely.
     Stop,
@@ -366,7 +366,7 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
         _token: CancellationToken,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async move {
-            let service_id = current_service_id();
+            let service_instance_id = current_service_instance_id();
 
             let mut host = Self::setup(target.clone()).await?;
 
@@ -375,7 +375,8 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
                 context::trigger_config::<ScalingPolicy>().or_else(|| Self::scaling_policy());
 
             let restart_policy = context::trigger_config::<RestartPolicy>().unwrap_or_default();
-            let runner = TriggerRunner::new(name, service_id, handler, restart_policy, scaling);
+            let runner =
+                TriggerRunner::new(name, service_instance_id, handler, restart_policy, scaling);
 
             runner.run_with_host::<T, Self>(&mut host, target).await
         })
@@ -386,12 +387,12 @@ pub trait TriggerHost<T: Send + Sync + 'static>: Sized + Send {
 // Engine internals -- dispatch and tracing helpers
 // ---------------------------------------------------------------------------
 
-/// Attempts to retrieve the current service's `ServiceId` from the task-local
-/// context. Falls back to `ServiceId(0)` if called outside a service scope.
-fn current_service_id() -> ServiceId {
+/// Attempts to retrieve the current service's `ServiceInstanceId` from the task-local
+/// context. Falls back to `ServiceInstanceId(0)` if called outside a service scope.
+fn current_service_instance_id() -> ServiceInstanceId {
     context::identity::CURRENT_SERVICE
-        .try_with(|identity| identity.service_id)
-        .unwrap_or(ServiceId::new(0))
+        .try_with(|identity| identity.service_instance_id)
+        .unwrap_or(ServiceInstanceId::new(0))
 }
 
 // ===========================================================================
@@ -446,20 +447,23 @@ mod tests {
     fn trigger_context_new_preserves_identity_fields() {
         let message = TriggerMessage {
             message_id: Uuid::now_v7(),
-            source_id: ServiceId::new(7),
+            source_service_instance_id: ServiceInstanceId::new(7),
             timestamp: Utc::now(),
             payload: Arc::new("payload"),
         };
 
-        let ctx = TriggerContext::new(ServiceId::new(42), 11, 3, message);
+        let ctx = TriggerContext::new(ServiceInstanceId::new(42), 11, 3, message);
 
-        assert_eq!(ctx.service_id, ServiceId::new(42));
+        assert_eq!(ctx.service_instance_id, ServiceInstanceId::new(42));
         assert_eq!(ctx.generation, 11);
         assert_eq!(ctx.instance_seq, 3);
-        assert_eq!(ctx.message.source_id, ServiceId::new(7));
+        assert_eq!(
+            ctx.message.source_service_instance_id,
+            ServiceInstanceId::new(7)
+        );
         assert_eq!(
             ctx.trigger_instance_id(),
-            InstanceId::new(ServiceId::new(42), 3)
+            TriggerInstanceId::new(ServiceInstanceId::new(42), 3)
         );
     }
 }

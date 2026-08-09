@@ -26,8 +26,9 @@ the next generation. Don't assume struct fields persist across restarts.
 
 ## Assuming Shelf is shared across services
 
-Shelf buckets are isolated by `ServiceId`. Two services cannot use the Shelf as a
-shared channel — use managed state (`Arc<RwLock<T>>`) for cross-service sharing.
+Shelf buckets are isolated by `ServiceInstanceId`. Two services cannot use the
+Shelf as a shared channel — use managed state (`Arc<RwLock<T>>`) for cross-service
+sharing.
 
 ## Reaching for managed state when read-only would do
 

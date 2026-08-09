@@ -6,7 +6,7 @@
 
 use crate::core::context::identity::DaemonResources;
 use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
-use crate::models::{ServiceId, ServiceStatus};
+use crate::models::{ServiceInstanceId, ServiceStatus};
 
 use std::any::Any;
 use std::sync::Arc;
@@ -41,8 +41,13 @@ impl SimulationHandle {
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
-    pub fn set_shelf<T: Any + Send + Sync>(&self, service_id: ServiceId, key: &str, value: T) {
-        let entry = self.resources.shelf.entry(service_id).or_default();
+    pub fn set_shelf<T: Any + Send + Sync>(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        key: &str,
+        value: T,
+    ) {
+        let entry = self.resources.shelf.entry(service_instance_id).or_default();
         entry.insert(key.to_string(), Box::new(value));
     }
 
@@ -50,8 +55,10 @@ impl SimulationHandle {
     ///
     /// This simulates external status transitions (e.g., a dependency going unhealthy,
     /// or an operator manually marking a service for reload).
-    pub fn set_status(&self, service_id: ServiceId, status: ServiceStatus) {
-        self.resources.status_plane.insert(service_id, status);
+    pub fn set_status(&self, service_instance_id: ServiceInstanceId, status: ServiceStatus) {
+        self.resources
+            .status_plane
+            .insert(service_instance_id, status);
         // Notify any watchers that a status change occurred.
         self.resources.status_changed.notify_waiters();
     }
@@ -60,8 +67,8 @@ impl SimulationHandle {
     ///
     /// If the service has a `Watch` trigger or calls `wait_reload()`, it will
     /// be woken up immediately.
-    pub fn trigger_reload(&self, service_id: &ServiceId) {
-        if let Some(notify) = self.resources.reload_signals.get(service_id) {
+    pub fn trigger_reload(&self, service_instance_id: &ServiceInstanceId) {
+        if let Some(notify) = self.resources.reload_signals.get(service_instance_id) {
             notify.notify_one();
         }
     }
@@ -80,7 +87,7 @@ impl SimulationHandle {
             .override_local_slot(Arc::new(value));
     }
 
-    /// Returns a list of all `ServiceId`s currently visible in the status plane.
+    /// Returns a list of all `ServiceInstanceId`s currently visible in the status plane.
     ///
     /// This is useful for discovering the runtime IDs assigned by `Registry`,
     /// which are needed for `set_status()` and `trigger_reload()`.
@@ -88,7 +95,7 @@ impl SimulationHandle {
     /// **Note**: Services only appear here after the runner has spawned them
     /// and written their initial status. Call this after a short delay to ensure
     /// services have been registered.
-    pub fn service_ids(&self) -> Vec<ServiceId> {
+    pub fn service_instance_ids(&self) -> Vec<ServiceInstanceId> {
         self.resources
             .status_plane
             .iter()
@@ -100,7 +107,7 @@ impl SimulationHandle {
     // Safe Read API -- lock-free accessors that return owned values
     // =========================================================================
 
-    /// Reads a shelf value by service ID and key, returning an owned clone.
+    /// Reads a shelf value by service instance ID and key, returning an owned clone.
     ///
     /// This is the **recommended** way to inspect shelf data in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
@@ -113,14 +120,17 @@ impl SimulationHandle {
     /// ```
     pub fn get_shelf<T: Any + Clone + Send + Sync>(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         key: &str,
     ) -> Option<T> {
-        self.resources.shelf.get(&service_id).and_then(|entry| {
-            entry
-                .get(key)
-                .and_then(|val| val.downcast_ref::<T>().cloned())
-        })
+        self.resources
+            .shelf
+            .get(&service_instance_id)
+            .and_then(|entry| {
+                entry
+                    .get(key)
+                    .and_then(|val| val.downcast_ref::<T>().cloned())
+            })
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -128,30 +138,30 @@ impl SimulationHandle {
     /// This is the **recommended** way to inspect service status in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
     /// this call, making it safe to use across `.await` points.
-    pub fn get_status(&self, service_id: ServiceId) -> Option<ServiceStatus> {
+    pub fn get_status(&self, service_instance_id: ServiceInstanceId) -> Option<ServiceStatus> {
         self.resources
             .status_plane
-            .get(&service_id)
+            .get(&service_instance_id)
             .map(|s| s.value().clone())
     }
 
     /// Checks whether a shelf key exists for the specified service.
     ///
     /// Returns `true` if the key is present (regardless of its type).
-    pub fn has_shelf(&self, service_id: ServiceId, key: &str) -> bool {
+    pub fn has_shelf(&self, service_instance_id: ServiceInstanceId, key: &str) -> bool {
         self.resources
             .shelf
-            .get(&service_id)
+            .get(&service_instance_id)
             .is_some_and(|entry| entry.contains_key(key))
     }
 
     /// Returns all shelf key names for the specified service.
     ///
     /// Returns an empty `Vec` if the service has no shelved data.
-    pub fn shelf_keys(&self, service_id: ServiceId) -> Vec<String> {
+    pub fn shelf_keys(&self, service_instance_id: ServiceInstanceId) -> Vec<String> {
         self.resources
             .shelf
-            .get(&service_id)
+            .get(&service_instance_id)
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
     }
@@ -192,12 +202,12 @@ impl MockContextBuilder {
     /// and state persistence logic.
     pub fn with_shelf<T: Any + Send + Sync>(
         self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         key: &str,
         data: T,
     ) -> Self {
         {
-            let entry = self.resources.shelf.entry(service_id).or_default();
+            let entry = self.resources.shelf.entry(service_instance_id).or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self
@@ -207,8 +217,14 @@ impl MockContextBuilder {
     ///
     /// This is useful for simulating the status of dependency services or
     /// setting the initial state of the service under test.
-    pub fn with_status(self, service_id: ServiceId, status: ServiceStatus) -> Self {
-        self.resources.status_plane.insert(service_id, status);
+    pub fn with_status(
+        self,
+        service_instance_id: ServiceInstanceId,
+        status: ServiceStatus,
+    ) -> Self {
+        self.resources
+            .status_plane
+            .insert(service_instance_id, status);
         self
     }
 

@@ -9,14 +9,14 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::models::{
-    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceDescription, ServiceId,
-    ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TriggerPressureSnapshot,
-    TriggerRuntimeSnapshot,
+    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceDescription,
+    ServiceInstanceId, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
+    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServiceRuntimeMetadata {
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     priority: u8,
     declared_scheduling: ServiceScheduling,
@@ -25,7 +25,7 @@ pub(crate) struct ServiceRuntimeMetadata {
 impl From<&ServiceDescription> for ServiceRuntimeMetadata {
     fn from(service: &ServiceDescription) -> Self {
         Self {
-            service_id: service.id,
+            service_instance_id: service.instance_id,
             service_name: service.name(),
             priority: service.priority(),
             declared_scheduling: service.scheduling(),
@@ -60,7 +60,7 @@ impl ServiceRuntimeRecord {
     fn snapshot(&self, status: ServiceStatus) -> ServiceRuntimeSnapshot {
         let state = self.state.lock();
         ServiceRuntimeSnapshot {
-            service_id: self.metadata.service_id,
+            service_instance_id: self.metadata.service_instance_id,
             service_name: self.metadata.service_name,
             priority: self.metadata.priority,
             declared_scheduling: self.metadata.declared_scheduling,
@@ -89,7 +89,7 @@ struct TriggerRuntimeTimeline {
 }
 
 struct TriggerRuntimeRecord {
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     generation: u64,
     semaphore: Arc<Semaphore>,
@@ -103,14 +103,14 @@ struct TriggerRuntimeRecord {
 
 impl TriggerRuntimeRecord {
     fn new(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         generation: u64,
         semaphore: Arc<Semaphore>,
         current_limit: Arc<AtomicUsize>,
     ) -> Self {
         Self {
-            service_id,
+            service_instance_id,
             service_name,
             generation,
             semaphore,
@@ -129,7 +129,7 @@ impl TriggerRuntimeRecord {
         let in_flight = current_limit.saturating_sub(available_permits);
         let timeline = self.timeline.lock();
         TriggerPressureSnapshot {
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             service_name: self.service_name,
             generation: self.generation,
             in_flight,
@@ -153,7 +153,7 @@ impl TriggerRuntimeRecord {
     fn runtime_snapshot(&self) -> TriggerRuntimeSnapshot {
         let pressure = self.pressure_snapshot();
         TriggerRuntimeSnapshot {
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             service_name: self.service_name,
             generation: self.generation,
             pressure,
@@ -196,8 +196,8 @@ pub(crate) struct RuntimeFactsStore {
     daemon_id: Uuid,
     start_time: DateTime<Utc>,
     start_instant: Instant,
-    services: DashMap<ServiceId, Arc<ServiceRuntimeRecord>>,
-    triggers: DashMap<ServiceId, Arc<TriggerRuntimeRecord>>,
+    services: DashMap<ServiceInstanceId, Arc<ServiceRuntimeRecord>>,
+    triggers: DashMap<ServiceInstanceId, Arc<TriggerRuntimeRecord>>,
 }
 
 impl Default for RuntimeFactsStore {
@@ -221,7 +221,7 @@ impl RuntimeFactsStore {
         for service in services {
             let metadata = ServiceRuntimeMetadata::from(service);
             self.services
-                .entry(service.id)
+                .entry(service.instance_id)
                 .or_insert_with(|| Arc::new(ServiceRuntimeRecord::new(metadata)));
         }
     }
@@ -240,11 +240,11 @@ impl RuntimeFactsStore {
 
     pub(crate) fn record_service_started(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         status: &ServiceStatus,
     ) {
-        let Some(record) = self.services.get(&service_id) else {
+        let Some(record) = self.services.get(&service_instance_id) else {
             return;
         };
         let mut state = record.state.lock();
@@ -255,16 +255,24 @@ impl RuntimeFactsStore {
         record_status_facts(&mut state, status);
     }
 
-    pub(crate) fn record_service_status(&self, service_id: ServiceId, status: &ServiceStatus) {
-        let Some(record) = self.services.get(&service_id) else {
+    pub(crate) fn record_service_status(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        status: &ServiceStatus,
+    ) {
+        let Some(record) = self.services.get(&service_instance_id) else {
             return;
         };
         let mut state = record.state.lock();
         record_status_facts(&mut state, status);
     }
 
-    pub(crate) fn record_service_restart(&self, service_id: ServiceId, backoff: Option<Duration>) {
-        let Some(record) = self.services.get(&service_id) else {
+    pub(crate) fn record_service_restart(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        backoff: Option<Duration>,
+    ) {
+        let Some(record) = self.services.get(&service_instance_id) else {
             return;
         };
         let mut state = record.state.lock();
@@ -274,36 +282,36 @@ impl RuntimeFactsStore {
 
     pub(crate) fn service_snapshot<F>(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         status_for: F,
     ) -> Option<ServiceRuntimeSnapshot>
     where
-        F: Fn(ServiceId) -> ServiceStatus,
+        F: Fn(ServiceInstanceId) -> ServiceStatus,
     {
         self.services
-            .get(&service_id)
-            .map(|record| record.snapshot(status_for(service_id)))
+            .get(&service_instance_id)
+            .map(|record| record.snapshot(status_for(service_instance_id)))
     }
 
     pub(crate) fn service_snapshots<F>(&self, status_for: F) -> Vec<ServiceRuntimeSnapshot>
     where
-        F: Fn(ServiceId) -> ServiceStatus,
+        F: Fn(ServiceInstanceId) -> ServiceStatus,
     {
         let mut snapshots: Vec<_> = self
             .services
             .iter()
             .map(|record| {
-                let service_id = *record.key();
-                record.value().snapshot(status_for(service_id))
+                let service_instance_id = *record.key();
+                record.value().snapshot(status_for(service_instance_id))
             })
             .collect();
-        snapshots.sort_by_key(|snapshot| snapshot.service_id);
+        snapshots.sort_by_key(|snapshot| snapshot.service_instance_id);
         snapshots
     }
 
     pub(crate) fn readiness_snapshot<F>(&self, status_for: F) -> ReadinessSnapshot
     where
-        F: Fn(ServiceId) -> ServiceStatus,
+        F: Fn(ServiceInstanceId) -> ServiceStatus,
     {
         let services = self.service_snapshots(status_for);
         readiness_from_services(services)
@@ -311,26 +319,29 @@ impl RuntimeFactsStore {
 
     pub(crate) fn register_trigger(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         generation: u64,
         semaphore: Arc<Semaphore>,
         current_limit: Arc<AtomicUsize>,
     ) -> TriggerRuntimeFactsHandle {
         let record = Arc::new(TriggerRuntimeRecord::new(
-            service_id,
+            service_instance_id,
             service_name,
             generation,
             semaphore,
             current_limit,
         ));
-        self.triggers.insert(service_id, record.clone());
+        self.triggers.insert(service_instance_id, record.clone());
         TriggerRuntimeFactsHandle { record }
     }
 
-    pub(crate) fn trigger_snapshot(&self, service_id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+    pub(crate) fn trigger_snapshot(
+        &self,
+        service_instance_id: ServiceInstanceId,
+    ) -> Option<TriggerRuntimeSnapshot> {
         self.triggers
-            .get(&service_id)
+            .get(&service_instance_id)
             .map(|record| record.runtime_snapshot())
     }
 
@@ -340,16 +351,16 @@ impl RuntimeFactsStore {
             .iter()
             .map(|record| record.runtime_snapshot())
             .collect();
-        snapshots.sort_by_key(|snapshot| snapshot.service_id);
+        snapshots.sort_by_key(|snapshot| snapshot.service_instance_id);
         snapshots
     }
 
     pub(crate) fn trigger_pressure(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
     ) -> Option<TriggerPressureSnapshot> {
         self.triggers
-            .get(&service_id)
+            .get(&service_instance_id)
             .map(|record| record.pressure_snapshot())
     }
 }
@@ -400,14 +411,14 @@ fn readiness_from_services(services: Vec<ServiceRuntimeSnapshot>) -> ReadinessSn
     for service in services {
         if let ServiceStatus::Recovering(message) = &service.status {
             snapshot.recent_errors.push(ReadinessServiceError {
-                service_id: service.service_id,
+                service_instance_id: service.service_instance_id,
                 service_name: service.service_name,
                 status: service.status.clone(),
                 message: message.clone(),
             });
         } else if let Some(message) = service.last_error.clone() {
             snapshot.recent_errors.push(ReadinessServiceError {
-                service_id: service.service_id,
+                service_instance_id: service.service_instance_id,
                 service_name: service.service_name,
                 status: service.status.clone(),
                 message,
@@ -431,7 +442,7 @@ fn readiness_from_services(services: Vec<ServiceRuntimeSnapshot>) -> ReadinessSn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ServiceEntry, ServiceParam};
+    use crate::models::{ServiceEntry, ServiceEntryId, ServiceParam};
     use futures::future::BoxFuture;
     use tokio_util::sync::CancellationToken;
 
@@ -462,8 +473,10 @@ mod tests {
     };
 
     fn service_description(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
+        let entry_id = ServiceEntryId::new(id);
         ServiceDescription {
-            id: ServiceId::new(id),
+            entry_id,
+            instance_id: ServiceInstanceId::from(entry_id),
             entry,
             cancellation_token: CancellationToken::new(),
         }
@@ -483,9 +496,9 @@ mod tests {
         assert_eq!(
             snapshots
                 .iter()
-                .map(|snapshot| snapshot.service_id)
+                .map(|snapshot| snapshot.service_instance_id)
                 .collect::<Vec<_>>(),
-            vec![ServiceId::new(1), ServiceId::new(2)]
+            vec![ServiceInstanceId::new(1), ServiceInstanceId::new(2)]
         );
     }
 
@@ -497,10 +510,13 @@ mod tests {
             service_description(2, &SERVICE_ENTRY_B),
         ];
         store.register_services(&services);
-        store.record_service_status(ServiceId::new(2), &ServiceStatus::Recovering("boom".into()));
+        store.record_service_status(
+            ServiceInstanceId::new(2),
+            &ServiceStatus::Recovering("boom".into()),
+        );
 
-        let readiness = store.readiness_snapshot(|service_id| {
-            if service_id == ServiceId::new(1) {
+        let readiness = store.readiness_snapshot(|service_instance_id| {
+            if service_instance_id == ServiceInstanceId::new(1) {
                 ServiceStatus::Healthy
             } else {
                 ServiceStatus::Recovering("boom".into())
@@ -519,12 +535,12 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceId::new(1), 3, &ServiceStatus::Initializing);
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Healthy);
-        store.record_service_restart(ServiceId::new(1), Some(Duration::from_millis(25)));
+        store.record_service_started(ServiceInstanceId::new(1), 3, &ServiceStatus::Initializing);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
+        store.record_service_restart(ServiceInstanceId::new(1), Some(Duration::from_millis(25)));
 
         let snapshot = store
-            .service_snapshot(ServiceId::new(1), |_| ServiceStatus::Healthy)
+            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::Healthy)
             .expect("registered service should have a snapshot");
         assert_eq!(snapshot.generation, 3);
         assert_eq!(snapshot.restart_count, 1);
@@ -539,15 +555,15 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceId::new(1), 1, &ServiceStatus::Initializing);
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Healthy);
+        store.record_service_started(ServiceInstanceId::new(1), 1, &ServiceStatus::Initializing);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
         store.record_service_status(
-            ServiceId::new(1),
+            ServiceInstanceId::new(1),
             &ServiceStatus::Recovering("retryable failure".into()),
         );
 
         let snapshot = store
-            .service_snapshot(ServiceId::new(1), |_| {
+            .service_snapshot(ServiceInstanceId::new(1), |_| {
                 ServiceStatus::Recovering("retryable failure".into())
             })
             .expect("registered service should have a snapshot");
@@ -562,21 +578,21 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceId::new(1), 1, &ServiceStatus::Initializing);
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Healthy);
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::ShuttingDown);
+        store.record_service_started(ServiceInstanceId::new(1), 1, &ServiceStatus::Initializing);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::ShuttingDown);
 
         let shutting_down = store
-            .service_snapshot(ServiceId::new(1), |_| ServiceStatus::ShuttingDown)
+            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::ShuttingDown)
             .expect("registered service should have a shutdown snapshot");
         assert_eq!(shutting_down.healthy_since, None);
         assert!(shutting_down.last_stopped_at.is_some());
 
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Healthy);
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Terminated);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Healthy);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Terminated);
 
         let terminated = store
-            .service_snapshot(ServiceId::new(1), |_| ServiceStatus::Terminated)
+            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::Terminated)
             .expect("registered service should have a terminated snapshot");
         assert_eq!(terminated.healthy_since, None);
         assert!(terminated.last_stopped_at.is_some());
@@ -589,20 +605,23 @@ mod tests {
         let services = vec![service_description(1, &SERVICE_ENTRY_A)];
         store.register_services(&services);
 
-        store.record_service_started(ServiceId::new(1), 1, &ServiceStatus::Initializing);
-        store.record_service_restart(ServiceId::new(1), Some(Duration::from_millis(50)));
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Recovering("boom".into()));
+        store.record_service_started(ServiceInstanceId::new(1), 1, &ServiceStatus::Initializing);
+        store.record_service_restart(ServiceInstanceId::new(1), Some(Duration::from_millis(50)));
+        store.record_service_status(
+            ServiceInstanceId::new(1),
+            &ServiceStatus::Recovering("boom".into()),
+        );
 
         let recovering = store
-            .service_snapshot(ServiceId::new(1), |_| {
+            .service_snapshot(ServiceInstanceId::new(1), |_| {
                 ServiceStatus::Recovering("boom".into())
             })
             .expect("registered service should have a recovering snapshot");
         assert_eq!(recovering.current_backoff, Some(Duration::from_millis(50)));
 
-        store.record_service_status(ServiceId::new(1), &ServiceStatus::Terminated);
+        store.record_service_status(ServiceInstanceId::new(1), &ServiceStatus::Terminated);
         let terminated = store
-            .service_snapshot(ServiceId::new(1), |_| ServiceStatus::Terminated)
+            .service_snapshot(ServiceInstanceId::new(1), |_| ServiceStatus::Terminated)
             .expect("registered service should have a terminated snapshot");
         assert_eq!(terminated.current_backoff, None);
     }

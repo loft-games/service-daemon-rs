@@ -10,7 +10,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 
-use crate::models::{ServiceId, service::InstanceId};
+use crate::models::{ServiceInstanceId, service::TriggerInstanceId};
 
 /// Log severity level stored as an enum.
 ///
@@ -74,7 +74,7 @@ impl fmt::Display for LogLevel {
 ///
 /// # ID Fields
 ///
-/// The `service_id`, `message_id`, and `instance_id` fields are automatically
+/// The `service_instance_id`, `message_id`, and `trigger_instance_id` fields are automatically
 /// extracted from the current `tracing::Span` context by `DaemonLayer`. They
 /// are `None` for log events that occur outside a service or trigger Span
 /// (e.g., during daemon initialization).
@@ -91,32 +91,32 @@ pub struct LogEvent {
     pub file: Option<Cow<'static, str>>,
     #[cfg_attr(not(feature = "file-logging"), allow(dead_code))]
     pub line: Option<u32>,
-    /// The `ServiceId` of the service that produced this event.
+    /// The `ServiceInstanceId` of the service that produced this event.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub service_id: Option<ServiceId>,
-    /// The `ServiceId` of the service that originally emitted the event.
+    pub service_instance_id: Option<ServiceInstanceId>,
+    /// The `ServiceInstanceId` of the service that originally emitted the event.
     /// Used for causal topology correlation.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub source_service_id: Option<ServiceId>,
+    pub source_service_instance_id: Option<ServiceInstanceId>,
     /// Message ID for causal tracing.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
     pub message_id: Option<Uuid>,
-    /// The trigger instance identifier, combining `ServiceId` and sequence
-    /// number. Extracted from numeric fields or native InstanceId extension.
+    /// The trigger instance identifier, combining `ServiceInstanceId` and sequence
+    /// number. Extracted from numeric fields or native TriggerInstanceId extension.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub instance_id: Option<InstanceId>,
+    pub trigger_instance_id: Option<TriggerInstanceId>,
     /// Structured error chain captured via `record_error`.
     #[cfg_attr(
         feature = "file-logging",

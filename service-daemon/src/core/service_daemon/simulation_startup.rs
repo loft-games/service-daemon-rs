@@ -43,7 +43,7 @@ impl ServiceDaemon {
                 }
 
                 runner::spawn_service(parts::SpawnServiceParts {
-                    service_id: service.id,
+                    service_instance_id: service.instance_id,
                     name: service.name(),
                     run: service.entry.wrapper,
                     watcher: service.entry.watcher,

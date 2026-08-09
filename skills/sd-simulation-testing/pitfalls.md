@@ -7,12 +7,12 @@ under `features = ["simulation"]`. Without it the test won't compile (the symbol
 are absent). Enable the feature on the `service-daemon` dependency in the test
 crate.
 
-## Calling `service_ids()` before services have spawned
+## Calling `service_instance_ids()` before services have spawned
 
 The status plane is populated as the runner spawns services. Calling
-`handle.service_ids()` immediately after `run_for_duration` starts may return an
-empty or partial list. For mid-flight work, let services spawn first (a short
-`tokio::time::sleep`) before enumerating or mutating by id.
+`handle.service_instance_ids()` immediately after `run_for_duration` starts may
+return an empty or partial list. For mid-flight work, let services spawn first
+(a short `tokio::time::sleep`) before enumerating or mutating by instance ID.
 
 ## Expecting `run_for_duration` to block forever
 
@@ -28,12 +28,12 @@ the lock-free readers — `get_shelf` / `get_status` / `has_shelf` / `shelf_keys
 which acquire and release internally and return owned values, so they are safe
 around await points.
 
-## Pre-filling with the wrong `ServiceId`
+## Pre-filling with the wrong `ServiceInstanceId`
 
-`with_shelf(service_id, ...)` silently targets whatever id you pass; a wrong id
-puts the data in a bucket the service never reads, and the test fails with an empty
-read rather than an obvious error. Keep one service under test and derive its id
-unambiguously.
+`with_shelf(service_instance_id, ...)` silently targets whatever ID you pass; a
+wrong ID puts the data in a bucket the service never reads, and the test fails
+with an empty read rather than an obvious error. Keep one service under test and
+derive its instance ID unambiguously.
 
 ## Type mismatch between `set_shelf` and `unshelve`
 

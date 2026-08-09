@@ -10,24 +10,58 @@ use tracing::warn;
 pub type ServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
 
 // ---------------------------------------------------------------------------
-// ServiceId: Unique, ID-based identity for runtime indexing.
+// ServiceEntryId: static registry identity.
+// ---------------------------------------------------------------------------
+
+/// A stable identifier for an entry in the link-time `SERVICE_REGISTRY`.
+///
+/// This identifies the static service or trigger definition, not a running
+/// service instance. It is assigned from the entry's position in the distributed
+/// slice when `Registry::build()` materializes selected entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub struct ServiceEntryId(pub(crate) usize);
+
+impl ServiceEntryId {
+    /// Explicitly construct a `ServiceEntryId`.
+    #[inline]
+    pub const fn new(id: usize) -> Self {
+        Self(id)
+    }
+
+    /// Get the underlying numeric value.
+    #[inline]
+    pub const fn value(&self) -> usize {
+        self.0
+    }
+}
+
+impl fmt::Display for ServiceEntryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "entry#{}", self.0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ServiceInstanceId: Unique, ID-based identity for runtime indexing.
 // Replaces String-based StatusPlane/Signal keys for safety and performance.
 // ---------------------------------------------------------------------------
 
-/// A unique identifier for a service instance within a `Registry`.
+/// A unique identifier for a managed service instance within a daemon.
 ///
-/// `ServiceId` is assigned by `Registry::build()` and serves as the **strong
-/// identity** for all runtime resource lookups (StatusPlane, reload signals).
+/// `ServiceInstanceId` serves as the **strong identity** for all runtime resource
+/// lookups (StatusPlane, Shelf, reload signals, running task handles).
 /// The human-readable `name` field on `ServiceDescription` is retained only
 /// for logging / tracing purposes ("weak identity").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
-pub struct ServiceId(pub(crate) usize);
+pub struct ServiceInstanceId(pub(crate) usize);
 
-impl ServiceId {
-    /// Explicitly construct a `ServiceId`.
+impl ServiceInstanceId {
+    /// Explicitly construct a `ServiceInstanceId`.
     ///
-    /// In production, IDs are assigned automatically by `Registry::build()`.
+    /// In production, auto-start singleton IDs are assigned by `Registry::build()`.
+    /// Future dynamic service instances should allocate fresh daemon-local IDs.
     /// This constructor exists for testing scenarios where ad-hoc services
     /// need to be created outside the Registry pipeline.
     #[inline]
@@ -42,93 +76,101 @@ impl ServiceId {
     }
 }
 
-impl Default for ServiceId {
-    /// Returns ServiceId(0), which is the default for system/background tasks.
+impl Default for ServiceInstanceId {
+    /// Returns ServiceInstanceId(0), which is the default for system/background tasks.
     fn default() -> Self {
         Self(0)
     }
 }
 
-impl std::str::FromStr for ServiceId {
+impl From<ServiceEntryId> for ServiceInstanceId {
+    fn from(entry_id: ServiceEntryId) -> Self {
+        Self(entry_id.0)
+    }
+}
+
+impl std::str::FromStr for ServiceInstanceId {
     type Err = std::num::ParseIntError;
 
-    /// Parses a ServiceId from a string like "svc#1" or "1".
+    /// Parses a ServiceInstanceId from a string like "svcinst#1" or "1".
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let numeric_part = s.strip_prefix("svc#").unwrap_or(s);
+        let numeric_part = s.strip_prefix("svcinst#").unwrap_or(s);
         numeric_part.parse::<usize>().map(Self::new)
     }
 }
 
-impl fmt::Display for ServiceId {
+impl fmt::Display for ServiceInstanceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "svc#{}", self.0)
+        write!(f, "svcinst#{}", self.0)
     }
 }
 
 // ---------------------------------------------------------------------------
-// InstanceId: numeric trigger instance identifier.
-// Combines ServiceId + monotonic sequence for unique instance identification.
+// TriggerInstanceId: numeric trigger instance identifier.
+// Combines ServiceInstanceId + monotonic sequence for unique instance identification.
 // ---------------------------------------------------------------------------
 
 /// A unique identifier for a specific trigger invocation within a service.
 ///
-/// Combines the owning service's [`ServiceId`] with a monotonically increasing
+/// Combines the owning service's [`ServiceInstanceId`] with a monotonically increasing
 /// sequence number to produce a globally unique, human-readable instance tag.
 ///
 /// # Performance
 ///
-/// `InstanceId` is 16 bytes, stack-allocated, and implements `Copy`. It
-/// replaces the previous `format!("{}:{}", service_id, seq)` pattern that
+/// `TriggerInstanceId` is 16 bytes, stack-allocated, and implements `Copy`. It
+/// replaces the previous `format!("{}:{}", service_instance_id, seq)` pattern that
 /// required a heap allocation on every trigger dispatch cycle.
 ///
 /// # Display Format
 ///
-/// Formats as `svc#N:SEQ` (e.g. `svc#1:42`), matching the legacy string
-/// format for backward compatibility in log output.
+/// Formats as `svcinst#N:SEQ` (e.g. `svcinst#1:42`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
-pub struct InstanceId {
+pub struct TriggerInstanceId {
     /// The service that owns this trigger instance.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     /// Monotonically increasing sequence within this service's lifetime.
     pub seq: u64,
 }
 
-impl InstanceId {
+impl TriggerInstanceId {
     #[inline]
-    pub const fn new(service_id: ServiceId, seq: u64) -> Self {
-        Self { service_id, seq }
+    pub const fn new(service_instance_id: ServiceInstanceId, seq: u64) -> Self {
+        Self {
+            service_instance_id,
+            seq,
+        }
     }
 }
 
-impl std::str::FromStr for InstanceId {
+impl std::str::FromStr for TriggerInstanceId {
     type Err = anyhow::Error;
 
-    /// Parses an `InstanceId` from a string like "svc#1:42".
-    /// Support both with and without "svc#" prefix on the service component.
+    /// Parses a `TriggerInstanceId` from a string like "svcinst#1:42".
+    /// Support both with and without "svcinst#" prefix on the service component.
     fn from_str(s: &str) -> anyhow::Result<Self> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
             return Err(anyhow::anyhow!(
-                "invalid instance_id format: '{}' (expected svc#N:SEQ)",
+                "invalid trigger_instance_id format: '{}' (expected svcinst#N:SEQ)",
                 s
             ));
         }
 
-        let service_id = parts[0]
-            .parse::<ServiceId>()
-            .map_err(|e| anyhow::anyhow!("failed to parse service_id component: {}", e))?;
+        let service_instance_id = parts[0]
+            .parse::<ServiceInstanceId>()
+            .map_err(|e| anyhow::anyhow!("failed to parse service_instance_id component: {}", e))?;
         let seq = parts[1]
             .parse::<u64>()
             .map_err(|e| anyhow::anyhow!("failed to parse sequence component: {}", e))?;
 
-        Ok(Self::new(service_id, seq))
+        Ok(Self::new(service_instance_id, seq))
     }
 }
 
-impl fmt::Display for InstanceId {
+impl fmt::Display for TriggerInstanceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.service_id, self.seq)
+        write!(f, "{}:{}", self.service_instance_id, self.seq)
     }
 }
 
@@ -222,20 +264,22 @@ pub struct ServiceEntry {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceDescription (runtime) -- now includes `ServiceId` and `tags`
+// ServiceDescription (runtime): static entry plus daemon-local instance.
 // ---------------------------------------------------------------------------
 
 /// Runtime description of a managed service instance.
 ///
 /// Holds a reference to the underlying static `ServiceEntry` from the
-/// `SERVICE_REGISTRY`, plus runtime-only state (`id`, `cancellation_token`)
+/// `SERVICE_REGISTRY`, plus runtime-only state (`instance_id`, `cancellation_token`)
 /// and Arc-wrapped variants of the entry's function pointers.
 ///
 /// Use accessor methods (`name()`, `priority()`, etc.) to read static
 /// metadata without field duplication.
 pub struct ServiceDescription {
-    /// Unique ID assigned by `Registry::build()` -- the strong identity.
-    pub id: ServiceId,
+    /// Static registry entry ID assigned from `SERVICE_REGISTRY`.
+    pub entry_id: ServiceEntryId,
+    /// Unique runtime instance ID -- the strong identity for daemon resources.
+    pub instance_id: ServiceInstanceId,
     /// Reference to the static entry that registered this service.
     pub entry: &'static ServiceEntry,
     /// Per-instance cancellation token for lifecycle management.
@@ -487,7 +531,8 @@ impl RegistryBuilder {
             }
 
             services.push(ServiceDescription {
-                id: ServiceId(idx),
+                entry_id: ServiceEntryId(idx),
+                instance_id: ServiceInstanceId::from(ServiceEntryId(idx)),
                 entry,
                 cancellation_token: CancellationToken::new(),
             });
@@ -500,6 +545,32 @@ impl RegistryBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(SERVICE_REGISTRY)]
+    static TEST_REGISTRY_ENTRY_ID_FIRST: ServiceEntry = ServiceEntry {
+        name: "test_registry_entry_id_first",
+        module: "models::service::tests",
+        params: &[],
+        wrapper: |_| Box::pin(async { Ok(()) }),
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        tags: &["__test_registry_entry_id_first__"],
+    };
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(SERVICE_REGISTRY)]
+    static TEST_REGISTRY_ENTRY_ID_SECOND: ServiceEntry = ServiceEntry {
+        name: "test_registry_entry_id_second",
+        module: "models::service::tests",
+        params: &[],
+        wrapper: |_| Box::pin(async { Ok(()) }),
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        tags: &["__test_registry_entry_id_second__"],
+    };
 
     #[test]
     fn test_service_scheduling_default() {
@@ -519,5 +590,28 @@ mod tests {
             tags: &[],
         };
         assert_eq!(entry.scheduling, ServiceScheduling::Isolated);
+    }
+
+    #[test]
+    fn tag_filtered_registry_preserves_original_entry_id() {
+        let registry = Registry::builder()
+            .with_tag("__test_registry_entry_id_second__")
+            .build();
+        let service = registry
+            .services
+            .iter()
+            .find(|service| service.name() == "test_registry_entry_id_second")
+            .expect("test service should be selected by tag");
+        let original_index = SERVICE_REGISTRY
+            .iter()
+            .enumerate()
+            .find_map(|(idx, entry)| (entry.name == "test_registry_entry_id_second").then_some(idx))
+            .expect("test service should exist in SERVICE_REGISTRY");
+
+        assert_eq!(service.entry_id, ServiceEntryId::new(original_index));
+        assert_eq!(
+            service.instance_id,
+            ServiceInstanceId::from(service.entry_id)
+        );
     }
 }

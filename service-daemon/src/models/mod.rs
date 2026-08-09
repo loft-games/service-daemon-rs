@@ -32,7 +32,7 @@ pub use runtime::{
 };
 pub use service::{
     PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
-    ServiceDescription, ServiceEntry, ServiceFn, ServiceId, ServiceParam, ServiceScheduling,
-    ServiceStatus,
+    ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn, ServiceInstanceId, ServiceParam,
+    ServiceScheduling, ServiceStatus,
 };
 pub use trigger::{TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage};

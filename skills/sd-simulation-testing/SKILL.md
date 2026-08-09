@@ -62,7 +62,8 @@ pair. The builder is pre-isolated (no auto-discovery) — you opt services in by
 ## Companions
 
 - `reference.md` — every `MockContextBuilder` and `SimulationHandle` method,
-  `ServiceId` discovery, and the mid-flight (phase-2) pattern.
+  `ServiceEntryId` to `ServiceInstanceId` discovery, and the mid-flight mutation
+  pattern.
 - `pitfalls.md` — the traps (forgetting the feature, IDs before spawn, holding
   locks across await, no-op province of `run_for_duration`).
 - `examples/simulation_test.rs` — a full pre-fill + mid-flight + assert test.

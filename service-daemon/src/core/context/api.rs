@@ -23,7 +23,7 @@ use crate::core::trigger_policy_overlay::{
     EffectiveTriggerPolicy, TriggerBasePolicy, TriggerPolicyOverlayStore,
 };
 use crate::models::{
-    ServiceId, ServiceStatus, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+    ServiceInstanceId, ServiceStatus, TriggerPolicyOverlay, TriggerPolicyOverlayError,
     TriggerPressureSnapshot,
 };
 
@@ -78,7 +78,7 @@ pub fn state() -> ServiceStatus {
     if id.reload_token.is_cancelled() {
         // Need to check if daemon already marked ShuttingDown
         if let Ok(resources) = CURRENT_RESOURCES.try_with(|r| r.clone())
-            && let Some(status) = resources.status_plane.get(&id.service_id)
+            && let Some(status) = resources.status_plane.get(&id.service_instance_id)
             && matches!(status.value(), ServiceStatus::ShuttingDown)
         {
             return ServiceStatus::ShuttingDown;
@@ -90,7 +90,7 @@ pub fn state() -> ServiceStatus {
     CURRENT_RESOURCES
         .try_with(|r| {
             r.status_plane
-                .get(&id.service_id)
+                .get(&id.service_instance_id)
                 .map(|s| s.value().clone())
                 .unwrap_or(ServiceStatus::Initializing)
         })
@@ -114,7 +114,7 @@ pub fn done() {
 
     let current_status = resources
         .status_plane
-        .get(&id.service_id)
+        .get(&id.service_instance_id)
         .map(|s| s.value().clone())
         .unwrap_or(ServiceStatus::Initializing);
 
@@ -129,10 +129,10 @@ pub fn done() {
     if next_status != current_status {
         resources
             .status_plane
-            .insert(id.service_id, next_status.clone());
+            .insert(id.service_instance_id, next_status.clone());
         resources
             .runtime_facts
-            .record_service_status(id.service_id, &next_status);
+            .record_service_status(id.service_instance_id, &next_status);
         resources.status_changed.notify_waiters();
         tracing::info!(
             "Service '{}' signalled done() (Transition: {:?} -> {:?})",
@@ -149,12 +149,12 @@ pub fn done() {
 /// # Note
 /// The async signature matches the other context helpers.
 pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
-    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+    let service_instance_id = match CURRENT_SERVICE.try_with(|id| id.service_instance_id) {
         Ok(id) => id,
         Err(_) => return,
     };
     if let Ok(resources) = CURRENT_RESOURCES.try_with(|r| r.clone()) {
-        let entry = resources.shelf.entry(service_id).or_default();
+        let entry = resources.shelf.entry(service_instance_id).or_default();
         entry.insert(key.to_string(), Box::new(data));
     }
 }
@@ -167,13 +167,13 @@ pub async fn shelve<T: Any + Send + Sync>(key: &str, data: T) {
 /// # Note
 /// The async signature matches the other context helpers.
 pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
-    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+    let service_instance_id = match CURRENT_SERVICE.try_with(|id| id.service_instance_id) {
         Ok(id) => id,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(&service_id).and_then(|entry| {
+            r.shelf.get(&service_instance_id).and_then(|entry| {
                 entry
                     .remove(key)
                     .and_then(|(_, val)| val.downcast::<T>().ok().map(|b| *b))
@@ -196,13 +196,13 @@ pub async fn unshelve<T: Any + Send + Sync>(key: &str) -> Option<T> {
 /// # Note
 /// The async signature matches the other context helpers.
 pub async fn shelve_clone<T: Any + Clone + Send + Sync>(key: &str) -> Option<T> {
-    let service_id = match CURRENT_SERVICE.try_with(|id| id.service_id) {
+    let service_instance_id = match CURRENT_SERVICE.try_with(|id| id.service_instance_id) {
         Ok(id) => id,
         Err(_) => return None,
     };
     CURRENT_RESOURCES
         .try_with(|r| {
-            r.shelf.get(&service_id).and_then(|entry| {
+            r.shelf.get(&service_instance_id).and_then(|entry| {
                 entry
                     .get(key)
                     .and_then(|val| val.downcast_ref::<T>().cloned())
@@ -233,7 +233,7 @@ fn implicit_handshake() {
     // Check and transition startup states
     let needs_transition = resources
         .status_plane
-        .get(&id.service_id)
+        .get(&id.service_instance_id)
         .map(|s| {
             matches!(
                 s.value(),
@@ -247,10 +247,10 @@ fn implicit_handshake() {
     if needs_transition {
         resources
             .status_plane
-            .insert(id.service_id, ServiceStatus::Healthy);
+            .insert(id.service_instance_id, ServiceStatus::Healthy);
         resources
             .runtime_facts
-            .record_service_status(id.service_id, &ServiceStatus::Healthy);
+            .record_service_status(id.service_instance_id, &ServiceStatus::Healthy);
         resources.status_changed.notify_waiters();
         tracing::debug!(
             "Service '{}' implicitly transitioned to Healthy (via lifecycle utility)",
@@ -423,29 +423,37 @@ pub(crate) fn current_service_generation() -> u64 {
         .unwrap_or_default()
 }
 
-pub(crate) fn current_trigger_pressure(service_id: ServiceId) -> Option<TriggerPressureSnapshot> {
+pub(crate) fn current_trigger_pressure(
+    service_instance_id: ServiceInstanceId,
+) -> Option<TriggerPressureSnapshot> {
     CURRENT_RESOURCES
-        .try_with(|resources| resources.runtime_facts.trigger_pressure(service_id))
+        .try_with(|resources| {
+            resources
+                .runtime_facts
+                .trigger_pressure(service_instance_id)
+        })
         .ok()
         .flatten()
 }
 
 pub(crate) fn request_trigger_policy_overlay(
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     generation: u64,
     overlay: TriggerPolicyOverlay,
 ) -> Result<(), TriggerPolicyOverlayError> {
     CURRENT_RESOURCES
         .try_with(|resources| {
-            resources
-                .trigger_policy_overlays
-                .request_overlay(service_id, generation, overlay)
+            resources.trigger_policy_overlays.request_overlay(
+                service_instance_id,
+                generation,
+                overlay,
+            )
         })
         .map_err(|_| TriggerPolicyOverlayError::TriggerOverlayUnavailable)?
 }
 
 pub(crate) fn clear_trigger_policy_overlay(
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     generation: u64,
     reason: &str,
 ) -> Result<(), TriggerPolicyOverlayError> {
@@ -453,13 +461,13 @@ pub(crate) fn clear_trigger_policy_overlay(
         .try_with(|resources| {
             resources
                 .trigger_policy_overlays
-                .clear_overlay(service_id, generation, reason)
+                .clear_overlay(service_instance_id, generation, reason)
         })
         .map_err(|_| TriggerPolicyOverlayError::TriggerOverlayUnavailable)?
 }
 
 pub(crate) fn register_current_trigger_runtime(
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     generation: u64,
     semaphore: Arc<Semaphore>,
@@ -468,7 +476,7 @@ pub(crate) fn register_current_trigger_runtime(
     CURRENT_RESOURCES
         .try_with(|resources| {
             resources.runtime_facts.register_trigger(
-                service_id,
+                service_instance_id,
                 service_name,
                 generation,
                 semaphore,
@@ -479,7 +487,7 @@ pub(crate) fn register_current_trigger_runtime(
 }
 
 pub(crate) fn register_current_trigger_policy_overlay(
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     generation: u64,
     base: TriggerBasePolicy,
     semaphore: Arc<Semaphore>,
@@ -488,7 +496,7 @@ pub(crate) fn register_current_trigger_policy_overlay(
     CURRENT_RESOURCES
         .try_with(|resources| {
             resources.trigger_policy_overlays.register_trigger(
-                service_id,
+                service_instance_id,
                 generation,
                 base,
                 semaphore,
@@ -501,11 +509,11 @@ pub(crate) fn register_current_trigger_policy_overlay(
 
 pub(crate) fn effective_trigger_policy(
     store: &TriggerPolicyOverlayStore,
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     generation: u64,
     fallback: TriggerBasePolicy,
 ) -> EffectiveTriggerPolicy {
-    store.effective_policy(service_id, generation, fallback)
+    store.effective_policy(service_instance_id, generation, fallback)
 }
 
 // ---------------------------------------------------------------------------
@@ -568,13 +576,13 @@ where
     }
 }
 
-/// Returns the `ServiceId` of the calling service.
+/// Returns the `ServiceInstanceId` of the calling service.
 ///
-/// Falls back to `ServiceId(0)` if called outside of a managed service scope
+/// Falls back to `ServiceInstanceId(0)` if called outside of a managed service scope
 /// (e.g., in a background task spawned via `tokio::spawn` without context propagation).
-pub fn current_service_id() -> ServiceId {
+pub fn current_service_instance_id() -> ServiceInstanceId {
     CURRENT_SERVICE
-        .try_with(|identity| identity.service_id)
+        .try_with(|identity| identity.service_instance_id)
         .unwrap_or_default()
 }
 
@@ -610,7 +618,7 @@ mod tests {
         let resources = DaemonResources::new();
         let expected_scope_id = resources.provider_scope.id();
         let identity = ServiceIdentity::new(
-            ServiceId::new(17),
+            ServiceInstanceId::new(17),
             "provider_scope",
             CancellationToken::new(),
             CancellationToken::new(),
@@ -637,11 +645,15 @@ mod tests {
     #[tokio::test]
     async fn sleep_records_completed_diagnostics() {
         let store = DiagnosticsStore::new();
-        let service_id = ServiceId::new(11);
-        let diagnostics =
-            store.register_generation(service_id, "sleep_completed", 1, RuntimeLane::Standard);
+        let service_instance_id = ServiceInstanceId::new(11);
+        let diagnostics = store.register_generation(
+            service_instance_id,
+            "sleep_completed",
+            1,
+            RuntimeLane::Standard,
+        );
         let identity = ServiceIdentity::new_with_diagnostics(
-            service_id,
+            service_instance_id,
             "sleep_completed",
             CancellationToken::new(),
             CancellationToken::new(),
@@ -655,7 +667,7 @@ mod tests {
 
         assert!(completed);
         let generation = store
-            .generation_snapshot(service_id, 1)
+            .generation_snapshot(service_instance_id, 1)
             .expect("generation diagnostics should exist");
         assert_eq!(generation.aggregate.service_sleep.completed, 1);
         assert_eq!(generation.aggregate.service_sleep.interrupted, 0);
@@ -667,13 +679,17 @@ mod tests {
     #[tokio::test]
     async fn sleep_records_reload_interruption_diagnostics() {
         let store = DiagnosticsStore::new();
-        let service_id = ServiceId::new(12);
-        let diagnostics =
-            store.register_generation(service_id, "sleep_reload", 1, RuntimeLane::Standard);
+        let service_instance_id = ServiceInstanceId::new(12);
+        let diagnostics = store.register_generation(
+            service_instance_id,
+            "sleep_reload",
+            1,
+            RuntimeLane::Standard,
+        );
         let reload_token = CancellationToken::new();
         reload_token.cancel();
         let identity = ServiceIdentity::new_with_diagnostics(
-            service_id,
+            service_instance_id,
             "sleep_reload",
             CancellationToken::new(),
             reload_token,
@@ -687,7 +703,7 @@ mod tests {
 
         assert!(!completed);
         let generation = store
-            .generation_snapshot(service_id, 1)
+            .generation_snapshot(service_instance_id, 1)
             .expect("generation diagnostics should exist");
         assert_eq!(generation.aggregate.service_sleep.completed, 0);
         assert_eq!(generation.aggregate.service_sleep.interrupted, 1);

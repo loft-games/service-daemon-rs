@@ -24,7 +24,7 @@ Both standard services and event-driven triggers are collected into a `SERVICE_R
 3. **Module reachability**: Any module included in the compilation tree via `mod` has its services and providers registered. No manual list maintenance is required.
 
 ### Registry identity
-Each entry in the registry contains a `ServiceId`. This ID is used as the primary key in the Status Plane and for routing trigger events.
+Each selected entry receives a `ServiceEntryId` from its original `SERVICE_REGISTRY` index. The daemon then materializes an auto-start singleton with `ServiceInstanceId::from(entry_id)`, and that runtime instance ID is used as the primary key in the Status Plane, Shelf, reload signals, runtime facts, diagnostics, and trigger routing.
 
 ## 2. Decentralized Dependency Injection
 
@@ -100,7 +100,7 @@ snapshots for daemon facts, readiness grouping, service facts, and trigger facts
 The snapshots copy facts out of the runtime; they do not expose status-plane
 guards, semaphores, diagnostics stores, or policy handles.
 
-The first runtime-facts surface is keyed by `ServiceId`. Trigger host and target
+The first runtime-facts surface is keyed by `ServiceInstanceId`. Trigger host and target
 labels are omitted because stable host/target metadata would require a separate
 registry contract. Status subscription is also separate from this surface: the
 current `status_changed` signal is a lossy `Notify`, not a sequenced status
@@ -161,7 +161,7 @@ The main internal modules are:
 - **`core/logging/`**: Logging and diagnostic event pipeline.
   - `mod.rs`: Public logging facade, subscriber initialization, and re-exports.
   - `model.rs`: Log event model, broadcast queue, and batch-size configuration.
-  - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUID v7 Message ID, numeric Service ID, and Instance ID) for asynchronous tracing.
+  - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUID v7 Message ID, numeric service instance ID, and trigger instance ID) for asynchronous tracing.
   - `render.rs`: Console and feature-gated JSON rendering.
   - `services.rs`: Console log drain service.
   - `file.rs`: Feature-gated file logging configuration and drain service.
@@ -234,14 +234,14 @@ Because of the automatic service discovery, testing a subsystem in a large proje
 **Test Setup:**
 1. **Use Tags**: Group services logically using `#[service(tags = ["core", "api"])]`.
 2. **Isolated Registry**: In integration tests, use `Registry::builder().with_tag("__isolation__").build()` to create an empty environment. Register test services with unique tags via `#[service(tags = ["__my_test__"])]` and select them with `Registry::builder().with_tag("__my_test__").build()`.
-3. **ServiceId Safety**: The `ServiceDaemonBuilder` automatically detects `ServiceId` collisions at startup, preventing two services from competing for the same status plane slot.
+3. **ServiceInstanceId Safety**: Runtime state is keyed by `ServiceInstanceId`, preventing two service instances from competing for the same status plane slot.
 
 ## 8. Event Traceability Architecture
 
 The system uses a unified messaging layer for all cross-service events:
 
-- **TriggerMessage**: Encapsulates the payload with a **UUID v7** `message_id` and a `source_id` (the publishing service).
-- **TriggerContext**: Provides execution-specific identity, including the current `service_id`, generation, and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`. Custom trigger engines that construct contexts manually must preserve that identity.
+- **TriggerMessage**: Encapsulates the payload with a **UUID v7** `message_id` and a `source_service_instance_id` (the publishing service instance).
+- **TriggerContext**: Provides execution-specific identity, including the current `service_instance_id`, generation, and a monotonic `instance_seq`, while wrapping the incoming `TriggerMessage`. Custom trigger engines that construct contexts manually must preserve that identity.
 - **Provider Methods**: Services emit events by calling provider instance methods directly (e.g. `notifier.notify()`, `queue.push(...)`) after resolving the provider via DI resolution.
 - **TriggerRunner**: Ensures that every trigger execution is wrapped in a tracing span that preserves the original event's context (Source, Message, and Instance). The runner also owns in-flight dispatch observation so completed failures and panics return to the service supervisor.
 - **Interceptor Pipeline**: `TriggerInterceptor<P>` layers execute in an onion model -- each interceptor wraps the next and decides if, when, and how many times to call it. Built-in interceptors handle tracing spans (`TracingInterceptor`) and exponential-backoff retry (`RetryInterceptor`). Public user-defined interceptor registration is not exposed yet.

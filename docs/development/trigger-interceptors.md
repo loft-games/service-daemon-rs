@@ -123,8 +123,8 @@ The context that flows through the chain carries everything needed for dispatch:
 
 ```rust,ignore
 pub struct DispatchContext<P> {
-    pub service_id: ServiceId,     // Which trigger service
-    pub source_id: ServiceId,      // Which service emitted the event
+    pub service_instance_id: ServiceInstanceId,        // Which trigger service instance
+    pub source_service_instance_id: ServiceInstanceId, // Which service instance emitted the event
     pub instance_seq: u64,         // Invocation sequence number
     pub message_id: uuid::Uuid,    // Globally unique UUID v7 event ID
     pub trigger_name: &'static str, // Human-readable trigger name

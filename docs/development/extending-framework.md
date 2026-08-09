@@ -101,10 +101,10 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for MyInterceptor {
 
 ## 4. Modifying Registry Mechanics
 
-The framework uses `linkme` for distributed registration and `ServiceId` for identity.
+The framework uses `linkme` for distributed registration, `ServiceEntryId` for static registry positions, and `ServiceInstanceId` for runtime identity.
 
-1. **Identity**: `ServiceId` values are assigned at compile-time via `linkme`.
-2. **Context**: Use `current_service_id()` from `service-daemon/src/models/trigger.rs` to retrieve the ID of the running service.
+1. **Identity**: `ServiceEntryId` values come from the selected entry's original `SERVICE_REGISTRY` index. Auto-start singleton services currently map that entry ID to `ServiceInstanceId::from(entry_id)`.
+2. **Context**: Use `current_service_instance_id()` from `service-daemon/src/core/context/api.rs` to retrieve the runtime ID of the running service instance.
 3. **Macro Generation**: Shared logic resides in `service-daemon-macro/src/common.rs`.
     - **`decompose_type`**: This utility is key to the DI system. It recursively inspects AST types to identify wrappers like `Arc`, `RwLock`, and `Mutex`, stripping the outer layers to reach the inner `T`.
     - **`ParamIntent`**: Parameters are categorized as either `Payload` or `Dependency`. This allows a single function to mix event data with DI-resolved resources automatedly.

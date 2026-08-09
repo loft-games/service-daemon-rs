@@ -1,5 +1,5 @@
 use service_daemon::{
-    DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceId,
+    DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceInstanceId,
     ServiceStatus, service,
 };
 use std::sync::LazyLock;
@@ -67,7 +67,10 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
     );
 
     assert_eq!(
-        daemon.handle().get_service_status(&ServiceId::new(0)).await,
+        daemon
+            .handle()
+            .get_service_status(&ServiceInstanceId::new(0))
+            .await,
         ServiceStatus::Terminated
     );
 

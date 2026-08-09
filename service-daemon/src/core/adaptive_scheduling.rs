@@ -10,7 +10,7 @@ use crate::core::diagnostics::{
     GenerationDiagnosticsSnapshot, LifecycleStatsSnapshot, ObservationStatsSnapshot, RuntimeLane,
     RuntimeLaneSnapshot, ServiceDiagnosticsSnapshot,
 };
-use crate::models::ServiceId;
+use crate::models::ServiceInstanceId;
 
 const RECOMMENDATION_INTERVAL: Duration = Duration::from_secs(30);
 const MINIMUM_COMPLETED_SAMPLES: u64 = 3;
@@ -64,7 +64,7 @@ pub(crate) struct DiagnosticsAggregateWindow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServiceDiagnosticsWindow {
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub current_generation: u64,
     pub runtime_lane: RuntimeLane,
@@ -73,7 +73,7 @@ pub(crate) struct ServiceDiagnosticsWindow {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GenerationDiagnosticsWindow {
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
     pub runtime_lane: RuntimeLane,
@@ -125,12 +125,12 @@ pub(crate) struct SchedulingRecommendation {
 pub(crate) enum SchedulingRecommendationTarget {
     RuntimeLane(RuntimeLane),
     Service {
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         current_generation: u64,
     },
     Generation {
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         generation: u64,
         runtime_lane: RuntimeLane,
@@ -321,7 +321,7 @@ impl SchedulingPolicyEvaluator {
         if self.lifecycle_has_instability(&generation.aggregate.lifecycle) {
             recommendations.push(SchedulingRecommendation {
                 target: SchedulingRecommendationTarget::Generation {
-                    service_id: generation.service_id,
+                    service_instance_id: generation.service_instance_id,
                     service_name: generation.service_name,
                     generation: generation.generation,
                     runtime_lane: generation.runtime_lane,
@@ -343,7 +343,7 @@ impl SchedulingPolicyEvaluator {
         {
             recommendations.push(SchedulingRecommendation {
                 target: SchedulingRecommendationTarget::Generation {
-                    service_id: generation.service_id,
+                    service_instance_id: generation.service_instance_id,
                     service_name: generation.service_name,
                     generation: generation.generation,
                     runtime_lane: generation.runtime_lane,
@@ -370,7 +370,7 @@ impl SchedulingPolicyEvaluator {
         if self.lifecycle_has_instability(&service.aggregate.lifecycle) {
             recommendations.push(SchedulingRecommendation {
                 target: SchedulingRecommendationTarget::Service {
-                    service_id: service.service_id,
+                    service_instance_id: service.service_instance_id,
                     service_name: service.service_name,
                     current_generation: service.current_generation,
                 },
@@ -400,7 +400,7 @@ impl SchedulingPolicyEvaluator {
 
         recommendations.push(SchedulingRecommendation {
             target: SchedulingRecommendationTarget::Service {
-                service_id: service.service_id,
+                service_instance_id: service.service_instance_id,
                 service_name: service.service_name,
                 current_generation: service.current_generation,
             },
@@ -535,9 +535,9 @@ impl DiagnosticsWindow {
             .services
             .iter()
             .map(|service| {
-                let previous = previous_services.get(&service.service_id);
+                let previous = previous_services.get(&service.service_instance_id);
                 ServiceDiagnosticsWindow {
-                    service_id: service.service_id,
+                    service_instance_id: service.service_instance_id,
                     service_name: service.service_name,
                     current_generation: service.current_generation,
                     runtime_lane: service.runtime_lane,
@@ -548,16 +548,16 @@ impl DiagnosticsWindow {
                 }
             })
             .collect();
-        services.sort_by_key(|service| service.service_id);
+        services.sort_by_key(|service| service.service_instance_id);
 
         let mut generations: Vec<_> = current
             .generations
             .iter()
             .map(|generation| {
-                let previous =
-                    previous_generations.get(&(generation.service_id, generation.generation));
+                let previous = previous_generations
+                    .get(&(generation.service_instance_id, generation.generation));
                 GenerationDiagnosticsWindow {
-                    service_id: generation.service_id,
+                    service_instance_id: generation.service_instance_id,
                     service_name: generation.service_name,
                     generation: generation.generation,
                     runtime_lane: generation.runtime_lane,
@@ -568,7 +568,8 @@ impl DiagnosticsWindow {
                 }
             })
             .collect();
-        generations.sort_by_key(|generation| (generation.service_id, generation.generation));
+        generations
+            .sort_by_key(|generation| (generation.service_instance_id, generation.generation));
 
         let mut lanes: Vec<_> = current
             .lanes
@@ -597,21 +598,26 @@ impl DiagnosticsWindow {
 
 fn service_snapshot_map(
     snapshot: &DiagnosticsSnapshot,
-) -> HashMap<ServiceId, &ServiceDiagnosticsSnapshot> {
+) -> HashMap<ServiceInstanceId, &ServiceDiagnosticsSnapshot> {
     snapshot
         .services
         .iter()
-        .map(|service| (service.service_id, service))
+        .map(|service| (service.service_instance_id, service))
         .collect()
 }
 
 fn generation_snapshot_map(
     snapshot: &DiagnosticsSnapshot,
-) -> HashMap<(ServiceId, u64), &GenerationDiagnosticsSnapshot> {
+) -> HashMap<(ServiceInstanceId, u64), &GenerationDiagnosticsSnapshot> {
     snapshot
         .generations
         .iter()
-        .map(|generation| ((generation.service_id, generation.generation), generation))
+        .map(|generation| {
+            (
+                (generation.service_instance_id, generation.generation),
+                generation,
+            )
+        })
         .collect()
 }
 
@@ -771,7 +777,7 @@ type RecommendationFingerprint = (
 type TargetFingerprint = (
     u8,
     Option<RuntimeLane>,
-    Option<ServiceId>,
+    Option<ServiceInstanceId>,
     Option<&'static str>,
     Option<u64>,
 );
@@ -798,25 +804,25 @@ fn target_fingerprint(target: &SchedulingRecommendationTarget) -> TargetFingerpr
     match target {
         SchedulingRecommendationTarget::RuntimeLane(lane) => (0, Some(*lane), None, None, None),
         SchedulingRecommendationTarget::Service {
-            service_id,
+            service_instance_id,
             service_name,
             current_generation,
         } => (
             1,
             None,
-            Some(*service_id),
+            Some(*service_instance_id),
             Some(*service_name),
             Some(*current_generation),
         ),
         SchedulingRecommendationTarget::Generation {
-            service_id,
+            service_instance_id,
             service_name,
             generation,
             runtime_lane,
         } => (
             2,
             Some(*runtime_lane),
-            Some(*service_id),
+            Some(*service_instance_id),
             Some(*service_name),
             Some(*generation),
         ),
@@ -874,7 +880,7 @@ mod tests {
     use crate::core::diagnostics::{
         GenerationExitKind, SleepExitReason, SleepObservation, SleepObservationSource,
     };
-    use crate::models::ServiceId;
+    use crate::models::ServiceInstanceId;
 
     fn completed_service_sleep(drift_ms: u64) -> SleepObservation {
         SleepObservation {
@@ -977,12 +983,12 @@ mod tests {
     }
 
     fn service_window(
-        service_id: usize,
+        service_instance_id: usize,
         runtime_lane: RuntimeLane,
         service_sleep: ObservationWindow,
     ) -> ServiceDiagnosticsWindow {
         ServiceDiagnosticsWindow {
-            service_id: ServiceId::new(service_id),
+            service_instance_id: ServiceInstanceId::new(service_instance_id),
             service_name: "worker",
             current_generation: 1,
             runtime_lane,
@@ -991,13 +997,13 @@ mod tests {
     }
 
     fn service_window_with_lifecycle(
-        service_id: usize,
+        service_instance_id: usize,
         runtime_lane: RuntimeLane,
         service_sleep: ObservationWindow,
         lifecycle: LifecycleWindow,
     ) -> ServiceDiagnosticsWindow {
         ServiceDiagnosticsWindow {
-            service_id: ServiceId::new(service_id),
+            service_instance_id: ServiceInstanceId::new(service_instance_id),
             service_name: "worker",
             current_generation: 1,
             runtime_lane,
@@ -1095,8 +1101,12 @@ mod tests {
     #[test]
     fn sampler_computes_service_and_generation_windows() {
         let store = crate::core::diagnostics::DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(7), "worker", 1, RuntimeLane::Standard);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(7),
+            "worker",
+            1,
+            RuntimeLane::Standard,
+        );
         handle.record_sleep_observation(completed_service_sleep(4));
         let mut sampler = DiagnosticsSampler::new();
         sampler.sample(store.snapshot());
@@ -1114,7 +1124,7 @@ mod tests {
         let service = window
             .services
             .iter()
-            .find(|service| service.service_id == ServiceId::new(7));
+            .find(|service| service.service_instance_id == ServiceInstanceId::new(7));
         assert_eq!(
             service.map(|service| service.aggregate.service_sleep.completed),
             Some(1)
@@ -1127,7 +1137,7 @@ mod tests {
         let generation = window
             .generations
             .iter()
-            .find(|generation| generation.service_id == ServiceId::new(7));
+            .find(|generation| generation.service_instance_id == ServiceInstanceId::new(7));
         assert_eq!(
             generation.map(|generation| generation.aggregate.service_sleep.avg_drift_ms),
             Some(8)
@@ -1235,7 +1245,7 @@ mod tests {
         assert_eq!(
             recommendations[0].target,
             SchedulingRecommendationTarget::Service {
-                service_id: ServiceId::new(1),
+                service_instance_id: ServiceInstanceId::new(1),
                 service_name: "worker",
                 current_generation: 1,
             }

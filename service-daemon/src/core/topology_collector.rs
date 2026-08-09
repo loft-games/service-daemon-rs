@@ -2,7 +2,7 @@
 //!
 //! Gated behind the `diagnostics` feature, this module subscribes to the
 //! [`LogQueue`](super::logging::model::LogQueue) broadcast channel and aggregates
-//! causal edges between services based on natively propagated `source_service_id`.
+//! causal edges between services based on natively propagated `source_service_instance_id`.
 //!
 //! # Architecture
 //!
@@ -12,7 +12,7 @@
 //! service B".
 //!
 //! This collector is **stateless**: it relies on the causal identity
-//! (`source_service_id`) injected by the `TriggerRunner` and propagated
+//! (`source_service_instance_id`) injected by the `TriggerRunner` and propagated
 //! through the logging pipeline.
 //!
 //! # Data Flow
@@ -22,7 +22,7 @@
 //!     |
 //!     v
 //! TopologyCollector (subscriber)
-//!     |  extracts (service_id, source_service_id)
+//!     |  extracts (service_instance_id, source_service_instance_id)
 //!     |  records edge (source -> service)
 //!     v
 //! EdgeMap: HashMap<(source, target), count>
@@ -38,7 +38,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
-use crate::models::{SERVICE_REGISTRY, ServiceId};
+use crate::models::{SERVICE_REGISTRY, ServiceInstanceId};
 
 use super::logging::model::{LogEvent, get_log_queue};
 
@@ -52,10 +52,10 @@ use super::logging::model::{LogEvent, get_log_queue};
 /// service. The `count` field tracks how many times this edge was observed.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 struct Edge {
-    /// The `ServiceId` of the emitter (the service that published the signal).
-    source: ServiceId,
-    /// The `ServiceId` of the consumer (the trigger that reacted).
-    target: ServiceId,
+    /// The `ServiceInstanceId` of the emitter (the service that published the signal).
+    source: ServiceInstanceId,
+    /// The `ServiceInstanceId` of the consumer (the trigger that reacted).
+    target: ServiceInstanceId,
 }
 
 /// Thread-safe storage for the accumulated topology edges.
@@ -117,16 +117,16 @@ pub fn start_topology_collector() -> JoinHandle<()> {
 /// Processes a single log event to extract causal edges.
 ///
 /// Under the stateless model, we simply check if the event carries a
-/// `source_service_id`. If it does, a causal relationship is established.
+/// `source_service_instance_id`. If it does, a causal relationship is established.
 fn process_event(state: &Arc<RwLock<TopologyState>>, event: &LogEvent) {
-    // We only care about events that have both a target (service_id)
-    // and a known source (source_service_id).
-    let target = match event.service_id {
+    // We only care about events that have both a target (service_instance_id)
+    // and a known source (source_service_instance_id).
+    let target = match event.service_instance_id {
         Some(id) => id,
         None => return,
     };
 
-    let source = match event.source_service_id {
+    let source = match event.source_service_instance_id {
         Some(id) => id,
         None => return,
     };
@@ -165,12 +165,12 @@ pub fn export_mermaid() -> Option<String> {
     sorted_edges.sort_by_key(|(edge, _)| *edge);
 
     for (edge, count) in sorted_edges {
-        let source_id = edge.source;
+        let source_service_instance_id = edge.source;
         let target_id = edge.target;
 
         // Map IDs to names using the global static registry
         let source_name = SERVICE_REGISTRY
-            .get(source_id.value())
+            .get(source_service_instance_id.value())
             .map(|e| e.name)
             .unwrap_or("unknown");
         let target_name = SERVICE_REGISTRY
@@ -178,7 +178,7 @@ pub fn export_mermaid() -> Option<String> {
             .map(|e| e.name)
             .unwrap_or("unknown");
 
-        let source_node = format!("{}_{}", source_name, source_id.value());
+        let source_node = format!("{}_{}", source_name, source_service_instance_id.value());
         let target_node = format!("{}_{}", target_name, target_id.value());
 
         lines.push(format!(
@@ -199,7 +199,7 @@ pub fn reset_topology() {
 }
 
 #[cfg(test)]
-pub(crate) fn record_topology_edge_for_test(source: ServiceId, target: ServiceId) {
+pub(crate) fn record_topology_edge_for_test(source: ServiceInstanceId, target: ServiceInstanceId) {
     let state = get_state().clone();
     let mut guard = state
         .write()
@@ -220,7 +220,7 @@ mod tests {
     fn test_stateless_correlation() {
         let state = Arc::new(RwLock::new(TopologyState::default()));
 
-        // Event with both service_id and source_service_id
+        // Event with both service_instance_id and source_service_instance_id
         let event = LogEvent {
             timestamp: Utc::now(),
             level: LogLevel::Info,
@@ -229,18 +229,18 @@ mod tests {
             module_path: None,
             file: None,
             line: None,
-            service_id: Some(ServiceId::new(2)),
-            source_service_id: Some(ServiceId::new(1)),
+            service_instance_id: Some(ServiceInstanceId::new(2)),
+            source_service_instance_id: Some(ServiceInstanceId::new(1)),
             message_id: Some(Uuid::now_v7()),
-            instance_id: None,
+            trigger_instance_id: None,
             error_chain: None,
         };
         process_event(&state, &event);
 
         let guard = state.read().unwrap();
         let edge = Edge {
-            source: ServiceId::new(1),
-            target: ServiceId::new(2),
+            source: ServiceInstanceId::new(1),
+            target: ServiceInstanceId::new(2),
         };
         assert_eq!(guard.edges.get(&edge), Some(&1));
     }

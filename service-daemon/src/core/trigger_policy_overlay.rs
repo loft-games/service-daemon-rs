@@ -9,7 +9,8 @@ use tracing::{info, warn};
 
 use crate::models::policy::validate_overlay_clear_reason;
 use crate::models::{
-    RestartPolicy, ScalingPolicy, ServiceId, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+    RestartPolicy, ScalingPolicy, ServiceInstanceId, TriggerPolicyOverlay,
+    TriggerPolicyOverlayError,
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -83,20 +84,20 @@ impl TriggerPolicyOverlayRecord {
 
 #[derive(Default)]
 pub(crate) struct TriggerPolicyOverlayStore {
-    records: DashMap<ServiceId, Arc<TriggerPolicyOverlayRecord>>,
+    records: DashMap<ServiceInstanceId, Arc<TriggerPolicyOverlayRecord>>,
 }
 
 impl TriggerPolicyOverlayStore {
     pub(crate) fn register_trigger(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         base: TriggerBasePolicy,
         semaphore: Arc<Semaphore>,
         current_limit: Arc<AtomicUsize>,
     ) {
         self.records.insert(
-            service_id,
+            service_instance_id,
             Arc::new(TriggerPolicyOverlayRecord::new(
                 base,
                 generation,
@@ -106,11 +107,14 @@ impl TriggerPolicyOverlayStore {
         );
     }
 
-    pub(crate) fn remove_trigger_generation(&self, service_id: ServiceId, generation: u64) {
-        let Some((_, record)) = self
-            .records
-            .remove_if(&service_id, |_, record| record.generation == generation)
-        else {
+    pub(crate) fn remove_trigger_generation(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        generation: u64,
+    ) {
+        let Some((_, record)) = self.records.remove_if(&service_instance_id, |_, record| {
+            record.generation == generation
+        }) else {
             return;
         };
 
@@ -123,7 +127,7 @@ impl TriggerPolicyOverlayStore {
         drop(state);
 
         Self::emit_overlay_cleared(
-            service_id,
+            service_instance_id,
             generation,
             "generation_end",
             "trigger generation ended",
@@ -135,21 +139,21 @@ impl TriggerPolicyOverlayStore {
 
     pub(crate) fn request_overlay(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         overlay: TriggerPolicyOverlay,
     ) -> Result<(), TriggerPolicyOverlayError> {
         if let Err(error) = overlay.validate_shape() {
-            Self::emit_overlay_rejected(service_id, generation, Some(&overlay), &error);
+            Self::emit_overlay_rejected(service_instance_id, generation, Some(&overlay), &error);
             return Err(error);
         }
-        let Some(record) = self.record_for_generation(service_id, generation) else {
+        let Some(record) = self.record_for_generation(service_instance_id, generation) else {
             let error = TriggerPolicyOverlayError::TriggerOverlayUnavailable;
-            Self::emit_overlay_rejected(service_id, generation, Some(&overlay), &error);
+            Self::emit_overlay_rejected(service_instance_id, generation, Some(&overlay), &error);
             return Err(error);
         };
         if let Err(error) = self.validate_overlay_bounds(&record, &overlay) {
-            Self::emit_overlay_rejected(service_id, generation, Some(&overlay), &error);
+            Self::emit_overlay_rejected(service_instance_id, generation, Some(&overlay), &error);
             return Err(error);
         }
         let expires_at = Instant::now() + overlay.ttl();
@@ -165,23 +169,23 @@ impl TriggerPolicyOverlayStore {
             expires_at,
         });
         state.restore_base_on_next_reconcile = previous_had_concurrency && !next_has_concurrency;
-        Self::emit_overlay_accepted(service_id, generation, &overlay);
+        Self::emit_overlay_accepted(service_instance_id, generation, &overlay);
         Ok(())
     }
 
     pub(crate) fn clear_overlay(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         reason: &str,
     ) -> Result<(), TriggerPolicyOverlayError> {
         if let Err(error) = validate_overlay_clear_reason(reason) {
-            Self::emit_overlay_rejected(service_id, generation, None, &error);
+            Self::emit_overlay_rejected(service_instance_id, generation, None, &error);
             return Err(error);
         }
-        let Some(record) = self.record_for_generation(service_id, generation) else {
+        let Some(record) = self.record_for_generation(service_instance_id, generation) else {
             let error = TriggerPolicyOverlayError::TriggerOverlayUnavailable;
-            Self::emit_overlay_rejected(service_id, generation, None, &error);
+            Self::emit_overlay_rejected(service_instance_id, generation, None, &error);
             return Err(error);
         };
         let mut state = record.state.lock();
@@ -196,7 +200,7 @@ impl TriggerPolicyOverlayStore {
         }
         drop(state);
         Self::emit_overlay_cleared(
-            service_id,
+            service_instance_id,
             generation,
             "manual",
             reason,
@@ -209,17 +213,17 @@ impl TriggerPolicyOverlayStore {
 
     pub(crate) fn effective_policy(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         fallback: TriggerBasePolicy,
     ) -> EffectiveTriggerPolicy {
-        let Some(record) = self.record_for_generation(service_id, generation) else {
+        let Some(record) = self.record_for_generation(service_instance_id, generation) else {
             return EffectiveTriggerPolicy {
                 restart_policy: fallback.restart_policy,
                 dispatch_timeout: None,
             };
         };
-        self.prune_expired_overlay(&record, service_id);
+        self.prune_expired_overlay(&record, service_instance_id);
         let state = record.state.lock();
         let Some(active) = state.overlay.as_ref() else {
             return EffectiveTriggerPolicy {
@@ -236,21 +240,25 @@ impl TriggerPolicyOverlayStore {
         }
     }
 
-    pub(crate) fn apply_effective_concurrency(&self, service_id: ServiceId, generation: u64) {
+    pub(crate) fn apply_effective_concurrency(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        generation: u64,
+    ) {
         self.reconcile_effective_concurrency(
-            service_id,
+            service_instance_id,
             generation,
-            self.current_limit_or_base(service_id, generation),
+            self.current_limit_or_base(service_instance_id, generation),
         );
     }
 
     pub(crate) fn reconcile_effective_concurrency(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         base_target: usize,
     ) -> usize {
-        let Some(record) = self.record_for_generation(service_id, generation) else {
+        let Some(record) = self.record_for_generation(service_instance_id, generation) else {
             return base_target.max(1);
         };
         let _reconcile_guard = record.reconcile.lock();
@@ -274,7 +282,7 @@ impl TriggerPolicyOverlayStore {
         };
         if let Some(expired) = expired {
             Self::emit_overlay_expired(
-                service_id,
+                service_instance_id,
                 record.generation,
                 &expired.overlay,
                 expired.had_concurrency,
@@ -285,21 +293,25 @@ impl TriggerPolicyOverlayStore {
 
     pub(crate) fn effective_concurrency_limit(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         fallback: usize,
     ) -> usize {
-        let Some(record) = self.record_for_generation(service_id, generation) else {
+        let Some(record) = self.record_for_generation(service_instance_id, generation) else {
             return fallback;
         };
-        self.prune_expired_overlay(&record, service_id);
+        self.prune_expired_overlay(&record, service_instance_id);
         self.active_concurrency_limit_for(&record)
             .unwrap_or(fallback)
     }
 
     #[cfg(test)]
-    pub(crate) fn has_active_overlay(&self, service_id: ServiceId, generation: u64) -> bool {
-        self.record_for_generation(service_id, generation)
+    pub(crate) fn has_active_overlay(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        generation: u64,
+    ) -> bool {
+        self.record_for_generation(service_instance_id, generation)
             .is_some_and(|record| record.state.lock().overlay.is_some())
     }
 
@@ -322,10 +334,10 @@ impl TriggerPolicyOverlayStore {
 
     fn record_for_generation(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
     ) -> Option<Arc<TriggerPolicyOverlayRecord>> {
-        self.records.get(&service_id).and_then(|record| {
+        self.records.get(&service_instance_id).and_then(|record| {
             if record.generation == generation {
                 Some(record.value().clone())
             } else {
@@ -334,14 +346,18 @@ impl TriggerPolicyOverlayStore {
         })
     }
 
-    fn prune_expired_overlay(&self, record: &TriggerPolicyOverlayRecord, service_id: ServiceId) {
+    fn prune_expired_overlay(
+        &self,
+        record: &TriggerPolicyOverlayRecord,
+        service_instance_id: ServiceInstanceId,
+    ) {
         let expired = {
             let mut state = record.state.lock();
             Self::take_expired_overlay(&mut state)
         };
         if let Some(expired) = expired {
             Self::emit_overlay_expired(
-                service_id,
+                service_instance_id,
                 record.generation,
                 &expired.overlay,
                 expired.had_concurrency,
@@ -358,8 +374,12 @@ impl TriggerPolicyOverlayStore {
             .and_then(|active| active.overlay.concurrency_limit())
     }
 
-    fn current_limit_or_base(&self, service_id: ServiceId, generation: u64) -> usize {
-        self.record_for_generation(service_id, generation)
+    fn current_limit_or_base(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        generation: u64,
+    ) -> usize {
+        self.record_for_generation(service_instance_id, generation)
             .map(|record| record.current_limit.load(Ordering::Relaxed))
             .unwrap_or(1)
     }
@@ -432,13 +452,13 @@ impl TriggerPolicyOverlayStore {
     }
 
     fn emit_overlay_accepted(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         overlay: &TriggerPolicyOverlay,
     ) {
         info!(
             event_kind = "trigger_policy_overlay_accepted",
-            service_id = service_id.value(),
+            service_instance_id = service_instance_id.value(),
             generation,
             reason = overlay.reason(),
             ttl_ms = Self::duration_ms(overlay.ttl()),
@@ -453,14 +473,14 @@ impl TriggerPolicyOverlayStore {
     }
 
     fn emit_overlay_rejected(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         overlay: Option<&TriggerPolicyOverlay>,
         error: &TriggerPolicyOverlayError,
     ) {
         warn!(
             event_kind = "trigger_policy_overlay_rejected",
-            service_id = service_id.value(),
+            service_instance_id = service_instance_id.value(),
             generation,
             error_kind = error.kind(),
             error = %error,
@@ -488,7 +508,7 @@ impl TriggerPolicyOverlayStore {
     }
 
     fn emit_overlay_cleared(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         clear_source: &'static str,
         clear_reason: &str,
@@ -498,7 +518,7 @@ impl TriggerPolicyOverlayStore {
     ) {
         info!(
             event_kind = "trigger_policy_overlay_cleared",
-            service_id = service_id.value(),
+            service_instance_id = service_instance_id.value(),
             generation,
             clear_source,
             clear_reason,
@@ -528,14 +548,14 @@ impl TriggerPolicyOverlayStore {
     }
 
     fn emit_overlay_expired(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         overlay: &TriggerPolicyOverlay,
         restored_base_policy: bool,
     ) {
         info!(
             event_kind = "trigger_policy_overlay_expired",
-            service_id = service_id.value(),
+            service_instance_id = service_instance_id.value(),
             generation,
             clear_source = "ttl_expired",
             reason = overlay.reason(),
@@ -667,9 +687,9 @@ mod tests {
     fn overlay_event<'a>(
         events: &'a [BTreeMap<String, String>],
         event_kind: &str,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
     ) -> &'a BTreeMap<String, String> {
-        let expected_service_id = service_id.value().to_string();
+        let expected_service_id = service_instance_id.value().to_string();
         events
             .iter()
             .find(|event| {
@@ -677,14 +697,14 @@ mod tests {
                     .get("event_kind")
                     .is_some_and(|kind| kind == event_kind)
                     && event
-                        .get("service_id")
+                        .get("service_instance_id")
                         .is_some_and(|actual| actual == &expected_service_id)
             })
             .unwrap_or_else(|| panic!("trace event {event_kind} should be captured: {events:?}"))
     }
 
     fn registered_store(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         base: TriggerBasePolicy,
         current_limit: usize,
@@ -693,7 +713,7 @@ mod tests {
         let semaphore = Arc::new(Semaphore::new(current_limit));
         let current_limit = Arc::new(AtomicUsize::new(current_limit));
         store.register_trigger(
-            service_id,
+            service_instance_id,
             generation,
             base,
             semaphore.clone(),
@@ -704,12 +724,12 @@ mod tests {
 
     #[test]
     fn overlay_rejects_concurrency_above_base_max() {
-        let service_id = ServiceId::new(7);
+        let service_instance_id = ServiceInstanceId::new(7);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(ScalingPolicy::builder().max_concurrency(2).build()),
         };
-        let (store, _, _) = registered_store(service_id, 1, base, 1);
+        let (store, _, _) = registered_store(service_instance_id, 1, base, 1);
 
         let overlay = TriggerPolicyOverlay::builder("burst", Duration::from_secs(1))
             .concurrency_limit(3)
@@ -717,7 +737,7 @@ mod tests {
             .expect("overlay shape should be valid");
 
         assert_eq!(
-            store.request_overlay(service_id, 1, overlay),
+            store.request_overlay(service_instance_id, 1, overlay),
             Err(TriggerPolicyOverlayError::ConcurrencyLimitExceedsMax {
                 requested: 3,
                 max: 2
@@ -727,12 +747,12 @@ mod tests {
 
     #[test]
     fn accepted_overlay_audit_includes_policy_fields() {
-        let service_id = ServiceId::new(701);
+        let service_instance_id = ServiceInstanceId::new(701);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(ScalingPolicy::builder().max_concurrency(4).build()),
         };
-        let (store, _, _) = registered_store(service_id, 9, base, 1);
+        let (store, _, _) = registered_store(service_instance_id, 9, base, 1);
         let overlay = TriggerPolicyOverlay::builder("pressure relief", Duration::from_secs(3))
             .concurrency_limit(2)
             .dispatch_timeout(Duration::from_millis(250))
@@ -742,12 +762,19 @@ mod tests {
 
         let events = with_trace_capture(|| {
             store
-                .request_overlay(service_id, 9, overlay)
+                .request_overlay(service_instance_id, 9, overlay)
                 .expect("overlay should be accepted");
         });
 
-        let event = overlay_event(&events, "trigger_policy_overlay_accepted", service_id);
-        assert_eq!(event.get("service_id").map(String::as_str), Some("701"));
+        let event = overlay_event(
+            &events,
+            "trigger_policy_overlay_accepted",
+            service_instance_id,
+        );
+        assert_eq!(
+            event.get("service_instance_id").map(String::as_str),
+            Some("701")
+        );
         assert_eq!(event.get("generation").map(String::as_str), Some("9"));
         assert_eq!(
             event.get("reason").map(String::as_str),
@@ -778,7 +805,7 @@ mod tests {
 
     #[test]
     fn rejected_overlay_audit_includes_context_unavailable_error_kind() {
-        let service_id = ServiceId::new(702);
+        let service_instance_id = ServiceInstanceId::new(702);
         let overlay = TriggerPolicyOverlay::builder("not registered", Duration::from_secs(1))
             .concurrency_limit(1)
             .build()
@@ -786,12 +813,20 @@ mod tests {
 
         let events = with_trace_capture(|| {
             assert_eq!(
-                TriggerPolicyOverlayStore::default().request_overlay(service_id, 1, overlay),
+                TriggerPolicyOverlayStore::default().request_overlay(
+                    service_instance_id,
+                    1,
+                    overlay
+                ),
                 Err(TriggerPolicyOverlayError::TriggerOverlayUnavailable)
             );
         });
 
-        let event = overlay_event(&events, "trigger_policy_overlay_rejected", service_id);
+        let event = overlay_event(
+            &events,
+            "trigger_policy_overlay_rejected",
+            service_instance_id,
+        );
         assert_eq!(
             event.get("error_kind").map(String::as_str),
             Some("trigger_overlay_unavailable")
@@ -808,12 +843,12 @@ mod tests {
 
     #[test]
     fn rejected_overlay_audit_includes_bounds_fields() {
-        let service_id = ServiceId::new(703);
+        let service_instance_id = ServiceInstanceId::new(703);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(ScalingPolicy::builder().max_concurrency(2).build()),
         };
-        let (store, _, _) = registered_store(service_id, 1, base, 1);
+        let (store, _, _) = registered_store(service_instance_id, 1, base, 1);
         let overlay = TriggerPolicyOverlay::builder("too high", Duration::from_secs(1))
             .concurrency_limit(3)
             .build()
@@ -821,7 +856,7 @@ mod tests {
 
         let events = with_trace_capture(|| {
             assert_eq!(
-                store.request_overlay(service_id, 1, overlay),
+                store.request_overlay(service_instance_id, 1, overlay),
                 Err(TriggerPolicyOverlayError::ConcurrencyLimitExceedsMax {
                     requested: 3,
                     max: 2
@@ -829,7 +864,11 @@ mod tests {
             );
         });
 
-        let event = overlay_event(&events, "trigger_policy_overlay_rejected", service_id);
+        let event = overlay_event(
+            &events,
+            "trigger_policy_overlay_rejected",
+            service_instance_id,
+        );
         assert_eq!(
             event.get("error_kind").map(String::as_str),
             Some("concurrency_limit_exceeds_max")
@@ -846,7 +885,7 @@ mod tests {
 
     #[test]
     fn clear_overlay_audit_distinguishes_present_and_empty_manual_clear() {
-        let service_id = ServiceId::new(704);
+        let service_instance_id = ServiceInstanceId::new(704);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -856,22 +895,22 @@ mod tests {
                     .build(),
             ),
         };
-        let (store, _, current_limit) = registered_store(service_id, 1, base, 1);
+        let (store, _, current_limit) = registered_store(service_instance_id, 1, base, 1);
         let overlay = TriggerPolicyOverlay::builder("manual test", Duration::from_secs(1))
             .concurrency_limit(3)
             .build()
             .expect("overlay shape should be valid");
         store
-            .request_overlay(service_id, 1, overlay)
+            .request_overlay(service_instance_id, 1, overlay)
             .expect("overlay should be accepted");
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
 
         let events = with_trace_capture(|| {
             store
-                .clear_overlay(service_id, 1, "manual recovery")
+                .clear_overlay(service_instance_id, 1, "manual recovery")
                 .expect("manual clear should succeed");
             store
-                .clear_overlay(service_id, 1, "manual no-op")
+                .clear_overlay(service_instance_id, 1, "manual no-op")
                 .expect("manual clear without active overlay should succeed");
         });
 
@@ -913,7 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn overlay_expires_back_to_initial_concurrency() {
-        let service_id = ServiceId::new(8);
+        let service_instance_id = ServiceInstanceId::new(8);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -923,24 +962,30 @@ mod tests {
                     .build(),
             ),
         };
-        let (store, _, _) = registered_store(service_id, 1, base, 1);
+        let (store, _, _) = registered_store(service_instance_id, 1, base, 1);
 
         let overlay = TriggerPolicyOverlay::builder("burst", Duration::from_millis(10))
             .concurrency_limit(3)
             .build()
             .expect("overlay shape should be valid");
         store
-            .request_overlay(service_id, 1, overlay)
+            .request_overlay(service_instance_id, 1, overlay)
             .expect("overlay should be accepted");
-        assert_eq!(store.effective_concurrency_limit(service_id, 1, 1), 3);
+        assert_eq!(
+            store.effective_concurrency_limit(service_instance_id, 1, 1),
+            3
+        );
 
         tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(store.effective_concurrency_limit(service_id, 1, 1), 1);
+        assert_eq!(
+            store.effective_concurrency_limit(service_instance_id, 1, 1),
+            1
+        );
     }
 
     #[test]
     fn ttl_expiry_audit_records_restore() {
-        let service_id = ServiceId::new(705);
+        let service_instance_id = ServiceInstanceId::new(705);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -950,17 +995,17 @@ mod tests {
                     .build(),
             ),
         };
-        let (store, _, current_limit) = registered_store(service_id, 1, base, 1);
+        let (store, _, current_limit) = registered_store(service_instance_id, 1, base, 1);
         let overlay = TriggerPolicyOverlay::builder("ttl test", Duration::from_millis(10))
             .concurrency_limit(3)
             .build()
             .expect("overlay shape should be valid");
         store
-            .request_overlay(service_id, 1, overlay)
+            .request_overlay(service_instance_id, 1, overlay)
             .expect("overlay should be accepted");
 
         let record = store
-            .record_for_generation(service_id, 1)
+            .record_for_generation(service_instance_id, 1)
             .expect("overlay record should be registered");
         record
             .state
@@ -971,11 +1016,18 @@ mod tests {
             .expires_at = Instant::now() - Duration::from_millis(1);
 
         let events = with_trace_capture(|| {
-            assert_eq!(store.effective_concurrency_limit(service_id, 1, 1), 1);
+            assert_eq!(
+                store.effective_concurrency_limit(service_instance_id, 1, 1),
+                1
+            );
         });
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
-        let event = overlay_event(&events, "trigger_policy_overlay_expired", service_id);
+        let event = overlay_event(
+            &events,
+            "trigger_policy_overlay_expired",
+            service_instance_id,
+        );
         assert_eq!(
             event.get("clear_source").map(String::as_str),
             Some("ttl_expired")
@@ -989,7 +1041,7 @@ mod tests {
 
     #[test]
     fn generation_cleanup_audit_records_restore_and_removal() {
-        let service_id = ServiceId::new(706);
+        let service_instance_id = ServiceInstanceId::new(706);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -999,23 +1051,30 @@ mod tests {
                     .build(),
             ),
         };
-        let (store, _, current_limit) = registered_store(service_id, 12, base, 1);
+        let (store, _, current_limit) = registered_store(service_instance_id, 12, base, 1);
         let overlay = TriggerPolicyOverlay::builder("generation end", Duration::from_secs(1))
             .concurrency_limit(3)
             .build()
             .expect("overlay shape should be valid");
         store
-            .request_overlay(service_id, 12, overlay)
+            .request_overlay(service_instance_id, 12, overlay)
             .expect("overlay should be accepted");
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
 
         let events = with_trace_capture(|| {
-            store.remove_trigger_generation(service_id, 12);
+            store.remove_trigger_generation(service_instance_id, 12);
         });
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
-        assert_eq!(store.effective_concurrency_limit(service_id, 12, 4), 4);
-        let event = overlay_event(&events, "trigger_policy_overlay_cleared", service_id);
+        assert_eq!(
+            store.effective_concurrency_limit(service_instance_id, 12, 4),
+            4
+        );
+        let event = overlay_event(
+            &events,
+            "trigger_policy_overlay_cleared",
+            service_instance_id,
+        );
         assert_eq!(
             event.get("clear_source").map(String::as_str),
             Some("generation_end")
@@ -1034,7 +1093,7 @@ mod tests {
     #[test]
     fn no_active_concurrency_overlay_preserves_scaling_fallback() {
         let store = TriggerPolicyOverlayStore::default();
-        let service_id = ServiceId::new(10);
+        let service_instance_id = ServiceInstanceId::new(10);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1046,18 +1105,27 @@ mod tests {
         };
         let semaphore = Arc::new(Semaphore::new(2));
         let current_limit = Arc::new(AtomicUsize::new(2));
-        store.register_trigger(service_id, 1, base, semaphore, current_limit.clone());
+        store.register_trigger(
+            service_instance_id,
+            1,
+            base,
+            semaphore,
+            current_limit.clone(),
+        );
 
-        assert_eq!(store.effective_concurrency_limit(service_id, 1, 4), 4);
+        assert_eq!(
+            store.effective_concurrency_limit(service_instance_id, 1, 4),
+            4
+        );
 
-        store.apply_effective_concurrency(service_id, 1);
+        store.apply_effective_concurrency(service_instance_id, 1);
         assert_eq!(current_limit.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn non_concurrency_overlay_does_not_reset_scaled_limit() {
         let store = TriggerPolicyOverlayStore::default();
-        let service_id = ServiceId::new(11);
+        let service_instance_id = ServiceInstanceId::new(11);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1069,23 +1137,32 @@ mod tests {
         };
         let semaphore = Arc::new(Semaphore::new(2));
         let current_limit = Arc::new(AtomicUsize::new(2));
-        store.register_trigger(service_id, 1, base, semaphore, current_limit.clone());
+        store.register_trigger(
+            service_instance_id,
+            1,
+            base,
+            semaphore,
+            current_limit.clone(),
+        );
 
         let overlay = TriggerPolicyOverlay::builder("retry tune", Duration::from_secs(1))
             .retry_policy(RestartPolicy::for_testing())
             .build()
             .expect("overlay shape should be valid");
         store
-            .request_overlay(service_id, 1, overlay)
+            .request_overlay(service_instance_id, 1, overlay)
             .expect("overlay should be accepted");
 
-        assert_eq!(store.effective_concurrency_limit(service_id, 1, 4), 4);
+        assert_eq!(
+            store.effective_concurrency_limit(service_instance_id, 1, 4),
+            4
+        );
         assert_eq!(current_limit.load(Ordering::Relaxed), 2);
     }
 
     #[test]
     fn request_overlay_records_desired_state_until_reconcile() {
-        let service_id = ServiceId::new(707);
+        let service_instance_id = ServiceInstanceId::new(707);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1095,28 +1172,34 @@ mod tests {
                     .build(),
             ),
         };
-        let (store, semaphore, current_limit) = registered_store(service_id, 1, base, 1);
+        let (store, semaphore, current_limit) = registered_store(service_instance_id, 1, base, 1);
         let overlay = TriggerPolicyOverlay::builder("desired only", Duration::from_secs(1))
             .concurrency_limit(3)
             .build()
             .expect("overlay shape should be valid");
 
         store
-            .request_overlay(service_id, 1, overlay)
+            .request_overlay(service_instance_id, 1, overlay)
             .expect("overlay should be accepted");
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
         assert_eq!(semaphore.available_permits(), 1);
-        assert_eq!(store.effective_concurrency_limit(service_id, 1, 4), 3);
+        assert_eq!(
+            store.effective_concurrency_limit(service_instance_id, 1, 4),
+            3
+        );
 
-        assert_eq!(store.reconcile_effective_concurrency(service_id, 1, 1), 3);
+        assert_eq!(
+            store.reconcile_effective_concurrency(service_instance_id, 1, 1),
+            3
+        );
         assert_eq!(current_limit.load(Ordering::Relaxed), 3);
         assert_eq!(semaphore.available_permits(), 3);
     }
 
     #[test]
     fn clear_overlay_restores_base_on_next_reconcile() {
-        let service_id = ServiceId::new(708);
+        let service_instance_id = ServiceInstanceId::new(708);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1126,30 +1209,36 @@ mod tests {
                     .build(),
             ),
         };
-        let (store, semaphore, current_limit) = registered_store(service_id, 1, base, 1);
+        let (store, semaphore, current_limit) = registered_store(service_instance_id, 1, base, 1);
         let overlay = TriggerPolicyOverlay::builder("clear desired", Duration::from_secs(1))
             .concurrency_limit(3)
             .build()
             .expect("overlay shape should be valid");
 
         store
-            .request_overlay(service_id, 1, overlay)
+            .request_overlay(service_instance_id, 1, overlay)
             .expect("overlay should be accepted");
-        assert_eq!(store.reconcile_effective_concurrency(service_id, 1, 1), 3);
+        assert_eq!(
+            store.reconcile_effective_concurrency(service_instance_id, 1, 1),
+            3
+        );
         store
-            .clear_overlay(service_id, 1, "clear test")
+            .clear_overlay(service_instance_id, 1, "clear test")
             .expect("clear should be accepted");
 
         assert_eq!(current_limit.load(Ordering::Relaxed), 3);
         assert_eq!(semaphore.available_permits(), 3);
-        assert_eq!(store.reconcile_effective_concurrency(service_id, 1, 3), 1);
+        assert_eq!(
+            store.reconcile_effective_concurrency(service_instance_id, 1, 3),
+            1
+        );
         assert_eq!(current_limit.load(Ordering::Relaxed), 1);
         assert_eq!(semaphore.available_permits(), 1);
     }
 
     #[test]
     fn reconcile_does_not_revoke_in_flight_dispatches_below_target() {
-        let service_id = ServiceId::new(709);
+        let service_instance_id = ServiceInstanceId::new(709);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1163,7 +1252,7 @@ mod tests {
         let semaphore = Arc::new(Semaphore::new(4));
         let current_limit = Arc::new(AtomicUsize::new(4));
         store.register_trigger(
-            service_id,
+            service_instance_id,
             1,
             base,
             semaphore.clone(),
@@ -1179,14 +1268,17 @@ mod tests {
             .try_acquire()
             .expect("third in-flight permit should be acquired");
 
-        assert_eq!(store.reconcile_effective_concurrency(service_id, 1, 1), 3);
+        assert_eq!(
+            store.reconcile_effective_concurrency(service_instance_id, 1, 1),
+            3
+        );
         assert_eq!(current_limit.load(Ordering::Relaxed), 3);
         assert_eq!(semaphore.available_permits(), 0);
     }
 
     #[test]
     fn concurrent_requests_converge_without_permit_counter_split() {
-        let service_id = ServiceId::new(710);
+        let service_instance_id = ServiceInstanceId::new(710);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: Some(
@@ -1200,7 +1292,7 @@ mod tests {
         let semaphore = Arc::new(Semaphore::new(1));
         let current_limit = Arc::new(AtomicUsize::new(1));
         store.register_trigger(
-            service_id,
+            service_instance_id,
             1,
             base,
             semaphore.clone(),
@@ -1217,9 +1309,9 @@ mod tests {
                             .build()
                             .expect("overlay shape should be valid");
                     store
-                        .request_overlay(service_id, 1, overlay)
+                        .request_overlay(service_instance_id, 1, overlay)
                         .expect("overlay should be accepted");
-                    store.reconcile_effective_concurrency(service_id, 1, 1);
+                    store.reconcile_effective_concurrency(service_instance_id, 1, 1);
                 });
             }
         });
@@ -1234,13 +1326,13 @@ mod tests {
     #[test]
     fn clearing_overlay_requires_reason() {
         let store = TriggerPolicyOverlayStore::default();
-        let service_id = ServiceId::new(9);
+        let service_instance_id = ServiceInstanceId::new(9);
         let base = TriggerBasePolicy {
             restart_policy: RestartPolicy::for_testing(),
             scaling: None,
         };
         store.register_trigger(
-            service_id,
+            service_instance_id,
             1,
             base,
             Arc::new(Semaphore::new(1)),
@@ -1248,7 +1340,7 @@ mod tests {
         );
 
         assert_eq!(
-            store.clear_overlay(service_id, 1, " "),
+            store.clear_overlay(service_instance_id, 1, " "),
             Err(TriggerPolicyOverlayError::EmptyReason)
         );
     }

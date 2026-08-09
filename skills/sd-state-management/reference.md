@@ -60,9 +60,10 @@ Note `shelve_clone` does **not** deposit — it reads back a clone of something 
 shelved (handy when a trigger host must re-read shelved state across iterations). To
 deposit while keeping your local copy, call `shelve(key, value.clone()).await`.
 
-Shelf buckets are isolated by `ServiceId`, so two selected services with the same
-Rust function name do not share Shelf state. Related helpers: `service_daemon::state`
-(observe lifecycle state) and `service_daemon::current_service_id`.
+Shelf buckets are isolated by `ServiceInstanceId`, so two selected services with
+the same Rust function name do not share Shelf state. Related helpers:
+`service_daemon::state` (observe lifecycle state) and
+`service_daemon::current_service_instance_id`.
 
 ## 6. Choosing the mechanism
 

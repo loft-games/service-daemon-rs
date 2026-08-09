@@ -83,7 +83,7 @@ mod tests {
     };
     use super::render::render_to_string;
     use super::*;
-    use crate::models::{ServiceId, service::InstanceId};
+    use crate::models::{ServiceInstanceId, service::TriggerInstanceId};
     use chrono::Utc;
     use std::borrow::Cow;
     use std::num::NonZeroUsize;
@@ -171,10 +171,10 @@ mod tests {
     fn make_event(
         level: LogLevel,
         message: &str,
-        service_id: Option<ServiceId>,
-        source_service_id: Option<ServiceId>,
+        service_instance_id: Option<ServiceInstanceId>,
+        source_service_instance_id: Option<ServiceInstanceId>,
         message_id: Option<Uuid>,
-        instance_id: Option<InstanceId>,
+        trigger_instance_id: Option<TriggerInstanceId>,
         error_chain: Option<&str>,
     ) -> LogEvent {
         LogEvent {
@@ -185,10 +185,10 @@ mod tests {
             module_path: None,
             file: None,
             line: None,
-            service_id,
-            source_service_id,
+            service_instance_id,
+            source_service_instance_id,
             message_id,
-            instance_id,
+            trigger_instance_id,
             error_chain: error_chain.map(|s| s.to_string()),
         }
     }
@@ -270,11 +270,11 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn render_includes_service_id_when_present() {
+    fn render_includes_service_instance_id_when_present() {
         let event = make_event(
             LogLevel::Info,
             "msg",
-            Some(ServiceId::new(123)),
+            Some(ServiceInstanceId::new(123)),
             None,
             None,
             None,
@@ -282,34 +282,37 @@ mod tests {
         );
         let output = render_to_string(&event);
         assert!(
-            output.contains("service_id=svc#123"),
-            "output should contain service_id, got: {}",
+            output.contains("service_instance_id=svcinst#123"),
+            "output should contain service_instance_id, got: {}",
             output
         );
     }
 
     #[test]
     fn render_includes_all_ids_when_present() {
-        let test_iid = InstanceId::new(ServiceId::new(3), 0);
+        let test_iid = TriggerInstanceId::new(ServiceInstanceId::new(3), 0);
         let msg_id = Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
         let event = make_event(
             LogLevel::Info,
             "triggered",
-            Some(ServiceId::new(1)),
+            Some(ServiceInstanceId::new(1)),
             None,
             Some(msg_id),
             Some(test_iid),
             None,
         );
         let output = render_to_string(&event);
-        assert!(output.contains("service_id=svc#1"), "missing service_id");
+        assert!(
+            output.contains("service_instance_id=svcinst#1"),
+            "missing service_instance_id"
+        );
         assert!(
             output.contains("message_id=0195e342-8874-7065-a86d-3e6a457b0195"),
             "missing message_id"
         );
         assert!(
-            output.contains("instance_id=svc#3:0"),
-            "missing instance_id, got: {}",
+            output.contains("trigger_instance_id=svcinst#3:0"),
+            "missing trigger_instance_id, got: {}",
             output
         );
     }
@@ -338,16 +341,16 @@ mod tests {
         let event = make_event(LogLevel::Info, "init phase", None, None, None, None, None);
         let output = render_to_string(&event);
         assert!(
-            !output.contains("service_id="),
-            "should not contain service_id when None"
+            !output.contains("service_instance_id="),
+            "should not contain service_instance_id when None"
         );
         assert!(
             !output.contains("message_id="),
             "should not contain message_id when None"
         );
         assert!(
-            !output.contains("instance_id="),
-            "should not contain instance_id when None"
+            !output.contains("trigger_instance_id="),
+            "should not contain trigger_instance_id when None"
         );
         assert!(
             !output.contains("error="),
@@ -383,9 +386,9 @@ mod tests {
     }
 
     #[test]
-    fn daemon_layer_captures_service_id_from_span() {
+    fn daemon_layer_captures_service_instance_id_from_span() {
         let events = collect_events_with_daemon_layer(|| {
-            let span = tracing::info_span!("service", service_id = "svc#42",);
+            let span = tracing::info_span!("service", service_instance_id = "svcinst#42",);
             let _enter = span.enter();
             tracing::info!("svc_id_test_marker");
         });
@@ -396,9 +399,9 @@ mod tests {
             .expect("should have captured the event");
 
         assert_eq!(
-            event.service_id,
-            Some(ServiceId::new(42)),
-            "service_id should be extracted from Span"
+            event.service_instance_id,
+            Some(ServiceInstanceId::new(42)),
+            "service_instance_id should be extracted from Span"
         );
     }
 
@@ -408,14 +411,14 @@ mod tests {
         let msg_id = Uuid::parse_str(msg_id_str).unwrap();
 
         let events = collect_events_with_daemon_layer(|| {
-            let service_span = tracing::info_span!("service", service_id = "svc#1",);
+            let service_span = tracing::info_span!("service", service_instance_id = "svcinst#1",);
             let _svc_enter = service_span.enter();
 
             let trigger_span = tracing::info_span!(
                 "trigger",
-                service_id = "svc#2",
+                service_instance_id = "svcinst#2",
                 message_id = msg_id_str,
-                instance_svc_id = 3u64,
+                trigger_instance_service_instance_id = 3u64,
                 instance_seq = 7u64,
             );
             let _trig_enter = trigger_span.enter();
@@ -428,20 +431,20 @@ mod tests {
             .expect("should have captured the event");
 
         assert_eq!(
-            event.service_id,
-            Some(ServiceId::new(2)),
-            "service_id should come from innermost span"
+            event.service_instance_id,
+            Some(ServiceInstanceId::new(2)),
+            "service_instance_id should come from innermost span"
         );
         assert_eq!(
             event.message_id,
             Some(msg_id),
             "message_id should be extracted from trigger span"
         );
-        let expected_iid = InstanceId::new(ServiceId::new(3), 7);
+        let expected_iid = TriggerInstanceId::new(ServiceInstanceId::new(3), 7);
         assert_eq!(
-            event.instance_id,
+            event.trigger_instance_id,
             Some(expected_iid),
-            "instance_id should be reconstructed from numeric fields"
+            "trigger_instance_id should be reconstructed from numeric fields"
         );
     }
 
@@ -457,16 +460,16 @@ mod tests {
             .expect("should capture the event");
 
         assert!(
-            event.service_id.is_none(),
-            "service_id should be None outside span"
+            event.service_instance_id.is_none(),
+            "service_instance_id should be None outside span"
         );
         assert!(
             event.message_id.is_none(),
             "message_id should be None outside span"
         );
         assert!(
-            event.instance_id.is_none(),
-            "instance_id should be None outside span"
+            event.trigger_instance_id.is_none(),
+            "trigger_instance_id should be None outside span"
         );
     }
 

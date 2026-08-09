@@ -52,12 +52,15 @@ async fn shelf_reader_service() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use service_daemon::{MockContext, Registry};
+    use service_daemon::{MockContext, Registry, ServiceEntryId, ServiceInstanceId};
 
     #[tokio::test]
-    async fn test_two_phase_simulation() -> anyhow::Result<()> {
+    async fn simulation_can_seed_and_mutate_shelf() -> anyhow::Result<()> {
+        // Current auto-start singleton instances use the same numeric value as
+        // their static registry entry ID.
+        let shelf_reader_id = ServiceInstanceId::from(ServiceEntryId::new(0));
         let (builder, handle) = MockContext::builder()
-            .with_shelf::<String>("shelf_reader_service", "config_key", "initial_val".into())
+            .with_shelf::<String>(shelf_reader_id, "config_key", "initial_val".into())
             .build();
 
         let daemon = builder
@@ -74,13 +77,13 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = handle.get_shelf("shelf_reader_service", "read_result");
+        let result: Option<String> = handle.get_shelf(shelf_reader_id, "read_result");
         assert_eq!(result, Some("initial_val".into()));
 
-        handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "mid_flight_val".into());
+        handle.set_shelf::<String>(shelf_reader_id, "dynamic_key", "mid_flight_val".into());
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = handle.get_shelf("shelf_reader_service", "dynamic_result");
+        let result: Option<String> = handle.get_shelf(shelf_reader_id, "dynamic_result");
         assert_eq!(result, Some("mid_flight_val".into()));
 
         cancel.cancel();
@@ -97,10 +100,11 @@ The `SimulationHandle` lets tests inspect and mutate the running sandbox without
 ### Snapshot Inspection
 
 ```rust,ignore
-let val: Option<String> = handle.get_shelf("svc", "key");
-let status = handle.get_status(svc_id);
+let service_instance_id = ServiceInstanceId::new(0);
+let val: Option<String> = handle.get_shelf(service_instance_id, "key");
+let status = handle.get_status(service_instance_id);
 
-if handle.has_shelf("svc", "key") {
+if handle.has_shelf(service_instance_id, "key") {
     // assert or trigger the next test step
 }
 ```
@@ -108,8 +112,8 @@ if handle.has_shelf("svc", "key") {
 ### Mutation API
 
 ```rust,ignore
-handle.set_status(service_id, ServiceStatus::NeedReload);
-handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
+handle.set_status(service_instance_id, ServiceStatus::NeedReload);
+handle.set_shelf::<String>(service_instance_id, "config_override", "NEW_VALUE".into());
 ```
 
 ## 4. Supported test controls

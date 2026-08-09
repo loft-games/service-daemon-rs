@@ -36,7 +36,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
 use service_daemon::{
-    BackoffController, RestartPolicy, ServiceDaemon, ServiceId, ServiceScheduling, ServiceStatus,
+    BackoffController, RestartPolicy, ServiceDaemon, ServiceEntryId, ServiceInstanceId,
+    ServiceScheduling, ServiceStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -59,13 +60,13 @@ const SETTLE_DELAY_SECS: u64 = 2;
 type MockServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
 type MockShelfValue = Box<dyn Any + Send + Sync>;
 type MockServiceShelf = DashMap<String, MockShelfValue>;
-type MockGlobalShelfMapping = DashMap<ServiceId, MockServiceShelf>;
+type MockGlobalShelfMapping = DashMap<ServiceInstanceId, MockServiceShelf>;
 
 #[allow(dead_code)]
 struct MockDaemonResources {
-    status_plane: DashMap<ServiceId, ServiceStatus>,
+    status_plane: DashMap<ServiceInstanceId, ServiceStatus>,
     shelf: MockGlobalShelfMapping,
-    reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
+    reload_signals: DashMap<ServiceInstanceId, Arc<tokio::sync::Notify>>,
     status_changed: tokio::sync::Notify,
     trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
@@ -84,7 +85,8 @@ impl MockDaemonResources {
 
 #[allow(dead_code)]
 struct MockServiceDescription {
-    id: ServiceId,
+    entry_id: ServiceEntryId,
+    instance_id: ServiceInstanceId,
     entry: &'static (),
     cancellation_token: CancellationToken,
 }
@@ -160,7 +162,7 @@ struct MockGenerationDiagnosticsHandle {
 
 #[allow(dead_code)]
 struct MockServiceIdentity {
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     name: &'static str,
     cancellation_token: CancellationToken,
     reload_token: CancellationToken,
@@ -171,7 +173,7 @@ struct MockServiceIdentity {
 #[allow(dead_code)]
 struct MockSupervisor {
     // -- Immutable service identity --
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     name: &'static str,
     run: MockServiceFn,
     watcher: Option<fn() -> BoxFuture<'static, ()>>,
@@ -270,7 +272,10 @@ fn run_static_analysis() {
     print_header("Section 1: Static Analysis (std::mem::size_of)");
 
     let types: Vec<(&str, usize)> = vec![
-        ("ServiceId", std::mem::size_of::<ServiceId>()),
+        (
+            "ServiceInstanceId",
+            std::mem::size_of::<ServiceInstanceId>(),
+        ),
         ("ServiceStatus", std::mem::size_of::<ServiceStatus>()),
         (
             "MockServiceDescription (~= internal ServiceDescription)",
@@ -332,11 +337,11 @@ fn warmup_allocator() {
 
 fn measure_dashmap_status_plane() -> Option<f64> {
     warmup_allocator();
-    let map: DashMap<ServiceId, ServiceStatus> = DashMap::new();
+    let map: DashMap<ServiceInstanceId, ServiceStatus> = DashMap::new();
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            map.insert(ServiceId::new(i), ServiceStatus::Healthy);
+            map.insert(ServiceInstanceId::new(i), ServiceStatus::Healthy);
         }
         std::hint::black_box(&map);
     })?;
@@ -346,11 +351,14 @@ fn measure_dashmap_status_plane() -> Option<f64> {
 
 fn measure_dashmap_reload_signals() -> Option<f64> {
     warmup_allocator();
-    let map: DashMap<ServiceId, Arc<tokio::sync::Notify>> = DashMap::new();
+    let map: DashMap<ServiceInstanceId, Arc<tokio::sync::Notify>> = DashMap::new();
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            map.insert(ServiceId::new(i), Arc::new(tokio::sync::Notify::new()));
+            map.insert(
+                ServiceInstanceId::new(i),
+                Arc::new(tokio::sync::Notify::new()),
+            );
         }
         std::hint::black_box(&map);
     })?;
@@ -383,7 +391,7 @@ fn measure_supervisor_heap_box() -> Option<f64> {
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
             boxes.push(Box::new(MockSupervisor {
-                service_id: ServiceId::new(i),
+                service_instance_id: ServiceInstanceId::new(i),
                 name: "bench",
                 run: |_| Box::pin(async { Ok(()) }),
                 watcher: None,
@@ -420,7 +428,11 @@ fn measure_tracing_spans() -> Option<f64> {
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            spans.push(info_span!("service", name = "bench", service_id = i));
+            spans.push(info_span!(
+                "service",
+                name = "bench",
+                service_instance_id = i
+            ));
         }
         std::hint::black_box(&spans);
     })?;
@@ -450,7 +462,7 @@ async fn measure_tokio_task_spawn() -> Option<f64> {
 
 async fn measure_hashmap_join_handles() -> Option<f64> {
     warmup_allocator();
-    let mut map: HashMap<ServiceId, tokio::task::JoinHandle<()>> =
+    let mut map: HashMap<ServiceInstanceId, tokio::task::JoinHandle<()>> =
         HashMap::with_capacity(ISOLATION_COUNT);
 
     let before = read_rss_bytes()?;
@@ -458,7 +470,7 @@ async fn measure_hashmap_join_handles() -> Option<f64> {
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        map.insert(ServiceId::new(i), handle);
+        map.insert(ServiceInstanceId::new(i), handle);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     let after = read_rss_bytes()?;
@@ -522,10 +534,18 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let cost_status = measure_dashmap_status_plane().unwrap_or(0.0);
-    print_row("DashMap<ServiceId, ServiceStatus>", cost_status, "B/entry");
+    print_row(
+        "DashMap<ServiceInstanceId, ServiceStatus>",
+        cost_status,
+        "B/entry",
+    );
 
     let cost_signals = measure_dashmap_reload_signals().unwrap_or(0.0);
-    print_row("DashMap<ServiceId, Arc<Notify>>", cost_signals, "B/entry");
+    print_row(
+        "DashMap<ServiceInstanceId, Arc<Notify>>",
+        cost_signals,
+        "B/entry",
+    );
 
     let cost_token = measure_cancellation_tokens().unwrap_or(0.0);
     print_row("CancellationToken::new()", cost_token, "B/token");
@@ -544,7 +564,11 @@ async fn main() -> anyhow::Result<()> {
     print_row("tokio::spawn (idle future)", cost_task, "B/task");
 
     let cost_map = measure_hashmap_join_handles().await.unwrap_or(0.0);
-    print_row("HashMap<ServiceId, JoinHandle>", cost_map, "B/entry");
+    print_row(
+        "HashMap<ServiceInstanceId, JoinHandle>",
+        cost_map,
+        "B/entry",
+    );
 
     // Per-service total estimate: sum of isolation measurements.
     // In the real framework, the supervisor struct IS the tokio task's future,
@@ -589,8 +613,14 @@ async fn main() -> anyhow::Result<()> {
         print_header("Component Attribution (isolation -> % of E2E delta)");
 
         let components: Vec<(&str, f64)> = vec![
-            ("StatusPlane (DashMap<Id, Status>)", cost_status),
-            ("ReloadSignals (DashMap<Id, Arc<Notify>>)", cost_signals),
+            (
+                "StatusPlane (DashMap<ServiceInstanceId, Status>)",
+                cost_status,
+            ),
+            (
+                "ReloadSignals (DashMap<ServiceInstanceId, Arc<Notify>>)",
+                cost_signals,
+            ),
             ("CancellationTokens (x2)", cost_token * 2.0),
             (
                 "Supervisor Struct (Box<ServiceSupervisor>)",

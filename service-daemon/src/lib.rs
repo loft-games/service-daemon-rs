@@ -54,8 +54,8 @@ mod models;
 
 // Re-export commonly used items
 pub use core::context::{
-    current_service_id, done, is_shutdown, shelve, shelve_clone, sleep, spawn_with_context, state,
-    trigger_config, unshelve, wait_shutdown,
+    current_service_instance_id, done, is_shutdown, shelve, shelve_clone, sleep,
+    spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
 };
 pub use core::di::{
     ManagedProvided, Provided, ProviderDependencyChange, ProviderDependencyChangeReason,
@@ -69,7 +69,7 @@ pub use core::managed_state::{Mutex, RwLock, TrackedNotify, TrackedSender};
 pub use core::service_daemon::{
     RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
 };
-pub use models::service::{InstanceId, ServicePriority, ServiceScheduling};
+pub use models::service::{ServicePriority, ServiceScheduling, TriggerInstanceId};
 pub use models::trigger::TriggerTransition;
 pub use models::{
     BackoffController, DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticAggregateStats,
@@ -84,10 +84,10 @@ pub use models::{
     DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot, ProviderError,
     ProviderInitError, ReadinessServiceError, ReadinessSnapshot, Registry, RegistryBuilder, Result,
     RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
-    SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceError, ServiceId,
-    ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost,
-    TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
-    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+    SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceEntryId, ServiceError,
+    ServiceInstanceId, ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext, TriggerHandler,
+    TriggerHost, TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
+    TriggerPolicyOverlayError, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)
@@ -123,7 +123,8 @@ pub mod __private {
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
-        PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceFn, ServiceParam,
+        PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceEntryId,
+        ServiceFn, ServiceInstanceId, ServiceParam,
     };
 
     pub use futures;
@@ -149,8 +150,8 @@ pub mod prelude {
         Provided, ReadinessSnapshot, SchedulingAdvisoryProfile, ServiceDaemon, ServiceError,
         ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
         TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
-        TriggerRuntimeSnapshot, WatchableProvided, current_service_id, done, is_shutdown, provider,
-        service, shelve, shelve_clone, sleep, spawn_with_context, state, trigger, trigger_config,
-        unshelve, wait_shutdown,
+        TriggerRuntimeSnapshot, WatchableProvided, current_service_instance_id, done, is_shutdown,
+        provider, service, shelve, shelve_clone, sleep, spawn_with_context, state, trigger,
+        trigger_config, unshelve, wait_shutdown,
     };
 }

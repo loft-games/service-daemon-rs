@@ -24,14 +24,14 @@ use super::failure::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 /// # Span Fields
 ///
 /// - `name`: The trigger service name.
-/// - `instance_svc_id`: Numeric `ServiceId` value.
+/// - `trigger_instance_service_instance_id`: Numeric `ServiceInstanceId` value.
 /// - `instance_seq`: Monotonic sequence number within the service.
 /// - `message_id`: The globally unique event identifier.
 ///
 /// # Log Output
 ///
 /// ```text
-/// INFO trigger{name="my_trigger" instance_id=svc#1:0 message_id="msg-0"}: Trigger fired
+/// INFO trigger{name="my_trigger" trigger_instance_id=svcinst#1:0 message_id="msg-0"}: Trigger fired
 /// ```
 pub(super) struct TracingInterceptor;
 
@@ -46,8 +46,8 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for TracingInterceptor {
             let span = tracing::info_span!(
                 "trigger",
                 name = %ctx.trigger_name,
-                service_id_num = ctx.service_id.value(),
-                source_service_id = ctx.source_id.value(),
+                service_instance_id_num = ctx.service_instance_id.value(),
+                source_service_instance_id = ctx.source_service_instance_id.value(),
                 instance_seq = ctx.instance_seq,
                 message_id = %ctx.message_id,
                 mid_hi = (mid_val >> 64) as u64,
@@ -131,8 +131,8 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
             let trigger_max_retries = retry_policy.trigger_max_retries;
 
             // Preserve shared fields for reconstruction across retries
-            let service_id = ctx.service_id;
-            let source_id = ctx.source_id;
+            let service_instance_id = ctx.service_instance_id;
+            let source_service_instance_id = ctx.source_service_instance_id;
             let instance_seq = ctx.instance_seq;
             let generation = ctx.generation;
             let message_id = ctx.message_id;
@@ -144,8 +144,8 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
             // First attempt: use the original `next` closure (enters the
             // interceptor chain below us)
             let first_ctx = DispatchContext {
-                service_id,
-                source_id,
+                service_instance_id,
+                source_service_instance_id,
                 instance_seq,
                 generation,
                 message_id,
@@ -184,7 +184,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                     return Err(TriggerDispatchFailure::new(
                         TriggerDispatchFailureKind::HandlerRetryExhausted,
                         trigger_name,
-                        service_id,
+                        service_instance_id,
                         Some(instance_seq),
                         Some(message_id),
                         format!("exceeded max retry limit ({max} attempts)"),
@@ -193,12 +193,12 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                 }
 
                 let retry_ctx = TriggerContext::new(
-                    service_id,
+                    service_instance_id,
                     generation,
                     instance_seq,
                     TriggerMessage {
                         message_id,
-                        source_id,
+                        source_service_instance_id,
                         timestamp: Utc::now(),
                         payload: payload.clone(),
                     },

@@ -1,21 +1,24 @@
 // A full simulation test: pre-fill shelf, run bounded, mutate mid-flight, assert.
 // Requires the daemon dep built with features = ["simulation"].
-use service_daemon::{MockContext, Registry, ServiceId, ServiceStatus};
+use service_daemon::{MockContext, Registry, ServiceEntryId, ServiceInstanceId, ServiceStatus};
 use std::time::Duration;
 
-// `svc_id` is the strong identity of the single service under test (tagged
-// "sim_shelf"). Derive it from the service's registry identity in your setup;
-// keeping one service under test makes the id unambiguous.
-fn service_under_test() -> ServiceId {
-    /* resolve the id for the tagged service */
+// Derive the static entry ID from `SERVICE_REGISTRY` in your setup. The current
+// auto-start singleton maps that entry ID directly to a service instance ID.
+fn service_under_test_entry() -> ServiceEntryId {
+    /* resolve the entry id for the tagged service */
     unimplemented!()
+}
+
+fn service_under_test_instance() -> ServiceInstanceId {
+    ServiceInstanceId::from(service_under_test_entry())
 }
 
 #[tokio::test]
 async fn pre_filled_shelf_is_visible_to_the_service() {
-    let svc_id = service_under_test();
+    let svc_id = service_under_test_instance();
 
-    // Phase 1 — seed state before the daemon starts.
+    // Seed state before the daemon starts.
     let (builder, handle) = MockContext::builder()
         .with_shelf::<String>(svc_id, "config_key", "phase1_value".into())
         .with_logging(false) // lightweight: skip framework log services
@@ -39,7 +42,7 @@ async fn pre_filled_shelf_is_visible_to_the_service() {
         Some("phase1_value".to_string()),
     );
 
-    // Phase 2 — inject new state mid-flight; visible on the next unshelve.
+    // Inject new state mid-flight; visible on the next unshelve.
     handle.set_shelf::<String>(svc_id, "dynamic_key", "phase2_value".into());
 
     run.await.ok();
@@ -53,7 +56,7 @@ async fn pre_filled_shelf_is_visible_to_the_service() {
 
 #[tokio::test]
 async fn status_override_drives_a_reload() {
-    let svc_id = service_under_test();
+    let svc_id = service_under_test_instance();
     let (builder, handle) = MockContext::builder().build();
     let mut daemon = builder
         .with_registry(Registry::builder().with_tag("sim_status").build())

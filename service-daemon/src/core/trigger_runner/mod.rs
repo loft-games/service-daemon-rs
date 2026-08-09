@@ -44,7 +44,7 @@ use crate::core::context;
 use crate::core::runtime_facts::TriggerRuntimeFactsHandle;
 use crate::core::trigger_policy_overlay::{TriggerBasePolicy, TriggerPolicyOverlayStore};
 use crate::models::policy::{RestartPolicy, ScalingPolicy};
-use crate::models::service::ServiceId;
+use crate::models::service::ServiceInstanceId;
 use crate::models::trigger::TriggerHandler;
 
 use self::interceptors::{RetryInterceptor, TracingInterceptor};
@@ -52,8 +52,8 @@ use self::interceptors::{RetryInterceptor, TracingInterceptor};
 pub struct TriggerRunner<P: Send + Sync + 'static> {
     /// Human-readable name of this trigger service.
     name: &'static str,
-    /// The `ServiceId` of the trigger service.
-    service_id: ServiceId,
+    /// The `ServiceInstanceId` of the trigger service.
+    service_instance_id: ServiceInstanceId,
     /// Monotonically increasing instance counter for tracing.
     instance_counter: AtomicU64,
     /// The user's event handler.
@@ -97,7 +97,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     /// 3. Terminal handler node (implicit)
     pub fn new(
         name: &'static str,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         handler: TriggerHandler<P>,
         restart_policy: RestartPolicy,
         scaling: Option<ScalingPolicy>,
@@ -111,14 +111,14 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             scaling,
         };
         let runtime_facts = context::register_current_trigger_runtime(
-            service_id,
+            service_instance_id,
             name,
             generation,
             semaphore.clone(),
             current_limit.clone(),
         );
         let policy_overlays = context::register_current_trigger_policy_overlay(
-            service_id,
+            service_instance_id,
             generation,
             base_policy,
             semaphore.clone(),
@@ -126,7 +126,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         );
         Self {
             name,
-            service_id,
+            service_instance_id,
             instance_counter: AtomicU64::new(0),
             handler,
             interceptors: vec![Arc::new(TracingInterceptor), Arc::new(RetryInterceptor)],
@@ -289,7 +289,7 @@ mod tests {
             .build();
         let runner = TriggerRunner::new(
             "failing_dispatch_trigger",
-            ServiceId::new(200),
+            ServiceInstanceId::new(200),
             handler,
             restart_policy,
             None,
@@ -297,7 +297,7 @@ mod tests {
 
         let result = __run_service_scope(
             ServiceIdentity::new(
-                ServiceId::new(200),
+                ServiceInstanceId::new(200),
                 "failing_dispatch_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -334,7 +334,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_id = ServiceId::new(301);
+        let service_instance_id = ServiceInstanceId::new(301);
         let (sender, receiver) = oneshot::channel::<TriggerPressureSnapshot>();
         let sender = Arc::new(StdMutex::new(Some(sender)));
         let handler_sender = sender.clone();
@@ -357,7 +357,7 @@ mod tests {
 
         let run_result = __run_service_scope(
             ServiceIdentity::new(
-                service_id,
+                service_instance_id,
                 "pressure_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -366,7 +366,7 @@ mod tests {
             || async move {
                 let runner = TriggerRunner::new(
                     "pressure_trigger",
-                    service_id,
+                    service_instance_id,
                     handler,
                     RestartPolicy::default(),
                     None,
@@ -386,14 +386,14 @@ mod tests {
         let observed = receiver
             .await
             .expect("handler should send observed pressure");
-        assert_eq!(observed.service_id, service_id);
+        assert_eq!(observed.service_instance_id, service_instance_id);
         assert_eq!(observed.current_limit, 1);
         assert_eq!(observed.in_flight, 1);
         assert_eq!(observed.dispatched_total, 1);
 
         let snapshot = resources
             .runtime_facts
-            .trigger_snapshot(service_id)
+            .trigger_snapshot(service_instance_id)
             .expect("trigger runtime snapshot should be registered");
         assert_eq!(snapshot.pressure.completed_total, 1);
         assert_eq!(snapshot.pressure.failed_total, 0);
@@ -408,7 +408,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_id = ServiceId::new(303);
+        let service_instance_id = ServiceInstanceId::new(303);
         let (sender, receiver) = oneshot::channel::<usize>();
         let sender = Arc::new(StdMutex::new(Some(sender)));
         let first_overlay_accepted = Arc::new(Notify::new());
@@ -447,7 +447,7 @@ mod tests {
 
         let run_result = __run_service_scope(
             ServiceIdentity::new(
-                service_id,
+                service_instance_id,
                 "overlay_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -457,7 +457,7 @@ mod tests {
                 let release_second = Arc::new(Notify::new());
                 let runner = TriggerRunner::new(
                     "overlay_trigger",
-                    service_id,
+                    service_instance_id,
                     handler,
                     RestartPolicy::default(),
                     Some(
@@ -499,7 +499,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_id = ServiceId::new(304);
+        let service_instance_id = ServiceInstanceId::new(304);
         let first_overlay_accepted = Arc::new(Notify::new());
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let handler_overlay_accepted = first_overlay_accepted.clone();
@@ -528,7 +528,7 @@ mod tests {
 
         let run_result = __run_service_scope(
             ServiceIdentity::new(
-                service_id,
+                service_instance_id,
                 "timeout_overlay_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -538,7 +538,7 @@ mod tests {
                 let release_second = Arc::new(Notify::new());
                 let runner = TriggerRunner::new(
                     "timeout_overlay_trigger",
-                    service_id,
+                    service_instance_id,
                     handler,
                     RestartPolicy::for_testing(),
                     None,
@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(failure.kind(), TriggerDispatchFailureKind::DispatchTimedOut);
         let snapshot = resources
             .runtime_facts
-            .trigger_snapshot(service_id)
+            .trigger_snapshot(service_instance_id)
             .expect("trigger runtime snapshot should be registered");
         assert_eq!(snapshot.pressure.failed_total, 1);
         assert!(
@@ -585,7 +585,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_id = ServiceId::new(305);
+        let service_instance_id = ServiceInstanceId::new(305);
         let first_overlay_accepted = Arc::new(Notify::new());
         let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let second_handler_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -620,7 +620,7 @@ mod tests {
 
         let run_result = __run_service_scope(
             ServiceIdentity::new(
-                service_id,
+                service_instance_id,
                 "captured_timeout_overlay_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -630,7 +630,7 @@ mod tests {
                 let release_second = Arc::new(Notify::new());
                 let runner = TriggerRunner::new(
                     "captured_timeout_overlay_trigger",
-                    service_id,
+                    service_instance_id,
                     handler,
                     RestartPolicy::for_testing(),
                     None,
@@ -665,7 +665,7 @@ mod tests {
         use tokio_util::sync::CancellationToken;
 
         let resources = DaemonResources::new();
-        let service_id = ServiceId::new(302);
+        let service_instance_id = ServiceInstanceId::new(302);
         let handler: TriggerHandler<()> =
             Arc::new(|_ctx| Box::pin(async { Err(anyhow::anyhow!("retry me")) }));
         let restart_policy = RestartPolicy::builder()
@@ -677,7 +677,7 @@ mod tests {
 
         let run_result = __run_service_scope(
             ServiceIdentity::new(
-                service_id,
+                service_instance_id,
                 "retry_counter_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -686,7 +686,7 @@ mod tests {
             || async move {
                 let runner = TriggerRunner::new(
                     "retry_counter_trigger",
-                    service_id,
+                    service_instance_id,
                     handler,
                     restart_policy,
                     None,
@@ -705,7 +705,7 @@ mod tests {
         assert!(run_result.is_err());
         let snapshot = resources
             .runtime_facts
-            .trigger_snapshot(service_id)
+            .trigger_snapshot(service_instance_id)
             .expect("trigger runtime snapshot should be registered");
         assert_eq!(snapshot.pressure.dispatched_total, 1);
         assert_eq!(snapshot.pressure.completed_total, 0);
@@ -730,7 +730,7 @@ mod tests {
         });
         let runner = TriggerRunner::new(
             "panicking_dispatch_trigger",
-            ServiceId::new(201),
+            ServiceInstanceId::new(201),
             handler,
             RestartPolicy::for_testing(),
             None,
@@ -738,7 +738,7 @@ mod tests {
 
         let result = __run_service_scope(
             ServiceIdentity::new(
-                ServiceId::new(201),
+                ServiceInstanceId::new(201),
                 "panicking_dispatch_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -788,7 +788,7 @@ mod tests {
             .build();
         let runner = TriggerRunner::new(
             "shutdown_interrupted_retry_trigger",
-            ServiceId::new(202),
+            ServiceInstanceId::new(202),
             handler,
             restart_policy,
             None,
@@ -798,7 +798,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new(
-                ServiceId::new(202),
+                ServiceInstanceId::new(202),
                 "shutdown_interrupted_retry_trigger",
                 cancellation_token,
                 CancellationToken::new(),
@@ -845,7 +845,7 @@ mod tests {
         });
         let runner = TriggerRunner::new(
             "reload_cancels_dispatch_trigger",
-            ServiceId::new(203),
+            ServiceInstanceId::new(203),
             handler,
             RestartPolicy::for_testing(),
             None,
@@ -855,7 +855,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new(
-                ServiceId::new(203),
+                ServiceInstanceId::new(203),
                 "reload_cancels_dispatch_trigger",
                 CancellationToken::new(),
                 reload_token,
@@ -911,7 +911,7 @@ mod tests {
             .build();
         let runner = TriggerRunner::new(
             "stop_drains_dispatch_trigger",
-            ServiceId::new(204),
+            ServiceInstanceId::new(204),
             handler,
             restart_policy,
             None,
@@ -921,7 +921,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new(
-                ServiceId::new(204),
+                ServiceInstanceId::new(204),
                 "stop_drains_dispatch_trigger",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -969,7 +969,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use tokio_util::sync::CancellationToken;
 
-        let service_id = ServiceId::new(206);
+        let service_instance_id = ServiceInstanceId::new(206);
         let handler_started = Arc::new(Notify::new());
         let release_handler = Arc::new(Notify::new());
         let handler_finished = Arc::new(AtomicBool::new(false));
@@ -999,7 +999,7 @@ mod tests {
         let cancellation_for_scope = cancellation_token.clone();
         let diagnostics = DiagnosticsStore::new();
         let diagnostics_handle = diagnostics.register_generation(
-            service_id,
+            service_instance_id,
             "shutdown_drains_dispatch_trigger",
             1,
             RuntimeLane::Standard,
@@ -1008,7 +1008,7 @@ mod tests {
 
         let task = tokio::spawn(__run_service_scope(
             ServiceIdentity::new_with_diagnostics(
-                service_id,
+                service_instance_id,
                 "shutdown_drains_dispatch_trigger",
                 cancellation_token,
                 CancellationToken::new(),
@@ -1018,7 +1018,7 @@ mod tests {
             move || async move {
                 let runner = TriggerRunner::new(
                     "shutdown_drains_dispatch_trigger",
-                    service_id,
+                    service_instance_id,
                     handler,
                     RestartPolicy::for_testing(),
                     None,
@@ -1057,7 +1057,7 @@ mod tests {
         let generation = snapshot
             .generations
             .iter()
-            .find(|generation| generation.service_id == ServiceId::new(206))
+            .find(|generation| generation.service_instance_id == ServiceInstanceId::new(206))
             .expect("trigger generation diagnostics should be projected");
         let boundary = generation
             .aggregate
@@ -1077,7 +1077,7 @@ mod tests {
         assert!(
             !resources
                 .trigger_policy_overlays
-                .has_active_overlay(service_id, 1),
+                .has_active_overlay(service_instance_id, 1),
             "overlay generation guard should remove active overlay after shutdown drain"
         );
     }

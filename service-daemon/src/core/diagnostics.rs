@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::models::{ServiceId, ServiceScheduling};
+use crate::models::{ServiceInstanceId, ServiceScheduling};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeLane {
@@ -548,7 +548,7 @@ impl ProviderFailureStats {
 }
 
 struct ServiceDiagnostics {
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     current_generation: AtomicU64,
     runtime_lane: Mutex<RuntimeLane>,
@@ -556,9 +556,13 @@ struct ServiceDiagnostics {
 }
 
 impl ServiceDiagnostics {
-    fn new(service_id: ServiceId, service_name: &'static str, lane: RuntimeLane) -> Self {
+    fn new(
+        service_instance_id: ServiceInstanceId,
+        service_name: &'static str,
+        lane: RuntimeLane,
+    ) -> Self {
         Self {
-            service_id,
+            service_instance_id,
             service_name,
             current_generation: AtomicU64::new(0),
             runtime_lane: Mutex::new(lane),
@@ -573,7 +577,7 @@ impl ServiceDiagnostics {
 
     fn snapshot(&self) -> ServiceDiagnosticsSnapshot {
         ServiceDiagnosticsSnapshot {
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             service_name: self.service_name,
             current_generation: self.current_generation.load(Ordering::Relaxed),
             runtime_lane: *lock_or_recover(&self.runtime_lane),
@@ -583,7 +587,7 @@ impl ServiceDiagnostics {
 }
 
 struct GenerationDiagnostics {
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     generation: u64,
     runtime_lane: RuntimeLane,
@@ -592,13 +596,13 @@ struct GenerationDiagnostics {
 
 impl GenerationDiagnostics {
     fn new(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         generation: u64,
         runtime_lane: RuntimeLane,
     ) -> Self {
         Self {
-            service_id,
+            service_instance_id,
             service_name,
             generation,
             runtime_lane,
@@ -608,7 +612,7 @@ impl GenerationDiagnostics {
 
     fn snapshot(&self) -> GenerationDiagnosticsSnapshot {
         GenerationDiagnosticsSnapshot {
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             service_name: self.service_name,
             generation: self.generation,
             runtime_lane: self.runtime_lane,
@@ -640,7 +644,7 @@ impl LaneDiagnostics {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ServiceDiagnosticsSnapshot {
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub current_generation: u64,
     pub runtime_lane: RuntimeLane,
@@ -649,7 +653,7 @@ pub(crate) struct ServiceDiagnosticsSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GenerationDiagnosticsSnapshot {
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
     pub runtime_lane: RuntimeLane,
@@ -754,8 +758,8 @@ impl GenerationDiagnosticsHandle {
 }
 
 pub(crate) struct DiagnosticsStore {
-    services: DashMap<ServiceId, Arc<ServiceDiagnostics>>,
-    generations: DashMap<(ServiceId, u64), Arc<GenerationDiagnostics>>,
+    services: DashMap<ServiceInstanceId, Arc<ServiceDiagnostics>>,
+    generations: DashMap<(ServiceInstanceId, u64), Arc<GenerationDiagnostics>>,
     provider_failures: Mutex<VecDeque<ProviderFailureSnapshot>>,
     control: Arc<LaneDiagnostics>,
     standard: Arc<LaneDiagnostics>,
@@ -784,27 +788,35 @@ impl DiagnosticsStore {
 
     pub(crate) fn register_generation(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         generation: u64,
         lane: RuntimeLane,
     ) -> GenerationDiagnosticsHandle {
         let service = self
             .services
-            .entry(service_id)
-            .or_insert_with(|| Arc::new(ServiceDiagnostics::new(service_id, service_name, lane)))
+            .entry(service_instance_id)
+            .or_insert_with(|| {
+                Arc::new(ServiceDiagnostics::new(
+                    service_instance_id,
+                    service_name,
+                    lane,
+                ))
+            })
             .clone();
         service.update_generation(generation, lane);
 
         let generation_diagnostics = Arc::new(GenerationDiagnostics::new(
-            service_id,
+            service_instance_id,
             service_name,
             generation,
             lane,
         ));
-        self.generations
-            .insert((service_id, generation), generation_diagnostics.clone());
-        self.retain_recent_generations(service_id);
+        self.generations.insert(
+            (service_instance_id, generation),
+            generation_diagnostics.clone(),
+        );
+        self.retain_recent_generations(service_instance_id);
 
         GenerationDiagnosticsHandle {
             service,
@@ -830,21 +842,21 @@ impl DiagnosticsStore {
     #[cfg(test)]
     pub(crate) fn service_snapshot(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
     ) -> Option<ServiceDiagnosticsSnapshot> {
         self.services
-            .get(&service_id)
+            .get(&service_instance_id)
             .map(|service| service.snapshot())
     }
 
     #[cfg(test)]
     pub(crate) fn generation_snapshot(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
     ) -> Option<GenerationDiagnosticsSnapshot> {
         self.generations
-            .get(&(service_id, generation))
+            .get(&(service_instance_id, generation))
             .map(|generation| generation.snapshot())
     }
 
@@ -859,14 +871,14 @@ impl DiagnosticsStore {
             .iter()
             .map(|service| service.value().snapshot())
             .collect();
-        services.sort_by_key(|snapshot| snapshot.service_id);
+        services.sort_by_key(|snapshot| snapshot.service_instance_id);
 
         let mut generations: Vec<_> = self
             .generations
             .iter()
             .map(|generation| generation.value().snapshot())
             .collect();
-        generations.sort_by_key(|snapshot| (snapshot.service_id, snapshot.generation));
+        generations.sort_by_key(|snapshot| (snapshot.service_instance_id, snapshot.generation));
 
         DiagnosticsSnapshot {
             services,
@@ -893,13 +905,13 @@ impl DiagnosticsStore {
         }
     }
 
-    fn retain_recent_generations(&self, service_id: ServiceId) {
+    fn retain_recent_generations(&self, service_instance_id: ServiceInstanceId) {
         let mut generations: Vec<_> = self
             .generations
             .iter()
             .filter_map(|entry| {
                 let (entry_service_id, generation) = *entry.key();
-                (entry_service_id == service_id).then_some(generation)
+                (entry_service_id == service_instance_id).then_some(generation)
             })
             .collect();
 
@@ -910,7 +922,7 @@ impl DiagnosticsStore {
         generations.sort_unstable();
         let evict_count = generations.len() - RETAINED_GENERATIONS_PER_SERVICE;
         for generation in generations.into_iter().take(evict_count) {
-            self.generations.remove(&(service_id, generation));
+            self.generations.remove(&(service_instance_id, generation));
         }
     }
 }
@@ -1005,8 +1017,12 @@ mod tests {
     #[test]
     fn service_sleep_observation_updates_generation_service_and_lane() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(7), "worker", 3, RuntimeLane::HighPriority);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(7),
+            "worker",
+            3,
+            RuntimeLane::HighPriority,
+        );
 
         handle.record_sleep_observation(SleepObservation {
             source: SleepObservationSource::ServiceSleep,
@@ -1022,7 +1038,7 @@ mod tests {
         assert_eq!(generation.aggregate.service_sleep.total_drift_ms, 5);
         assert_eq!(generation.aggregate.service_sleep.max_drift_ms, 5);
 
-        let service = store.service_snapshot(ServiceId::new(7)).unwrap();
+        let service = store.service_snapshot(ServiceInstanceId::new(7)).unwrap();
         assert_eq!(service.current_generation, 3);
         assert_eq!(service.runtime_lane, RuntimeLane::HighPriority);
         assert_eq!(service.aggregate.service_sleep.completed, 1);
@@ -1035,8 +1051,12 @@ mod tests {
     #[test]
     fn interrupted_sleep_does_not_add_drift() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(1), "reloading", 1, RuntimeLane::Standard);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(1),
+            "reloading",
+            1,
+            RuntimeLane::Standard,
+        );
 
         handle.record_sleep_observation(SleepObservation {
             source: SleepObservationSource::ServiceSleep,
@@ -1056,8 +1076,12 @@ mod tests {
     #[test]
     fn lifecycle_classification_updates_counters() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(2), "isolated", 9, RuntimeLane::Isolated);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(2),
+            "isolated",
+            9,
+            RuntimeLane::Isolated,
+        );
 
         handle.record_reload_requested();
         handle.record_exit(GenerationExitKind::IsolatedStartupFailure);
@@ -1091,9 +1115,13 @@ mod tests {
     #[test]
     fn trigger_dispatch_recoverable_exit_updates_existing_lifecycle_counters() {
         let store = DiagnosticsStore::new();
-        let service_id = ServiceId::new(22);
-        let handle =
-            store.register_generation(service_id, "email_trigger", 4, RuntimeLane::Standard);
+        let service_instance_id = ServiceInstanceId::new(22);
+        let handle = store.register_generation(
+            service_instance_id,
+            "email_trigger",
+            4,
+            RuntimeLane::Standard,
+        );
 
         handle.record_exit(GenerationExitKind::RecoverableError);
         handle.record_restart(
@@ -1115,7 +1143,7 @@ mod tests {
             Some(RestartDecisionKind::BackoffRecoverableError)
         );
 
-        let service = store.service_snapshot(service_id).unwrap();
+        let service = store.service_snapshot(service_instance_id).unwrap();
         assert_eq!(service.aggregate.lifecycle.recoverable_error, 1);
         assert_eq!(service.aggregate.lifecycle.backoff_restart, 1);
         assert_eq!(
@@ -1137,9 +1165,13 @@ mod tests {
     #[test]
     fn trigger_dispatch_panic_exit_updates_panic_counter_and_last_exit_kind() {
         let store = DiagnosticsStore::new();
-        let service_id = ServiceId::new(23);
-        let handle =
-            store.register_generation(service_id, "panic_trigger", 5, RuntimeLane::Standard);
+        let service_instance_id = ServiceInstanceId::new(23);
+        let handle = store.register_generation(
+            service_instance_id,
+            "panic_trigger",
+            5,
+            RuntimeLane::Standard,
+        );
 
         handle.record_exit(GenerationExitKind::Panic);
         handle.record_restart(
@@ -1161,7 +1193,7 @@ mod tests {
             Some(RestartDecisionKind::BackoffPanic)
         );
 
-        let service = store.service_snapshot(service_id).unwrap();
+        let service = store.service_snapshot(service_instance_id).unwrap();
         assert_eq!(service.aggregate.lifecycle.panic, 1);
         assert_eq!(service.aggregate.lifecycle.backoff_restart, 1);
         assert_eq!(
@@ -1183,9 +1215,13 @@ mod tests {
     #[test]
     fn immediate_restart_decision_updates_aggregates_without_backoff() {
         let store = DiagnosticsStore::new();
-        let service_id = ServiceId::new(24);
-        let handle =
-            store.register_generation(service_id, "clean_exit", 1, RuntimeLane::HighPriority);
+        let service_instance_id = ServiceInstanceId::new(24);
+        let handle = store.register_generation(
+            service_instance_id,
+            "clean_exit",
+            1,
+            RuntimeLane::HighPriority,
+        );
 
         handle.record_exit(GenerationExitKind::NormalExit);
         handle.record_restart(
@@ -1203,7 +1239,7 @@ mod tests {
             Some(RestartDecisionKind::Immediate)
         );
 
-        let service = store.service_snapshot(service_id).unwrap();
+        let service = store.service_snapshot(service_instance_id).unwrap();
         assert_eq!(service.aggregate.lifecycle.restart, 1);
         assert_eq!(service.aggregate.lifecycle.backoff_restart, 0);
         assert_eq!(
@@ -1226,7 +1262,7 @@ mod tests {
 
         for generation in 1..=1030 {
             let handle = store.register_generation(
-                ServiceId::new(5),
+                ServiceInstanceId::new(5),
                 "crashing",
                 generation,
                 RuntimeLane::Standard,
@@ -1242,10 +1278,10 @@ mod tests {
         let retained_generations: Vec<_> = snapshot
             .generations
             .iter()
-            .filter(|generation| generation.service_id == ServiceId::new(5))
+            .filter(|generation| generation.service_instance_id == ServiceInstanceId::new(5))
             .map(|generation| generation.generation)
             .collect();
-        let service = store.service_snapshot(ServiceId::new(5)).unwrap();
+        let service = store.service_snapshot(ServiceInstanceId::new(5)).unwrap();
         let lane = store.lane_snapshot(RuntimeLane::Standard);
 
         assert_eq!(retained_generations.len(), 1024);
@@ -1261,7 +1297,7 @@ mod tests {
 
         for generation in 1..=1030 {
             let handle = store.register_generation(
-                ServiceId::new(5),
+                ServiceInstanceId::new(5),
                 "crashing",
                 generation,
                 RuntimeLane::Standard,
@@ -1282,7 +1318,7 @@ mod tests {
 
         for generation in 1..=3 {
             let handle = store.register_generation(
-                ServiceId::new(6),
+                ServiceInstanceId::new(6),
                 "stable",
                 generation,
                 RuntimeLane::HighPriority,
@@ -1299,13 +1335,13 @@ mod tests {
         let crashing_generations: Vec<_> = snapshot
             .generations
             .iter()
-            .filter(|generation| generation.service_id == ServiceId::new(5))
+            .filter(|generation| generation.service_instance_id == ServiceInstanceId::new(5))
             .map(|generation| generation.generation)
             .collect();
         let stable_generations: Vec<_> = snapshot
             .generations
             .iter()
-            .filter(|generation| generation.service_id == ServiceId::new(6))
+            .filter(|generation| generation.service_instance_id == ServiceInstanceId::new(6))
             .map(|generation| generation.generation)
             .collect();
 
@@ -1313,11 +1349,23 @@ mod tests {
         assert_eq!(crashing_generations.first(), Some(&7));
         assert_eq!(crashing_generations.last(), Some(&1030));
         assert_eq!(stable_generations, vec![1, 2, 3]);
-        assert!(store.generation_snapshot(ServiceId::new(5), 1).is_none());
-        assert!(store.generation_snapshot(ServiceId::new(5), 7).is_some());
-        assert!(store.generation_snapshot(ServiceId::new(6), 1).is_some());
+        assert!(
+            store
+                .generation_snapshot(ServiceInstanceId::new(5), 1)
+                .is_none()
+        );
+        assert!(
+            store
+                .generation_snapshot(ServiceInstanceId::new(5), 7)
+                .is_some()
+        );
+        assert!(
+            store
+                .generation_snapshot(ServiceInstanceId::new(6), 1)
+                .is_some()
+        );
 
-        let crashing_service = store.service_snapshot(ServiceId::new(5)).unwrap();
+        let crashing_service = store.service_snapshot(ServiceInstanceId::new(5)).unwrap();
         assert_eq!(crashing_service.current_generation, 1030);
         assert_eq!(crashing_service.aggregate.service_sleep.completed, 1030);
         assert_eq!(crashing_service.aggregate.lifecycle.panic, 1030);
@@ -1327,7 +1375,7 @@ mod tests {
             Some(RestartDecisionKind::BackoffPanic)
         );
 
-        let stable_service = store.service_snapshot(ServiceId::new(6)).unwrap();
+        let stable_service = store.service_snapshot(ServiceInstanceId::new(6)).unwrap();
         assert_eq!(stable_service.current_generation, 3);
         assert_eq!(stable_service.aggregate.service_sleep.completed, 3);
         assert_eq!(stable_service.aggregate.lifecycle.normal_exit, 3);
@@ -1370,8 +1418,12 @@ mod tests {
     #[test]
     fn public_snapshot_distills_internal_diagnostics() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(4), "priority", 2, RuntimeLane::HighPriority);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(4),
+            "priority",
+            2,
+            RuntimeLane::HighPriority,
+        );
 
         handle.record_sleep_observation(SleepObservation {
             source: SleepObservationSource::ServiceSleep,
@@ -1391,7 +1443,10 @@ mod tests {
         let snapshot: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
         assert_eq!(snapshot.services.len(), 1);
         assert_eq!(snapshot.generations.len(), 1);
-        assert_eq!(snapshot.services[0].service_id, ServiceId::new(4));
+        assert_eq!(
+            snapshot.services[0].service_instance_id,
+            ServiceInstanceId::new(4)
+        );
         assert_eq!(
             snapshot.services[0].declared_scheduling,
             Some(ServiceScheduling::HighPriority)
@@ -1439,8 +1494,12 @@ mod tests {
     #[test]
     fn public_snapshot_projects_shutdown_boundary_diagnostics() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(15), "shutdown", 1, RuntimeLane::Isolated);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(15),
+            "shutdown",
+            1,
+            RuntimeLane::Isolated,
+        );
 
         handle.record_shutdown_boundary(ShutdownBoundaryOutcomeSnapshot {
             boundary: ShutdownBoundaryKind::IsolatedRuntimeJoin,
@@ -1514,8 +1573,12 @@ mod tests {
     #[test]
     fn public_snapshot_labels_standard_service_local_wake_delay() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(10), "standard", 1, RuntimeLane::Standard);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(10),
+            "standard",
+            1,
+            RuntimeLane::Standard,
+        );
         for _ in 0..3 {
             handle.record_sleep_observation(completed_observation(
                 SleepObservationSource::ServiceSleep,
@@ -1538,8 +1601,12 @@ mod tests {
     #[test]
     fn public_snapshot_labels_standard_service_impacted_by_lane_pressure() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(11), "standard", 1, RuntimeLane::Standard);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(11),
+            "standard",
+            1,
+            RuntimeLane::Standard,
+        );
         for _ in 0..3 {
             record_standard_lane_probe(&store, Duration::from_millis(420));
             handle.record_sleep_observation(completed_observation(
@@ -1563,8 +1630,12 @@ mod tests {
     #[test]
     fn public_snapshot_lifecycle_instability_takes_precedence_for_standard_service() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(12), "standard", 1, RuntimeLane::Standard);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(12),
+            "standard",
+            1,
+            RuntimeLane::Standard,
+        );
         for _ in 0..3 {
             handle.record_sleep_observation(completed_observation(
                 SleepObservationSource::ServiceSleep,
@@ -1599,8 +1670,12 @@ mod tests {
     #[test]
     fn public_snapshot_does_not_apply_standard_labels_to_high_priority_service() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(13), "priority", 1, RuntimeLane::HighPriority);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(13),
+            "priority",
+            1,
+            RuntimeLane::HighPriority,
+        );
         for _ in 0..3 {
             handle.record_sleep_observation(completed_observation(
                 SleepObservationSource::ServiceSleep,
@@ -1617,8 +1692,12 @@ mod tests {
     #[test]
     fn public_snapshot_conversion_does_not_mutate_internal_diagnostics() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(14), "standard", 1, RuntimeLane::Standard);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(14),
+            "standard",
+            1,
+            RuntimeLane::Standard,
+        );
         for _ in 0..3 {
             record_standard_lane_probe(&store, Duration::from_millis(420));
             handle.record_sleep_observation(completed_observation(
@@ -1652,8 +1731,12 @@ mod tests {
     #[tokio::test]
     async fn generation_runtime_probe_records_cancellation() {
         let store = DiagnosticsStore::new();
-        let handle =
-            store.register_generation(ServiceId::new(3), "isolated", 1, RuntimeLane::Isolated);
+        let handle = store.register_generation(
+            ServiceInstanceId::new(3),
+            "isolated",
+            1,
+            RuntimeLane::Isolated,
+        );
         let token = CancellationToken::new();
         token.cancel();
 

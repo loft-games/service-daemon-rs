@@ -171,7 +171,7 @@ impl ServiceDaemonBuilder {
     /// This is used internally by `MockContext` to auto-include framework
     /// services (e.g., `log_service`) in simulation tests. The tagged services
     /// are merged into the final service list in `build()`, deduplicated by
-    /// `ServiceId`.
+    /// `ServiceEntryId`.
     #[must_use]
     pub fn with_infra_tags(mut self, tags: &[&'static str]) -> Self {
         self.infra_tags.extend_from_slice(tags);
@@ -194,14 +194,17 @@ impl ServiceDaemonBuilder {
 
         // Merge infrastructure services that bypass tag filtering.
         // Each infra tag is resolved against the global SERVICE_REGISTRY,
-        // and matching services are appended (deduplicated by ServiceId).
+        // and matching services are appended (deduplicated by ServiceEntryId).
         if !self.infra_tags.is_empty() {
             let infra_services = Registry::builder()
                 .with_tags(self.infra_tags)
                 .build()
                 .into_services();
             for service in infra_services {
-                if !services.iter().any(|existing| existing.id == service.id) {
+                if !services
+                    .iter()
+                    .any(|existing| existing.entry_id == service.entry_id)
+                {
                     services.push(service);
                 }
             }

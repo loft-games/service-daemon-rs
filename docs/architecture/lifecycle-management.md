@@ -4,7 +4,7 @@ The `ServiceDaemon` uses a structured orchestration system to manage service gen
 
 ## 1. Unified Status Plane
 
-All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus>`) managed by `DaemonResources`.
+All services share a central **Status Plane** (`DashMap<ServiceInstanceId, ServiceStatus>`) managed by `DaemonResources`.
 
 | Level | Transitions to | Triggered by |
 |--------|----------------|--------------|
@@ -138,7 +138,7 @@ For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdo
 ## 4. State Persistence (The Shelf)
 
 The "Shelf" is a daemon-scoped store where services can deposit data before a reload or after a crash.
-- **Isolation**: Buckets are isolated by `ServiceId`, so two selected services with the same Rust function name cannot share shelf state accidentally.
+- **Isolation**: Buckets are isolated by `ServiceInstanceId`, so two selected services with the same Rust function name cannot share shelf state accidentally.
 - **Survival**: Unlike ordinary in-memory state, Shelf data survives generation termination and is inherited by the next generation of the same selected service.
 
 ## 5. Provider Initialization Errors

@@ -12,7 +12,7 @@ use crate::core::context;
 use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
 use crate::core::runtime_facts::TriggerRuntimeFactsHandle;
 use crate::models::policy::RestartPolicy;
-use crate::models::service::ServiceId;
+use crate::models::service::ServiceInstanceId;
 use crate::models::trigger::{TriggerContext, TriggerHandler, TriggerMessage};
 use uuid::Uuid;
 
@@ -60,10 +60,10 @@ impl<T> Drop for AbortOnDropJoinHandle<T> {
 /// may inspect or modify fields, then passes it to `next`. This eliminates
 /// lifetime entanglement between interceptor layers.
 pub struct DispatchContext<P> {
-    /// The `ServiceId` of the trigger service.
-    pub service_id: ServiceId,
-    /// The `ServiceId` of the service that originally emitted the event.
-    pub source_id: ServiceId,
+    /// The `ServiceInstanceId` of the trigger service.
+    pub service_instance_id: ServiceInstanceId,
+    /// The `ServiceInstanceId` of the service that originally emitted the event.
+    pub source_service_instance_id: ServiceInstanceId,
     /// Monotonically increasing sequence number within this trigger service.
     pub instance_seq: u64,
     /// Service generation that owns this dispatch.
@@ -164,14 +164,14 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     pub(super) async fn dispatch(
         &self,
         payload: P,
-        identity: Option<(uuid::Uuid, ServiceId)>,
+        identity: Option<(uuid::Uuid, ServiceInstanceId)>,
         in_flight: &mut InFlightDispatches,
     ) -> Result<()> {
         let seq = self.instance_counter.fetch_add(1, Ordering::Relaxed);
-        let (message_id, source_id) =
-            identity.unwrap_or_else(|| (generate_message_id(), self.service_id));
+        let (message_id, source_service_instance_id) =
+            identity.unwrap_or_else(|| (generate_message_id(), self.service_instance_id));
         if let Some(policy_overlays) = &self.policy_overlays {
-            policy_overlays.apply_effective_concurrency(self.service_id, self.generation);
+            policy_overlays.apply_effective_concurrency(self.service_instance_id, self.generation);
         }
 
         let permit = self
@@ -183,7 +183,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 TriggerDispatchFailure::new(
                     TriggerDispatchFailureKind::DispatchPermitAcquireFailed,
                     self.name,
-                    self.service_id,
+                    self.service_instance_id,
                     Some(seq),
                     Some(message_id),
                     format!("could not acquire dispatch permit: {error}"),
@@ -198,7 +198,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             .map(|store| {
                 context::effective_trigger_policy(
                     store,
-                    self.service_id,
+                    self.service_instance_id,
                     self.generation,
                     self.base_policy,
                 )
@@ -211,8 +211,8 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
             );
 
         let ctx = DispatchContext {
-            service_id: self.service_id,
-            source_id,
+            service_instance_id: self.service_instance_id,
+            source_service_instance_id,
             instance_seq: seq,
             generation: self.generation,
             message_id,
@@ -225,7 +225,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
         let chain = self.build_chain();
         let trigger_name = self.name;
-        let service_id = self.service_id;
+        let service_instance_id = self.service_instance_id;
         let dispatch_timeout = effective_policy.dispatch_timeout;
 
         let dispatch_task = context::spawn_with_context(async move {
@@ -237,7 +237,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 dispatch,
                 dispatch_timeout,
                 trigger_name,
-                service_id,
+                service_instance_id,
                 seq,
                 message_id,
             )
@@ -248,7 +248,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
         in_flight.push(Self::observe_dispatch_task(
             trigger_name,
-            service_id,
+            service_instance_id,
             seq,
             message_id,
             self.runtime_facts.clone(),
@@ -260,7 +260,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 
     pub(super) fn observe_dispatch_task(
         trigger_name: &'static str,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         instance_seq: u64,
         message_id: Uuid,
         runtime_facts: Option<TriggerRuntimeFactsHandle>,
@@ -282,7 +282,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         }
                         warn!(
                             trigger = %failure.trigger_name(),
-                            service_id = failure.service_id().value(),
+                            service_instance_id = failure.service_instance_id().value(),
                             instance_seq = ?failure.instance_seq(),
                             message_id = ?failure.message_id(),
                             trigger_failure_kind = %failure.kind().as_str(),
@@ -296,7 +296,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         let failure = TriggerDispatchFailure::new(
                             TriggerDispatchFailureKind::DispatchTaskError,
                             trigger_name,
-                            service_id,
+                            service_instance_id,
                             Some(instance_seq),
                             Some(message_id),
                             error_message,
@@ -306,7 +306,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                         }
                         warn!(
                             trigger = %trigger_name,
-                            service_id = service_id.value(),
+                            service_instance_id = service_instance_id.value(),
                             instance_seq,
                             message_id = %message_id,
                             trigger_failure_kind = %failure.kind().as_str(),
@@ -325,7 +325,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     let failure = TriggerDispatchFailure::new(
                         kind,
                         trigger_name,
-                        service_id,
+                        service_instance_id,
                         Some(instance_seq),
                         Some(message_id),
                         join_error.to_string(),
@@ -335,7 +335,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     }
                     warn!(
                         trigger = %trigger_name,
-                        service_id = service_id.value(),
+                        service_instance_id = service_instance_id.value(),
                         instance_seq,
                         message_id = %message_id,
                         trigger_failure_kind = %failure.kind().as_str(),
@@ -365,12 +365,12 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         > = Box::new(|ctx: DispatchContext<P>| {
             Box::pin(async move {
                 let trigger_ctx = TriggerContext::new(
-                    ctx.service_id,
+                    ctx.service_instance_id,
                     ctx.generation,
                     ctx.instance_seq,
                     TriggerMessage {
                         message_id: ctx.message_id,
-                        source_id: ctx.source_id,
+                        source_service_instance_id: ctx.source_service_instance_id,
                         timestamp: Utc::now(),
                         payload: ctx.payload,
                     },
@@ -401,7 +401,7 @@ async fn run_dispatch_with_timeout(
     dispatch: impl std::future::Future<Output = anyhow::Result<()>>,
     timeout: Option<Duration>,
     trigger_name: &'static str,
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     instance_seq: u64,
     message_id: Uuid,
 ) -> anyhow::Result<()> {
@@ -413,7 +413,7 @@ async fn run_dispatch_with_timeout(
         Err(_) => Err(TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTimedOut,
             trigger_name,
-            service_id,
+            service_instance_id,
             Some(instance_seq),
             Some(message_id),
             format!("dispatch did not complete within {timeout:?}"),

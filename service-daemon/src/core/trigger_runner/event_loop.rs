@@ -29,21 +29,21 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
     {
         struct OverlayGenerationGuard {
             store: Option<Arc<crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore>>,
-            service_id: crate::models::ServiceId,
+            service_instance_id: crate::models::ServiceInstanceId,
             generation: u64,
         }
 
         impl Drop for OverlayGenerationGuard {
             fn drop(&mut self) {
                 if let Some(store) = &self.store {
-                    store.remove_trigger_generation(self.service_id, self.generation);
+                    store.remove_trigger_generation(self.service_instance_id, self.generation);
                 }
             }
         }
 
         let _overlay_generation_guard = OverlayGenerationGuard {
             store: self.policy_overlays.clone(),
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             generation: self.generation,
         };
         let mut in_flight = InFlightDispatches::new();

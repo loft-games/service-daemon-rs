@@ -122,9 +122,9 @@ Services and triggers emit events by calling provider instance methods directly 
 
 The framework's `TriggerRunner` automatically manages the **Causal Identity** for every dispatched event:
 1.  **Message ID** (UUID v7): A time-ordered, globally unique ID for the event.
-2.  **Source ID**: The `ServiceId` of the service that originally fired the event.
-3.  **Service ID**: The `ServiceId` of the current trigger handler.
-4.  **Instance Seq**: A monotonic sequence number for the current invocation.
+2.  **Source service instance ID**: The `ServiceInstanceId` of the service instance that originally fired the event.
+3.  **Current service instance ID**: The `ServiceInstanceId` of the current trigger handler.
+4.  **Instance sequence**: A monotonic sequence number for the current invocation.
 
 This 4-tuple identity supports log correlation and trace reconstruction.
 
@@ -220,7 +220,7 @@ trigger generation ends.
 
 Custom `TriggerHost::run_as_service` implementations that bypass the default
 runner should construct contexts with `TriggerContext::new(...)` and pass the
-current service id and generation.
+current service instance ID and generation.
 
 ---
 

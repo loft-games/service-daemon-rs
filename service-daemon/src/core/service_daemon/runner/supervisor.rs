@@ -13,7 +13,7 @@ use crate::core::diagnostics::{
 };
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 use crate::models::policy::RestartStormGuard;
-use crate::models::{BackoffController, ServiceError, ServiceFn, ServiceId, ServiceStatus};
+use crate::models::{BackoffController, ServiceError, ServiceFn, ServiceInstanceId, ServiceStatus};
 use crate::{ProviderDependencyWatchSet, ProviderInitError};
 
 use super::super::parts::{
@@ -131,7 +131,7 @@ fn duration_millis(duration: Duration) -> u64 {
 /// Internally driven by a [`SupervisorState`] FSM -- see module-level docs.
 pub(super) struct ServiceSupervisor {
     // -- Immutable service identity --
-    pub(super) service_id: ServiceId,
+    pub(super) service_instance_id: ServiceInstanceId,
     pub(super) name: &'static str,
     pub(super) run: ServiceFn,
     pub(super) watcher: Option<fn() -> ProviderDependencyWatchSet>,
@@ -161,7 +161,7 @@ pub(super) struct ServiceSupervisor {
 impl ServiceSupervisor {
     pub(super) fn new(parts: ServiceSupervisorParts) -> Self {
         let ServiceSupervisorParts {
-            service_id,
+            service_instance_id,
             name,
             run,
             watcher,
@@ -177,7 +177,7 @@ impl ServiceSupervisor {
         } = parts;
 
         Self {
-            service_id,
+            service_instance_id,
             name,
             run,
             watcher,
@@ -206,7 +206,7 @@ impl ServiceSupervisor {
         let initial_status = self
             .resources
             .status_plane
-            .get(&self.service_id)
+            .get(&self.service_instance_id)
             .map(|s| s.value().clone())
             .unwrap_or(ServiceStatus::Initializing);
 
@@ -319,10 +319,10 @@ impl ServiceSupervisor {
                     };
                     error!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         trigger = %trigger_failure.trigger_name(),
-                        trigger_service_id = %trigger_failure.service_id(),
+                        trigger_service_id = %trigger_failure.service_instance_id(),
                         instance_seq = ?trigger_failure.instance_seq(),
                         message_id = ?trigger_failure.message_id(),
                         trigger_failure_kind = %trigger_failure.kind().as_str(),
@@ -406,7 +406,7 @@ impl ServiceSupervisor {
             self.record_restart_decision(decision, Duration::ZERO, Duration::ZERO, false);
             self.resources
                 .runtime_facts
-                .record_service_restart(self.service_id, None);
+                .record_service_restart(self.service_instance_id, None);
             self.backoff.record_success();
             self.restart_storm.reset();
             return true;
@@ -415,7 +415,7 @@ impl ServiceSupervisor {
         let reload_signal = self
             .resources
             .reload_signals
-            .entry(self.service_id)
+            .entry(self.service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
@@ -425,7 +425,7 @@ impl ServiceSupervisor {
         let restart_delay = storm_decision.effective_delay;
         self.resources
             .runtime_facts
-            .record_service_restart(self.service_id, Some(restart_delay));
+            .record_service_restart(self.service_instance_id, Some(restart_delay));
         self.record_restart_decision(
             decision,
             storm_decision.policy_delay,
@@ -434,7 +434,7 @@ impl ServiceSupervisor {
         );
         warn!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             policy_delay_ms = duration_millis(storm_decision.policy_delay),
             effective_delay_ms = duration_millis(restart_delay),
@@ -458,10 +458,10 @@ impl ServiceSupervisor {
             _ = self.cancellation_token.cancelled() => {
                 info!("Service {} received shutdown signal during restart delay", self.name);
                 let terminated = ServiceStatus::Terminated;
-                self.resources.status_plane.insert(self.service_id, terminated.clone());
+                self.resources.status_plane.insert(self.service_instance_id, terminated.clone());
                 self.resources
                     .runtime_facts
-                    .record_service_status(self.service_id, &terminated);
+                    .record_service_status(self.service_instance_id, &terminated);
                 self.resources.status_changed.notify_waiters();
                 return false;
             }
@@ -489,12 +489,14 @@ impl ServiceSupervisor {
 
         let start_status = self.determine_start_status();
         self.generation = self.generation.saturating_add(1);
-        let resolved_scheduling =
-            self.body_lane_resolver
-                .resolve(self.service_id, self.generation, self.scheduling);
+        let resolved_scheduling = self.body_lane_resolver.resolve(
+            self.service_instance_id,
+            self.generation,
+            self.scheduling,
+        );
         let runtime_lane = RuntimeLane::from(resolved_scheduling);
         self.generation_diagnostics = Some(self.diagnostics.register_generation(
-            self.service_id,
+            self.service_instance_id,
             self.name,
             self.generation,
             runtime_lane,
@@ -514,7 +516,7 @@ impl ServiceSupervisor {
 
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             declared_scheduling = ?self.scheduling,
             resolved_scheduling = ?resolved_scheduling,
@@ -524,13 +526,13 @@ impl ServiceSupervisor {
             "Starting service generation"
         );
         self.resources.runtime_facts.record_service_started(
-            self.service_id,
+            self.service_instance_id,
             self.generation,
             &start_status,
         );
         self.resources
             .status_plane
-            .insert(self.service_id, start_status);
+            .insert(self.service_instance_id, start_status);
         self.resources.status_changed.notify_waiters();
 
         if self.generation_body_lane.is_none() {
@@ -551,7 +553,7 @@ impl ServiceSupervisor {
         let reload_signal = self
             .resources
             .reload_signals
-            .entry(self.service_id)
+            .entry(self.service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
@@ -579,7 +581,7 @@ impl ServiceSupervisor {
 
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             declared_scheduling = ?self.scheduling,
             resolved_scheduling = ?resolved_scheduling,
@@ -589,7 +591,7 @@ impl ServiceSupervisor {
         );
 
         let generation_parts = ServiceGenerationParts {
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             name: self.name,
             generation: self.generation,
             run: self.run,
@@ -616,7 +618,7 @@ impl ServiceSupervisor {
                     reload_token.cancel();
                     info!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         body_lane = ?body_lane,
                         dependency_type_id = ?change.type_id,
@@ -630,7 +632,7 @@ impl ServiceSupervisor {
                     reload_token.cancel();
                     info!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         body_lane = ?body_lane,
                         "Service reload signal received, waiting for service generation to exit"
@@ -646,7 +648,7 @@ impl ServiceSupervisor {
                     reload_token.cancel();
                     info!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         body_lane = ?body_lane,
                         "Service reload signal received, waiting for service generation to exit"
@@ -701,7 +703,7 @@ impl ServiceSupervisor {
 
             info!(
                 service = %self.name,
-                service_id = %self.service_id,
+                service_instance_id = %self.service_instance_id,
                 generation = self.generation,
                 runtime_lane = ?runtime_lane,
                 elapsed_ms,
@@ -724,7 +726,7 @@ impl ServiceSupervisor {
             );
             error!(
                 service = %self.name,
-                service_id = %self.service_id,
+                service_instance_id = %self.service_instance_id,
                 generation = self.generation,
                 message = %message,
                 "Service generation outcome missing reload token"
@@ -732,10 +734,10 @@ impl ServiceSupervisor {
             let recovering = ServiceStatus::Recovering(message);
             self.resources
                 .status_plane
-                .insert(self.service_id, recovering.clone());
+                .insert(self.service_instance_id, recovering.clone());
             self.resources
                 .runtime_facts
-                .record_service_status(self.service_id, &recovering);
+                .record_service_status(self.service_instance_id, &recovering);
             self.resources.status_changed.notify_waiters();
             return SupervisorState::Restart(RestartDecision::WithBackoff(
                 RestartFailureKind::InternalSupervisorError,
@@ -776,7 +778,7 @@ impl ServiceSupervisor {
 
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             runtime_lane = ?runtime_lane,
             next_status = ?exit_record.next_status,
@@ -805,16 +807,16 @@ impl ServiceSupervisor {
         if !exit_record.should_restart {
             self.resources
                 .runtime_facts
-                .record_service_status(self.service_id, &exit_record.next_status);
+                .record_service_status(self.service_instance_id, &exit_record.next_status);
             info!("Service {} marked as fatal, not restarting", self.name);
             return self.terminate();
         }
         self.resources
             .status_plane
-            .insert(self.service_id, exit_record.next_status.clone());
+            .insert(self.service_instance_id, exit_record.next_status.clone());
         self.resources
             .runtime_facts
-            .record_service_status(self.service_id, &exit_record.next_status);
+            .record_service_status(self.service_instance_id, &exit_record.next_status);
         self.resources.status_changed.notify_waiters();
 
         if matches!(
@@ -853,7 +855,7 @@ impl ServiceSupervisor {
         }
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             elapsed_ms = self.generation_start.map(|start| duration_millis(start.elapsed())),
             "Service generation terminated"
@@ -861,10 +863,10 @@ impl ServiceSupervisor {
         let terminated = ServiceStatus::Terminated;
         self.resources
             .status_plane
-            .insert(self.service_id, terminated.clone());
+            .insert(self.service_instance_id, terminated.clone());
         self.resources
             .runtime_facts
-            .record_service_status(self.service_id, &terminated);
+            .record_service_status(self.service_instance_id, &terminated);
         self.resources.status_changed.notify_waiters();
         SupervisorState::Terminated
     }
@@ -886,7 +888,7 @@ impl ServiceSupervisor {
 /// Spawn a single service with the given restart policy.
 pub(super) async fn spawn_service(parts: SpawnServiceParts) {
     let SpawnServiceParts {
-        service_id,
+        service_instance_id,
         name,
         run,
         watcher,
@@ -904,7 +906,7 @@ pub(super) async fn spawn_service(parts: SpawnServiceParts) {
     } = parts;
 
     let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-        service_id,
+        service_instance_id,
         name,
         run,
         watcher,
@@ -923,7 +925,10 @@ pub(super) async fn spawn_service(parts: SpawnServiceParts) {
         SupervisorSpawnLane::Control(runtime) => runtime.spawn(supervisor.run_loop()),
     };
 
-    running_tasks.lock().await.insert(service_id, handle);
+    running_tasks
+        .lock()
+        .await
+        .insert(service_instance_id, handle);
 }
 #[cfg(test)]
 mod tests {
@@ -1135,7 +1140,7 @@ mod tests {
     }
 
     fn remap_supervisor(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         name: &'static str,
         run: ServiceFn,
         declared_scheduling: ServiceScheduling,
@@ -1143,7 +1148,7 @@ mod tests {
         shared: RemapSupervisorShared,
     ) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
-            service_id,
+            service_instance_id,
             name,
             run,
             watcher: None,
@@ -1176,10 +1181,10 @@ mod tests {
         ];
 
         for (index, declared_scheduling) in declared_lanes.into_iter().enumerate() {
-            let service_id = ServiceId::new(200 + index);
+            let service_instance_id = ServiceInstanceId::new(200 + index);
             let diagnostics = Arc::new(DiagnosticsStore::new());
             let mut supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-                service_id,
+                service_instance_id,
                 name: "default_resolver",
                 run: noop_service,
                 watcher: None,
@@ -1209,7 +1214,7 @@ mod tests {
             }
             assert_eq!(
                 diagnostics
-                    .generation_snapshot(service_id, 1)
+                    .generation_snapshot(service_instance_id, 1)
                     .expect("generation diagnostics should be registered")
                     .runtime_lane,
                 RuntimeLane::from(declared_scheduling)
@@ -1222,12 +1227,12 @@ mod tests {
         NO_LIVE_REMAP_THREADS.lock().await.clear();
         NO_LIVE_REMAP_RECORD_AGAIN.store(false, Ordering::SeqCst);
         let should_isolate_next_generation = Arc::new(AtomicBool::new(false));
-        let service_id = ServiceId::new(210);
+        let service_instance_id = ServiceInstanceId::new(210);
         let resources = DaemonResources::new();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
         let supervisor = remap_supervisor(
-            service_id,
+            service_instance_id,
             "no_live_remap",
             no_live_remap_service,
             ServiceScheduling::Standard,
@@ -1256,7 +1261,11 @@ mod tests {
 
         let records = wait_for_thread_records(NO_LIVE_REMAP_THREADS.clone(), 2).await;
         assert_ne!(records[1], "svc-no_live_remap");
-        assert!(diagnostics.generation_snapshot(service_id, 2).is_none());
+        assert!(
+            diagnostics
+                .generation_snapshot(service_instance_id, 2)
+                .is_none()
+        );
 
         stop_supervisor(&cancellation_token, handle).await;
     }
@@ -1264,17 +1273,17 @@ mod tests {
     #[tokio::test]
     async fn standard_to_isolated_remap_applies_only_after_reload_boundary() {
         STANDARD_TO_ISOLATED_THREADS.lock().await.clear();
-        let service_id = ServiceId::new(220);
+        let service_instance_id = ServiceInstanceId::new(220);
         let resources = DaemonResources::new();
         let reload_signal = resources
             .reload_signals
-            .entry(service_id)
+            .entry(service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
         let supervisor = remap_supervisor(
-            service_id,
+            service_instance_id,
             "standard_to_isolated_remap",
             standard_to_isolated_remap_service,
             ServiceScheduling::Standard,
@@ -1297,7 +1306,7 @@ mod tests {
         assert_ne!(first_records[0], "svc-standard_to_isolated_remap");
         assert_eq!(
             diagnostics
-                .generation_snapshot(service_id, 1)
+                .generation_snapshot(service_instance_id, 1)
                 .expect("generation 1 diagnostics should exist")
                 .runtime_lane,
             RuntimeLane::Standard
@@ -1307,10 +1316,10 @@ mod tests {
         let records = wait_for_thread_records(STANDARD_TO_ISOLATED_THREADS.clone(), 2).await;
         assert_eq!(records[1], "svc-standard_to_isolated_remap");
         let generation_1 = diagnostics
-            .generation_snapshot(service_id, 1)
+            .generation_snapshot(service_instance_id, 1)
             .expect("generation 1 diagnostics should exist after reload");
         let generation_2 = diagnostics
-            .generation_snapshot(service_id, 2)
+            .generation_snapshot(service_instance_id, 2)
             .expect("generation 2 diagnostics should exist after reload");
         assert_eq!(generation_1.runtime_lane, RuntimeLane::Standard);
         assert_eq!(generation_1.aggregate.lifecycle.reload_requested, 1);
@@ -1323,17 +1332,17 @@ mod tests {
     #[tokio::test]
     async fn isolated_to_standard_remap_applies_only_after_reload_boundary() {
         ISOLATED_TO_STANDARD_THREADS.lock().await.clear();
-        let service_id = ServiceId::new(230);
+        let service_instance_id = ServiceInstanceId::new(230);
         let resources = DaemonResources::new();
         let reload_signal = resources
             .reload_signals
-            .entry(service_id)
+            .entry(service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
         let supervisor = remap_supervisor(
-            service_id,
+            service_instance_id,
             "isolated_to_standard_remap",
             isolated_to_standard_remap_service,
             ServiceScheduling::Isolated,
@@ -1356,7 +1365,7 @@ mod tests {
         assert_eq!(first_records[0], "svc-isolated_to_standard_remap");
         assert_eq!(
             diagnostics
-                .generation_snapshot(service_id, 1)
+                .generation_snapshot(service_instance_id, 1)
                 .expect("generation 1 diagnostics should exist")
                 .runtime_lane,
             RuntimeLane::Isolated
@@ -1366,10 +1375,10 @@ mod tests {
         let records = wait_for_thread_records(ISOLATED_TO_STANDARD_THREADS.clone(), 2).await;
         assert_ne!(records[1], "svc-isolated_to_standard_remap");
         let generation_1 = diagnostics
-            .generation_snapshot(service_id, 1)
+            .generation_snapshot(service_instance_id, 1)
             .expect("generation 1 diagnostics should exist after reload");
         let generation_2 = diagnostics
-            .generation_snapshot(service_id, 2)
+            .generation_snapshot(service_instance_id, 2)
             .expect("generation 2 diagnostics should exist after reload");
         assert_eq!(generation_1.runtime_lane, RuntimeLane::Isolated);
         assert_eq!(generation_1.aggregate.lifecycle.reload_requested, 1);
@@ -1382,9 +1391,9 @@ mod tests {
     #[tokio::test]
     async fn body_bridge_returns_scoped_generation_outcome() {
         let store = Arc::new(DiagnosticsStore::new());
-        let service_id = ServiceId::new(42);
+        let service_instance_id = ServiceInstanceId::new(42);
         let parts = ServiceGenerationParts {
-            service_id,
+            service_instance_id,
             name: "body_bridge",
             generation: 1,
             run: noop_service,
@@ -1392,7 +1401,7 @@ mod tests {
             reload_token: CancellationToken::new(),
             resources: DaemonResources::new(),
             diagnostics: store.register_generation(
-                service_id,
+                service_instance_id,
                 "body_bridge",
                 1,
                 RuntimeLane::Standard,
@@ -1445,14 +1454,14 @@ mod tests {
             .thread_name("test-control")
             .build()
             .expect("control runtime should build");
-        let service_id = ServiceId::new(77);
+        let service_instance_id = ServiceInstanceId::new(77);
         let running_tasks = Arc::new(Mutex::new(HashMap::new()));
         let resources = DaemonResources::new();
         let cancellation_token = CancellationToken::new();
         let daemon_token = CancellationToken::new();
 
         spawn_service(SpawnServiceParts {
-            service_id,
+            service_instance_id,
             name: "control_watcher",
             run: cancellable_service,
             watcher: Some(control_runtime_watcher),
@@ -1486,7 +1495,7 @@ mod tests {
         );
 
         cancellation_token.cancel();
-        let handle = { running_tasks.lock().await.remove(&service_id) };
+        let handle = { running_tasks.lock().await.remove(&service_instance_id) };
         if let Some(handle) = handle {
             let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         }
@@ -1497,7 +1506,7 @@ mod tests {
 
     fn test_supervisor(policy: RestartPolicy) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
-            service_id: ServiceId::new(1),
+            service_instance_id: ServiceInstanceId::new(1),
             name: "test_service",
             run: noop_service,
             watcher: None,
@@ -1517,7 +1526,7 @@ mod tests {
         supervisor.generation = generation;
         supervisor.reload_token = Some(CancellationToken::new());
         supervisor.generation_diagnostics = Some(supervisor.diagnostics.register_generation(
-            supervisor.service_id,
+            supervisor.service_instance_id,
             supervisor.name,
             generation,
             RuntimeLane::Standard,
@@ -1565,7 +1574,7 @@ mod tests {
 
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(generation.aggregate.lifecycle.restart, 1);
         assert_eq!(generation.aggregate.lifecycle.backoff_restart, 1);
@@ -1585,7 +1594,7 @@ mod tests {
 
         let service = supervisor
             .diagnostics
-            .service_snapshot(supervisor.service_id)
+            .service_snapshot(supervisor.service_instance_id)
             .expect("service diagnostics should be present");
         assert_eq!(
             service.aggregate.lifecycle.last_restart_decision,
@@ -1613,7 +1622,7 @@ mod tests {
 
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(generation.aggregate.lifecycle.restart, 1);
         assert_eq!(generation.aggregate.lifecycle.backoff_restart, 0);
@@ -1647,7 +1656,7 @@ mod tests {
             .find(|event| event.get("restart_decision_kind").is_some())
             .expect("restart trace event should be captured");
         assert_eq!(event.get("service"), Some(&"test_service".to_string()));
-        assert!(event.contains_key("service_id"));
+        assert!(event.contains_key("service_instance_id"));
         assert_eq!(event.get("generation"), Some(&generation.to_string()));
         assert_eq!(
             event.get("restart_decision_kind"),
@@ -1682,7 +1691,7 @@ mod tests {
             .find(|event| event.get("exit_kind").is_some())
             .unwrap_or_else(|| panic!("outcome trace event should be captured: {:?}", *events));
         assert_eq!(event.get("service"), Some(&"test_service".to_string()));
-        assert!(event.contains_key("service_id"));
+        assert!(event.contains_key("service_instance_id"));
         assert_eq!(event.get("generation"), Some(&generation.to_string()));
         assert_eq!(
             event.get("runtime_lane"),
@@ -1702,7 +1711,7 @@ mod tests {
     #[tokio::test]
     async fn isolated_startup_errors_use_backoff_recovery() {
         let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-            service_id: ServiceId::new(1),
+            service_instance_id: ServiceInstanceId::new(1),
             name: "isolated_startup",
             run: noop_service,
             watcher: None,
@@ -1796,11 +1805,11 @@ mod tests {
     #[tokio::test]
     async fn isolated_startup_gate_cancellation_returns_startup_failure() {
         let store = Arc::new(DiagnosticsStore::new());
-        let service_id = ServiceId::new(1);
+        let service_instance_id = ServiceInstanceId::new(1);
         let cancellation_token = CancellationToken::new();
         cancellation_token.cancel();
         let generation_parts = ServiceGenerationParts {
-            service_id,
+            service_instance_id,
             name: "isolated_gate",
             generation: 1,
             run: noop_service,
@@ -1808,7 +1817,7 @@ mod tests {
             reload_token: CancellationToken::new(),
             resources: DaemonResources::new(),
             diagnostics: store.register_generation(
-                service_id,
+                service_instance_id,
                 "isolated_gate",
                 1,
                 RuntimeLane::Isolated,
@@ -1892,7 +1901,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::HandlerRetryExhausted,
             "test_trigger",
-            ServiceId::new(1),
+            ServiceInstanceId::new(1),
             Some(7),
             Some(uuid::Uuid::nil()),
             "retry exhausted",
@@ -1922,7 +1931,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTaskPanic,
             "panic_trigger",
-            ServiceId::new(1),
+            ServiceInstanceId::new(1),
             Some(8),
             Some(uuid::Uuid::nil()),
             "dispatch panicked",
@@ -2003,7 +2012,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTaskError,
             "reload_trigger",
-            ServiceId::new(1),
+            ServiceInstanceId::new(1),
             Some(9),
             Some(uuid::Uuid::nil()),
             "dispatch failed during reload",
@@ -2107,7 +2116,7 @@ mod tests {
         assert!(matches!(state, SupervisorState::Terminated));
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(
             generation.aggregate.lifecycle.last_exit_kind,
@@ -2132,7 +2141,7 @@ mod tests {
         assert!(supervisor.daemon_token.is_cancelled());
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(
             generation.aggregate.lifecycle.last_exit_kind,
@@ -2172,7 +2181,7 @@ mod tests {
             supervisor
                 .resources
                 .status_plane
-                .get(&supervisor.service_id)
+                .get(&supervisor.service_instance_id)
                 .map(|status| status.value().clone()),
             Some(ServiceStatus::Terminated)
         );
@@ -2185,7 +2194,7 @@ mod tests {
         supervisor
             .resources
             .reload_signals
-            .insert(supervisor.service_id, reload_signal.clone());
+            .insert(supervisor.service_instance_id, reload_signal.clone());
 
         for _ in 0..5 {
             assert!(

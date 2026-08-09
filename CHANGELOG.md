@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Service Identity API**: Split static `ServiceEntryId` from runtime `ServiceInstanceId`, removed the previous service identity type, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
 - **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
 
 ## [0.1.0-alpha.5] - 2026-06-21
@@ -38,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider Initialization Boundaries**: Clarified `ProviderError` versus `ProviderInitError`, preserved provider-init source classification in tracing/tests, and kept fatal, timeout, cancellation, panic, and dependency-provider failures distinct.
 - **Scheduling Runtime**: Split supervision/control-plane work from service and trigger body execution lanes, added HighPriority worker-count selection from final registry entries, and kept advisory analysis read-only.
 - **Trigger Supervision**: Improved trigger dispatch observability so retry exhaustion, infrastructure errors, panics, reload, and shutdown produce distinct lifecycle/restart signals.
-- **Trigger Context Identity**: `TriggerContext` now carries the owning service generation. Manual struct literals should migrate to `TriggerContext::new(service_id, generation, instance_seq, message)` during the alpha API window.
+- **Trigger Context Identity**: `TriggerContext` now carries the owning service generation. Manual struct literals should migrate to `TriggerContext::new(service_instance_id, generation, instance_seq, message)` during the alpha API window.
 - **Trigger Policy Overlay Contract**: Clarified temporary overlays as generation-scoped desired state for future dispatch scheduling. Concurrency is reconciled at runner scheduling boundaries; already captured timeout and retry policy are unchanged.
 - **Logging Initialization**: Made logging initialization safe to call repeatedly and tightened log batch-size validation.
 
@@ -48,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider Reload Scope**: Made provider dependency reload generation-scoped so binding/value changes reload the affected generation without leaking across daemon boundaries.
 - **Public API Boundaries**: Reduced accidental public surface area and tightened macro/runtime checks for invalid parameters and unsupported capacity values.
 - **Panic Path Reduction**: Reworked several public-facing error paths to return structured errors instead of relying on panic behavior.
-- **Shelf Isolation**: Isolated shelf status by `ServiceId` so duplicate Rust function names selected into different service entries do not share persisted generation state.
+- **Shelf Isolation**: Isolated shelf status by service instance identity so duplicate Rust function names selected into different service entries do not share persisted generation state.
 
 ## [0.1.0-alpha.4] - 2026-05-07
 

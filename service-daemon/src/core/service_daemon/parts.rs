@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ProviderDependencyWatchSet;
 use crate::core::diagnostics::DiagnosticsStore;
-use crate::models::{ServiceDescription, ServiceFn, ServiceId, ServiceScheduling};
+use crate::models::{ServiceDescription, ServiceFn, ServiceInstanceId, ServiceScheduling};
 
 use super::super::context::DaemonResources;
 use super::policy::RestartPolicy;
 
 pub(super) struct ServiceSupervisorParts {
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub name: &'static str,
     pub run: ServiceFn,
     pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
@@ -55,7 +55,7 @@ impl BodyExecutionLanes {
 
 #[cfg(test)]
 type BodyLaneOverrideResolver =
-    Arc<dyn Fn(ServiceId, u64, ServiceScheduling) -> ServiceScheduling + Send + Sync>;
+    Arc<dyn Fn(ServiceInstanceId, u64, ServiceScheduling) -> ServiceScheduling + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub(super) struct BodyLaneResolver {
@@ -66,22 +66,22 @@ pub(super) struct BodyLaneResolver {
 impl BodyLaneResolver {
     pub(super) fn resolve(
         &self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         generation: u64,
         declared_scheduling: ServiceScheduling,
     ) -> ServiceScheduling {
         #[cfg(test)]
         if let Some(resolver) = &self.override_resolver {
-            return resolver(service_id, generation, declared_scheduling);
+            return resolver(service_instance_id, generation, declared_scheduling);
         }
 
-        let _ = (service_id, generation);
+        let _ = (service_instance_id, generation);
         declared_scheduling
     }
 
     #[cfg(test)]
     pub(super) fn with_override(
-        resolver: impl Fn(ServiceId, u64, ServiceScheduling) -> ServiceScheduling
+        resolver: impl Fn(ServiceInstanceId, u64, ServiceScheduling) -> ServiceScheduling
         + Send
         + Sync
         + 'static,
@@ -110,7 +110,7 @@ impl fmt::Debug for BodyExecutionLane {
 }
 
 pub(super) struct SpawnServiceParts {
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub name: &'static str,
     pub run: ServiceFn,
     pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
@@ -119,7 +119,7 @@ pub(super) struct SpawnServiceParts {
     pub supervisor_lane: SupervisorSpawnLane,
     pub body_lanes: BodyExecutionLanes,
     pub body_lane_resolver: BodyLaneResolver,
-    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    pub running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
     pub isolated_startup_permits: Arc<Semaphore>,
@@ -130,7 +130,7 @@ pub(super) struct SpawnServiceParts {
 pub(super) struct SpawnAllServicesParts {
     pub services: Vec<ServiceDescription>,
     pub restart_policy: RestartPolicy,
-    pub running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    pub running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
     pub diagnostics: Arc<DiagnosticsStore>,
     pub isolated_startup_permits: Arc<Semaphore>,
@@ -147,18 +147,18 @@ mod tests {
     #[test]
     fn default_body_lane_resolver_returns_declared_scheduling() {
         let resolver = BodyLaneResolver::default();
-        let service_id = ServiceId::new(9);
+        let service_instance_id = ServiceInstanceId::new(9);
 
         assert_eq!(
-            resolver.resolve(service_id, 1, ServiceScheduling::Standard),
+            resolver.resolve(service_instance_id, 1, ServiceScheduling::Standard),
             ServiceScheduling::Standard
         );
         assert_eq!(
-            resolver.resolve(service_id, 2, ServiceScheduling::HighPriority),
+            resolver.resolve(service_instance_id, 2, ServiceScheduling::HighPriority),
             ServiceScheduling::HighPriority
         );
         assert_eq!(
-            resolver.resolve(service_id, 3, ServiceScheduling::Isolated),
+            resolver.resolve(service_instance_id, 3, ServiceScheduling::Isolated),
             ServiceScheduling::Isolated
         );
     }
@@ -168,7 +168,7 @@ mod tests {
         let resolver = BodyLaneResolver::with_override(|_, _, _| ServiceScheduling::Isolated);
 
         assert_eq!(
-            resolver.resolve(ServiceId::new(10), 1, ServiceScheduling::Standard),
+            resolver.resolve(ServiceInstanceId::new(10), 1, ServiceScheduling::Standard),
             ServiceScheduling::Isolated
         );
     }

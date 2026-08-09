@@ -1,6 +1,6 @@
 use crate::core::diagnostics as internal;
 
-use super::service::{ServiceId, ServiceScheduling};
+use super::service::{ServiceInstanceId, ServiceScheduling};
 
 const DIAGNOSTIC_MINIMUM_COMPLETED_SAMPLES: u64 = 3;
 const DIAGNOSTIC_HIGH_AVG_DRIFT_MS: u64 = 100;
@@ -646,8 +646,8 @@ impl From<internal::DiagnosticsAggregateSnapshot> for DiagnosticAggregateStats {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceDiagnosticsSnapshot {
-    /// Static service identifier.
-    pub service_id: ServiceId,
+    /// Runtime service instance identifier.
+    pub service_instance_id: ServiceInstanceId,
     /// Registered service name.
     pub service_name: &'static str,
     /// Latest generation number observed for this service.
@@ -667,7 +667,7 @@ impl ServiceDiagnosticsSnapshot {
     ) -> Self {
         let interpretations = service_interpretations(&value, standard_lane_pressure);
         Self {
-            service_id: value.service_id,
+            service_instance_id: value.service_instance_id,
             service_name: value.service_name,
             current_generation: value.current_generation,
             declared_scheduling: scheduling_from_lane(value.runtime_lane),
@@ -687,8 +687,8 @@ impl From<internal::ServiceDiagnosticsSnapshot> for ServiceDiagnosticsSnapshot {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationDiagnosticsSnapshot {
-    /// Static service identifier.
-    pub service_id: ServiceId,
+    /// Runtime service instance identifier.
+    pub service_instance_id: ServiceInstanceId,
     /// Registered service name.
     pub service_name: &'static str,
     /// Generation number.
@@ -702,7 +702,7 @@ pub struct GenerationDiagnosticsSnapshot {
 impl From<internal::GenerationDiagnosticsSnapshot> for GenerationDiagnosticsSnapshot {
     fn from(value: internal::GenerationDiagnosticsSnapshot) -> Self {
         Self {
-            service_id: value.service_id,
+            service_instance_id: value.service_instance_id,
             service_name: value.service_name,
             generation: value.generation,
             declared_scheduling: scheduling_from_lane(value.runtime_lane),

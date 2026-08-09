@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::service::{ServiceId, ServiceScheduling, ServiceStatus};
+use super::service::{ServiceInstanceId, ServiceScheduling, ServiceStatus};
 
 /// Daemon-level runtime facts.
 #[non_exhaustive]
@@ -34,8 +34,8 @@ pub struct DaemonRuntimeSnapshot {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceRuntimeSnapshot {
-    /// Registry identity.
-    pub service_id: ServiceId,
+    /// Runtime service instance identity.
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub priority: u8,
     pub declared_scheduling: ServiceScheduling,
@@ -58,7 +58,7 @@ pub struct ServiceRuntimeSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadinessServiceError {
     /// Service that produced the error.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub status: ServiceStatus,
     /// Human-readable error summary.
@@ -97,7 +97,7 @@ pub struct ReadinessSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerPressureSnapshot {
     /// Trigger service identity.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
     /// Currently running handler dispatches.
@@ -128,7 +128,7 @@ pub struct TriggerPressureSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerRuntimeSnapshot {
     /// Trigger service identity.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
     /// Pressure facts observed by the trigger runner.

@@ -42,7 +42,7 @@ use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
-    SchedulingAdvisoryProfile, ServiceDescription, ServiceId, ServiceRuntimeSnapshot,
+    SchedulingAdvisoryProfile, ServiceDescription, ServiceInstanceId, ServiceRuntimeSnapshot,
     ServiceStatus, TriggerRuntimeSnapshot,
 };
 
@@ -64,8 +64,8 @@ pub struct ServiceDaemonHandle {
 }
 
 impl ServiceDaemonHandle {
-    /// Get the current status of a service by its `ServiceId`.
-    pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
+    /// Get the current status of a service by its `ServiceInstanceId`.
+    pub async fn get_service_status(&self, id: &ServiceInstanceId) -> ServiceStatus {
         self.resources
             .status_plane
             .get(id)
@@ -89,21 +89,23 @@ impl ServiceDaemonHandle {
     pub fn runtime_readiness(&self) -> ReadinessSnapshot {
         self.resources
             .runtime_facts
-            .readiness_snapshot(|service_id| self.status_for_snapshot(service_id))
+            .readiness_snapshot(|service_instance_id| self.status_for_snapshot(service_instance_id))
     }
 
     /// Return read-only runtime facts for all registered services.
     pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
         self.resources
             .runtime_facts
-            .service_snapshots(|service_id| self.status_for_snapshot(service_id))
+            .service_snapshots(|service_instance_id| self.status_for_snapshot(service_instance_id))
     }
 
     /// Return read-only runtime facts for a service.
-    pub fn runtime_service(&self, id: ServiceId) -> Option<ServiceRuntimeSnapshot> {
+    pub fn runtime_service(&self, id: ServiceInstanceId) -> Option<ServiceRuntimeSnapshot> {
         self.resources
             .runtime_facts
-            .service_snapshot(id, |service_id| self.status_for_snapshot(service_id))
+            .service_snapshot(id, |service_instance_id| {
+                self.status_for_snapshot(service_instance_id)
+            })
     }
 
     /// Return read-only runtime facts for all observed triggers.
@@ -112,11 +114,11 @@ impl ServiceDaemonHandle {
     }
 
     /// Return read-only runtime facts for an observed trigger.
-    pub fn runtime_trigger(&self, id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+    pub fn runtime_trigger(&self, id: ServiceInstanceId) -> Option<TriggerRuntimeSnapshot> {
         self.resources.runtime_facts.trigger_snapshot(id)
     }
 
-    fn status_for_snapshot(&self, id: ServiceId) -> ServiceStatus {
+    fn status_for_snapshot(&self, id: ServiceInstanceId) -> ServiceStatus {
         self.resources
             .status_plane
             .get(&id)
@@ -155,7 +157,7 @@ impl ServiceDaemonHandle {
 /// ```
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
-    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
     /// Dedicated runtime for supervisor and control-plane work.
@@ -204,8 +206,8 @@ impl ServiceDaemon {
         }
     }
 
-    /// Get the current status of a service by its `ServiceId`.
-    pub async fn get_service_status(&self, id: &ServiceId) -> ServiceStatus {
+    /// Get the current status of a service by its `ServiceInstanceId`.
+    pub async fn get_service_status(&self, id: &ServiceInstanceId) -> ServiceStatus {
         self.handle().get_service_status(id).await
     }
 
@@ -230,7 +232,7 @@ impl ServiceDaemon {
     }
 
     /// Return read-only runtime facts for a service.
-    pub fn runtime_service(&self, id: ServiceId) -> Option<ServiceRuntimeSnapshot> {
+    pub fn runtime_service(&self, id: ServiceInstanceId) -> Option<ServiceRuntimeSnapshot> {
         self.handle().runtime_service(id)
     }
 
@@ -240,7 +242,7 @@ impl ServiceDaemon {
     }
 
     /// Return read-only runtime facts for an observed trigger.
-    pub fn runtime_trigger(&self, id: ServiceId) -> Option<TriggerRuntimeSnapshot> {
+    pub fn runtime_trigger(&self, id: ServiceInstanceId) -> Option<TriggerRuntimeSnapshot> {
         self.handle().runtime_trigger(id)
     }
 
@@ -459,7 +461,8 @@ fn clone_service_descriptions(services: &[ServiceDescription]) -> Vec<ServiceDes
     services
         .iter()
         .map(|service| ServiceDescription {
-            id: service.id,
+            entry_id: service.entry_id,
+            instance_id: service.instance_id,
             entry: service.entry,
             cancellation_token: service.cancellation_token.clone(),
         })
@@ -481,7 +484,8 @@ fn emit_shutdown_topology() {
 mod tests {
     use super::*;
     use crate::models::{
-        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceParam, ServiceScheduling,
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId, ServiceParam,
+        ServiceScheduling,
     };
     use crate::{TT::*, provider, service, trigger};
     use std::any::TypeId;
@@ -550,8 +554,10 @@ mod tests {
     };
 
     fn test_service(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
+        let entry_id = ServiceEntryId::new(id);
         ServiceDescription {
-            id: ServiceId::new(id),
+            entry_id,
+            instance_id: ServiceInstanceId::from(entry_id),
             entry,
             cancellation_token: CancellationToken::new(),
         }
@@ -781,8 +787,8 @@ mod tests {
     fn shutdown_topology_is_emitted_as_tracing_event() {
         crate::core::topology_collector::reset_topology();
         crate::core::topology_collector::record_topology_edge_for_test(
-            ServiceId::new(0),
-            ServiceId::new(1),
+            ServiceInstanceId::new(0),
+            ServiceInstanceId::new(1),
         );
 
         let capture = CapturedTraceFields::default();
@@ -1002,15 +1008,15 @@ mod tests {
         let handle = daemon.handle();
 
         // Initially, unknown service should be Terminated
-        let status = handle.get_service_status(&ServiceId(999)).await;
+        let status = handle.get_service_status(&ServiceInstanceId(999)).await;
         assert_eq!(status, ServiceStatus::Terminated);
 
         // Insert a status manually and verify
         daemon
             .resources
             .status_plane
-            .insert(ServiceId(1), ServiceStatus::Healthy);
-        let status = handle.get_service_status(&ServiceId(1)).await;
+            .insert(ServiceInstanceId(1), ServiceStatus::Healthy);
+        let status = handle.get_service_status(&ServiceInstanceId(1)).await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
@@ -1026,17 +1032,17 @@ mod tests {
         daemon
             .resources
             .status_plane
-            .insert(ServiceId(0), ServiceStatus::Initializing);
+            .insert(ServiceInstanceId(0), ServiceStatus::Initializing);
 
-        let status = handle.get_service_status(&ServiceId(0)).await;
+        let status = handle.get_service_status(&ServiceInstanceId(0)).await;
         assert_eq!(status, ServiceStatus::Initializing);
 
         // Update status
         daemon
             .resources
             .status_plane
-            .insert(ServiceId(0), ServiceStatus::Healthy);
-        let status = handle.get_service_status(&ServiceId(0)).await;
+            .insert(ServiceInstanceId(0), ServiceStatus::Healthy);
+        let status = handle.get_service_status(&ServiceInstanceId(0)).await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
@@ -1057,9 +1063,9 @@ mod tests {
         daemon
             .resources
             .status_plane
-            .insert(ServiceId::new(1), ServiceStatus::Healthy);
+            .insert(ServiceInstanceId::new(1), ServiceStatus::Healthy);
         daemon.resources.status_plane.insert(
-            ServiceId::new(2),
+            ServiceInstanceId::new(2),
             ServiceStatus::Recovering("temporary failure".to_owned()),
         );
 
@@ -1074,17 +1080,21 @@ mod tests {
         assert_eq!(
             services
                 .iter()
-                .map(|snapshot| snapshot.service_id)
+                .map(|snapshot| snapshot.service_instance_id)
                 .collect::<Vec<_>>(),
-            vec![ServiceId::new(1), ServiceId::new(2)]
+            vec![ServiceInstanceId::new(1), ServiceInstanceId::new(2)]
         );
         assert_eq!(
             handle
-                .runtime_service(ServiceId::new(1))
+                .runtime_service(ServiceInstanceId::new(1))
                 .map(|snapshot| snapshot.status),
             Some(ServiceStatus::Healthy)
         );
-        assert!(handle.runtime_service(ServiceId::new(999)).is_none());
+        assert!(
+            handle
+                .runtime_service(ServiceInstanceId::new(999))
+                .is_none()
+        );
 
         let readiness = handle.runtime_readiness();
         assert_eq!(readiness.healthy.len(), 1);

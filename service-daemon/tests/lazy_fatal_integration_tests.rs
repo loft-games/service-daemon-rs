@@ -1,6 +1,6 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, ProviderError, ServiceDaemon, ServiceId, ServiceStatus, provider,
-    service,
+    DiagnosticGenerationExitKind, ProviderError, ServiceDaemon, ServiceInstanceId, ServiceStatus,
+    provider, service,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -104,11 +104,17 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
 
     assert!(LAZY_HEALTHY_STOPPED.load(Ordering::SeqCst));
     assert_eq!(
-        daemon.handle().get_service_status(&ServiceId::new(0)).await,
+        daemon
+            .handle()
+            .get_service_status(&ServiceInstanceId::new(0))
+            .await,
         ServiceStatus::Terminated
     );
     assert_eq!(
-        daemon.handle().get_service_status(&ServiceId::new(1)).await,
+        daemon
+            .handle()
+            .get_service_status(&ServiceInstanceId::new(1))
+            .await,
         ServiceStatus::Terminated
     );
 

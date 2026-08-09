@@ -8,7 +8,7 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 use uuid::Uuid;
 
-use crate::models::{ServiceId, service::InstanceId};
+use crate::models::{ServiceInstanceId, service::TriggerInstanceId};
 
 use super::model::{LogEvent, LogLevel, get_log_queue};
 use super::render::{in_log_processing, render_to_stderr};
@@ -92,7 +92,7 @@ impl tracing::field::Visit for FieldCollector {
 /// # Span Context Extraction
 ///
 /// `DaemonLayer` requires `LookupSpan` on the subscriber so it can walk the
-/// current Span chain and extract `service_id`, `message_id`, and `instance_id`
+/// current Span chain and extract `service_instance_id`, `message_id`, and `trigger_instance_id`
 /// fields that were injected by `ServiceSupervisor::on_running` and
 /// `TracingInterceptor`. Events outside any Span will have `None` for these IDs.
 pub struct DaemonLayer;
@@ -101,7 +101,7 @@ impl<S> Layer<S> for DaemonLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    /// Captures Span field values (`service_id`, `message_id`, etc.) into the
+    /// Captures Span field values (`service_instance_id`, `message_id`, etc.) into the
     /// Span's extensions on creation. These are later read by `extract_span_ids`
     /// during event processing.
     fn on_new_span(
@@ -115,11 +115,14 @@ where
             attrs.record(&mut visitor);
 
             // Only store if at least one known field was found
-            if visitor.fields.service_id.is_some()
+            if visitor.fields.service_instance_id.is_some()
                 || visitor.fields.message_id.is_some()
-                || visitor.fields.instance_svc_id.is_some()
-                || visitor.fields.service_id_num.is_some()
-                || visitor.fields.source_service_id.is_some()
+                || visitor
+                    .fields
+                    .trigger_instance_service_instance_id
+                    .is_some()
+                || visitor.fields.service_instance_id_num.is_some()
+                || visitor.fields.source_service_instance_id.is_some()
             {
                 span.extensions_mut().insert(visitor.fields);
             }
@@ -136,7 +139,7 @@ where
         let error_chain = collector.take_error();
 
         // Walk the Span chain to extract service/trigger IDs
-        let (service_id, source_service_id, message_id, instance_id) =
+        let (service_instance_id, source_service_instance_id, message_id, trigger_instance_id) =
             extract_span_ids(&ctx, event);
 
         let log_event = Arc::new(LogEvent {
@@ -147,10 +150,10 @@ where
             module_path: metadata.module_path().map(Cow::Borrowed),
             file: metadata.file().map(Cow::Borrowed),
             line: metadata.line(),
-            service_id,
-            source_service_id,
+            service_instance_id,
+            source_service_instance_id,
             message_id,
-            instance_id,
+            trigger_instance_id,
             error_chain,
         });
 
@@ -166,12 +169,12 @@ where
     }
 }
 
-/// Walks the current Span scope to extract `service_id`, `message_id`, and
-/// `instance_id` fields from ancestor Spans.
+/// Walks the current Span scope to extract `service_instance_id`, `message_id`, and
+/// `trigger_instance_id` fields from ancestor Spans.
 ///
 /// These fields are injected by:
-/// - `ServiceSupervisor::on_running` - creates `info_span!("service", service_id = ...)`
-/// - `TracingInterceptor` - creates `info_span!("trigger", service_id = ..., message_id = ...)`
+/// - `ServiceSupervisor::on_running` - creates `info_span!("service", service_instance_id = ...)`
+/// - `TracingInterceptor` - creates `info_span!("trigger", service_instance_id = ..., message_id = ...)`
 ///
 /// The walk proceeds from innermost (current) to outermost Span, returning
 /// the first value found for each field.
@@ -179,55 +182,55 @@ fn extract_span_ids<S>(
     ctx: &Context<'_, S>,
     event: &Event<'_>,
 ) -> (
-    Option<ServiceId>,
-    Option<ServiceId>,
+    Option<ServiceInstanceId>,
+    Option<ServiceInstanceId>,
     Option<Uuid>,
-    Option<InstanceId>,
+    Option<TriggerInstanceId>,
 )
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    let mut service_id = None;
-    let mut source_service_id = None;
+    let mut service_instance_id = None;
+    let mut source_service_instance_id = None;
     let mut message_id = None;
-    let mut instance_id = None;
+    let mut trigger_instance_id = None;
 
     if let Some(scope) = ctx.event_scope(event) {
         for span in scope {
             let extensions = span.extensions();
 
             // 1. Native typed IDs stored in span extensions.
-            if service_id.is_none()
-                && let Some(sid) = extensions.get::<ServiceId>()
+            if service_instance_id.is_none()
+                && let Some(sid) = extensions.get::<ServiceInstanceId>()
             {
-                service_id = Some(*sid);
+                service_instance_id = Some(*sid);
             }
             if message_id.is_none()
                 && let Some(mid) = extensions.get::<Uuid>()
             {
                 message_id = Some(*mid);
             }
-            if instance_id.is_none()
-                && let Some(iid) = extensions.get::<InstanceId>()
+            if trigger_instance_id.is_none()
+                && let Some(iid) = extensions.get::<TriggerInstanceId>()
             {
-                instance_id = Some(*iid);
+                trigger_instance_id = Some(*iid);
             }
 
-            // 2. Legacy string IDs kept for macro-less spans.
+            // 2. String/numeric span fields from tracing spans.
             if let Some(fields) = extensions.get::<SpanFields>() {
-                if service_id.is_none() {
-                    if let Some(ref s) = fields.service_id {
-                        if let Ok(id) = ServiceId::from_str(s) {
-                            service_id = Some(id);
+                if service_instance_id.is_none() {
+                    if let Some(ref s) = fields.service_instance_id {
+                        if let Ok(id) = ServiceInstanceId::from_str(s) {
+                            service_instance_id = Some(id);
                         }
-                    } else if let Some(n) = fields.service_id_num {
-                        service_id = Some(ServiceId::new(n));
+                    } else if let Some(n) = fields.service_instance_id_num {
+                        service_instance_id = Some(ServiceInstanceId::new(n));
                     }
                 }
-                if source_service_id.is_none()
-                    && let Some(n) = fields.source_service_id
+                if source_service_instance_id.is_none()
+                    && let Some(n) = fields.source_service_instance_id
                 {
-                    source_service_id = Some(ServiceId::new(n));
+                    source_service_instance_id = Some(ServiceInstanceId::new(n));
                 }
                 if message_id.is_none()
                     && let Some(ref s) = fields.message_id
@@ -236,40 +239,48 @@ where
                     message_id = Some(id);
                 }
 
-                // Numeric Instance ID fallback (required for legacy/test compatibility)
-                if instance_id.is_none() {
-                    let svc_part = fields.instance_svc_id.or(fields.service_id_num);
+                // Numeric trigger instance reconstruction from span fields.
+                if trigger_instance_id.is_none() {
+                    let svc_part = fields
+                        .trigger_instance_service_instance_id
+                        .or(fields.service_instance_id_num);
                     if let (Some(svc), Some(seq)) = (svc_part, fields.instance_seq) {
-                        instance_id = Some(InstanceId::new(ServiceId::new(svc), seq));
+                        trigger_instance_id =
+                            Some(TriggerInstanceId::new(ServiceInstanceId::new(svc), seq));
                     }
                 }
             }
         }
     }
 
-    (service_id, source_service_id, message_id, instance_id)
+    (
+        service_instance_id,
+        source_service_instance_id,
+        message_id,
+        trigger_instance_id,
+    )
 }
 
 /// Storage for extracted span field values, attached to each Span via extensions.
 ///
-/// When `DaemonLayer` sees a new Span with known field names (`service_id`,
+/// When `DaemonLayer` sees a new Span with known field names (`service_instance_id`,
 /// `message_id`, etc.), it stores their values in a `SpanFields` instance
 /// within the Span's extensions. These values are later read by
 /// `extract_span_ids` during event processing.
 #[derive(Debug, Default)]
 struct SpanFields {
-    service_id: Option<String>,
+    service_instance_id: Option<String>,
     message_id: Option<String>,
-    /// Numeric `ServiceId` captured without string parsing.
-    service_id_num: Option<usize>,
-    /// The `ServiceId` of the source service.
-    source_service_id: Option<usize>,
+    /// Numeric `ServiceInstanceId` captured without string parsing.
+    service_instance_id_num: Option<usize>,
+    /// The `ServiceInstanceId` of the source service.
+    source_service_instance_id: Option<usize>,
     /// High 64 bits of `message_id` (Uuid).
     mid_hi: Option<u64>,
     /// Low 64 bits of `message_id` (Uuid).
     mid_lo: Option<u64>,
-    /// Numeric service ID component of the trigger instance identifier.
-    instance_svc_id: Option<usize>,
+    /// Numeric service instance ID component of the trigger instance identifier.
+    trigger_instance_service_instance_id: Option<usize>,
     /// Numeric sequence component of the trigger instance identifier.
     instance_seq: Option<u64>,
 }
@@ -277,9 +288,9 @@ struct SpanFields {
 /// Visitor that extracts known ID fields from Span attributes during creation.
 ///
 /// Recognizes:
-/// - `service_id` - from `ServiceSupervisor::on_running` and `TracingInterceptor`
+/// - `service_instance_id` - from `ServiceSupervisor::on_running` and `TracingInterceptor`
 /// - `message_id` - from `TracingInterceptor` (trigger dispatch)
-/// - `instance_svc_id` / `instance_seq` - numeric fields from `TracingInterceptor`
+/// - `trigger_instance_service_instance_id` / `instance_seq` - numeric fields from `TracingInterceptor`
 ///
 /// All other fields are ignored. String values are captured via `Display`
 /// formatting; numeric values are captured via `record_u64`.
@@ -292,7 +303,7 @@ impl field::Visit for SpanFieldVisitor {
     fn record_debug(&mut self, field: &field::Field, value: &dyn std::fmt::Debug) {
         let formatted = format!("{:?}", value);
         match field.name() {
-            "service_id" => self.fields.service_id = Some(formatted),
+            "service_instance_id" => self.fields.service_instance_id = Some(formatted),
             "message_id" => self.fields.message_id = Some(formatted),
             _ => {} // Ignore unknown fields
         }
@@ -300,7 +311,7 @@ impl field::Visit for SpanFieldVisitor {
 
     fn record_str(&mut self, field: &field::Field, value: &str) {
         match field.name() {
-            "service_id" => self.fields.service_id = Some(value.to_string()),
+            "service_instance_id" => self.fields.service_instance_id = Some(value.to_string()),
             "message_id" => self.fields.message_id = Some(value.to_string()),
             _ => {}
         }
@@ -308,11 +319,15 @@ impl field::Visit for SpanFieldVisitor {
 
     fn record_u64(&mut self, field: &field::Field, value: u64) {
         match field.name() {
-            "service_id_num" => self.fields.service_id_num = Some(value as usize),
-            "source_service_id" => self.fields.source_service_id = Some(value as usize),
+            "service_instance_id_num" => self.fields.service_instance_id_num = Some(value as usize),
+            "source_service_instance_id" => {
+                self.fields.source_service_instance_id = Some(value as usize)
+            }
             "mid_hi" => self.fields.mid_hi = Some(value),
             "mid_lo" => self.fields.mid_lo = Some(value),
-            "instance_svc_id" => self.fields.instance_svc_id = Some(value as usize),
+            "trigger_instance_service_instance_id" => {
+                self.fields.trigger_instance_service_instance_id = Some(value as usize)
+            }
             "instance_seq" => self.fields.instance_seq = Some(value),
             _ => {}
         }

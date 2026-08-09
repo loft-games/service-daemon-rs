@@ -97,8 +97,8 @@ stores behind pointers (`Arc`, `DashMap` buckets, etc.).
 | Type | Stack Size | Role |
 | :--- | ---: | :--- |
 | `BackoffController` | 128 B | Stateful retry engine: `RestartPolicy` (104 B) + current delay + attempt counter |
-| `ServiceIdentity` | 48 B | Task-local handle: `ServiceId`, `&'static str` name, 2x `CancellationToken`, `Arc<AtomicBool>` handshake flag |
-| `ServiceDescription` | 24 B | Registry entry: `ServiceId` + `&'static ServiceEntry` ref + `CancellationToken` |
+| `ServiceIdentity` | 48 B | Task-local handle: `ServiceInstanceId`, `&'static str` name, 2x `CancellationToken`, `Arc<AtomicBool>` handshake flag |
+| `ServiceDescription` | 32 B | Runtime description: `ServiceEntryId` + `ServiceInstanceId` + `&'static ServiceEntry` ref + `CancellationToken` |
 | `ServiceStatus` | 24 B | Lifecycle enum (Initializing, Healthy, Recovering, etc.) |
 | `RestartPolicy` | 104 B | Stateless backoff configuration (7 fields: delays, multiplier, jitter, timeouts) |
 | `DaemonResources` | 192 B | Shared daemon state: 3x `DashMap` + `Notify` + `DashMap<TypeId, Box<dyn Any>>` |
@@ -114,15 +114,15 @@ allocator metadata, hash bucket overhead, and Arc control blocks.
 
 | Component | Per-Entry Cost | What It Measures |
 | :--- | ---: | :--- |
-| `DashMap<ServiceId, ServiceStatus>` | ~139 B | StatusPlane: hash bucket metadata + amortized empty slots + `ServiceStatus` value |
-| `DashMap<ServiceId, Arc<Notify>>` | ~33 B | ReloadSignals: bucket + `Arc` control block (16 B) + `Notify` inner state |
+| `DashMap<ServiceInstanceId, ServiceStatus>` | ~139 B | StatusPlane: hash bucket metadata + amortized empty slots + `ServiceStatus` value |
+| `DashMap<ServiceInstanceId, Arc<Notify>>` | ~33 B | ReloadSignals: bucket + `Arc` control block (16 B) + `Notify` inner state |
 | `CancellationToken::new()` | ~37 B | Shared cancellation state node (x2 per service: description + reload) |
 | `Arc<AtomicBool>::new()` | ~32 B | Handshake flag: `Arc` control block + 1 B payload (below page granularity, estimated) |
 | `tokio::spawn` (idle future) | ~459 B | Future boxing + task header + waker allocation |
-| `HashMap<ServiceId, JoinHandle>` entry | ~270 B | `running_tasks` map entry (includes JoinHandle bookkeeping) |
+| `HashMap<ServiceInstanceId, JoinHandle>` entry | ~270 B | `running_tasks` map entry (includes JoinHandle bookkeeping) |
 
 > [!NOTE]
-> The `HashMap<ServiceId, JoinHandle>` measurement includes JoinHandle
+> The `HashMap<ServiceInstanceId, JoinHandle>` measurement includes JoinHandle
 > tracking overhead. The `tokio::spawn` measurement captures the raw task
 > cost without map bookkeeping. In the real framework these are combined,
 > so their individual contributions should not be summed directly.

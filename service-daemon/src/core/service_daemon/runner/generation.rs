@@ -17,7 +17,7 @@ use crate::core::diagnostics::{
     ShutdownBoundaryResultKind, ShutdownResidualActionKind, run_generation_runtime_probe,
 };
 use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
-use crate::models::{ServiceFn, ServiceId};
+use crate::models::{ServiceFn, ServiceInstanceId};
 
 pub(super) type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
 const DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -106,7 +106,7 @@ pub(super) fn isolated_generation_error(
 }
 
 pub(super) struct ServiceGenerationParts {
-    pub(super) service_id: ServiceId,
+    pub(super) service_instance_id: ServiceInstanceId,
     pub(super) name: &'static str,
     pub(super) generation: u64,
     pub(super) run: ServiceFn,
@@ -121,7 +121,7 @@ fn run_scoped_service_generation(
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
     Box::pin(async move {
         let ServiceGenerationParts {
-            service_id,
+            service_instance_id,
             name,
             generation,
             run,
@@ -133,8 +133,8 @@ fn run_scoped_service_generation(
         let span = tracing::info_span!(
             "service",
             name = %name,
-            service_id = %service_id,
-            service_id_num = service_id.value(),
+            service_instance_id = %service_instance_id,
+            service_instance_id_num = service_instance_id.value(),
             generation,
             runtime_lane = ?diagnostics.runtime_lane(),
         );
@@ -144,7 +144,7 @@ fn run_scoped_service_generation(
             ProviderRuntimePhase::ServiceGenerationResolve
         };
         let identity = ServiceIdentity::new_generation_with_diagnostics(
-            service_id,
+            service_instance_id,
             name,
             cancellation_token.clone(),
             reload_token,
@@ -196,7 +196,7 @@ pub(super) fn run_body_service_generation(
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
     Box::pin(async move {
         let name = parts.name;
-        let service_id = parts.service_id;
+        let service_instance_id = parts.service_instance_id;
         let generation = parts.generation;
         let handle = runtime.spawn(run_scoped_service_generation(parts));
         let guard = BodyTaskAbortGuard::new(handle);
@@ -206,7 +206,7 @@ pub(super) fn run_body_service_generation(
             Err(err) if err.is_panic() => {
                 error!(
                     service = %name,
-                    service_id = %service_id,
+                    service_instance_id = %service_instance_id,
                     generation,
                     error = ?err,
                     "Service body task panicked outside scoped generation"
@@ -216,7 +216,7 @@ pub(super) fn run_body_service_generation(
             Err(err) => {
                 warn!(
                     service = %name,
-                    service_id = %service_id,
+                    service_instance_id = %service_instance_id,
                     generation,
                     error = ?err,
                     "Service body task ended before reporting outcome"
@@ -252,7 +252,7 @@ pub(super) fn run_isolated_service_generation(
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
     Box::pin(async move {
         let name = parts.name;
-        let service_id = parts.service_id;
+        let service_instance_id = parts.service_instance_id;
         let generation = parts.generation;
         let cancellation_token = parts.cancellation_token.clone();
         let reload_token = parts.reload_token.clone();
@@ -309,7 +309,7 @@ pub(super) fn run_isolated_service_generation(
                             if let Err(err) = probe_handle.await {
                                 warn!(
                                     service = %name,
-                                    service_id = %service_id,
+                                    service_instance_id = %service_instance_id,
                                     generation,
                                     error = ?err,
                                     "Isolated runtime probe task ended unexpectedly"
@@ -367,13 +367,13 @@ pub(super) fn run_isolated_service_generation(
             IsolatedThreadJoinOutcome::Joined => {}
             IsolatedThreadJoinOutcome::TimedOut => warn!(
                 service = %name,
-                service_id = %service_id,
+                service_instance_id = %service_instance_id,
                 generation,
                 "Isolated service thread join timed out after outcome bridge completed"
             ),
             IsolatedThreadJoinOutcome::Panicked => warn!(
                 service = %name,
-                service_id = %service_id,
+                service_instance_id = %service_instance_id,
                 generation,
                 "Isolated service thread panicked while joining after outcome bridge completed"
             ),

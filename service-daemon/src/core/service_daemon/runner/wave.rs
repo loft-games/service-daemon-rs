@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::ServiceScheduling;
 use crate::core::context::DaemonResources;
-use crate::models::{ServiceDescription, ServiceId, ServiceStatus};
+use crate::models::{ServiceDescription, ServiceInstanceId, ServiceStatus};
 
 use super::super::parts::{
     BodyExecutionLanes, BodyLaneResolver, SpawnAllServicesParts, SpawnServiceParts,
@@ -73,7 +73,7 @@ impl<'a> ServiceWave<'a> {
             for service in &self.services {
                 let status = resources
                     .status_plane
-                    .get(&service.id)
+                    .get(&service.instance_id)
                     .map(|r| r.value().clone());
                 if status != Some(ServiceStatus::Healthy) {
                     all_healthy = false;
@@ -155,19 +155,19 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
             {
                 error!(
                     service = %service.name(),
-                    service_id = %service.id,
+                    service_instance_id = %service.instance_id,
                     "HighPriority service is missing the shared high-priority runtime"
                 );
                 resources
                     .status_plane
-                    .insert(service.id, ServiceStatus::Terminated);
+                    .insert(service.instance_id, ServiceStatus::Terminated);
                 resources.status_changed.notify_waiters();
                 daemon_token.cancel();
                 return;
             }
 
             spawn_service(SpawnServiceParts {
-                service_id: service.id,
+                service_instance_id: service.instance_id,
                 name: service.name(),
                 run: service.entry.wrapper,
                 watcher: service.entry.watcher,
@@ -200,7 +200,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
 /// Services with the same priority are shut down concurrently.
 pub(super) async fn stop_all_services(
     services: &[ServiceDescription],
-    running_tasks: Arc<Mutex<HashMap<ServiceId, JoinHandle<()>>>>,
+    running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
     daemon_token: CancellationToken,
     grace_period: Duration,
@@ -223,17 +223,17 @@ pub(super) async fn stop_all_services(
             let shutting_down = ServiceStatus::ShuttingDown;
             resources
                 .status_plane
-                .insert(service.id, shutting_down.clone());
+                .insert(service.instance_id, shutting_down.clone());
             resources
                 .runtime_facts
-                .record_service_status(service.id, &shutting_down);
+                .record_service_status(service.instance_id, &shutting_down);
             resources.status_changed.notify_waiters();
         }
 
         // 2. Parallel Wait: Wait for all services in this wave to finish
         let mut join_handles = Vec::new();
         for service in wave.services {
-            let sid = service.id;
+            let sid = service.instance_id;
             let name = service.name();
             let handle_opt = {
                 let mut guard = running_tasks.lock().await;
