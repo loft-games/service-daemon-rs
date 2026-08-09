@@ -37,8 +37,8 @@ use tracing::info_span;
 use uuid::Uuid;
 
 use service_daemon::{
-    BackoffController, RestartPolicy, ServiceDaemon, ServiceEntryId, ServiceInstanceId,
-    ServiceScheduling, ServiceStatus,
+    BackoffController, ProviderDependencyWatchSet, RestartPolicy, ServiceDaemon, ServiceEntryId,
+    ServiceInstanceId, ServiceScheduling, ServiceStatus,
 };
 
 fn service_instance_id(index: usize) -> ServiceInstanceId {
@@ -97,15 +97,15 @@ struct MockServiceDescription {
 }
 
 // ---------------------------------------------------------------------------
-// MockSupervisor -- mirrors the private `ServiceSupervisor` in runner.rs
+// MockSupervisor -- mirrors the private `ServiceSupervisor` in supervisor.rs
 // ---------------------------------------------------------------------------
 // IMPORTANT: If `ServiceSupervisor` fields change, update this struct to match.
-// Reference: service-daemon/src/core/service_daemon/runner.rs (ServiceSupervisor)
+// Reference: service-daemon/src/core/service_daemon/runner/supervisor.rs (ServiceSupervisor)
 
 /// Layout-compatible mock of the internal `ServiceSupervisor` struct.
 ///
 /// This type exists solely for memory measurement. Its field types and order
-/// must mirror the real `ServiceSupervisor` defined in `runner.rs`.
+/// must mirror the real `ServiceSupervisor` defined in `supervisor.rs`.
 ///
 /// # Sync Contract
 ///
@@ -181,7 +181,7 @@ struct MockSupervisor {
     service_instance_id: ServiceInstanceId,
     name: &'static str,
     run: MockServiceFn,
-    watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    watcher: Option<fn() -> ProviderDependencyWatchSet>,
     scheduling: ServiceScheduling,
     body_lanes: MockBodyExecutionLanes,
     body_lane_resolver: MockBodyLaneResolver,
@@ -198,6 +198,7 @@ struct MockSupervisor {
     generation_start: Option<Instant>,
     generation: u64,
     generation_diagnostics: Option<MockGenerationDiagnosticsHandle>,
+    dependency_watch_set: Option<ProviderDependencyWatchSet>,
     reload_token: Option<CancellationToken>,
 }
 
@@ -207,11 +208,11 @@ struct MockSupervisor {
 // not for CI invariants.
 #[cfg(feature = "memory-analysis")]
 const _: () = {
-    const EXPECTED_SIZE: usize = 416;
+    const EXPECTED_SIZE: usize = 448;
     assert!(
         std::mem::size_of::<MockSupervisor>() == EXPECTED_SIZE,
         // If this fails, the real ServiceSupervisor layout has changed.
-        // Update MockSupervisor fields to match runner.rs and adjust EXPECTED_SIZE.
+        // Update MockSupervisor fields to match supervisor.rs and adjust EXPECTED_SIZE.
     );
 };
 
@@ -415,6 +416,7 @@ fn measure_supervisor_heap_box() -> Option<f64> {
                 generation_start: None,
                 generation: 0,
                 generation_diagnostics: None,
+                dependency_watch_set: None,
                 reload_token: None,
             }));
         }
