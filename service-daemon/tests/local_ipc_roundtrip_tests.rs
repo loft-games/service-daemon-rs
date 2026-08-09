@@ -6,8 +6,8 @@ use std::ffi::OsString;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-const REQUEST_PAYLOAD: &[u8] = b"hello";
-const RESPONSE_PAYLOAD: &[u8] = b"world";
+const REQUEST_PAYLOAD: &[u8] = b"\x00local-ipc-request\xff";
+const RESPONSE_PAYLOAD: &[u8] = b"\xfeok\x00response";
 
 static IPC_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -58,7 +58,10 @@ mod unix_tests {
 
     const ROUNDTRIP_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_ROUNDTRIP_NAME_0CFD61B9";
     const OVERRIDE_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_OVERRIDE_NAME_A49E8522";
-    const INVALID_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_INVALID_NAME_C64173F7";
+    const INVALID_LISTEN_ENV_VAR: &str =
+        "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_INVALID_LISTEN_NAME_C64173F7";
+    const INVALID_CONNECT_ENV_VAR: &str =
+        "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_INVALID_CONNECT_NAME_F23F5C14";
 
     #[derive(Debug)]
     #[provider(
@@ -192,15 +195,35 @@ mod unix_tests {
     #[derive(Debug)]
     #[provider(
         LocalIpcListen("service-daemon-rs-local-ipc-unix-valid-fallback"),
-        env = "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_INVALID_NAME_C64173F7"
+        env = "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_INVALID_LISTEN_NAME_C64173F7"
     )]
     pub struct UnixInvalidEnvServer;
 
+    #[derive(Debug)]
+    #[provider(
+        LocalIpcConnect("service-daemon-rs-local-ipc-unix-valid-fallback"),
+        env = "SERVICE_DAEMON_RS_LOCAL_IPC_UNIX_INVALID_CONNECT_NAME_F23F5C14"
+    )]
+    pub struct UnixInvalidEnvClient;
+
     #[tokio::test]
-    async fn unix_local_ipc_env_override_invalid_logical_name_is_fatal() {
-        let _env_var = set_raw_env_value(INVALID_ENV_VAR, "bad/name");
+    async fn unix_local_ipc_listen_env_override_invalid_logical_name_is_fatal() {
+        let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
 
         match <UnixInvalidEnvServer as ManagedProvided>::resolve_managed().await {
+            Err(ProviderError::Fatal(message)) => {
+                assert!(message.contains("logical name"), "{message}");
+                assert!(message.contains("bad/name"), "{message}");
+            }
+            other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unix_local_ipc_connect_env_override_invalid_logical_name_is_fatal() {
+        let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
+
+        match <UnixInvalidEnvClient as ManagedProvided>::resolve_managed().await {
             Err(ProviderError::Fatal(message)) => {
                 assert!(message.contains("logical name"), "{message}");
                 assert!(message.contains("bad/name"), "{message}");
@@ -218,7 +241,10 @@ mod windows_tests {
 
     const ROUNDTRIP_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_ROUNDTRIP_NAME_0CFD61B9";
     const OVERRIDE_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_OVERRIDE_NAME_A49E8522";
-    const INVALID_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_NAME_C64173F7";
+    const INVALID_LISTEN_ENV_VAR: &str =
+        "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_LISTEN_NAME_C64173F7";
+    const INVALID_CONNECT_ENV_VAR: &str =
+        "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_CONNECT_NAME_F23F5C14";
     const ERROR_PIPE_BUSY: i32 = 231;
 
     async fn connect_roundtrip_with_busy_retry(
@@ -387,15 +413,35 @@ mod windows_tests {
     #[derive(Debug)]
     #[provider(
         LocalIpcListen("service-daemon-rs-local-ipc-windows-valid-fallback"),
-        env = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_NAME_C64173F7"
+        env = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_LISTEN_NAME_C64173F7"
     )]
     pub struct WindowsInvalidEnvServer;
 
+    #[derive(Debug)]
+    #[provider(
+        LocalIpcConnect("service-daemon-rs-local-ipc-windows-valid-fallback"),
+        env = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_CONNECT_NAME_F23F5C14"
+    )]
+    pub struct WindowsInvalidEnvClient;
+
     #[tokio::test]
-    async fn windows_local_ipc_env_override_invalid_logical_name_is_fatal() {
-        let _env_var = set_raw_env_value(INVALID_ENV_VAR, "bad/name");
+    async fn windows_local_ipc_listen_env_override_invalid_logical_name_is_fatal() {
+        let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
 
         match <WindowsInvalidEnvServer as ManagedProvided>::resolve_managed().await {
+            Err(ProviderError::Fatal(message)) => {
+                assert!(message.contains("logical name"), "{message}");
+                assert!(message.contains("bad/name"), "{message}");
+            }
+            other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn windows_local_ipc_connect_env_override_invalid_logical_name_is_fatal() {
+        let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
+
+        match <WindowsInvalidEnvClient as ManagedProvided>::resolve_managed().await {
             Err(ProviderError::Fatal(message)) => {
                 assert!(message.contains("logical name"), "{message}");
                 assert!(message.contains("bad/name"), "{message}");

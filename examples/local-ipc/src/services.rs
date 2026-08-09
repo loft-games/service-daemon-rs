@@ -9,8 +9,8 @@ use tracing::info;
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::NamedPipeClient;
 
-const REQUEST_PAYLOAD: &[u8] = b"hello";
-const RESPONSE_PAYLOAD: &[u8] = b"world";
+const REQUEST_PAYLOAD: &[u8] = b"\x00local-ipc-request\xff";
+const RESPONSE_PAYLOAD: &[u8] = b"\xfeok\x00response";
 
 #[cfg(windows)]
 const ERROR_PIPE_BUSY: i32 = 231;
@@ -116,6 +116,14 @@ pub async fn local_ipc_server_service(
         request = %String::from_utf8_lossy(&request),
         "Received local IPC request"
     );
+    if request.as_slice() != REQUEST_PAYLOAD {
+        return Err(LocalIpcError::UnexpectedRequest {
+            name: EXAMPLE_LOCAL_IPC_NAME,
+            expected: REQUEST_PAYLOAD,
+            actual: request.to_vec(),
+        }
+        .into());
+    }
 
     if let Err(source) = write_response(&mut business_connection).await {
         return Err(LocalIpcError::WriteResponse {
@@ -172,8 +180,60 @@ pub async fn local_ipc_client_service(
         response = %String::from_utf8_lossy(&response),
         "Received local IPC response"
     );
+    if response.as_slice() != RESPONSE_PAYLOAD {
+        return Err(LocalIpcError::UnexpectedResponse {
+            name: EXAMPLE_LOCAL_IPC_NAME,
+            expected: RESPONSE_PAYLOAD,
+            actual: response.to_vec(),
+        }
+        .into());
+    }
 
     service_daemon::done();
     service_daemon::wait_shutdown().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn local_ipc_helpers_transfer_request_bytes_losslessly() {
+        assert!(REQUEST_PAYLOAD.contains(&0x00));
+        assert!(REQUEST_PAYLOAD.contains(&0xff));
+
+        let (mut writer, mut reader) = duplex(64);
+        let write_task = tokio::spawn(async move { write_request(&mut writer).await });
+
+        let request = read_request(&mut reader)
+            .await
+            .expect("read_request should read the exact request payload");
+
+        write_task
+            .await
+            .expect("write task should not panic")
+            .expect("write_request should succeed");
+        assert_eq!(request.as_slice(), REQUEST_PAYLOAD);
+    }
+
+    #[tokio::test]
+    async fn local_ipc_helpers_transfer_response_bytes_losslessly() {
+        assert!(RESPONSE_PAYLOAD.contains(&0x00));
+        assert!(RESPONSE_PAYLOAD.contains(&0xfe));
+
+        let (mut writer, mut reader) = duplex(64);
+        let write_task = tokio::spawn(async move { write_response(&mut writer).await });
+
+        let response = read_response(&mut reader)
+            .await
+            .expect("read_response should read the exact response payload");
+
+        write_task
+            .await
+            .expect("write task should not panic")
+            .expect("write_response should succeed");
+        assert_eq!(response.as_slice(), RESPONSE_PAYLOAD);
+    }
 }

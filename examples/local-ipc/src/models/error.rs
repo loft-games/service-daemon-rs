@@ -16,6 +16,11 @@ pub enum LocalIpcError {
         name: &'static str,
         source: io::Error,
     },
+    UnexpectedRequest {
+        name: &'static str,
+        expected: &'static [u8],
+        actual: Vec<u8>,
+    },
     WriteResponse {
         name: &'static str,
         source: io::Error,
@@ -31,6 +36,11 @@ pub enum LocalIpcError {
     ReadResponse {
         name: &'static str,
         source: io::Error,
+    },
+    UnexpectedResponse {
+        name: &'static str,
+        expected: &'static [u8],
+        actual: Vec<u8>,
     },
 }
 
@@ -52,6 +62,16 @@ impl fmt::Display for LocalIpcError {
             Self::ReadRequest { name, .. } => {
                 write!(f, "failed to read local IPC request for {name}")
             }
+            Self::UnexpectedRequest {
+                name,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "unexpected local IPC request for {name}: expected {expected:?}, got {actual:?}"
+                )
+            }
             Self::WriteResponse { name, .. } => {
                 write!(f, "failed to write local IPC response for {name}")
             }
@@ -63,6 +83,16 @@ impl fmt::Display for LocalIpcError {
             }
             Self::ReadResponse { name, .. } => {
                 write!(f, "failed to read local IPC response for {name}")
+            }
+            Self::UnexpectedResponse {
+                name,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "unexpected local IPC response for {name}: expected {expected:?}, got {actual:?}"
+                )
             }
         }
     }
@@ -78,6 +108,7 @@ impl std::error::Error for LocalIpcError {
             | Self::ConnectClient { source, .. }
             | Self::WriteRequest { source, .. }
             | Self::ReadResponse { source, .. } => Some(source),
+            Self::UnexpectedRequest { .. } | Self::UnexpectedResponse { .. } => None,
         }
     }
 }
