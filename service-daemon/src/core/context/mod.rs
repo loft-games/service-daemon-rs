@@ -23,6 +23,8 @@ pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
+#[doc(hidden)]
+pub use api::__resolve_service_handle;
 pub(crate) use api::{__run_daemon_resources_scope, __run_daemon_resources_sync_scope};
 pub use api::{
     __run_service_scope, current_cancellation_token, current_service_instance_id, done,
@@ -45,7 +47,12 @@ pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ScalingPolicy, ServiceInstanceId, ServiceStatus};
+    use crate::models::{
+        ScalingPolicy, ServiceEntry, ServiceInstanceId, ServiceParam, ServiceScheduling,
+        ServiceStatus,
+    };
+    use futures::future::BoxFuture;
+    use linkme::distributed_slice;
     use std::any::TypeId;
     use std::future::Future;
     use std::sync::Arc;
@@ -64,6 +71,50 @@ mod tests {
         )
     }
 
+    fn selected_handle_test_wrapper(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn excluded_handle_test_wrapper(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn unlinked_handle_test_wrapper(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(crate::models::SERVICE_REGISTRY)]
+    static SELECTED_HANDLE_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "selected_handle_test_service",
+        module: "core::context::tests",
+        params: &[] as &[ServiceParam],
+        wrapper: selected_handle_test_wrapper,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        tags: &["__handle_resolver_selected__"],
+    };
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(crate::models::SERVICE_REGISTRY)]
+    static EXCLUDED_HANDLE_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "excluded_handle_test_service",
+        module: "core::context::tests",
+        params: &[] as &[ServiceParam],
+        wrapper: excluded_handle_test_wrapper,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        tags: &["__handle_resolver_excluded__"],
+    };
+
     /// Helper to run a future in a service scope (for tests).
     async fn in_scope<F, Fut, T>(
         identity: ServiceIdentity,
@@ -77,6 +128,67 @@ mod tests {
         CURRENT_SERVICE
             .scope(identity, CURRENT_RESOURCES.scope(resources, f()))
             .await
+    }
+
+    fn resources_with_registry_tag(tag: &'static str) -> Arc<DaemonResources> {
+        let registry = crate::models::Registry::builder().with_tag(tag).build();
+        let (_, projection) = registry.into_parts();
+        let resources = create_test_resources();
+        resources.set_service_catalog_projection(projection);
+        resources
+    }
+
+    #[test]
+    fn service_handle_resolution_fails_outside_daemon_scope() {
+        let error = __resolve_service_handle(selected_handle_test_wrapper).unwrap_err();
+
+        assert!(
+            matches!(error, crate::ProviderError::Fatal(message) if message.contains("requires a daemon provider scope"))
+        );
+    }
+
+    #[tokio::test]
+    async fn service_handle_resolution_returns_daemon_local_handle() {
+        let resources = resources_with_registry_tag("__handle_resolver_selected__");
+
+        let handle = __run_daemon_resources_sync_scope(resources, || {
+            __resolve_service_handle(selected_handle_test_wrapper)
+        })
+        .await
+        .expect("selected service should resolve to handle");
+
+        assert_eq!(handle.name(), "selected_handle_test_service");
+        assert_eq!(handle.module(), "core::context::tests");
+    }
+
+    #[tokio::test]
+    async fn service_handle_resolution_reports_unlinked_target() {
+        let resources = resources_with_registry_tag("__handle_resolver_selected__");
+
+        let error = __run_daemon_resources_sync_scope(resources, || {
+            __resolve_service_handle(unlinked_handle_test_wrapper)
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, crate::ProviderError::Fatal(message) if message.contains("not linked into SERVICE_REGISTRY"))
+        );
+    }
+
+    #[tokio::test]
+    async fn service_handle_resolution_reports_linked_but_not_selected_target() {
+        let resources = resources_with_registry_tag("__handle_resolver_selected__");
+
+        let error = __run_daemon_resources_sync_scope(resources, || {
+            __resolve_service_handle(excluded_handle_test_wrapper)
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, crate::ProviderError::Fatal(message) if message.contains("linked but not selected"))
+        );
     }
 
     #[tokio::test]

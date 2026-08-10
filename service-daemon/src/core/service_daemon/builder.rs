@@ -190,16 +190,14 @@ impl ServiceDaemonBuilder {
     #[must_use]
     pub fn build(self) -> ServiceDaemon {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
-        let mut services = registry.into_services();
+        let (mut services, mut projection) = registry.into_parts();
 
         // Merge infrastructure services that bypass tag filtering.
         // Each infra tag is resolved against the global SERVICE_REGISTRY,
         // and matching services are appended (deduplicated by ServiceEntryId).
         if !self.infra_tags.is_empty() {
-            let infra_services = Registry::builder()
-                .with_tags(self.infra_tags)
-                .build()
-                .into_services();
+            let infra_registry = Registry::builder().with_tags(self.infra_tags).build();
+            let (infra_services, infra_projection) = infra_registry.into_parts();
             for service in infra_services {
                 if !services
                     .iter()
@@ -208,6 +206,7 @@ impl ServiceDaemonBuilder {
                     services.push(service);
                 }
             }
+            projection = projection.merge(&infra_projection);
         }
 
         let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
@@ -218,6 +217,7 @@ impl ServiceDaemonBuilder {
         });
         #[cfg(not(feature = "simulation"))]
         let resources = DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()));
+        resources.set_service_catalog_projection(projection);
         let diagnostics = resources.diagnostics.clone();
         resources.runtime_facts.register_services(&services);
 

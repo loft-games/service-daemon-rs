@@ -10,11 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Cross-platform Local IPC Providers**: Added `LocalIpcListen` and `LocalIpcConnect` provider templates that accept logical names and map them to Unix domain sockets or Windows named pipes while exposing a shared `AsyncRead`/`AsyncWrite` service shape.
+- **Service Handles**: Added `ServiceHandle` and `service_handle!(...)` so provider code can resolve a daemon-local handle to a selected static service entry by service function path.
+- **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, reachability probes, and focused Windows MSVC validation coverage.
 
 ### Changed
 
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
+- **Service Handle Resolution**: Provider-time service handle lookup is scoped to the current daemon projection. Linked services outside the projection and unlinked targets fail with provider initialization errors instead of falling back to a global runtime instance.
 - **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
 
 ## [0.1.0-alpha.5] - 2026-06-21

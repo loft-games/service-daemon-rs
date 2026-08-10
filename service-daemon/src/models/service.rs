@@ -3,7 +3,9 @@ use crate::models::{ProviderInitError, RestartPolicy};
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
@@ -259,6 +261,209 @@ pub struct ServiceEntry {
 }
 
 // ---------------------------------------------------------------------------
+// ServiceHandle: daemon-local static service entry capability.
+// ---------------------------------------------------------------------------
+
+/// A handle to a service entry selected by the current daemon registry.
+///
+/// The handle identifies the static service definition, not a running instance.
+/// Runtime instances use [`ServiceInstanceId`] and are allocated when a service
+/// is materialized by the daemon.
+#[derive(Clone, Copy)]
+pub struct ServiceHandle {
+    entry_id: ServiceEntryId,
+    entry: &'static ServiceEntry,
+}
+
+impl ServiceHandle {
+    #[inline]
+    pub(crate) const fn new(entry_id: ServiceEntryId, entry: &'static ServiceEntry) -> Self {
+        Self { entry_id, entry }
+    }
+
+    /// Static registry entry ID for this service definition.
+    #[inline]
+    pub const fn entry_id(&self) -> ServiceEntryId {
+        self.entry_id
+    }
+
+    /// Static registry entry metadata for this service definition.
+    #[inline]
+    pub const fn entry(&self) -> &'static ServiceEntry {
+        self.entry
+    }
+
+    /// Human-readable service function name.
+    #[inline]
+    pub const fn name(&self) -> &'static str {
+        self.entry.name
+    }
+
+    /// Module path where the service was registered.
+    #[inline]
+    pub const fn module(&self) -> &'static str {
+        self.entry.module
+    }
+}
+
+impl fmt::Debug for ServiceHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceHandle")
+            .field("entry_id", &self.entry_id)
+            .field("name", &self.entry.name)
+            .field("module", &self.entry.module)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GlobalServiceEntryRecord {
+    pub entry_id: ServiceEntryId,
+    pub entry: &'static ServiceEntry,
+}
+
+/// Process-wide catalog built from the link-time service registry.
+pub(crate) struct ServiceCatalog {
+    records: Vec<GlobalServiceEntryRecord>,
+    by_wrapper: HashMap<ServiceFn, ServiceEntryId>,
+    by_tag: HashMap<&'static str, Vec<ServiceEntryId>>,
+}
+
+impl ServiceCatalog {
+    fn build() -> Self {
+        let mut records = Vec::new();
+        let mut by_wrapper = HashMap::new();
+        let mut by_tag: HashMap<&'static str, Vec<ServiceEntryId>> = HashMap::new();
+
+        for (idx, entry) in SERVICE_REGISTRY.iter().enumerate() {
+            let entry_id = ServiceEntryId::new(idx);
+            records.push(GlobalServiceEntryRecord { entry_id, entry });
+            by_wrapper.insert(entry.wrapper, entry_id);
+            for tag in entry.tags {
+                by_tag.entry(*tag).or_default().push(entry_id);
+            }
+        }
+
+        Self {
+            records,
+            by_wrapper,
+            by_tag,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn get(entry_id: ServiceEntryId) -> Option<GlobalServiceEntryRecord> {
+        global_service_catalog()
+            .records
+            .get(entry_id.value())
+            .copied()
+            .filter(|record| record.entry_id == entry_id)
+    }
+
+    #[inline]
+    pub(crate) fn entry_id_for_wrapper(wrapper: ServiceFn) -> Option<ServiceEntryId> {
+        global_service_catalog().by_wrapper.get(&wrapper).copied()
+    }
+
+    #[inline]
+    pub(crate) fn tag_exists(tag: &'static str) -> bool {
+        global_service_catalog().by_tag.contains_key(tag)
+    }
+
+    pub(crate) fn project(
+        include_tags: &[&'static str],
+        exclude_tags: &[&'static str],
+    ) -> ServiceCatalogProjection {
+        let catalog = global_service_catalog();
+        let mut selected_ids = HashSet::new();
+
+        if include_tags.is_empty() {
+            selected_ids.extend(catalog.records.iter().map(|record| record.entry_id));
+        } else {
+            for tag in include_tags {
+                if let Some(entry_ids) = catalog.by_tag.get(tag) {
+                    selected_ids.extend(entry_ids.iter().copied());
+                }
+            }
+        }
+
+        for tag in exclude_tags {
+            if let Some(entry_ids) = catalog.by_tag.get(tag) {
+                for entry_id in entry_ids {
+                    selected_ids.remove(entry_id);
+                }
+            }
+        }
+
+        let entry_ids = catalog
+            .records
+            .iter()
+            .filter_map(|record| {
+                selected_ids
+                    .contains(&record.entry_id)
+                    .then_some(record.entry_id)
+            })
+            .collect();
+
+        ServiceCatalogProjection::new(entry_ids)
+    }
+}
+
+static SERVICE_CATALOG: OnceLock<ServiceCatalog> = OnceLock::new();
+
+pub(crate) fn global_service_catalog() -> &'static ServiceCatalog {
+    SERVICE_CATALOG.get_or_init(ServiceCatalog::build)
+}
+
+/// Daemon-local view of service entries selected from the global catalog.
+pub(crate) struct ServiceCatalogProjection {
+    entry_ids: Vec<ServiceEntryId>,
+    selected: HashSet<ServiceEntryId>,
+}
+
+impl ServiceCatalogProjection {
+    fn new(entry_ids: Vec<ServiceEntryId>) -> Self {
+        let selected = entry_ids.iter().copied().collect();
+        Self {
+            entry_ids,
+            selected,
+        }
+    }
+
+    pub(crate) fn entry_ids(&self) -> &[ServiceEntryId] {
+        &self.entry_ids
+    }
+
+    pub(crate) fn contains(&self, entry_id: ServiceEntryId) -> bool {
+        self.selected.contains(&entry_id)
+    }
+
+    pub(crate) fn merge(&self, other: &Self) -> Arc<Self> {
+        let mut entry_ids = self.entry_ids.clone();
+        let mut selected = self.selected.clone();
+
+        for entry_id in &other.entry_ids {
+            if selected.insert(*entry_id) {
+                entry_ids.push(*entry_id);
+            }
+        }
+
+        Arc::new(Self {
+            entry_ids,
+            selected,
+        })
+    }
+
+    pub(crate) fn resolve_handle(&self, entry_id: ServiceEntryId) -> Option<ServiceHandle> {
+        self.contains(entry_id)
+            .then(|| ServiceCatalog::get(entry_id))
+            .flatten()
+            .map(|record| ServiceHandle::new(record.entry_id, record.entry))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ServiceDescription (runtime): static entry plus daemon-local instance.
 // ---------------------------------------------------------------------------
 
@@ -412,6 +617,8 @@ pub struct ProviderEntry {
 pub struct Registry {
     /// The materialised, ID-bearing service descriptions.
     pub(crate) services: Vec<ServiceDescription>,
+    /// Daemon-local projection of static registry entries selected for this registry.
+    pub(crate) projection: Arc<ServiceCatalogProjection>,
 }
 
 impl Registry {
@@ -439,9 +646,8 @@ impl Registry {
         &self.services
     }
 
-    /// Consume the registry and yield the service descriptions.
-    pub(crate) fn into_services(self) -> Vec<ServiceDescription> {
-        self.services
+    pub(crate) fn into_parts(self) -> (Vec<ServiceDescription>, Arc<ServiceCatalogProjection>) {
+        (self.services, self.projection)
     }
 }
 
@@ -507,8 +713,7 @@ impl RegistryBuilder {
     pub fn build(self) -> Registry {
         // Warn for include tags that match nothing
         for tag in &self.include_tags {
-            let has_match = SERVICE_REGISTRY.iter().any(|e| e.tags.contains(tag));
-            if !has_match {
+            if !ServiceCatalog::tag_exists(tag) {
                 warn!(
                     "Registry::build() -- tag '{}' did not match any registered service",
                     tag
@@ -516,30 +721,27 @@ impl RegistryBuilder {
             }
         }
 
+        let projection = Arc::new(ServiceCatalog::project(
+            &self.include_tags,
+            &self.exclude_tags,
+        ));
         let mut services = Vec::new();
 
-        for (idx, entry) in SERVICE_REGISTRY.iter().enumerate() {
-            // --- Include filter ---
-            if !self.include_tags.is_empty()
-                && !entry.tags.iter().any(|t| self.include_tags.contains(t))
-            {
-                continue;
-            }
-
-            // --- Exclude filter ---
-            if entry.tags.iter().any(|t| self.exclude_tags.contains(t)) {
-                continue;
-            }
-
+        for entry_id in projection.entry_ids() {
+            let record =
+                ServiceCatalog::get(*entry_id).expect("projected service entry must exist");
             services.push(ServiceDescription {
-                entry_id: ServiceEntryId(idx),
+                entry_id: record.entry_id,
                 instance_id: ServiceInstanceId::new_v7(),
-                entry,
+                entry: record.entry,
                 cancellation_token: CancellationToken::new(),
             });
         }
 
-        Registry { services }
+        Registry {
+            services,
+            projection,
+        }
     }
 }
 
@@ -547,13 +749,25 @@ impl RegistryBuilder {
 mod tests {
     use super::*;
 
+    fn test_registry_entry_id_first_wrapper(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn test_registry_entry_id_second_wrapper(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
     #[allow(unsafe_code)]
     #[distributed_slice(SERVICE_REGISTRY)]
     static TEST_REGISTRY_ENTRY_ID_FIRST: ServiceEntry = ServiceEntry {
         name: "test_registry_entry_id_first",
         module: "models::service::tests",
         params: &[],
-        wrapper: |_| Box::pin(async { Ok(()) }),
+        wrapper: test_registry_entry_id_first_wrapper,
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
@@ -566,7 +780,7 @@ mod tests {
         name: "test_registry_entry_id_second",
         module: "models::service::tests",
         params: &[],
-        wrapper: |_| Box::pin(async { Ok(()) }),
+        wrapper: test_registry_entry_id_second_wrapper,
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
@@ -615,6 +829,58 @@ mod tests {
             7,
             "auto-start singleton service instances should receive UUIDv7 IDs"
         );
+    }
+
+    #[test]
+    fn global_catalog_projects_tags_in_registry_order() {
+        let projection = ServiceCatalog::project(
+            &[
+                "__test_registry_entry_id_second__",
+                "__test_registry_entry_id_first__",
+            ],
+            &[],
+        );
+        let entry_ids = projection.entry_ids();
+        let first_index = SERVICE_REGISTRY
+            .iter()
+            .enumerate()
+            .find_map(|(idx, entry)| (entry.name == "test_registry_entry_id_first").then_some(idx))
+            .expect("first test service should exist in SERVICE_REGISTRY");
+        let second_index = SERVICE_REGISTRY
+            .iter()
+            .enumerate()
+            .find_map(|(idx, entry)| (entry.name == "test_registry_entry_id_second").then_some(idx))
+            .expect("second test service should exist in SERVICE_REGISTRY");
+        let expected = if first_index < second_index {
+            vec![
+                ServiceEntryId::new(first_index),
+                ServiceEntryId::new(second_index),
+            ]
+        } else {
+            vec![
+                ServiceEntryId::new(second_index),
+                ServiceEntryId::new(first_index),
+            ]
+        };
+
+        assert_eq!(entry_ids, expected.as_slice());
+    }
+
+    #[test]
+    fn global_catalog_is_process_singleton() {
+        assert!(std::ptr::eq(
+            global_service_catalog(),
+            global_service_catalog()
+        ));
+    }
+
+    #[test]
+    fn global_catalog_resolves_wrapper_to_entry_id() {
+        let entry_id = ServiceCatalog::entry_id_for_wrapper(test_registry_entry_id_second_wrapper)
+            .expect("wrapper should be indexed by global catalog");
+        let record = ServiceCatalog::get(entry_id).expect("entry ID should resolve to record");
+
+        assert_eq!(record.entry.name, "test_registry_entry_id_second");
     }
 
     #[test]

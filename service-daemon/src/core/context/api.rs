@@ -23,8 +23,8 @@ use crate::core::trigger_policy_overlay::{
     EffectiveTriggerPolicy, TriggerBasePolicy, TriggerPolicyOverlayStore,
 };
 use crate::models::{
-    ServiceInstanceId, ServiceStatus, TriggerPolicyOverlay, TriggerPolicyOverlayError,
-    TriggerPressureSnapshot,
+    ServiceCatalog, ServiceFn, ServiceHandle, ServiceInstanceId, ServiceStatus,
+    TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
 };
 
 /// Runs a future with service task-local identity and resources set.
@@ -62,6 +62,44 @@ where
     F: FnOnce() -> T,
 {
     CURRENT_RESOURCES.scope(resources, async move { f() }).await
+}
+
+#[doc(hidden)]
+pub fn __resolve_service_handle(wrapper: ServiceFn) -> Result<ServiceHandle, crate::ProviderError> {
+    let resources = CURRENT_RESOURCES
+        .try_with(|resources| resources.clone())
+        .map_err(|_| {
+            crate::ProviderError::Fatal(
+                "service_handle! requires a daemon provider scope".to_owned(),
+            )
+        })?;
+
+    let entry_id = ServiceCatalog::entry_id_for_wrapper(wrapper).ok_or_else(|| {
+        crate::ProviderError::Fatal(
+            "service_handle! target is not linked into SERVICE_REGISTRY".to_owned(),
+        )
+    })?;
+
+    let projection = resources.service_catalog_projection().ok_or_else(|| {
+        crate::ProviderError::Fatal(
+            "service_handle! cannot resolve before daemon registry projection is initialized"
+                .to_owned(),
+        )
+    })?;
+
+    projection.resolve_handle(entry_id).ok_or_else(|| {
+        let target = ServiceCatalog::get(entry_id)
+            .map(|record| {
+                format!(
+                    "{}::{} ({})",
+                    record.entry.module, record.entry.name, entry_id
+                )
+            })
+            .unwrap_or_else(|| entry_id.to_string());
+        crate::ProviderError::Fatal(format!(
+            "service_handle! target {target} is linked but not selected by this daemon registry"
+        ))
+    })
 }
 
 /// Returns the current lifecycle status of the calling service.

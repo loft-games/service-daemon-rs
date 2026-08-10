@@ -17,6 +17,8 @@ const SERVICE_PASS_CASES: &[&str] = &[
     "tests/pass/17_service_visibility_super.rs",
     "tests/pass/19_service_visibility_in_self_path.rs",
     "tests/pass/20_service_visibility_in_super_path.rs",
+    "tests/pass/27_service_wrapper_path_visibility.rs",
+    "tests/pass/28_service_handle_macro_path_visibility.rs",
 ];
 
 const SERVICE_FAIL_CASES: &[&str] = &[
@@ -28,6 +30,7 @@ const SERVICE_FAIL_CASES: &[&str] = &[
     "tests/fail/13_service_private_not_visible_to_sibling.rs",
     "tests/fail/14_service_invalid_scheduling.rs",
     "tests/fail/15_service_auto_scheduling.rs",
+    "tests/fail/33_service_handle_rejects_generic_path.rs",
 ];
 
 const TRIGGER_PASS_CASES: &[&str] = &["tests/pass/18_trigger_visibility_super.rs"];

@@ -85,8 +85,8 @@ pub use models::{
     ProviderInitError, ReadinessServiceError, ReadinessSnapshot, Registry, RegistryBuilder, Result,
     RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
     SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceEntryId, ServiceError,
-    ServiceInstanceId, ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext, TriggerHandler,
-    TriggerHost, TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
+    ServiceHandle, ServiceInstanceId, ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
     TriggerPolicyOverlayError, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 
@@ -107,7 +107,7 @@ pub mod __private {
     pub use std::sync::Arc;
 
     pub use crate::ProviderDependencyWatchSet;
-    pub use crate::core::context::current_cancellation_token;
+    pub use crate::core::context::{__resolve_service_handle, current_cancellation_token};
     pub use crate::core::managed_state::{
         StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
     };
@@ -124,7 +124,7 @@ pub mod __private {
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
         PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceEntryId,
-        ServiceFn, ServiceInstanceId, ServiceParam,
+        ServiceFn, ServiceHandle, ServiceInstanceId, ServiceParam,
     };
 
     pub use futures;
@@ -137,7 +137,7 @@ pub mod __private {
 }
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{provider, service, trigger};
+pub use service_daemon_macro::{provider, service, service_handle, trigger};
 
 /// A prelude module for commonly used items and trigger templates.
 ///
@@ -148,10 +148,10 @@ pub mod prelude {
     pub use crate::{
         DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticRuntimeLane, ManagedProvided,
         Provided, ReadinessSnapshot, SchedulingAdvisoryProfile, ServiceDaemon, ServiceError,
-        ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
-        TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
+        ServiceHandle, ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
+        TT, TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
         TriggerRuntimeSnapshot, WatchableProvided, current_service_instance_id, done, is_shutdown,
-        provider, service, shelve, shelve_clone, sleep, spawn_with_context, state, trigger,
-        trigger_config, unshelve, wait_shutdown,
+        provider, service, service_handle, shelve, shelve_clone, sleep, spawn_with_context, state,
+        trigger, trigger_config, unshelve, wait_shutdown,
     };
 }

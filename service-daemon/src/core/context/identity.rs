@@ -17,7 +17,7 @@ use crate::core::diagnostics::{DiagnosticsStore, GenerationDiagnosticsHandle};
 use crate::core::provider_scope::ProviderScope;
 use crate::core::runtime_facts::RuntimeFactsStore;
 use crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore;
-use crate::models::{ServiceInstanceId, ServiceStatus};
+use crate::models::{ServiceCatalogProjection, ServiceInstanceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
 // Process-Level Cancellation Token -- shared by ALL ServiceDaemon instances
@@ -64,6 +64,7 @@ pub struct DaemonResources {
     pub(crate) provider_scope: Arc<ProviderScope>,
     pub(crate) runtime_facts: Arc<RuntimeFactsStore>,
     pub(crate) trigger_policy_overlays: Arc<TriggerPolicyOverlayStore>,
+    pub(crate) service_catalog_projection: OnceLock<Arc<ServiceCatalogProjection>>,
 }
 
 impl DaemonResources {
@@ -84,7 +85,16 @@ impl DaemonResources {
             provider_scope: ProviderScope::new_daemon_scope(),
             runtime_facts: Arc::new(RuntimeFactsStore::new()),
             trigger_policy_overlays: Arc::new(TriggerPolicyOverlayStore::default()),
+            service_catalog_projection: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn set_service_catalog_projection(&self, projection: Arc<ServiceCatalogProjection>) {
+        let _ = self.service_catalog_projection.set(projection);
+    }
+
+    pub(crate) fn service_catalog_projection(&self) -> Option<Arc<ServiceCatalogProjection>> {
+        self.service_catalog_projection.get().cloned()
     }
 }
 
