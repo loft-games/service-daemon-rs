@@ -127,6 +127,7 @@ without changing the trigger's base policy.
 | Macro `scheduling = ...` | Accepts only `Standard`, `HighPriority`, or `Isolated`; there is no `Auto` or `Control` user-facing mode. |
 | `ServiceEntry` | Public metadata surface. It does not carry experimental restart policy or scheduling hint fields. |
 | `ServiceHandle` | Public handle to a daemon-selected static service entry. It contains `ServiceEntryId` and `&'static ServiceEntry`, not a runtime `ServiceInstanceId`. |
+| `ServiceInstanceHandle` | Public handle to a materialized runtime instance. It contains `ServiceInstanceId`, `ServiceEntryId`, and `&'static ServiceEntry` so instance APIs can address one runtime instance without losing its static service definition. |
 | `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
 | `DaemonRuntimeSnapshot`, `ReadinessSnapshot`, service runtime snapshots, and trigger runtime snapshots | Public read-only operational facts copied out of runtime state. |
 | `TriggerContext::pressure()` | Self-scoped read-only trigger pressure facts for the current trigger service. |

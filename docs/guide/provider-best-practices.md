@@ -80,6 +80,12 @@ and resolves it against the current daemon's registry projection. The returned
 entry metadata. It does not identify a running service instance and does not
 contain a `ServiceInstanceId`.
 
+After a service definition is materialized by a daemon, the runtime instance is
+identified separately by `ServiceInstanceHandle`. That instance handle carries
+both `ServiceInstanceId` and `ServiceEntryId`, so operational APIs can address a
+specific running instance while still grouping it back to the static service
+definition.
+
 Handle resolution is provider-scope only. Calling it outside daemon provider
 initialization fails because there is no daemon projection. If the service is
 linked into the binary but excluded by the daemon's tag-filtered registry, the

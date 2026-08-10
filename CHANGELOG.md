@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider Attribute Normalization**: Added explicit `default = ...` and `template = ...` provider head forms while preserving existing bare defaults and built-in template syntax.
 - **Release Security Contract**: Added maintainer documentation for deployment boundaries, logging safety, Unix socket deployment, TCP listener exposure, and example-production responsibilities.
 - **Service Handles**: Added `ServiceHandle` and `service_handle!(...)` so provider code can resolve a daemon-local handle to a selected static service entry by service function path.
+- **Service Instance Handles**: Added `ServiceInstanceHandle` to expose the runtime `ServiceInstanceId` together with the static `ServiceEntryId` for a materialized service instance.
 - **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, reachability probes, and focused Windows MSVC validation coverage.
 

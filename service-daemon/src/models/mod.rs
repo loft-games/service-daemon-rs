@@ -32,8 +32,8 @@ pub use runtime::{
 };
 pub use service::{
     PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
-    ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn, ServiceHandle, ServiceInstanceId,
-    ServiceParam, ServiceScheduling, ServiceStatus,
+    ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn, ServiceHandle,
+    ServiceInstanceHandle, ServiceInstanceId, ServiceParam, ServiceScheduling, ServiceStatus,
 };
 pub(crate) use service::{ServiceCatalog, ServiceCatalogProjection};
 pub use trigger::{TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage};

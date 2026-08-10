@@ -5,6 +5,7 @@ use linkme::distributed_slice;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -317,6 +318,95 @@ impl fmt::Debug for ServiceHandle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ServiceInstanceHandle: daemon-local runtime service instance capability.
+// ---------------------------------------------------------------------------
+
+/// A handle to a daemon-local runtime service instance.
+///
+/// This handle identifies one materialized service instance. It carries both
+/// the runtime [`ServiceInstanceId`] and the static [`ServiceEntryId`] so callers
+/// can group instances back to their service definition without treating the two
+/// IDs as interchangeable.
+#[derive(Clone, Copy)]
+pub struct ServiceInstanceHandle {
+    instance_id: ServiceInstanceId,
+    entry_id: ServiceEntryId,
+    entry: &'static ServiceEntry,
+}
+
+impl ServiceInstanceHandle {
+    #[inline]
+    pub(crate) const fn new(
+        instance_id: ServiceInstanceId,
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+    ) -> Self {
+        Self {
+            instance_id,
+            entry_id,
+            entry,
+        }
+    }
+
+    /// Runtime instance ID for this service instance.
+    #[inline]
+    pub const fn instance_id(&self) -> ServiceInstanceId {
+        self.instance_id
+    }
+
+    /// Static registry entry ID for this service definition.
+    #[inline]
+    pub const fn entry_id(&self) -> ServiceEntryId {
+        self.entry_id
+    }
+
+    /// Static registry entry metadata for this service definition.
+    #[inline]
+    pub const fn entry(&self) -> &'static ServiceEntry {
+        self.entry
+    }
+
+    /// Human-readable service function name.
+    #[inline]
+    pub const fn name(&self) -> &'static str {
+        self.entry.name
+    }
+
+    /// Module path where the service was registered.
+    #[inline]
+    pub const fn module(&self) -> &'static str {
+        self.entry.module
+    }
+}
+
+impl PartialEq for ServiceInstanceHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.instance_id == other.instance_id && self.entry_id == other.entry_id
+    }
+}
+
+impl Eq for ServiceInstanceHandle {}
+
+impl Hash for ServiceInstanceHandle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.instance_id.hash(state);
+        self.entry_id.hash(state);
+    }
+}
+
+impl fmt::Debug for ServiceInstanceHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceInstanceHandle")
+            .field("instance_id", &self.instance_id)
+            .field("entry_id", &self.entry_id)
+            .field("name", &self.entry.name)
+            .field("module", &self.entry.module)
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct GlobalServiceEntryRecord {
     pub entry_id: ServiceEntryId,
@@ -509,6 +599,12 @@ impl ServiceDescription {
     #[inline]
     pub fn scheduling(&self) -> ServiceScheduling {
         self.entry.scheduling
+    }
+
+    /// Runtime handle for this materialized service instance.
+    #[inline]
+    pub fn instance_handle(&self) -> ServiceInstanceHandle {
+        ServiceInstanceHandle::new(self.instance_id, self.entry_id, self.entry)
     }
 }
 
@@ -881,6 +977,25 @@ mod tests {
         let record = ServiceCatalog::get(entry_id).expect("entry ID should resolve to record");
 
         assert_eq!(record.entry.name, "test_registry_entry_id_second");
+    }
+
+    #[test]
+    fn service_instance_handle_exposes_runtime_and_entry_identity() {
+        let registry = Registry::builder()
+            .with_tag("__test_registry_entry_id_second__")
+            .build();
+        let service = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "test_registry_entry_id_second")
+            .expect("test service should be selected by tag");
+        let handle = service.instance_handle();
+
+        assert_eq!(handle.instance_id(), service.instance_id);
+        assert_eq!(handle.entry_id(), service.entry_id);
+        assert!(std::ptr::eq(handle.entry(), service.entry));
+        assert_eq!(handle.name(), "test_registry_entry_id_second");
+        assert_eq!(handle.module(), "models::service::tests");
     }
 
     #[test]
