@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::context::{DaemonResources, process_token};
 use crate::core::diagnostics::DiagnosticsStore;
-use crate::models::{Registry, SchedulingAdvisoryProfile};
+use crate::models::{Registry, SchedulingAdvisoryProfile, ServiceDescription};
 
 use super::ServiceDaemon;
 use super::policy::RestartPolicy;
@@ -204,10 +204,18 @@ impl ServiceDaemonBuilder {
                     .iter()
                     .any(|existing| existing.entry_id == service.entry_id)
                 {
-                    if let Some(record) = infra_instance_registry.get(service.instance_id) {
+                    for instance in service.instances() {
+                        let Some(record) = infra_instance_registry.get(instance.instance_id())
+                        else {
+                            continue;
+                        };
                         instance_registry.insert(record);
                     }
-                    services.push(service);
+                    services.push(ServiceDescription {
+                        entry_id: service.entry_id,
+                        entry: service.entry,
+                        instance_registry: instance_registry.clone(),
+                    });
                 }
             }
             projection = projection.merge(&infra_projection);
@@ -223,7 +231,9 @@ impl ServiceDaemonBuilder {
         let resources = DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()));
         resources.set_service_catalog_projection(projection);
         let diagnostics = resources.diagnostics.clone();
-        resources.runtime_facts.register_services(&services);
+        resources
+            .runtime_facts
+            .register_service_instances(&instance_registry.records());
 
         // Inject daemon-level trigger configs into the shared resources.
         resources

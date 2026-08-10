@@ -33,6 +33,11 @@ Each `ServiceDaemon` stores its final projection in `DaemonResources`. Provider 
 
 If the target service is linked but not selected by the daemon's registry projection, handle resolution fails with provider-init semantics. If the target wrapper is not linked into `SERVICE_REGISTRY`, resolution also fails. Calling the macro outside a daemon provider scope has no daemon projection and fails.
 
+### Daemon-local instance registry
+Each materialized registry entry currently creates one auto-start singleton instance. The daemon stores those instances in a daemon-local instance registry keyed by `ServiceInstanceId`, with a secondary entry-to-instances index keyed by `ServiceEntryId`. Runner startup, shutdown, runtime facts, diagnostics, status updates, and instance control use the registry's instance records rather than treating a service description as a single running instance.
+
+`ServiceDescription` is now an entry-scoped daemon-local view. It keeps the selected `ServiceEntryId` and `&'static ServiceEntry`, and `instances()` returns the current `ServiceInstanceHandle` values for that entry. A `ServiceInstanceHandle` carries `{ instance_id, entry_id, entry }`; callers can address one runtime instance while still grouping it back to its static service definition.
+
 ## 2. Decentralized Dependency Injection
 
 `service-daemon-rs` separates provider discovery from provider ownership. `PROVIDER_REGISTRY` tells the daemon which provider definitions exist, while provider scopes decide which cached instance a daemon generation actually receives.
@@ -126,6 +131,7 @@ without changing the trigger's base policy.
 | `ServiceScheduling::{Standard, HighPriority, Isolated}` | Public static execution contract generated into the registry; runtime and public APIs do not override it across modes. |
 | Macro `scheduling = ...` | Accepts only `Standard`, `HighPriority`, or `Isolated`; there is no `Auto` or `Control` user-facing mode. |
 | `ServiceEntry` | Public metadata surface. It does not carry experimental restart policy or scheduling hint fields. |
+| `ServiceDescription` | Public entry-scoped daemon-local view. It exposes static metadata plus `instances()` for the runtime handles currently materialized for that entry. |
 | `ServiceHandle` | Public handle to a daemon-selected static service entry. It contains `ServiceEntryId` and `&'static ServiceEntry`, not a runtime `ServiceInstanceId`. |
 | `ServiceInstanceHandle` | Public handle to a materialized runtime instance. It contains `ServiceInstanceId`, `ServiceEntryId`, and `&'static ServiceEntry` so instance APIs can address one runtime instance without losing its static service definition. |
 | `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |

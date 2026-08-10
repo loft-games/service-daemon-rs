@@ -4,7 +4,7 @@ use crate::models::ProviderInitError;
 
 use super::runtime::RuntimePreparationError;
 use super::startup_preflight::StartupPreflightError;
-use super::{ServiceDaemon, clone_service_descriptions, parts, runner};
+use super::{ServiceDaemon, parts, runner};
 
 pub(super) enum StartupError {
     ProviderGraph(ProviderInitError),
@@ -35,7 +35,7 @@ impl ServiceDaemon {
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let startup =
                 control_runtime.spawn(runner::spawn_all_services(parts::SpawnAllServicesParts {
-                    services: clone_service_descriptions(&self.services),
+                    instances: self.instance_registry.records(),
                     restart_policy: self.restart_policy,
                     running_tasks: self.running_tasks.clone(),
                     resources: self.resources.clone(),

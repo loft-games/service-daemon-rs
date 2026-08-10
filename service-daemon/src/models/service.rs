@@ -462,6 +462,7 @@ impl ServiceInstanceRecord {
     }
 
     #[inline]
+    #[allow(dead_code)]
     pub(crate) fn params(&self) -> &'static [ServiceParam] {
         self.entry().params
     }
@@ -524,10 +525,13 @@ impl ServiceInstanceRegistry {
     }
 
     pub(crate) fn records(&self) -> Vec<ServiceInstanceRecord> {
-        self.by_instance
+        let mut records = self
+            .by_instance
             .iter()
             .map(|entry| entry.value().clone())
-            .collect()
+            .collect::<Vec<_>>();
+        records.sort_by_key(|record| record.instance_id());
+        records
     }
 
     #[cfg(test)]
@@ -683,26 +687,24 @@ impl ServiceCatalogProjection {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceDescription (runtime): static entry plus daemon-local instance.
+// ServiceDescription (daemon-local): static entry plus runtime instances.
 // ---------------------------------------------------------------------------
 
-/// Runtime description of a managed service instance.
+/// Daemon-local description of a selected service definition.
 ///
 /// Holds a reference to the underlying static `ServiceEntry` from the
-/// `SERVICE_REGISTRY`, plus runtime-only state (`instance_id`, `cancellation_token`)
-/// and Arc-wrapped variants of the entry's function pointers.
+/// `SERVICE_REGISTRY` and exposes the materialized runtime instances owned by
+/// the current daemon for this entry.
 ///
 /// Use accessor methods (`name()`, `priority()`, etc.) to read static
 /// metadata without field duplication.
 pub struct ServiceDescription {
     /// Static registry entry ID assigned from `SERVICE_REGISTRY`.
     pub entry_id: ServiceEntryId,
-    /// Unique runtime instance ID -- the strong identity for daemon resources.
-    pub instance_id: ServiceInstanceId,
     /// Reference to the static entry that registered this service.
     pub entry: &'static ServiceEntry,
-    /// Per-instance cancellation token for lifecycle management.
-    pub cancellation_token: CancellationToken,
+    /// Daemon-local runtime instance registry.
+    pub(crate) instance_registry: Arc<ServiceInstanceRegistry>,
 }
 
 impl ServiceDescription {
@@ -730,10 +732,10 @@ impl ServiceDescription {
         self.entry.scheduling
     }
 
-    /// Runtime handle for this materialized service instance.
+    /// Runtime instance handles materialized for this selected service entry.
     #[inline]
-    pub fn instance_handle(&self) -> ServiceInstanceHandle {
-        ServiceInstanceHandle::new(self.instance_id, self.entry_id, self.entry)
+    pub fn instances(&self) -> Vec<ServiceInstanceHandle> {
+        self.instance_registry.handles_for_entry(self.entry_id)
     }
 }
 
@@ -964,16 +966,14 @@ impl RegistryBuilder {
         for entry_id in projection.entry_ids() {
             let record =
                 ServiceCatalog::get(*entry_id).expect("projected service entry must exist");
+            let instance_id = ServiceInstanceId::new_v7();
+            let handle = ServiceInstanceHandle::new(instance_id, record.entry_id, record.entry);
+            instance_registry.insert(ServiceInstanceRecord::new(handle, CancellationToken::new()));
             let service = ServiceDescription {
                 entry_id: record.entry_id,
-                instance_id: ServiceInstanceId::new_v7(),
                 entry: record.entry,
-                cancellation_token: CancellationToken::new(),
+                instance_registry: instance_registry.clone(),
             };
-            instance_registry.insert(ServiceInstanceRecord::new(
-                service.instance_handle(),
-                service.cancellation_token.clone(),
-            ));
             services.push(service);
         }
 
@@ -1064,8 +1064,13 @@ mod tests {
             .expect("test service should exist in SERVICE_REGISTRY");
 
         assert_eq!(service.entry_id, ServiceEntryId::new(original_index));
+        let instance = service
+            .instances()
+            .first()
+            .copied()
+            .expect("auto-start service should have one instance handle");
         assert_eq!(
-            service.instance_id.as_uuid().get_version_num(),
+            instance.instance_id().as_uuid().get_version_num(),
             7,
             "auto-start singleton service instances should receive UUIDv7 IDs"
         );
@@ -1133,9 +1138,12 @@ mod tests {
             .iter()
             .find(|service| service.name() == "test_registry_entry_id_second")
             .expect("test service should be selected by tag");
-        let handle = service.instance_handle();
+        let handle = service
+            .instances()
+            .first()
+            .copied()
+            .expect("auto-start service should have one instance handle");
 
-        assert_eq!(handle.instance_id(), service.instance_id);
         assert_eq!(handle.entry_id(), service.entry_id);
         assert!(std::ptr::eq(handle.entry(), service.entry));
         assert_eq!(handle.name(), "test_registry_entry_id_second");
@@ -1182,6 +1190,56 @@ mod tests {
     }
 
     #[test]
+    fn service_description_instances_are_scoped_to_own_entry() {
+        let first_entry_id =
+            ServiceCatalog::entry_id_for_wrapper(test_registry_entry_id_first_wrapper)
+                .expect("first wrapper should be indexed by global catalog");
+        let second_entry_id =
+            ServiceCatalog::entry_id_for_wrapper(test_registry_entry_id_second_wrapper)
+                .expect("second wrapper should be indexed by global catalog");
+        let first_record =
+            ServiceCatalog::get(first_entry_id).expect("first entry ID should resolve to record");
+        let second_record =
+            ServiceCatalog::get(second_entry_id).expect("second entry ID should resolve to record");
+        let instance_registry = Arc::new(ServiceInstanceRegistry::new());
+        let first_handle = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(Uuid::from_u128(200)),
+            first_entry_id,
+            first_record.entry,
+        );
+        let second_handle = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(Uuid::from_u128(201)),
+            first_entry_id,
+            first_record.entry,
+        );
+        let other_entry_handle = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(Uuid::from_u128(202)),
+            second_entry_id,
+            second_record.entry,
+        );
+        instance_registry.insert(ServiceInstanceRecord::new(
+            first_handle,
+            CancellationToken::new(),
+        ));
+        instance_registry.insert(ServiceInstanceRecord::new(
+            second_handle,
+            CancellationToken::new(),
+        ));
+        instance_registry.insert(ServiceInstanceRecord::new(
+            other_entry_handle,
+            CancellationToken::new(),
+        ));
+
+        let service = ServiceDescription {
+            entry_id: first_entry_id,
+            entry: first_record.entry,
+            instance_registry,
+        };
+
+        assert_eq!(service.instances(), vec![first_handle, second_handle]);
+    }
+
+    #[test]
     fn registry_build_records_auto_start_instance_handles() {
         let registry = Registry::builder()
             .with_tag("__test_registry_entry_id_second__")
@@ -1191,13 +1249,18 @@ mod tests {
             .iter()
             .find(|service| service.name() == "test_registry_entry_id_second")
             .expect("test service should be selected by tag");
+        let instance = service
+            .instances()
+            .first()
+            .copied()
+            .expect("auto-start service should have one instance handle");
         let record = registry
             .instance_registry
-            .get(service.instance_id)
+            .get(instance.instance_id())
             .expect("auto-start service should have an instance record");
 
         assert_eq!(registry.instance_registry.len(), registry.services().len());
-        assert_eq!(record.handle(), service.instance_handle());
+        assert_eq!(record.handle(), instance);
         assert_eq!(record.entry_id(), service.entry_id);
         assert_eq!(record.name(), service.name());
         assert_eq!(
@@ -1209,7 +1272,7 @@ mod tests {
             registry
                 .instance_registry
                 .handles_for_entry(service.entry_id),
-            vec![service.instance_handle()]
+            vec![instance]
         );
     }
 
@@ -1260,10 +1323,21 @@ mod tests {
             .expect("test service should be selected by second registry");
 
         assert_eq!(first_service.entry_id, second_service.entry_id);
-        assert_eq!(first_service.instance_id.as_uuid().get_version_num(), 7);
-        assert_eq!(second_service.instance_id.as_uuid().get_version_num(), 7);
+        let first_instance = first_service
+            .instances()
+            .first()
+            .copied()
+            .expect("first auto-start service should have one instance handle");
+        let second_instance = second_service
+            .instances()
+            .first()
+            .copied()
+            .expect("second auto-start service should have one instance handle");
+        assert_eq!(first_instance.instance_id().as_uuid().get_version_num(), 7);
+        assert_eq!(second_instance.instance_id().as_uuid().get_version_num(), 7);
         assert_ne!(
-            first_service.instance_id, second_service.instance_id,
+            first_instance.instance_id(),
+            second_instance.instance_id(),
             "materializing the same registry entry twice should not reuse a runtime instance ID"
         );
     }

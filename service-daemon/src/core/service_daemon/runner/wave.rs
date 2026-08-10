@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 
 use crate::ServiceScheduling;
 use crate::core::context::DaemonResources;
-use crate::models::{ServiceDescription, ServiceInstanceId, ServiceStatus};
+use crate::models::{ServiceInstanceId, ServiceInstanceRecord, ServiceStatus};
 
 use super::super::parts::{
     BodyExecutionLanes, BodyLaneResolver, SpawnAllServicesParts, SpawnServiceParts,
@@ -18,16 +18,16 @@ use super::spawn_service;
 
 /// Helper for wave-based service management.
 pub(super) struct ServiceWave<'a> {
-    services: Vec<&'a ServiceDescription>,
+    services: Vec<&'a ServiceInstanceRecord>,
     priority: u8,
 }
 
 impl<'a> ServiceWave<'a> {
     /// Groups services by priority into waves.
     pub(super) fn from_services(
-        services: &'a [ServiceDescription],
+        services: &'a [ServiceInstanceRecord],
     ) -> BTreeMap<u8, ServiceWave<'a>> {
-        let mut waves: BTreeMap<u8, Vec<&'a ServiceDescription>> = BTreeMap::new();
+        let mut waves: BTreeMap<u8, Vec<&'a ServiceInstanceRecord>> = BTreeMap::new();
         for service in services {
             waves.entry(service.priority()).or_default().push(service);
         }
@@ -73,7 +73,7 @@ impl<'a> ServiceWave<'a> {
             for service in &self.services {
                 let status = resources
                     .status_plane
-                    .get(&service.instance_id)
+                    .get(&service.instance_id())
                     .map(|r| r.value().clone());
                 if status != Some(ServiceStatus::Healthy) {
                     all_healthy = false;
@@ -115,7 +115,7 @@ impl<'a> ServiceWave<'a> {
 /// receives a shutdown signal during startup.
 pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
     let SpawnAllServicesParts {
-        services,
+        instances,
         restart_policy,
         running_tasks,
         resources,
@@ -133,7 +133,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
         standard: standard_runtime,
         high_priority: high_priority_runtime,
     };
-    let waves = ServiceWave::from_services(&services);
+    let waves = ServiceWave::from_services(&instances);
 
     // Process waves in descending order of priority
     for (priority, wave) in waves.into_iter().rev() {
@@ -150,29 +150,29 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
         );
 
         for service in &wave.services {
-            if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
+            if matches!(service.scheduling(), ServiceScheduling::HighPriority)
                 && body_lanes.high_priority.is_none()
             {
                 error!(
                     service = %service.name(),
-                    service_instance_id = %service.instance_id,
+                    service_instance_id = %service.instance_id(),
                     "HighPriority service is missing the shared high-priority runtime"
                 );
                 resources
                     .status_plane
-                    .insert(service.instance_id, ServiceStatus::Terminated);
+                    .insert(service.instance_id(), ServiceStatus::Terminated);
                 resources.status_changed.notify_waiters();
                 daemon_token.cancel();
                 return;
             }
 
             spawn_service(SpawnServiceParts {
-                service_instance_id: service.instance_id,
+                service_instance_id: service.instance_id(),
                 name: service.name(),
-                run: service.entry.wrapper,
-                watcher: service.entry.watcher,
+                run: service.entry().wrapper,
+                watcher: service.entry().watcher,
                 policy: restart_policy,
-                scheduling: service.entry.scheduling,
+                scheduling: service.scheduling(),
                 supervisor_lane: SupervisorSpawnLane::Control(control_runtime.clone()),
                 body_lanes: body_lanes.clone(),
                 body_lane_resolver: BodyLaneResolver::default(),
@@ -180,7 +180,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
                 resources: resources.clone(),
                 diagnostics: diagnostics.clone(),
                 isolated_startup_permits: isolated_startup_permits.clone(),
-                cancellation_token: service.cancellation_token.clone(),
+                cancellation_token: service.cancellation_token(),
                 daemon_token: daemon_token.clone(),
             })
             .await;
@@ -199,7 +199,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
 /// This stops services in ascending order of their `priority` value.
 /// Services with the same priority are shut down concurrently.
 pub(super) async fn stop_all_services(
-    services: &[ServiceDescription],
+    services: &[ServiceInstanceRecord],
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
     daemon_token: CancellationToken,
@@ -219,21 +219,21 @@ pub(super) async fn stop_all_services(
 
         // 1. Parallel Signal: Cancel all services in this wave
         for service in &wave.services {
-            service.cancellation_token.cancel();
+            service.cancellation_token().cancel();
             let shutting_down = ServiceStatus::ShuttingDown;
             resources
                 .status_plane
-                .insert(service.instance_id, shutting_down.clone());
+                .insert(service.instance_id(), shutting_down.clone());
             resources
                 .runtime_facts
-                .record_service_status(service.instance_id, &shutting_down);
+                .record_service_status(service.instance_id(), &shutting_down);
             resources.status_changed.notify_waiters();
         }
 
         // 2. Parallel Wait: Wait for all services in this wave to finish
         let mut join_handles = Vec::new();
         for service in wave.services {
-            let sid = service.instance_id;
+            let sid = service.instance_id();
             let name = service.name();
             let handle_opt = {
                 let mut guard = running_tasks.lock().await;

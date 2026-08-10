@@ -93,12 +93,16 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
     let healthy_service_id = registry
         .services()
         .iter()
-        .find_map(|service| (service.name() == "healthy_service").then_some(service.instance_id))
+        .find(|service| service.name() == "healthy_service")
+        .and_then(|service| service.instances().first().copied())
+        .map(|instance| instance.instance_id())
         .expect("healthy_service should be materialized");
     let fatal_service_id = registry
         .services()
         .iter()
-        .find_map(|service| (service.name() == "fatal_service").then_some(service.instance_id))
+        .find(|service| service.name() == "fatal_service")
+        .and_then(|service| service.instances().first().copied())
+        .map(|instance| instance.instance_id())
         .expect("fatal_service should be materialized");
 
     let mut daemon = ServiceDaemon::builder().with_registry(registry).build();

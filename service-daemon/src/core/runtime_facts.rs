@@ -9,8 +9,8 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::models::{
-    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceDescription,
-    ServiceInstanceId, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
+    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceInstanceId,
+    ServiceInstanceRecord, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
     TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 
@@ -22,10 +22,10 @@ pub(crate) struct ServiceRuntimeMetadata {
     declared_scheduling: ServiceScheduling,
 }
 
-impl From<&ServiceDescription> for ServiceRuntimeMetadata {
-    fn from(service: &ServiceDescription) -> Self {
+impl From<&ServiceInstanceRecord> for ServiceRuntimeMetadata {
+    fn from(service: &ServiceInstanceRecord) -> Self {
         Self {
-            service_instance_id: service.instance_id,
+            service_instance_id: service.instance_id(),
             service_name: service.name(),
             priority: service.priority(),
             declared_scheduling: service.scheduling(),
@@ -217,11 +217,11 @@ impl RuntimeFactsStore {
         }
     }
 
-    pub(crate) fn register_services(&self, services: &[ServiceDescription]) {
+    pub(crate) fn register_service_instances(&self, services: &[ServiceInstanceRecord]) {
         for service in services {
             let metadata = ServiceRuntimeMetadata::from(service);
             self.services
-                .entry(service.instance_id)
+                .entry(service.instance_id())
                 .or_insert_with(|| Arc::new(ServiceRuntimeRecord::new(metadata)));
         }
     }
@@ -442,7 +442,9 @@ fn readiness_from_services(services: Vec<ServiceRuntimeSnapshot>) -> ReadinessSn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ServiceEntry, ServiceEntryId, ServiceParam};
+    use crate::models::{
+        ServiceEntry, ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord, ServiceParam,
+    };
     use futures::future::BoxFuture;
     use tokio_util::sync::CancellationToken;
 
@@ -472,24 +474,24 @@ mod tests {
         tags: &[],
     };
 
-    fn service_description(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
+    fn service_instance_record(id: usize, entry: &'static ServiceEntry) -> ServiceInstanceRecord {
         let entry_id = ServiceEntryId::new(id);
-        ServiceDescription {
+        let handle = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128)),
             entry_id,
-            instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128)),
             entry,
-            cancellation_token: CancellationToken::new(),
-        }
+        );
+        ServiceInstanceRecord::new(handle, CancellationToken::new())
     }
 
     #[test]
     fn service_snapshots_are_sorted_by_service_id() {
         let store = RuntimeFactsStore::new();
         let services = vec![
-            service_description(2, &SERVICE_ENTRY_B),
-            service_description(1, &SERVICE_ENTRY_A),
+            service_instance_record(2, &SERVICE_ENTRY_B),
+            service_instance_record(1, &SERVICE_ENTRY_A),
         ];
-        store.register_services(&services);
+        store.register_service_instances(&services);
 
         let snapshots = store.service_snapshots(|_| ServiceStatus::Healthy);
 
@@ -509,10 +511,10 @@ mod tests {
     fn readiness_groups_statuses_and_errors_without_verdict() {
         let store = RuntimeFactsStore::new();
         let services = vec![
-            service_description(1, &SERVICE_ENTRY_A),
-            service_description(2, &SERVICE_ENTRY_B),
+            service_instance_record(1, &SERVICE_ENTRY_A),
+            service_instance_record(2, &SERVICE_ENTRY_B),
         ];
-        store.register_services(&services);
+        store.register_service_instances(&services);
         store.record_service_status(
             ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
             &ServiceStatus::Recovering("boom".into()),
@@ -535,8 +537,8 @@ mod tests {
     #[test]
     fn service_lifecycle_facts_record_generation_backoff_and_health() {
         let store = RuntimeFactsStore::new();
-        let services = vec![service_description(1, &SERVICE_ENTRY_A)];
-        store.register_services(&services);
+        let services = vec![service_instance_record(1, &SERVICE_ENTRY_A)];
+        store.register_service_instances(&services);
 
         store.record_service_started(
             ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
@@ -567,8 +569,8 @@ mod tests {
     #[test]
     fn recovering_clears_health_and_records_error_boundary() {
         let store = RuntimeFactsStore::new();
-        let services = vec![service_description(1, &SERVICE_ENTRY_A)];
-        store.register_services(&services);
+        let services = vec![service_instance_record(1, &SERVICE_ENTRY_A)];
+        store.register_service_instances(&services);
 
         store.record_service_started(
             ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
@@ -597,8 +599,8 @@ mod tests {
     #[test]
     fn shutdown_and_termination_clear_health_timeline() {
         let store = RuntimeFactsStore::new();
-        let services = vec![service_description(1, &SERVICE_ENTRY_A)];
-        store.register_services(&services);
+        let services = vec![service_instance_record(1, &SERVICE_ENTRY_A)];
+        store.register_service_instances(&services);
 
         store.record_service_started(
             ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
@@ -644,8 +646,8 @@ mod tests {
     #[test]
     fn restart_backoff_survives_until_terminal_or_running_boundary() {
         let store = RuntimeFactsStore::new();
-        let services = vec![service_description(1, &SERVICE_ENTRY_A)];
-        store.register_services(&services);
+        let services = vec![service_instance_record(1, &SERVICE_ENTRY_A)];
+        store.register_service_instances(&services);
 
         store.record_service_started(
             ServiceInstanceId::new(uuid::Uuid::from_u128(1)),

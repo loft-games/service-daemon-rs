@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::context::DaemonResources;
-use crate::models::{ServiceDescription, ServiceInstanceId};
+use crate::models::{ServiceInstanceId, ServiceInstanceRecord};
 
 use super::parts::{SpawnAllServicesParts, SpawnServiceParts};
 
@@ -38,14 +38,14 @@ pub async fn spawn_all_services(parts: SpawnAllServicesParts) {
 
 /// Stop all running services gracefully using wave-based priorities.
 pub async fn stop_all_services(
-    services: &[ServiceDescription],
+    instances: &[ServiceInstanceRecord],
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     resources: Arc<DaemonResources>,
     daemon_token: CancellationToken,
     grace_period: Duration,
 ) {
     wave::stop_all_services(
-        services,
+        instances,
         running_tasks,
         resources,
         daemon_token,

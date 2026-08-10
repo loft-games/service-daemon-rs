@@ -12,7 +12,9 @@ fn service_instance_id(registry: &Registry, name: &str) -> ServiceInstanceId {
     registry
         .services()
         .iter()
-        .find_map(|service| (service.name() == name).then_some(service.instance_id))
+        .find(|service| service.name() == name)
+        .and_then(|service| service.instances().first().copied())
+        .map(|instance| instance.instance_id())
         .expect("service should be materialized in registry")
 }
 

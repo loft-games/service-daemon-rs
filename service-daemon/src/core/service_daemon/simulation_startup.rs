@@ -32,8 +32,8 @@ impl ServiceDaemon {
                 standard: runtimes.standard.clone(),
                 high_priority: runtimes.high_priority.clone(),
             };
-            for service in &self.services {
-                if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
+            for service in self.instance_registry.records() {
+                if matches!(service.scheduling(), ServiceScheduling::HighPriority)
                     && body_lanes.high_priority.is_none()
                 {
                     return Err(ServiceError::InternalError(format!(
@@ -43,12 +43,12 @@ impl ServiceDaemon {
                 }
 
                 runner::spawn_service(parts::SpawnServiceParts {
-                    service_instance_id: service.instance_id,
+                    service_instance_id: service.instance_id(),
                     name: service.name(),
-                    run: service.entry.wrapper,
-                    watcher: service.entry.watcher,
+                    run: service.entry().wrapper,
+                    watcher: service.entry().watcher,
                     policy: test_policy,
-                    scheduling: service.entry.scheduling,
+                    scheduling: service.scheduling(),
                     supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime.clone()),
                     body_lanes: body_lanes.clone(),
                     body_lane_resolver: parts::BodyLaneResolver::default(),
@@ -56,7 +56,7 @@ impl ServiceDaemon {
                     resources: self.resources.clone(),
                     diagnostics: self.diagnostics.clone(),
                     isolated_startup_permits: self.isolated_startup_permits.clone(),
-                    cancellation_token: service.cancellation_token.clone(),
+                    cancellation_token: service.cancellation_token(),
                     daemon_token: daemon_token.clone(),
                 })
                 .await;

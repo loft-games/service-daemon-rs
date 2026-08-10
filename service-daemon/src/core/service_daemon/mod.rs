@@ -42,8 +42,8 @@ use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
-    SchedulingAdvisoryProfile, ServiceDescription, ServiceInstanceId, ServiceInstanceRegistry,
-    ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
+    SchedulingAdvisoryProfile, ServiceDescription, ServiceInstanceHandle, ServiceInstanceId,
+    ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
 };
 
 pub use builder::ServiceDaemonBuilder;
@@ -72,6 +72,11 @@ impl ServiceDaemonHandle {
             .get(id)
             .map(|s| s.clone())
             .unwrap_or(ServiceStatus::Terminated)
+    }
+
+    /// Get the current status of a service instance handle.
+    pub async fn get_instance_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus {
+        self.get_service_status(&handle.instance_id()).await
     }
 
     /// Return a read-only snapshot of daemon diagnostics.
@@ -107,6 +112,39 @@ impl ServiceDaemonHandle {
             .service_snapshot(id, |service_instance_id| {
                 self.status_for_snapshot(service_instance_id)
             })
+    }
+
+    /// Return read-only runtime facts for a service instance handle.
+    pub fn runtime_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> Option<ServiceRuntimeSnapshot> {
+        self.runtime_service(handle.instance_id())
+    }
+
+    /// Request shutdown for one managed service instance.
+    ///
+    /// This cancels the instance token and updates status/runtime facts. It
+    /// does not remove the instance from the daemon registry and does not wait
+    /// for the task join handle to finish.
+    pub fn request_stop_instance(&self, handle: &ServiceInstanceHandle) -> bool {
+        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
+            return false;
+        };
+        if record.handle() != *handle {
+            return false;
+        }
+
+        record.cancellation_token().cancel();
+        let shutting_down = ServiceStatus::ShuttingDown;
+        self.resources
+            .status_plane
+            .insert(handle.instance_id(), shutting_down.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(handle.instance_id(), &shutting_down);
+        self.resources.status_changed.notify_waiters();
+        true
     }
 
     /// Return read-only runtime facts for all observed triggers.
@@ -381,14 +419,14 @@ impl ServiceDaemon {
     /// Internal helper: perform the actual graceful shutdown sequence.
     async fn do_shutdown(&mut self) {
         if let Some(control_runtime) = self.control_runtime.as_ref() {
-            let services = clone_service_descriptions(&self.services);
+            let instances = self.instance_registry.records();
             let running_tasks = self.running_tasks.clone();
             let resources = self.resources.clone();
             let cancellation_token = self.cancellation_token.clone();
             let wave_stop_timeout = self.restart_policy.wave_stop_timeout;
             let shutdown = control_runtime.spawn(async move {
                 runner::stop_all_services(
-                    &services,
+                    &instances,
                     running_tasks,
                     resources,
                     cancellation_token,
@@ -401,8 +439,9 @@ impl ServiceDaemon {
                 tracing::error!(error = ?err, "ServiceDaemon shutdown orchestration failed");
             }
         } else {
+            let instances = self.instance_registry.records();
             runner::stop_all_services(
-                &self.services,
+                &instances,
                 self.running_tasks.clone(),
                 self.resources.clone(),
                 self.cancellation_token.clone(),
@@ -442,8 +481,9 @@ impl ServiceDaemon {
 
         tokio::time::sleep(duration).await;
 
+        let instances = self.instance_registry.records();
         runner::stop_all_services(
-            &self.services,
+            &instances,
             self.running_tasks.clone(),
             self.resources.clone(),
             self.cancellation_token.clone(),
@@ -458,18 +498,6 @@ impl ServiceDaemon {
 
         Ok(())
     }
-}
-
-fn clone_service_descriptions(services: &[ServiceDescription]) -> Vec<ServiceDescription> {
-    services
-        .iter()
-        .map(|service| ServiceDescription {
-            entry_id: service.entry_id,
-            instance_id: service.instance_id,
-            entry: service.entry,
-            cancellation_token: service.cancellation_token.clone(),
-        })
-        .collect()
 }
 
 #[cfg(feature = "diagnostics")]
@@ -487,7 +515,8 @@ fn emit_shutdown_topology() {
 mod tests {
     use super::*;
     use crate::models::{
-        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId, ServiceParam,
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId,
+        ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceParam,
         ServiceScheduling,
     };
     use crate::{TT::*, provider, service, trigger};
@@ -495,9 +524,10 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     use std::collections::BTreeMap;
     use std::num::NonZeroUsize;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
     #[cfg(feature = "diagnostics")]
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
     use tracing::debug;
     #[cfg(feature = "diagnostics")]
@@ -558,11 +588,16 @@ mod tests {
 
     fn test_service(id: usize, entry: &'static ServiceEntry) -> ServiceDescription {
         let entry_id = ServiceEntryId::new(id);
+        let instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128));
+        let instance_registry = Arc::new(ServiceInstanceRegistry::new());
+        instance_registry.insert(ServiceInstanceRecord::new(
+            ServiceInstanceHandle::new(instance_id, entry_id, entry),
+            CancellationToken::new(),
+        ));
         ServiceDescription {
             entry_id,
-            instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128)),
             entry,
-            cancellation_token: CancellationToken::new(),
+            instance_registry,
         }
     }
 
@@ -1067,10 +1102,15 @@ mod tests {
             test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
             test_service(1, &STANDARD_TEST_ENTRY),
         ];
+        let instance_records = daemon
+            .services
+            .iter()
+            .flat_map(|service| service.instance_registry.records())
+            .collect::<Vec<_>>();
         daemon
             .resources
             .runtime_facts
-            .register_services(&daemon.services);
+            .register_service_instances(&instance_records);
         daemon.resources.status_plane.insert(
             ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             ServiceStatus::Healthy,
@@ -1128,6 +1168,49 @@ mod tests {
         assert!(!handle.runtime().shutdown_requested);
         daemon.shutdown();
         assert!(handle.runtime().shutdown_requested);
+    }
+
+    #[tokio::test]
+    async fn request_stop_instance_updates_instance_status_and_runtime_facts() {
+        setup_tracing();
+        let registry = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
+            .build();
+        let service = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "capacity_primary_standard_service")
+            .expect("standard test service should be selected by tag");
+        let instance = service
+            .instances()
+            .first()
+            .copied()
+            .expect("auto-start service should have an instance handle");
+        let fake_instance = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(999)),
+            instance.entry_id(),
+            instance.entry(),
+        );
+        let daemon = ServiceDaemon::builder().with_registry(registry).build();
+        let handle = daemon.handle();
+
+        assert!(!handle.request_stop_instance(&fake_instance));
+        assert_eq!(
+            handle.get_instance_status(&fake_instance).await,
+            ServiceStatus::Terminated
+        );
+
+        assert!(handle.request_stop_instance(&instance));
+        assert_eq!(
+            handle.get_instance_status(&instance).await,
+            ServiceStatus::ShuttingDown
+        );
+        assert_eq!(
+            handle
+                .runtime_instance(&instance)
+                .map(|snapshot| snapshot.status),
+            Some(ServiceStatus::ShuttingDown)
+        );
     }
 
     #[test]

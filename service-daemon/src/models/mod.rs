@@ -35,5 +35,7 @@ pub use service::{
     ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn, ServiceHandle,
     ServiceInstanceHandle, ServiceInstanceId, ServiceParam, ServiceScheduling, ServiceStatus,
 };
-pub(crate) use service::{ServiceCatalog, ServiceCatalogProjection, ServiceInstanceRegistry};
+pub(crate) use service::{
+    ServiceCatalog, ServiceCatalogProjection, ServiceInstanceRecord, ServiceInstanceRegistry,
+};
 pub use trigger::{TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage};

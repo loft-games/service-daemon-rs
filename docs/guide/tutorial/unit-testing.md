@@ -52,7 +52,7 @@ async fn shelf_reader_service() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use service_daemon::{MockContext, Registry, ServiceInstanceId};
+    use service_daemon::{MockContext, Registry};
 
     #[tokio::test]
     async fn simulation_can_seed_and_mutate_shelf() -> anyhow::Result<()> {
@@ -60,9 +60,9 @@ mod tests {
         let shelf_reader_id = registry
             .services()
             .iter()
-            .find_map(|service| {
-                (service.name() == "shelf_reader_service").then_some(service.instance_id)
-            })
+            .find(|service| service.name() == "shelf_reader_service")
+            .and_then(|service| service.instances().first().copied())
+            .map(|instance| instance.instance_id())
             .expect("shelf_reader_service should be selected");
         let (builder, handle) = MockContext::builder()
             .with_shelf::<String>(shelf_reader_id, "config_key", "initial_val".into())

@@ -34,9 +34,9 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
     let service_instance_id = registry
         .services()
         .iter()
-        .find_map(|service| {
-            (service.name() == "normal_exit_service").then_some(service.instance_id)
-        })
+        .find(|service| service.name() == "normal_exit_service")
+        .and_then(|service| service.instances().first().copied())
+        .map(|instance| instance.instance_id())
         .expect("normal_exit_service should be materialized");
 
     let mut daemon = ServiceDaemon::builder()

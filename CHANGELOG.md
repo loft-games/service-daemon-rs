@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
+- **Service Instance Model**: Runtime instances are now represented by `ServiceInstanceHandle` values stored in a daemon-local instance registry. `ServiceDescription` is entry-scoped and exposes its current instance handles instead of carrying a single instance ID and cancellation token.
 - **Service Handle Resolution**: Provider-time service handle lookup is scoped to the current daemon projection. Linked services outside the projection and unlinked targets fail with provider initialization errors instead of falling back to a global runtime instance.
 - **Provider Attribute Parser**: Shared named-tail parsing across service, trigger, and provider macros while keeping provider default/template heads as a macro-specific syntax boundary.
 - **Proc-macro Diagnostics**: Removed the `proc-macro-error2` dependency and routed macro errors through the repository-owned diagnostics facade while preserving stable compile-error output.

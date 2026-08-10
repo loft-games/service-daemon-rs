@@ -104,10 +104,12 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for MyInterceptor {
 The framework uses `linkme` for distributed registration, `ServiceEntryId` for static registry positions, and `ServiceInstanceId` for runtime identity.
 
 1. **Identity**: `ServiceEntryId` values come from the selected entry's original `SERVICE_REGISTRY` index. Auto-start singleton services receive fresh UUIDv7-backed `ServiceInstanceId` values when a `Registry` is materialized.
-2. **Context**: Use `current_service_instance_id()` from `service-daemon/src/core/context/api.rs` to retrieve the runtime ID of the running service instance.
-3. **Catalog projection**: Registry filtering should go through the global service catalog projection API. Do not add new direct scans of `SERVICE_REGISTRY` for tag filtering or wrapper-to-entry lookup.
-4. **Service handles**: `service_handle!(...)` resolves a `ServiceHandle` through the current daemon projection during provider initialization. The handle identifies the static entry, not a running instance.
-5. **Macro Generation**: Shared logic resides in `service-daemon-macro/src/common.rs`.
+2. **Instance registry**: Runtime instances belong to a daemon-local registry keyed by `ServiceInstanceId` with a secondary `ServiceEntryId` index. Do not add a process-global runtime instance table.
+3. **Entry descriptions**: `ServiceDescription` is an entry-scoped view. Runner/control-plane code that needs a startable instance should use `ServiceInstanceRecord`; public callers should use `ServiceInstanceHandle`.
+4. **Context**: Use `current_service_instance_id()` from `service-daemon/src/core/context/api.rs` to retrieve the runtime ID of the running service instance.
+5. **Catalog projection**: Registry filtering should go through the global service catalog projection API. Do not add new direct scans of `SERVICE_REGISTRY` for tag filtering or wrapper-to-entry lookup.
+6. **Service handles**: `service_handle!(...)` resolves a `ServiceHandle` through the current daemon projection during provider initialization. The handle identifies the static entry, not a running instance.
+7. **Macro Generation**: Shared logic resides in `service-daemon-macro/src/common.rs`.
     - **`decompose_type`**: This utility is key to the DI system. It recursively inspects AST types to identify wrappers like `Arc`, `RwLock`, and `Mutex`, stripping the outer layers to reach the inner `T`.
     - **`ParamIntent`**: Parameters are categorized as either `Payload` or `Dependency`. This allows a single function to mix event data with DI-resolved resources automatedly.
 

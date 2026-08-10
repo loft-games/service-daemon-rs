@@ -84,7 +84,10 @@ After a service definition is materialized by a daemon, the runtime instance is
 identified separately by `ServiceInstanceHandle`. That instance handle carries
 both `ServiceInstanceId` and `ServiceEntryId`, so operational APIs can address a
 specific running instance while still grouping it back to the static service
-definition.
+definition. `ServiceDescription::instances()` returns the currently materialized
+instance handles for one selected entry. `ServiceDaemonHandle` can read status
+and runtime facts for a `ServiceInstanceHandle`, and can request shutdown for
+that instance without deleting it from the daemon registry.
 
 Handle resolution is provider-scope only. Calling it outside daemon provider
 initialization fails because there is no daemon projection. If the service is

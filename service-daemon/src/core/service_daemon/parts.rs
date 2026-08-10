@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::ProviderDependencyWatchSet;
 use crate::core::diagnostics::DiagnosticsStore;
-use crate::models::{ServiceDescription, ServiceFn, ServiceInstanceId, ServiceScheduling};
+use crate::models::{ServiceFn, ServiceInstanceId, ServiceInstanceRecord, ServiceScheduling};
 
 use super::super::context::DaemonResources;
 use super::policy::RestartPolicy;
@@ -128,7 +128,7 @@ pub(super) struct SpawnServiceParts {
 }
 
 pub(super) struct SpawnAllServicesParts {
-    pub services: Vec<ServiceDescription>,
+    pub instances: Vec<ServiceInstanceRecord>,
     pub restart_policy: RestartPolicy,
     pub running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     pub resources: Arc<DaemonResources>,
