@@ -190,19 +190,23 @@ impl ServiceDaemonBuilder {
     #[must_use]
     pub fn build(self) -> ServiceDaemon {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
-        let (mut services, mut projection) = registry.into_parts();
+        let (mut services, mut projection, instance_registry) = registry.into_parts();
 
         // Merge infrastructure services that bypass tag filtering.
         // Each infra tag is resolved against the global SERVICE_REGISTRY,
         // and matching services are appended (deduplicated by ServiceEntryId).
         if !self.infra_tags.is_empty() {
             let infra_registry = Registry::builder().with_tags(self.infra_tags).build();
-            let (infra_services, infra_projection) = infra_registry.into_parts();
+            let (infra_services, infra_projection, infra_instance_registry) =
+                infra_registry.into_parts();
             for service in infra_services {
                 if !services
                     .iter()
                     .any(|existing| existing.entry_id == service.entry_id)
                 {
+                    if let Some(record) = infra_instance_registry.get(service.instance_id) {
+                        instance_registry.insert(record);
+                    }
                     services.push(service);
                 }
             }
@@ -231,6 +235,7 @@ impl ServiceDaemonBuilder {
 
         ServiceDaemon {
             services,
+            instance_registry,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),

@@ -42,8 +42,8 @@ use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
-    SchedulingAdvisoryProfile, ServiceDescription, ServiceInstanceId, ServiceRuntimeSnapshot,
-    ServiceStatus, TriggerRuntimeSnapshot,
+    SchedulingAdvisoryProfile, ServiceDescription, ServiceInstanceId, ServiceInstanceRegistry,
+    ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
 };
 
 pub use builder::ServiceDaemonBuilder;
@@ -60,6 +60,7 @@ use startup_pipeline::StartupError;
 pub struct ServiceDaemonHandle {
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
+    instance_registry: Arc<ServiceInstanceRegistry>,
     shutdown_token: CancellationToken,
 }
 
@@ -157,6 +158,7 @@ impl ServiceDaemonHandle {
 /// ```
 pub struct ServiceDaemon {
     services: Vec<ServiceDescription>,
+    instance_registry: Arc<ServiceInstanceRegistry>,
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
@@ -202,6 +204,7 @@ impl ServiceDaemon {
         ServiceDaemonHandle {
             resources: self.resources.clone(),
             diagnostics: self.diagnostics.clone(),
+            instance_registry: self.instance_registry.clone(),
             shutdown_token: self.cancellation_token.clone(),
         }
     }

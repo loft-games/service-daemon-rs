@@ -132,7 +132,7 @@ mod tests {
 
     fn resources_with_registry_tag(tag: &'static str) -> Arc<DaemonResources> {
         let registry = crate::models::Registry::builder().with_tag(tag).build();
-        let (_, projection) = registry.into_parts();
+        let (_, projection, _) = registry.into_parts();
         let resources = create_test_resources();
         resources.set_service_catalog_projection(projection);
         resources

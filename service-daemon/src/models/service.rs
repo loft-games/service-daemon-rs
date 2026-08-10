@@ -1,5 +1,6 @@
 use crate::ProviderDependencyWatchSet;
 use crate::models::{ProviderInitError, RestartPolicy};
+use dashmap::DashMap;
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
 use std::any::TypeId;
@@ -407,6 +408,134 @@ impl fmt::Debug for ServiceInstanceHandle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ServiceInstanceRegistry: daemon-local runtime instance registry.
+// ---------------------------------------------------------------------------
+
+/// A daemon-local runtime record for one materialized service instance.
+#[derive(Clone)]
+pub(crate) struct ServiceInstanceRecord {
+    handle: ServiceInstanceHandle,
+    cancellation_token: CancellationToken,
+}
+
+impl ServiceInstanceRecord {
+    #[inline]
+    pub(crate) fn new(
+        handle: ServiceInstanceHandle,
+        cancellation_token: CancellationToken,
+    ) -> Self {
+        Self {
+            handle,
+            cancellation_token,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn handle(&self) -> ServiceInstanceHandle {
+        self.handle
+    }
+
+    #[inline]
+    pub(crate) fn instance_id(&self) -> ServiceInstanceId {
+        self.handle.instance_id()
+    }
+
+    #[inline]
+    pub(crate) fn entry_id(&self) -> ServiceEntryId {
+        self.handle.entry_id()
+    }
+
+    #[inline]
+    pub(crate) fn entry(&self) -> &'static ServiceEntry {
+        self.handle.entry()
+    }
+
+    #[inline]
+    pub(crate) fn name(&self) -> &'static str {
+        self.handle.name()
+    }
+
+    #[inline]
+    pub(crate) fn priority(&self) -> u8 {
+        self.entry().priority
+    }
+
+    #[inline]
+    pub(crate) fn params(&self) -> &'static [ServiceParam] {
+        self.entry().params
+    }
+
+    #[inline]
+    pub(crate) fn scheduling(&self) -> ServiceScheduling {
+        self.entry().scheduling
+    }
+
+    #[inline]
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
+    }
+}
+
+/// Daemon-local registry of materialized service instances.
+///
+/// Static service definitions remain in the process-wide service catalog. This
+/// registry tracks only instances owned by one daemon.
+#[derive(Default)]
+pub(crate) struct ServiceInstanceRegistry {
+    by_instance: DashMap<ServiceInstanceId, ServiceInstanceRecord>,
+    by_entry: DashMap<ServiceEntryId, HashSet<ServiceInstanceId>>,
+}
+
+impl ServiceInstanceRegistry {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn insert(&self, record: ServiceInstanceRecord) {
+        let instance_id = record.instance_id();
+        let entry_id = record.entry_id();
+        self.by_instance.insert(instance_id, record);
+        self.by_entry
+            .entry(entry_id)
+            .or_default()
+            .insert(instance_id);
+    }
+
+    pub(crate) fn get(&self, instance_id: ServiceInstanceId) -> Option<ServiceInstanceRecord> {
+        self.by_instance
+            .get(&instance_id)
+            .map(|record| record.clone())
+    }
+
+    pub(crate) fn handles_for_entry(&self, entry_id: ServiceEntryId) -> Vec<ServiceInstanceHandle> {
+        let mut handles = self
+            .by_entry
+            .get(&entry_id)
+            .map(|entry_instances| {
+                entry_instances
+                    .iter()
+                    .filter_map(|instance_id| self.get(*instance_id).map(|record| record.handle()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        handles.sort_by_key(|handle| handle.instance_id());
+        handles
+    }
+
+    pub(crate) fn records(&self) -> Vec<ServiceInstanceRecord> {
+        self.by_instance
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.by_instance.len()
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct GlobalServiceEntryRecord {
     pub entry_id: ServiceEntryId,
@@ -715,6 +844,8 @@ pub struct Registry {
     pub(crate) services: Vec<ServiceDescription>,
     /// Daemon-local projection of static registry entries selected for this registry.
     pub(crate) projection: Arc<ServiceCatalogProjection>,
+    /// Daemon-local registry of materialized service instances.
+    pub(crate) instance_registry: Arc<ServiceInstanceRegistry>,
 }
 
 impl Registry {
@@ -742,8 +873,14 @@ impl Registry {
         &self.services
     }
 
-    pub(crate) fn into_parts(self) -> (Vec<ServiceDescription>, Arc<ServiceCatalogProjection>) {
-        (self.services, self.projection)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<ServiceDescription>,
+        Arc<ServiceCatalogProjection>,
+        Arc<ServiceInstanceRegistry>,
+    ) {
+        (self.services, self.projection, self.instance_registry)
     }
 }
 
@@ -821,22 +958,29 @@ impl RegistryBuilder {
             &self.include_tags,
             &self.exclude_tags,
         ));
+        let instance_registry = Arc::new(ServiceInstanceRegistry::new());
         let mut services = Vec::new();
 
         for entry_id in projection.entry_ids() {
             let record =
                 ServiceCatalog::get(*entry_id).expect("projected service entry must exist");
-            services.push(ServiceDescription {
+            let service = ServiceDescription {
                 entry_id: record.entry_id,
                 instance_id: ServiceInstanceId::new_v7(),
                 entry: record.entry,
                 cancellation_token: CancellationToken::new(),
-            });
+            };
+            instance_registry.insert(ServiceInstanceRecord::new(
+                service.instance_handle(),
+                service.cancellation_token.clone(),
+            ));
+            services.push(service);
         }
 
         Registry {
             services,
             projection,
+            instance_registry,
         }
     }
 }
@@ -996,6 +1140,77 @@ mod tests {
         assert!(std::ptr::eq(handle.entry(), service.entry));
         assert_eq!(handle.name(), "test_registry_entry_id_second");
         assert_eq!(handle.module(), "models::service::tests");
+    }
+
+    #[test]
+    fn service_instance_registry_indexes_by_instance_and_entry() {
+        let entry_id = ServiceCatalog::entry_id_for_wrapper(test_registry_entry_id_second_wrapper)
+            .expect("wrapper should be indexed by global catalog");
+        let record = ServiceCatalog::get(entry_id).expect("entry ID should resolve to record");
+        let registry = ServiceInstanceRegistry::new();
+        let first_handle = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(Uuid::from_u128(100)),
+            entry_id,
+            record.entry,
+        );
+        let second_handle = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(Uuid::from_u128(101)),
+            entry_id,
+            record.entry,
+        );
+
+        registry.insert(ServiceInstanceRecord::new(
+            first_handle,
+            CancellationToken::new(),
+        ));
+        registry.insert(ServiceInstanceRecord::new(
+            second_handle,
+            CancellationToken::new(),
+        ));
+
+        assert_eq!(registry.len(), 2);
+        assert_eq!(
+            registry
+                .get(first_handle.instance_id())
+                .map(|record| record.handle()),
+            Some(first_handle)
+        );
+        assert_eq!(
+            registry.handles_for_entry(entry_id),
+            vec![first_handle, second_handle]
+        );
+    }
+
+    #[test]
+    fn registry_build_records_auto_start_instance_handles() {
+        let registry = Registry::builder()
+            .with_tag("__test_registry_entry_id_second__")
+            .build();
+        let service = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "test_registry_entry_id_second")
+            .expect("test service should be selected by tag");
+        let record = registry
+            .instance_registry
+            .get(service.instance_id)
+            .expect("auto-start service should have an instance record");
+
+        assert_eq!(registry.instance_registry.len(), registry.services().len());
+        assert_eq!(record.handle(), service.instance_handle());
+        assert_eq!(record.entry_id(), service.entry_id);
+        assert_eq!(record.name(), service.name());
+        assert_eq!(
+            record.instance_id().as_uuid().get_version_num(),
+            7,
+            "auto-start singleton service instances should receive UUIDv7 IDs"
+        );
+        assert_eq!(
+            registry
+                .instance_registry
+                .handles_for_entry(service.entry_id),
+            vec![service.instance_handle()]
+        );
     }
 
     #[test]
