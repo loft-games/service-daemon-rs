@@ -512,7 +512,7 @@ mod simulation_tests {
     fn test_mock_context_shelf_pre_filling() {
         // Verify that pre-filled shelf data is accessible through the handle.
         let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
-        let (builder, handle) = MockContext::builder()
+        let handle = MockContext::builder()
             .with_shelf::<i32>(svc_id, "counter", 42)
             .with_shelf::<String>(svc_id, "name", "hello".to_string())
             .build();
@@ -523,14 +523,13 @@ mod simulation_tests {
             Some("hello".to_string())
         );
 
-        // Builder should be valid (not consumed)
-        let _ = builder;
+        assert_eq!(handle.daemon().id(), handle.id());
     }
 
     #[test]
     fn test_mock_context_status_pre_filling() {
         let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
-        let (_, handle) = MockContext::builder()
+        let handle = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Healthy)
             .build();
 
@@ -539,7 +538,7 @@ mod simulation_tests {
 
     #[test]
     fn test_simulation_handle_dynamic_shelf_update() {
-        let (_, handle) = MockContext::builder().build();
+        let handle = MockContext::builder().build();
         let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
 
         assert!(!handle.has_shelf(svc_id, "counter"));
@@ -552,7 +551,7 @@ mod simulation_tests {
     #[test]
     fn test_simulation_handle_dynamic_status_update() {
         let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
-        let (_, handle) = MockContext::builder()
+        let handle = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Initializing)
             .build();
 
@@ -566,13 +565,13 @@ mod simulation_tests {
     #[test]
     fn test_mock_context_isolation() {
         // Two MockContexts should have completely separate resources.
-        let (_, handle_a) = MockContext::builder()
+        let handle_a = MockContext::builder()
             .with_status(
                 ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
                 ServiceStatus::Healthy,
             )
             .build();
-        let (_, handle_b) = MockContext::builder()
+        let handle_b = MockContext::builder()
             .with_status(
                 ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
                 ServiceStatus::Initializing,

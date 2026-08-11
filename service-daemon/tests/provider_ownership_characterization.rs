@@ -478,8 +478,8 @@ async fn simulation_daemons_share_root_provider_cache_by_default() {
     use service_daemon::{MockContext, Registry};
 
     async fn run_simulation_until_observed(count: usize) {
-        let (builder, _handle) = MockContext::builder().with_logging(false).build();
-        let daemon = builder
+        let simulation = MockContext::builder()
+            .with_logging(false)
             .with_registry(
                 Registry::builder()
                     .with_tag("simulation_provider_cache_shared")
@@ -487,7 +487,7 @@ async fn simulation_daemons_share_root_provider_cache_by_default() {
             )
             .build();
 
-        daemon
+        simulation
             .run_for_duration(Duration::from_millis(200))
             .await
             .expect("simulation daemon should run for duration");
@@ -517,11 +517,9 @@ async fn simulation_pre_run_provider_override_is_daemon_local() -> anyhow::Resul
     SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS.store(0, Ordering::SeqCst);
     SIMULATION_PRE_RUN_OVERRIDE_VALUE.store(0, Ordering::SeqCst);
 
-    let (builder, _handle) = MockContext::builder()
+    let simulation = MockContext::builder()
         .with_logging(false)
         .with_provider_override(SimulationPreRunOverrideProvider(42))
-        .build();
-    let daemon = builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_pre_run_provider_override")
@@ -529,7 +527,7 @@ async fn simulation_pre_run_provider_override_is_daemon_local() -> anyhow::Resul
         )
         .build();
 
-    daemon
+    simulation
         .run_for_duration(Duration::from_millis(200))
         .await
         .expect("simulation daemon should run for duration");
@@ -548,15 +546,15 @@ async fn simulation_pre_run_provider_override_is_daemon_local() -> anyhow::Resul
     assert_eq!(root.0, 1);
     assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_INITS.load(Ordering::SeqCst), 1);
 
-    let (builder, _handle) = MockContext::builder().with_logging(false).build();
-    let daemon = builder
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_pre_run_provider_override")
                 .build(),
         )
         .build();
-    daemon
+    simulation
         .run_for_duration(Duration::from_millis(200))
         .await
         .expect("second simulation daemon should run for duration");
@@ -588,18 +586,19 @@ async fn simulation_runtime_provider_override_reloads_dependent_service() -> any
     SIMULATION_RUNTIME_OVERRIDE_FIRST_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE.store(0, Ordering::SeqCst);
 
-    let (builder, handle) = MockContext::builder().with_logging(false).build();
-    let daemon = builder
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_runtime_provider_override")
                 .build(),
         )
         .build();
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run().await;
-        daemon.wait().await.expect("daemon wait should succeed");
+        runner.run().await;
+        runner.wait().await.expect("daemon wait should succeed");
     });
 
     wait_for_observations(
@@ -608,7 +607,7 @@ async fn simulation_runtime_provider_override_reloads_dependent_service() -> any
         1,
     )
     .await;
-    handle.override_provider(SimulationRuntimeOverrideProvider(42));
+    simulation.override_provider(SimulationRuntimeOverrideProvider(42));
 
     wait_for_observations(
         "runtime override should trigger reload and second observation",
@@ -647,21 +646,20 @@ async fn root_value_mutation_does_not_reload_daemon_after_local_override() -> an
     SIMULATION_FORK_FIRST_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_FORK_SECOND_VALUE.store(0, Ordering::SeqCst);
 
-    let (builder, _handle) = MockContext::builder()
+    let simulation = MockContext::builder()
         .with_logging(false)
         .with_provider_override(SimulationForkBoundaryProvider(42))
-        .build();
-    let daemon = builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_fork_boundary")
                 .build(),
         )
         .build();
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run().await;
-        daemon.wait().await.expect("daemon wait should succeed");
+        runner.run().await;
+        runner.wait().await.expect("daemon wait should succeed");
     });
 
     wait_for_observations(
@@ -708,38 +706,38 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
     SIMULATION_LOCAL_VALUE_ROOT_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_LOCAL_VALUE_MUTATIONS.store(0, Ordering::SeqCst);
 
-    let (local_builder, _local_handle) = MockContext::builder()
+    let local_simulation = MockContext::builder()
         .with_logging(false)
         .with_provider_override(SimulationLocalValueProvider(42))
-        .build();
-    let local_daemon = local_builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_local_value_boundary")
                 .build(),
         )
         .build();
-    let local_cancel = local_daemon.cancel_token();
+    let local_cancel = local_simulation.cancel_token();
+    let local_runner = local_simulation.clone();
     let local_task = tokio::spawn(async move {
-        local_daemon.run().await;
-        local_daemon
+        local_runner.run().await;
+        local_runner
             .wait()
             .await
             .expect("local daemon wait should succeed");
     });
 
-    let (root_builder, _root_handle) = MockContext::builder().with_logging(false).build();
-    let root_daemon = root_builder
+    let root_simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_local_value_boundary")
                 .build(),
         )
         .build();
-    let root_cancel = root_daemon.cancel_token();
+    let root_cancel = root_simulation.cancel_token();
+    let root_runner = root_simulation.clone();
     let root_task = tokio::spawn(async move {
-        root_daemon.run().await;
-        root_daemon
+        root_runner.run().await;
+        root_runner
             .wait()
             .await
             .expect("root daemon wait should succeed");
@@ -802,18 +800,19 @@ async fn watch_trigger_target_resolution_uses_daemon_local_override() {
     SIMULATION_WATCH_TARGET_FIRST_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_WATCH_TARGET_SECOND_VALUE.store(0, Ordering::SeqCst);
 
-    let (builder, handle) = MockContext::builder().with_logging(false).build();
-    let daemon = builder
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_watch_target_provider")
                 .build(),
         )
         .build();
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run().await;
-        daemon.wait().await.expect("daemon wait should succeed");
+        runner.run().await;
+        runner.wait().await.expect("daemon wait should succeed");
     });
 
     wait_for_observations(
@@ -823,7 +822,7 @@ async fn watch_trigger_target_resolution_uses_daemon_local_override() {
     )
     .await;
 
-    handle.override_provider(SimulationWatchTargetProvider(42));
+    simulation.override_provider(SimulationWatchTargetProvider(42));
 
     wait_for_observations(
         "watch target override should reload trigger generation",
@@ -858,18 +857,19 @@ async fn watch_trigger_extra_dependency_resolution_uses_daemon_local_override() 
     SIMULATION_WATCH_EXTRA_FIRST_DEP_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_WATCH_EXTRA_SECOND_DEP_VALUE.store(0, Ordering::SeqCst);
 
-    let (builder, handle) = MockContext::builder().with_logging(false).build();
-    let daemon = builder
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_watch_extra_dependency")
                 .build(),
         )
         .build();
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run().await;
-        daemon.wait().await.expect("daemon wait should succeed");
+        runner.run().await;
+        runner.wait().await.expect("daemon wait should succeed");
     });
 
     wait_for_observations(
@@ -879,7 +879,7 @@ async fn watch_trigger_extra_dependency_resolution_uses_daemon_local_override() 
     )
     .await;
 
-    handle.override_provider(SimulationWatchExtraDependencyProvider(42));
+    simulation.override_provider(SimulationWatchExtraDependencyProvider(42));
 
     wait_for_observations(
         "extra dependency override should reload trigger generation",

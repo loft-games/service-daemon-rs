@@ -460,9 +460,12 @@ async fn test_reachable_eager_provider_dependency_initializes_before_service() {
 #[cfg(feature = "simulation")]
 #[tokio::test]
 async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
+    use service_daemon::MockContext;
+
     SIMULATION_EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let daemon = ServiceDaemon::builder()
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_simulation_eager_test")
@@ -472,7 +475,7 @@ async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
 
     assert!(!SIMULATION_EAGER_INIT_CALLED.load(Ordering::SeqCst));
 
-    daemon
+    simulation
         .run_for_duration(Duration::from_millis(100))
         .await
         .unwrap();
@@ -483,9 +486,12 @@ async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
 #[cfg(feature = "simulation")]
 #[tokio::test]
 async fn test_run_for_duration_eager_init_failure_returns_error() {
+    use service_daemon::MockContext;
+
     SIMULATION_EAGER_FAILURE_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let daemon = ServiceDaemon::builder()
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_simulation_eager_failure_test")
@@ -495,7 +501,9 @@ async fn test_run_for_duration_eager_init_failure_returns_error() {
 
     assert!(!SIMULATION_EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
 
-    let result = daemon.run_for_duration(Duration::from_millis(100)).await;
+    let result = simulation
+        .run_for_duration(Duration::from_millis(100))
+        .await;
 
     assert!(SIMULATION_EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
     assert!(result.is_err());

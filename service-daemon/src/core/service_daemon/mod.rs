@@ -20,6 +20,8 @@ mod simulation_startup;
 mod startup_pipeline;
 mod startup_preflight;
 
+#[cfg(feature = "simulation")]
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::pending;
 use std::sync::{Arc, OnceLock};
@@ -215,16 +217,119 @@ impl DaemonInstanceHandle {
         }
     }
 
-    /// Run for a limited duration (for testing).
+    /// Run for a limited duration using simulation startup semantics.
     #[cfg(feature = "simulation")]
     #[instrument(skip(self))]
-    pub async fn run_for_duration(&self, duration: Duration) -> ServiceResult<()> {
+    pub(crate) async fn simulation_run_for_duration(
+        &self,
+        duration: Duration,
+    ) -> ServiceResult<()> {
         let result = {
             let mut inner = self.inner.lock().await;
             inner.run_for_duration(duration).await
         };
         daemon_registry().unregister(self.id);
         result
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_set_shelf<T: Any + Send + Sync>(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        key: &str,
+        value: T,
+    ) {
+        let entry = self.resources.shelf.entry(service_instance_id).or_default();
+        entry.insert(key.to_string(), Box::new(value));
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_set_status(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        status: ServiceStatus,
+    ) {
+        self.resources
+            .status_plane
+            .insert(service_instance_id, status);
+        self.resources.status_changed.notify_waiters();
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_trigger_reload(&self, service_instance_id: &ServiceInstanceId) {
+        if let Some(notify) = self.resources.reload_signals.get(service_instance_id) {
+            notify.notify_one();
+        }
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_override_provider<T>(&self, value: T)
+    where
+        T: 'static + Send + Sync + Clone,
+    {
+        self.resources
+            .provider_scope
+            .override_local_slot(Arc::new(value));
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_service_instance_ids(&self) -> Vec<ServiceInstanceId> {
+        self.resources
+            .status_plane
+            .iter()
+            .map(|entry| *entry.key())
+            .collect()
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_get_shelf<T: Any + Clone + Send + Sync>(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        key: &str,
+    ) -> Option<T> {
+        self.resources
+            .shelf
+            .get(&service_instance_id)
+            .and_then(|entry| {
+                entry
+                    .get(key)
+                    .and_then(|val| val.downcast_ref::<T>().cloned())
+            })
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_get_status(
+        &self,
+        service_instance_id: ServiceInstanceId,
+    ) -> Option<ServiceStatus> {
+        self.resources
+            .status_plane
+            .get(&service_instance_id)
+            .map(|status| status.value().clone())
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_has_shelf(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        key: &str,
+    ) -> bool {
+        self.resources
+            .shelf
+            .get(&service_instance_id)
+            .is_some_and(|entry| entry.contains_key(key))
+    }
+
+    #[cfg(feature = "simulation")]
+    pub(crate) fn simulation_shelf_keys(
+        &self,
+        service_instance_id: ServiceInstanceId,
+    ) -> Vec<String> {
+        self.resources
+            .shelf
+            .get(&service_instance_id)
+            .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
+            .unwrap_or_default()
     }
 
     fn status_for_snapshot(&self, id: ServiceInstanceId) -> ServiceStatus {
@@ -1298,6 +1403,9 @@ mod tests {
             .iter()
             .flat_map(|service| service.instance_registry.records())
             .collect::<Vec<_>>();
+        for record in &instance_records {
+            daemon.instance_registry.insert(record.clone());
+        }
         daemon
             .resources
             .runtime_facts
@@ -1504,13 +1612,13 @@ mod tests {
         setup_tracing();
         SHORT_RUN_COUNT.store(0, Ordering::SeqCst);
 
-        let daemon = ServiceDaemon::builder()
+        let simulation = crate::MockContext::builder()
+            .with_logging(false)
             .with_registry(Registry::builder().with_tag("__test_short_run__").build())
-            .with_restart_policy(RestartPolicy::for_testing())
             .build();
 
         let start = Instant::now();
-        daemon
+        simulation
             .run_for_duration(Duration::from_millis(500))
             .await
             .unwrap();

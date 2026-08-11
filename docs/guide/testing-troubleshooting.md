@@ -47,27 +47,38 @@ async fn my_service() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_two_phase_simulation() {
-    // 1. Set up the test shelf
-    let (builder, handle) = MockContext::builder()
-        .with_shelf::<String>("my_service", "config_key", "initial_val".into())
-        .build();
+    let registry = Registry::builder().with_tag("__test_sim__").build();
+    let service_instance_id = registry
+        .services()
+        .iter()
+        .find(|service| service.name() == "my_service")
+        .and_then(|service| service.instances().first().copied())
+        .map(|instance| instance.instance_id())
+        .expect("my_service should be selected");
 
-    let daemon = builder
-        .with_registry(Registry::builder().with_tag("__test_sim__").build())
+    // 1. Set up the test shelf
+    let simulation = MockContext::builder()
+        .with_shelf::<String>(service_instance_id, "config_key", "initial_val".into())
+        .with_registry(registry)
         .build();
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
     
     // Start daemon in background
-    let daemon_task = tokio::spawn(async move { daemon.run().await; });
+    let runner = simulation.clone();
+    let daemon_task = tokio::spawn(async move {
+        runner.run().await;
+        runner.wait().await.ok();
+    });
 
     // 2. Update state while the daemon is running
-    handle.set_shelf::<String>("my_service", "dynamic_key", "new_val".into());
+    simulation.set_shelf::<String>(service_instance_id, "dynamic_key", "new_val".into());
 
     // 3. Verify side-effects
-    let result = handle.get_shelf("my_service", "processed_result");
+    let result = simulation.get_shelf::<String>(service_instance_id, "processed_result");
     assert!(result.is_some());
 
     cancel.cancel();
+    daemon_task.await.ok();
 }
 ```
 
@@ -78,6 +89,9 @@ async fn test_two_phase_simulation() {
 | **Builder** | `with_shelf` | Pre-fills a Shelf entry for a specific service. |
 | **Builder** | `with_status` | Pre-sets a lifecycle status in the isolated status plane. |
 | **Builder** | `with_provider_override` | Installs a daemon-local provider value before eager initialization and service startup. |
+| **Builder** | `with_registry` | Selects which registered services run inside the simulation. |
+| **Handle** | `run` / `wait` / `shutdown` | Controls the sandbox daemon lifecycle. |
+| **Handle** | `run_for_duration` | Runs the sandbox daemon for a bounded duration. |
 | **Handle** | `get_shelf` | Reads a cloned value from the shelf without holding a lock after return. |
 | **Handle** | `get_status` | Reads a cloned status value without holding a lock after return. |
 | **Handle** | `set_shelf` | Writes or replaces a value in the shelf. |
@@ -93,19 +107,16 @@ struct TestConfig {
     endpoint: String,
 }
 
-let (builder, handle) = MockContext::builder()
+let simulation = MockContext::builder()
     .with_provider_override(TestConfig {
         endpoint: "memory://test".to_string(),
     })
-    .build();
-
-let mut daemon = builder
     .with_registry(Registry::builder().with_tag("__test_sim__").build())
     .build();
 
-daemon.run().await;
+simulation.run().await;
 
-handle.override_provider(TestConfig {
+simulation.override_provider(TestConfig {
     endpoint: "memory://after-reload".to_string(),
 });
 ```
@@ -113,7 +124,7 @@ handle.override_provider(TestConfig {
 A pre-run override is visible to reachable eager providers and the first service generation. A runtime override mutates the provider binding: dependent services and `Watch` triggers reload, and the next generation resolves the new daemon-local provider value.
 
 > [!WARNING]
-> **Deadlock Risk**: Avoid using `handle.resources()` directly in tests if you plan to `await` anything afterwards. Holding a reference to internal `DashMap` guards across `.await` points will cause an immediate deadlock when a service tries to access those same resources. Always prefer `get_shelf()` and `get_status()`.
+> **Deadlock Risk**: Avoid reaching into daemon internals in tests if you plan to `await` anything afterwards. Holding internal `DashMap` guards across `.await` points can deadlock when a service tries to access those same resources. Always prefer `SimulationHandle` readers such as `get_shelf()` and `get_status()`.
 
 ## 3. Troubleshooting
 

@@ -32,22 +32,20 @@ async fn test_real_service_reads_pre_filled_shelf() {
     // Build sandbox with pre-filled shelf data.
     let registry = Registry::builder().with_tag("sim_shelf").build();
     let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
-    let (builder, handle) = MockContext::builder()
+    let simulation = MockContext::builder()
         .with_shelf::<String>(shelf_reader_id, "config_key", "hello_from_mock".into())
+        .with_registry(registry)
         .build();
 
-    // Override registry to discover ONLY our tagged service
-    let daemon = builder.with_registry(registry).build();
-
     // Run the daemon for enough time for the service to execute
-    daemon
+    simulation
         .run_for_duration(Duration::from_millis(500))
         .await
         .unwrap();
 
     // Verify: the service read the pre-filled value and wrote it to "read_result"
     assert_eq!(
-        handle.get_shelf::<String>(shelf_reader_id, "read_result"),
+        simulation.get_shelf::<String>(shelf_reader_id, "read_result"),
         Some("hello_from_mock".to_string()),
         "Real service should have read and persisted the pre-filled shelf value"
     );
@@ -66,29 +64,28 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
 
     let registry = Registry::builder().with_tag("sim_shelf").build();
     let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
-    let (builder, handle) = MockContext::builder().build();
+    let simulation = MockContext::builder().with_registry(registry).build();
 
-    let daemon = builder.with_registry(registry).build();
-
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
 
     // Run daemon in background
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run_for_duration(Duration::from_secs(3)).await.ok();
+        runner.run_for_duration(Duration::from_secs(3)).await.ok();
     });
 
     // Wait for the service to start
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // -- SimulationHandle: inject shelf data mid-flight --
-    handle.set_shelf::<String>(shelf_reader_id, "dynamic_key", "injected_mid_flight".into());
+    simulation.set_shelf::<String>(shelf_reader_id, "dynamic_key", "injected_mid_flight".into());
 
     // Wait for the service to observe and persist the mutation
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify: the service saw the dynamically injected value
     assert_eq!(
-        handle.get_shelf::<String>(shelf_reader_id, "dynamic_result"),
+        simulation.get_shelf::<String>(shelf_reader_id, "dynamic_result"),
         Some("injected_mid_flight".to_string()),
         "Real service should have observed the SimulationHandle's dynamic shelf injection"
     );
@@ -111,16 +108,16 @@ async fn test_two_phase_god_hand_with_real_service() {
     // Pre-fill initial config before startup.
     let registry = Registry::builder().with_tag("sim_shelf").build();
     let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
-    let (builder, handle) = MockContext::builder()
+    let simulation = MockContext::builder()
         .with_shelf::<String>(shelf_reader_id, "config_key", "phase1_value".into())
+        .with_registry(registry)
         .build();
 
-    let daemon = builder.with_registry(registry).build();
+    let cancel = simulation.cancel_token();
 
-    let cancel = daemon.cancel_token();
-
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run_for_duration(Duration::from_secs(3)).await.ok();
+        runner.run_for_duration(Duration::from_secs(3)).await.ok();
     });
 
     // Wait for service to read pre-filled data.
@@ -128,20 +125,20 @@ async fn test_two_phase_god_hand_with_real_service() {
 
     // Verify the service read the pre-filled value.
     assert_eq!(
-        handle.get_shelf::<String>(shelf_reader_id, "read_result"),
+        simulation.get_shelf::<String>(shelf_reader_id, "read_result"),
         Some("phase1_value".to_string()),
         "Service should have read the pre-filled 'phase1_value'"
     );
 
     // SimulationHandle overwrites shelf data mid-flight.
-    handle.set_shelf::<String>(shelf_reader_id, "dynamic_key", "phase2_value".into());
+    simulation.set_shelf::<String>(shelf_reader_id, "dynamic_key", "phase2_value".into());
 
     // Wait for service to observe the mid-flight mutation.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify the service saw the dynamically injected value.
     assert_eq!(
-        handle.get_shelf::<String>(shelf_reader_id, "dynamic_result"),
+        simulation.get_shelf::<String>(shelf_reader_id, "dynamic_result"),
         Some("phase2_value".to_string()),
         "Service should have observed the SimulationHandle's 'phase2_value'"
     );
@@ -160,17 +157,16 @@ async fn test_god_hand_status_flip_with_real_service() {
 
     let registry = Registry::builder().with_tag("sim_status").build();
     let status_watcher_id = service_instance_id(&registry, "status_watcher_service");
-    let (builder, handle) = MockContext::builder().build();
+    let simulation = MockContext::builder().with_registry(registry).build();
 
-    let daemon = builder.with_registry(registry).build();
-
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
 
     // Run the daemon in the background -- tests should not call wait()
     // inline because it blocks the test thread waiting for OS signals.
+    let runner = simulation.clone();
     let daemon_task = tokio::spawn(async move {
-        daemon.run().await;
-        if let Err(err) = daemon.wait().await {
+        runner.run().await;
+        if let Err(err) = runner.wait().await {
             panic!("daemon.wait() failed: {err}");
         }
     });
@@ -180,7 +176,7 @@ async fn test_god_hand_status_flip_with_real_service() {
 
     // Discover visible ServiceInstanceIds. This includes both status_watcher_service
     // and infra services (log_service) that are auto-included.
-    let ids = handle.service_instance_ids();
+    let ids = simulation.service_instance_ids();
     assert!(
         !ids.is_empty(),
         "Should have at least one service (status_watcher_service)"
@@ -192,14 +188,14 @@ async fn test_god_hand_status_flip_with_real_service() {
     );
 
     // -- SimulationHandle: flip status to Healthy --
-    handle.set_status(status_watcher_id, ServiceStatus::Healthy);
+    simulation.set_status(status_watcher_id, ServiceStatus::Healthy);
 
     // Wait for service to observe the new status via state()
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Verify: service persisted the observed status to shelf
     assert_eq!(
-        handle.get_shelf::<String>(status_watcher_id, "observed_status"),
+        simulation.get_shelf::<String>(status_watcher_id, "observed_status"),
         Some("Healthy".to_string()),
         "Real service should have observed the SimulationHandle's status flip to Healthy"
     );

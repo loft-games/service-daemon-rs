@@ -64,29 +64,28 @@ mod tests {
             .and_then(|service| service.instances().first().copied())
             .map(|instance| instance.instance_id())
             .expect("shelf_reader_service should be selected");
-        let (builder, handle) = MockContext::builder()
+        let simulation = MockContext::builder()
             .with_shelf::<String>(shelf_reader_id, "config_key", "initial_val".into())
+            .with_registry(registry)
             .build();
 
-        let daemon = builder.with_registry(registry).build();
-
-        let cancel = daemon.cancel_token();
+        let cancel = simulation.cancel_token();
+        let runner = simulation.clone();
         let daemon_task = tokio::spawn(async move {
-            let mut daemon = daemon;
-            daemon.run().await;
-            if let Err(err) = daemon.wait().await {
+            runner.run().await;
+            if let Err(err) = runner.wait().await {
                 panic!("daemon.wait() failed: {err}");
             }
         });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = handle.get_shelf(shelf_reader_id, "read_result");
+        let result: Option<String> = simulation.get_shelf(shelf_reader_id, "read_result");
         assert_eq!(result, Some("initial_val".into()));
 
-        handle.set_shelf::<String>(shelf_reader_id, "dynamic_key", "mid_flight_val".into());
+        simulation.set_shelf::<String>(shelf_reader_id, "dynamic_key", "mid_flight_val".into());
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = handle.get_shelf(shelf_reader_id, "dynamic_result");
+        let result: Option<String> = simulation.get_shelf(shelf_reader_id, "dynamic_result");
         assert_eq!(result, Some("mid_flight_val".into()));
 
         cancel.cancel();
@@ -98,12 +97,12 @@ mod tests {
 
 ## 3. The `SimulationHandle`
 
-The `SimulationHandle` lets tests inspect and mutate the running sandbox without reaching into daemon internals.
+The `SimulationHandle` lets tests run, inspect, and mutate the sandbox without reaching into daemon internals.
 
 ### Snapshot Inspection
 
 ```rust,ignore
-let service_instance_id = registry.services()[0].instance_id;
+let service_instance_id = registry.services()[0].instances()[0].instance_id();
 let val: Option<String> = handle.get_shelf(service_instance_id, "key");
 let status = handle.get_status(service_instance_id);
 

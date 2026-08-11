@@ -221,15 +221,14 @@ graph LR
         MC["MockContextBuilder"] -->|pre-fill| Shelf["Shelf Data"]
         MC -->|pre-fill| Status["Status Plane"]
         MC -->|pre-run override| ProviderScope["Provider Scope"]
-        MC -->|produces| Builder["ServiceDaemonBuilder"]
         MC -->|produces| Handle["SimulationHandle"]
     end
 
-    subgraph Daemon_Execution ["ServiceDaemon Engine"]
-        Builder -->|build + run| SD["ServiceDaemon"]
-        SD -->|owns| Resources["Private DaemonResources"]
+    subgraph Daemon_Execution ["Daemon Instance"]
+        Handle -->|controls| DIH["DaemonInstanceHandle"]
+        DIH -->|owns| Resources["Private DaemonResources"]
         Resources --> ProviderScope
-        SD -->|runs| RealSvc["Real Service Logic"]
+        DIH -->|runs| RealSvc["Real Service Logic"]
     end
 
     subgraph Runtime_Updates ["Runtime Updates"]
