@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Cross-platform Local IPC Providers**: Added `LocalIpcListen` and `LocalIpcConnect` provider templates that accept logical names and map them to Unix domain sockets or Windows named pipes while exposing a shared `AsyncRead`/`AsyncWrite` service shape.
 - **Provider Attribute Normalization**: Added explicit `default = ...` and `template = ...` provider head forms while preserving existing bare defaults and built-in template syntax.
 - **Release Security Contract**: Added maintainer documentation for deployment boundaries, logging safety, Unix socket deployment, TCP listener exposure, and example-production responsibilities.
-- **Service Handles**: Added `ServiceHandle` and `service_handle!(...)` so provider code can resolve a daemon-local handle to a selected static service entry by service function path.
+- **Service Handles**: Added `ServiceHandle` and `service_handle!(...)` so provider code can resolve a handle to a selected static service entry by service function path.
 - **Service Instance Handles**: Added `ServiceInstanceHandle` to expose the runtime `ServiceInstanceId` together with the static `ServiceEntryId` for a materialized service instance.
 - **Daemon Instance Handles**: Added UUIDv7 `DaemonInstanceId` and `DaemonInstanceHandle` as the public daemon instance control handle returned by `ServiceDaemonBuilder::build()`.
 - **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.

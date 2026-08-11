@@ -263,14 +263,15 @@ pub struct ServiceEntry {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceHandle: daemon-local static service entry capability.
+// ServiceHandle: static service definition handle.
 // ---------------------------------------------------------------------------
 
-/// A handle to a service entry selected by the current daemon registry.
+/// A handle to a static service definition.
 ///
 /// The handle identifies the static service definition, not a running instance.
 /// Runtime instances use [`ServiceInstanceId`] and are allocated when a service
-/// is materialized by the daemon.
+/// is materialized by a daemon. A daemon verifies this handle against its own
+/// registry projection before returning daemon-local instances for it.
 #[derive(Clone, Copy)]
 pub struct ServiceHandle {
     entry_id: ServiceEntryId,
@@ -685,6 +686,7 @@ impl ServiceCatalogProjection {
                 entry_ids.push(*entry_id);
             }
         }
+        entry_ids.sort();
 
         Arc::new(Self {
             entry_ids,

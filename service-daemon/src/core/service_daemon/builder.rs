@@ -224,6 +224,7 @@ impl ServiceDaemonBuilder {
                 }
             }
             projection = projection.merge(&infra_projection);
+            services.sort_by_key(|service| service.entry_id);
         }
 
         let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);

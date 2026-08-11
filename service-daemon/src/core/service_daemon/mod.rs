@@ -80,18 +80,12 @@ impl DaemonInstanceHandle {
         self.shutdown_token.clone()
     }
 
-    /// Get the current status of a service by its `ServiceInstanceId`.
-    pub async fn get_service_status(&self, id: &ServiceInstanceId) -> ServiceStatus {
-        self.resources
-            .status_plane
-            .get(id)
-            .map(|s| s.clone())
-            .unwrap_or(ServiceStatus::Terminated)
-    }
-
     /// Get the current status of a service instance handle.
     pub async fn get_instance_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus {
-        self.get_service_status(&handle.instance_id()).await
+        if !self.owns_instance(handle) {
+            return ServiceStatus::Terminated;
+        }
+        self.status_for_instance_id(handle.instance_id())
     }
 
     /// Return a read-only snapshot of daemon diagnostics.
@@ -120,21 +114,15 @@ impl DaemonInstanceHandle {
             .service_snapshots(|service_instance_id| self.status_for_snapshot(service_instance_id))
     }
 
-    /// Return read-only runtime facts for a service.
-    pub fn runtime_service(&self, id: ServiceInstanceId) -> Option<ServiceRuntimeSnapshot> {
-        self.resources
-            .runtime_facts
-            .service_snapshot(id, |service_instance_id| {
-                self.status_for_snapshot(service_instance_id)
-            })
-    }
-
     /// Return read-only runtime facts for a service instance handle.
     pub fn runtime_instance(
         &self,
         handle: &ServiceInstanceHandle,
     ) -> Option<ServiceRuntimeSnapshot> {
-        self.runtime_service(handle.instance_id())
+        if !self.owns_instance(handle) {
+            return None;
+        }
+        self.runtime_snapshot_for_instance_id(handle.instance_id())
     }
 
     /// Request shutdown for one managed service instance.
@@ -167,9 +155,17 @@ impl DaemonInstanceHandle {
         self.resources.runtime_facts.trigger_snapshots()
     }
 
-    /// Return read-only runtime facts for an observed trigger.
-    pub fn runtime_trigger(&self, id: ServiceInstanceId) -> Option<TriggerRuntimeSnapshot> {
-        self.resources.runtime_facts.trigger_snapshot(id)
+    /// Return read-only runtime facts for an observed trigger service instance.
+    pub fn runtime_trigger_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> Option<TriggerRuntimeSnapshot> {
+        if !self.owns_instance(handle) {
+            return None;
+        }
+        self.resources
+            .runtime_facts
+            .trigger_snapshot(handle.instance_id())
     }
 
     /// Return all service instances owned by this daemon.
@@ -181,7 +177,7 @@ impl DaemonInstanceHandle {
             .collect()
     }
 
-    /// Return service instances for one daemon-local service definition.
+    /// Return service instances for one service definition selected by this daemon.
     pub fn service_instances_for(&self, handle: &ServiceHandle) -> Vec<ServiceInstanceHandle> {
         let Some(projection) = self.resources.service_catalog_projection() else {
             return Vec::new();
@@ -232,11 +228,32 @@ impl DaemonInstanceHandle {
     }
 
     fn status_for_snapshot(&self, id: ServiceInstanceId) -> ServiceStatus {
+        self.status_for_instance_id(id)
+    }
+
+    fn status_for_instance_id(&self, id: ServiceInstanceId) -> ServiceStatus {
         self.resources
             .status_plane
             .get(&id)
             .map(|status| status.clone())
             .unwrap_or(ServiceStatus::Initializing)
+    }
+
+    fn runtime_snapshot_for_instance_id(
+        &self,
+        id: ServiceInstanceId,
+    ) -> Option<ServiceRuntimeSnapshot> {
+        self.resources
+            .runtime_facts
+            .service_snapshot(id, |service_instance_id| {
+                self.status_for_snapshot(service_instance_id)
+            })
+    }
+
+    fn owns_instance(&self, handle: &ServiceInstanceHandle) -> bool {
+        self.instance_registry
+            .get(handle.instance_id())
+            .is_some_and(|record| record.handle() == *handle)
     }
 }
 
@@ -846,6 +863,28 @@ mod tests {
     }
 
     #[test]
+    fn builder_infra_tag_merge_preserves_registry_entry_order() {
+        let daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_infra_tags(&["__unit_high_priority_capacity_infra__"])
+            .build_inner();
+
+        let entry_ids = daemon
+            .services
+            .iter()
+            .map(|service| service.entry_id)
+            .collect::<Vec<_>>();
+        let mut sorted_entry_ids = entry_ids.clone();
+        sorted_entry_ids.sort();
+
+        assert_eq!(entry_ids, sorted_entry_ids);
+    }
+
+    #[test]
     fn builder_capacity_plan_counts_high_priority_triggers_and_services_equally() {
         let daemon = test_inner_builder()
             .with_registry(
@@ -1204,55 +1243,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_service_daemon_handle() {
+    async fn daemon_handle_returns_terminated_for_unknown_instance_handle() {
         setup_tracing();
         let handle = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .build();
-
-        // Initially, unknown service should be Terminated
-        let status = handle
-            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(999)))
-            .await;
-        assert_eq!(status, ServiceStatus::Terminated);
-
-        // Insert a status manually and verify
-        handle.resources.status_plane.insert(
-            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
-            ServiceStatus::Healthy,
+        let unknown_instance = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(999)),
+            ServiceEntryId::new(999),
+            &STANDARD_TEST_ENTRY,
         );
-        let status = handle
-            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(1)))
-            .await;
-        assert_eq!(status, ServiceStatus::Healthy);
+
+        let status = handle.get_instance_status(&unknown_instance).await;
+        assert_eq!(status, ServiceStatus::Terminated);
     }
 
     #[tokio::test]
-    async fn test_service_status_update() {
+    async fn daemon_handle_reads_status_by_instance_handle() {
         setup_tracing();
-        let handle = ServiceDaemon::builder()
-            .with_registry(isolated_registry())
+        let registry = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
             .build();
+        let instance = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "capacity_primary_standard_service")
+            .and_then(|service| service.instances().first().copied())
+            .expect("standard test service should be selected by tag");
+        let handle = ServiceDaemon::builder().with_registry(registry).build();
 
-        // Insert status
-        handle.resources.status_plane.insert(
-            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
-            ServiceStatus::Initializing,
-        );
-
-        let status = handle
-            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
-            .await;
+        let status = handle.get_instance_status(&instance).await;
         assert_eq!(status, ServiceStatus::Initializing);
 
-        // Update status
-        handle.resources.status_plane.insert(
-            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
-            ServiceStatus::Healthy,
-        );
-        let status = handle
-            .get_service_status(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
-            .await;
+        handle
+            .resources
+            .status_plane
+            .insert(instance.instance_id(), ServiceStatus::Healthy);
+        let status = handle.get_instance_status(&instance).await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
@@ -1305,17 +1332,25 @@ mod tests {
                 ServiceInstanceId::new(uuid::Uuid::from_u128(2))
             ]
         );
+        let standard_instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| {
+                instance.instance_id() == ServiceInstanceId::new(uuid::Uuid::from_u128(1))
+            })
+            .expect("standard test service instance should be registered");
         assert_eq!(
             handle
-                .runtime_service(ServiceInstanceId::new(uuid::Uuid::from_u128(1)))
+                .runtime_instance(&standard_instance)
                 .map(|snapshot| snapshot.status),
             Some(ServiceStatus::Healthy)
         );
-        assert!(
-            handle
-                .runtime_service(ServiceInstanceId::new(uuid::Uuid::from_u128(999)))
-                .is_none()
+        let fake_instance = ServiceInstanceHandle::new(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(999)),
+            standard_instance.entry_id(),
+            standard_instance.entry(),
         );
+        assert!(handle.runtime_instance(&fake_instance).is_none());
 
         let readiness = handle.runtime_readiness();
         assert_eq!(readiness.healthy.len(), 1);

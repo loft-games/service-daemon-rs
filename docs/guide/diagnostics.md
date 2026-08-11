@@ -168,7 +168,7 @@ need current daemon state:
 let runtime = daemon.runtime();
 let readiness = daemon.runtime_readiness();
 let services = daemon.runtime_services();
-let trigger = daemon.runtime_trigger(trigger_service_id);
+let trigger = daemon.runtime_trigger_instance(&trigger_instance);
 ```
 
 `DaemonRuntimeSnapshot` reports daemon identity, uptime, shutdown state, and
