@@ -9,8 +9,9 @@ use crate::common::CommonEntryAttrs;
 /// #[service]                                        // all defaults
 /// #[service(priority = 80)]                         // priority only
 /// #[service(scheduling = Isolated)]                  // scheduling only
+/// #[service(auto_start = false)]                     // selected but not auto-started
 /// #[service(tags = ["infra", "core"])]              // tags only
-/// #[service(priority = 80, scheduling = HighPriority, tags = ["infra"])]
+/// #[service(priority = 80, scheduling = HighPriority, auto_start = true, tags = ["infra"])]
 /// ```
 pub type ServiceAttr = CommonEntryAttrs;
 
@@ -27,6 +28,7 @@ mod tests {
             attr.scheduling.to_string(),
             "service_daemon :: ServiceScheduling :: Standard"
         );
+        assert_eq!(attr.auto_start.to_string(), "true");
         assert_eq!(attr.tags.to_string(), "& []");
     }
 
@@ -61,14 +63,23 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_auto_start_false() {
+        let attr: ServiceAttr = parse_str("auto_start = false").unwrap();
+        assert_eq!(attr.auto_start.to_string(), "false");
+    }
+
+    #[test]
     fn test_parse_mixed_attributes() {
-        let attr: ServiceAttr =
-            parse_str("priority = 10, scheduling = Isolated, tags = [\"test\"]").unwrap();
+        let attr: ServiceAttr = parse_str(
+            "priority = 10, scheduling = Isolated, auto_start = false, tags = [\"test\"]",
+        )
+        .unwrap();
         assert_eq!(attr.priority.to_string(), "10");
         assert_eq!(
             attr.scheduling.to_string(),
             "service_daemon :: ServiceScheduling :: Isolated"
         );
+        assert_eq!(attr.auto_start.to_string(), "false");
         assert_eq!(attr.tags.to_string(), "& [\"test\"]");
     }
 
@@ -78,7 +89,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Unknown service attribute 'unknown'. Supported: priority, scheduling, tags"
+            "Unknown service attribute 'unknown'. Supported: priority, scheduling, auto_start, tags"
         );
     }
 }

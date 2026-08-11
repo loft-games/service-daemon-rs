@@ -58,7 +58,7 @@ another service without looking up the registry by string name.
 ```rust
 use service_daemon::{ProviderError, ServiceHandle, provider, service, service_handle};
 
-#[service(tags = ["workers"])]
+#[service(auto_start = false, tags = ["workers"])]
 async fn worker_service() -> anyhow::Result<()> {
     service_daemon::done();
     service_daemon::wait_shutdown().await;
@@ -91,9 +91,35 @@ so keeping an instance handle does not keep the daemon alive. `ServiceHandle::in
 lists existing runtime instances for that service in the owning daemon.
 `DaemonInstanceHandle` also lists instances for the whole daemon or delegates by
 `ServiceHandle`. The returned `ServiceInstanceHandle` can read its own status
-and runtime facts and can request shutdown for that instance without deleting it
-from the daemon registry. After the owning daemon is gone, status reads report
-`Terminated`, runtime snapshots return `None`, and stop requests return `false`.
+and runtime facts, request shutdown, wait for shutdown, or remove daemon-local
+runtime state for that instance. After the owning daemon is gone, status reads
+report `Terminated`, runtime snapshots return `None`, and stop/remove/purge
+requests return `false`.
+
+Service definitions default to `auto_start = true`: a selected entry creates
+one runtime instance when the daemon starts. Use
+`#[service(auto_start = false)]` when the selected service definition should
+not start automatically. The service can still be resolved with
+`service_handle!(...)`; `ServiceHandle::instances()` starts empty, and
+`ServiceHandle::spawn().await` creates and starts a new runtime instance:
+
+```rust
+#[service(auto_start = false, tags = ["workers"])]
+async fn worker_service() -> anyhow::Result<()> {
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service(tags = ["controller"])]
+async fn controller(worker: std::sync::Arc<WorkerService>) -> anyhow::Result<()> {
+    let instance = worker.0.spawn().await?;
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    instance.remove().await?;
+    Ok(())
+}
+```
 
 Handle resolution needs daemon scope. Calling it outside daemon context fails
 because there is no daemon projection. If the service is

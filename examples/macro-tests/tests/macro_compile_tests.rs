@@ -19,6 +19,7 @@ const SERVICE_PASS_CASES: &[&str] = &[
     "tests/pass/20_service_visibility_in_super_path.rs",
     "tests/pass/27_service_wrapper_path_visibility.rs",
     "tests/pass/28_service_handle_macro_path_visibility.rs",
+    "tests/pass/29_service_auto_start_false.rs",
 ];
 
 const SERVICE_FAIL_CASES: &[&str] = &[

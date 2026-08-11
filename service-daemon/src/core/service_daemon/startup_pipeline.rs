@@ -32,6 +32,8 @@ impl DaemonInstanceInner {
                 }
             })?;
 
+        self.standard_runtime = Some(runtimes.standard.clone());
+
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let startup =
                 control_runtime.spawn(runner::spawn_all_services(parts::SpawnAllServicesParts {

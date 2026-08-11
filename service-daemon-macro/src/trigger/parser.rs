@@ -66,7 +66,7 @@ impl Parse for TriggerArgs {
 
         // Step 3: Parse optional trailing named arguments.
         let mut common = CommonEntryAttrs::default();
-        parse_optional_named_tail(input, |meta| common.parse_meta_for("trigger", meta))?;
+        parse_optional_named_tail(input, |meta| common.parse_meta_for_trigger(meta))?;
 
         Ok(TriggerArgs {
             host_path,

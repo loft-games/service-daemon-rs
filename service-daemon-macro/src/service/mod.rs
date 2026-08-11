@@ -17,6 +17,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ServiceAttr);
     let priority_tokens = args.priority;
     let scheduling_tokens = args.scheduling;
+    let auto_start_tokens = args.auto_start;
     let tags_tokens = args.tags;
 
     let input = parse_macro_input!(item as ItemFn);
@@ -111,6 +112,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             watcher_ptr: &watcher_ptr,
             priority: &priority_tokens,
             scheduling: &scheduling_tokens,
+            auto_start: &auto_start_tokens,
             tags: &tags_tokens,
         });
 

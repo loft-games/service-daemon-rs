@@ -232,6 +232,11 @@ impl RuntimeFactsStore {
         }
     }
 
+    pub(crate) fn remove_service_instance(&self, service_instance_id: ServiceInstanceId) {
+        self.services.remove(&service_instance_id);
+        self.triggers.remove(&service_instance_id);
+    }
+
     pub(crate) fn daemon_snapshot(&self, shutdown_requested: bool) -> DaemonRuntimeSnapshot {
         DaemonRuntimeSnapshot {
             daemon_id: self.daemon_id,
@@ -464,6 +469,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
+        auto_start: true,
         tags: &[],
     };
 
@@ -475,6 +481,7 @@ mod tests {
         watcher: None,
         priority: 80,
         scheduling: ServiceScheduling::HighPriority,
+        auto_start: true,
         tags: &[],
     };
 

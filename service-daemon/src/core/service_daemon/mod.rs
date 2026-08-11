@@ -24,12 +24,12 @@ mod startup_preflight;
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::pending;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 #[cfg(feature = "simulation")]
 use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -40,13 +40,13 @@ use tokio::signal::unix::{SignalKind, signal};
 
 use crate::core::context::DaemonResources;
 use crate::core::diagnostics::DiagnosticsStore;
-#[cfg(unix)]
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessSnapshot,
     Result as ServiceResult, SchedulingAdvisoryProfile, ServiceControl, ServiceDescription,
     ServiceEntry, ServiceEntryId, ServiceHandle, ServiceInstanceHandle, ServiceInstanceId,
-    ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
+    ServiceInstanceRecord, ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceScheduling,
+    ServiceStatus, TriggerRuntimeSnapshot,
 };
 use dashmap::DashMap;
 
@@ -74,6 +74,7 @@ struct DaemonInstanceControl {
     id: DaemonInstanceId,
     resources: Arc<DaemonResources>,
     instance_registry: Arc<ServiceInstanceRegistry>,
+    inner: Weak<Mutex<DaemonInstanceInner>>,
 }
 
 impl DaemonInstanceHandle {
@@ -394,6 +395,69 @@ impl ServiceControl for DaemonInstanceControl {
         self.resources.status_changed.notify_waiters();
         true
     }
+
+    fn spawn_service_instance(
+        &self,
+        handle: &ServiceHandle,
+        control: Arc<dyn ServiceControl>,
+    ) -> futures::future::BoxFuture<'static, ServiceResult<ServiceInstanceHandle>> {
+        let entry_id = handle.entry_id();
+        let entry = handle.entry();
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let Some(inner) = inner.upgrade() else {
+                return Err(ServiceError::RegistryError(
+                    "service handle owner daemon is no longer active".to_owned(),
+                ));
+            };
+            let mut inner = inner.lock().await;
+            inner
+                .spawn_service_instance(entry_id, entry, control.clone())
+                .await
+        })
+    }
+
+    fn stop_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
+        let instance = handle.clone();
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let Some(inner) = inner.upgrade() else {
+                return Ok(false);
+            };
+            inner.lock().await.stop_service_instance(&instance).await
+        })
+    }
+
+    fn remove_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
+        let instance = handle.clone();
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let Some(inner) = inner.upgrade() else {
+                return Ok(false);
+            };
+            inner.lock().await.remove_service_instance(&instance).await
+        })
+    }
+
+    fn purge_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
+        let instance = handle.clone();
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let Some(inner) = inner.upgrade() else {
+                return Ok(false);
+            };
+            inner.lock().await.purge_service_instance(&instance).await
+        })
+    }
 }
 
 impl DaemonInstanceControl {
@@ -459,13 +523,14 @@ impl DaemonRegistry {
         let instance_registry = inner.instance_registry.clone();
         let shutdown_token = inner.cancellation_token.clone();
         let external_cancel_token = inner.external_cancel_token.clone();
+        let inner = Arc::new(Mutex::new(inner));
         let control = Arc::new(DaemonInstanceControl {
             id,
             resources: resources.clone(),
             instance_registry,
+            inner: Arc::downgrade(&inner),
         });
         resources.set_service_control(control.clone());
-        let inner = Arc::new(Mutex::new(inner));
         let entry = Arc::new(DaemonRegistryEntry {
             _inner: inner.clone(),
             _control: control.clone(),
@@ -541,6 +606,8 @@ pub(crate) struct DaemonInstanceInner {
     cancellation_token: CancellationToken,
     /// Dedicated runtime for supervisor and control-plane work.
     control_runtime: Option<Runtime>,
+    /// Handle for the runtime that hosts standard service bodies.
+    standard_runtime: Option<Handle>,
     high_priority_capacity: HighPriorityCapacityPlan,
     /// Shared runtime lazily created for HighPriority service bodies.
     high_priority_runtime: Option<Runtime>,
@@ -730,6 +797,7 @@ impl DaemonInstanceInner {
 
         self.stop_adaptive_recommendation_loop().await;
         self.stop_runtime_probes().await;
+        self.standard_runtime = None;
         self.shutdown_high_priority_runtime();
         self.shutdown_control_runtime();
 
@@ -771,10 +839,221 @@ impl DaemonInstanceInner {
 
         self.stop_adaptive_recommendation_loop().await;
         self.stop_runtime_probes().await;
+        self.standard_runtime = None;
         self.shutdown_high_priority_runtime_detached();
         self.shutdown_control_runtime_detached();
 
         Ok(())
+    }
+
+    async fn spawn_service_instance(
+        &mut self,
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+        control: Arc<dyn ServiceControl>,
+    ) -> ServiceResult<ServiceInstanceHandle> {
+        if self.cancellation_token.is_cancelled() {
+            return Err(ServiceError::RegistryError(
+                "cannot spawn service instance after daemon shutdown was requested".to_owned(),
+            ));
+        }
+        if !self.owns_service_entry(entry_id, entry) {
+            return Err(ServiceError::RegistryError(format!(
+                "service entry {entry_id} is not selected by this daemon"
+            )));
+        }
+
+        let control_runtime = self
+            .control_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+            .ok_or_else(|| {
+                ServiceError::RegistryError(
+                    "cannot spawn service instance before daemon run() prepares runtimes"
+                        .to_owned(),
+                )
+            })?;
+        let standard_runtime = self.standard_runtime.clone().ok_or_else(|| {
+            ServiceError::RegistryError(
+                "cannot spawn service instance before standard runtime is available".to_owned(),
+            )
+        })?;
+        let high_priority_runtime = self
+            .high_priority_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone());
+        if matches!(entry.scheduling, ServiceScheduling::HighPriority)
+            && high_priority_runtime.is_none()
+        {
+            return Err(ServiceError::RegistryError(format!(
+                "HighPriority service '{}' is missing the shared high-priority runtime",
+                entry.name
+            )));
+        }
+
+        let record = ServiceInstanceRecord::new(
+            ServiceInstanceId::new_v7(),
+            entry_id,
+            entry,
+            CancellationToken::new(),
+        );
+        self.instance_registry.insert(record.clone());
+        self.resources
+            .runtime_facts
+            .register_service_instances(std::slice::from_ref(&record));
+
+        runner::spawn_service(parts::SpawnServiceParts {
+            service_instance_id: record.instance_id(),
+            name: record.name(),
+            run: record.entry().wrapper,
+            watcher: record.entry().watcher,
+            policy: self.restart_policy,
+            scheduling: record.scheduling(),
+            supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime),
+            body_lanes: parts::BodyExecutionLanes {
+                standard: standard_runtime,
+                high_priority: high_priority_runtime,
+            },
+            body_lane_resolver: parts::BodyLaneResolver::default(),
+            running_tasks: self.running_tasks.clone(),
+            resources: self.resources.clone(),
+            diagnostics: self.diagnostics.clone(),
+            isolated_startup_permits: self.isolated_startup_permits.clone(),
+            cancellation_token: record.cancellation_token(),
+            daemon_token: self.cancellation_token.clone(),
+        })
+        .await;
+
+        Ok(ServiceInstanceHandle::from_record(&record, control))
+    }
+
+    async fn stop_service_instance(
+        &mut self,
+        handle: &ServiceInstanceHandle,
+    ) -> ServiceResult<bool> {
+        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
+            return Ok(false);
+        };
+        if !record_matches_handle(&record, handle) {
+            return Ok(false);
+        }
+
+        record.cancellation_token().cancel();
+        let shutting_down = ServiceStatus::ShuttingDown;
+        self.resources
+            .status_plane
+            .insert(handle.instance_id(), shutting_down.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(handle.instance_id(), &shutting_down);
+        self.resources.status_changed.notify_waiters();
+
+        let task = {
+            self.running_tasks
+                .lock()
+                .await
+                .remove(&handle.instance_id())
+        };
+        if let Some(mut task) = task {
+            let grace_period = self.restart_policy.wave_stop_timeout;
+            tokio::select! {
+                result = &mut task => {
+                    if let Err(err) = result
+                        && !err.is_cancelled()
+                    {
+                        tracing::warn!(
+                            service = %record.name(),
+                            service_instance_id = %record.instance_id(),
+                            error = ?err,
+                            "Service instance ended unexpectedly while stopping"
+                        );
+                    }
+                }
+                _ = tokio::time::sleep(grace_period) => {
+                    tracing::warn!(
+                        service = %record.name(),
+                        service_instance_id = %record.instance_id(),
+                        "Service instance did not stop within grace period, forcing abort"
+                    );
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
+        }
+
+        let terminated = ServiceStatus::Terminated;
+        self.resources
+            .status_plane
+            .insert(handle.instance_id(), terminated.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(handle.instance_id(), &terminated);
+        self.resources.status_changed.notify_waiters();
+        Ok(true)
+    }
+
+    async fn remove_service_instance(
+        &mut self,
+        handle: &ServiceInstanceHandle,
+    ) -> ServiceResult<bool> {
+        if !self.stop_service_instance(handle).await? {
+            return Ok(false);
+        }
+        self.cleanup_service_instance(handle.instance_id()).await;
+        Ok(true)
+    }
+
+    async fn purge_service_instance(
+        &mut self,
+        handle: &ServiceInstanceHandle,
+    ) -> ServiceResult<bool> {
+        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
+            return Ok(false);
+        };
+        if !record_matches_handle(&record, handle) {
+            return Ok(false);
+        }
+
+        record.cancellation_token().cancel();
+        let task = {
+            self.running_tasks
+                .lock()
+                .await
+                .remove(&handle.instance_id())
+        };
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
+
+        let terminated = ServiceStatus::Terminated;
+        self.resources
+            .status_plane
+            .insert(handle.instance_id(), terminated.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(handle.instance_id(), &terminated);
+        self.cleanup_service_instance(handle.instance_id()).await;
+        self.resources.status_changed.notify_waiters();
+        Ok(true)
+    }
+
+    async fn cleanup_service_instance(&self, instance_id: ServiceInstanceId) {
+        self.instance_registry.remove(instance_id);
+        self.running_tasks.lock().await.remove(&instance_id);
+        self.resources.status_plane.remove(&instance_id);
+        self.resources.shelf.remove(&instance_id);
+        self.resources.reload_signals.remove(&instance_id);
+        self.resources
+            .runtime_facts
+            .remove_service_instance(instance_id);
+        self.resources.status_changed.notify_waiters();
+    }
+
+    fn owns_service_entry(&self, entry_id: ServiceEntryId, entry: &'static ServiceEntry) -> bool {
+        self.services
+            .iter()
+            .any(|service| service.entry_id == entry_id && std::ptr::eq(service.entry, entry))
     }
 }
 
@@ -787,6 +1066,12 @@ fn emit_shutdown_topology() {
             "behavioral topology exported during shutdown"
         );
     }
+}
+
+fn record_matches_handle(record: &ServiceInstanceRecord, handle: &ServiceInstanceHandle) -> bool {
+    record.instance_id() == handle.instance_id()
+        && record.entry_id() == handle.entry_id()
+        && std::ptr::eq(record.entry(), handle.entry())
 }
 
 #[cfg(test)]
@@ -839,6 +1124,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
+        auto_start: true,
         tags: &["__unit_runtime_standard__"],
     };
 
@@ -850,6 +1136,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::HighPriority,
+        auto_start: true,
         tags: &["__unit_runtime_high_priority__"],
     };
 
@@ -861,6 +1148,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Isolated,
+        auto_start: true,
         tags: &["__unit_runtime_isolated__"],
     };
 
@@ -1352,6 +1640,32 @@ mod tests {
         };
 
         assert!(service_handle.instances().is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_handle_spawn_requires_running_daemon_runtimes() {
+        let registry = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
+            .build();
+        let daemon = ServiceDaemon::builder().with_registry(registry).build();
+        let service_handle = daemon
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "capacity_primary_standard_service")
+            .expect("standard test service should have one auto-start instance")
+            .service();
+
+        let err = service_handle
+            .spawn()
+            .await
+            .expect_err("spawn should require daemon runtimes to be prepared");
+        assert!(
+            err.to_string()
+                .contains("cannot spawn service instance before daemon run() prepares runtimes"),
+            "unexpected spawn error: {err}"
+        );
+
+        daemon_registry().unregister(daemon.id());
     }
 
     #[tokio::test]

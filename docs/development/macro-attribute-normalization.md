@@ -7,7 +7,7 @@ boundaries, not a new public macro syntax.
 The public macro forms remain the source of truth:
 
 ```rust
-#[service(priority = 80, scheduling = HighPriority, tags = ["infra"])]
+#[service(priority = 80, scheduling = HighPriority, auto_start = false, tags = ["infra"])]
 #[trigger(TT::Queue(JobQueue), priority = 60)]
 #[provider(8080, env = "PORT")]
 #[provider(default = 8080, env = "PORT")]
@@ -34,6 +34,7 @@ entry attributes:
 
 - `priority = ...`
 - `scheduling = ...`
+- `auto_start = ...`
 - `tags = [...]`
 
 `#[trigger(Host(Target), ...)]` has a custom head and a common named tail. The

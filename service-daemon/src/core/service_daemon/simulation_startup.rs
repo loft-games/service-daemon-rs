@@ -27,6 +27,8 @@ impl DaemonInstanceInner {
                 ) => ServiceError::InternalError(err.to_string()),
             })?;
 
+        self.standard_runtime = Some(runtimes.standard.clone());
+
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let body_lanes = parts::BodyExecutionLanes {
                 standard: runtimes.standard.clone(),

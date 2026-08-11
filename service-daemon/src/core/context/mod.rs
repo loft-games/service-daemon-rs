@@ -49,8 +49,8 @@ mod tests {
     use super::*;
     use crate::models::{
         DaemonInstanceId, ScalingPolicy, ServiceControl, ServiceEntry, ServiceEntryId,
-        ServiceInstanceHandle, ServiceInstanceId, ServiceParam, ServiceRuntimeSnapshot,
-        ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
+        ServiceHandle, ServiceInstanceHandle, ServiceInstanceId, ServiceParam,
+        ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
     };
     use futures::future::BoxFuture;
     use linkme::distributed_slice;
@@ -122,6 +122,39 @@ mod tests {
         fn request_stop(&self, _handle: &ServiceInstanceHandle) -> bool {
             false
         }
+
+        fn spawn_service_instance(
+            &self,
+            _handle: &ServiceHandle,
+            _control: Arc<dyn ServiceControl>,
+        ) -> BoxFuture<'static, crate::models::Result<ServiceInstanceHandle>> {
+            Box::pin(async {
+                Err(crate::models::ServiceError::RegistryError(
+                    "test service control cannot spawn service instances".to_owned(),
+                ))
+            })
+        }
+
+        fn stop_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn remove_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn purge_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
     }
 
     fn selected_handle_test_wrapper(
@@ -152,6 +185,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
+        auto_start: true,
         tags: &["__handle_resolver_selected__"],
     };
 
@@ -165,6 +199,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
+        auto_start: true,
         tags: &["__handle_resolver_excluded__"],
     };
 

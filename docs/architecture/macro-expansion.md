@@ -9,6 +9,12 @@ When you annotate a function, the macro generates:
 2. An `async move` wrapper that resolves dependencies before calling the original function.
 3. A `static` registry entry collected by `linkme` with the metadata the daemon needs at runtime.
 
+`#[service]` accepts named metadata attributes such as `priority`, `scheduling`,
+`tags`, and `auto_start`. `auto_start` defaults to `true`;
+`auto_start = false` keeps the selected service definition in the daemon
+projection without creating an auto-start instance. The generated
+`ServiceEntry` stores the selected boolean.
+
 > [!IMPORTANT]
 > **Distributed Registration Requirement**: Because `linkme` works at the linker level, any module containing a `#[service]` or `#[trigger]` **must** be included in your compilation tree (e.g., via `mod my_module;`). If a module is not reachable from `main.rs`, its services will not be discovered.
 

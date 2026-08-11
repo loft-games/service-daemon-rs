@@ -1,4 +1,4 @@
-error: Unknown service attribute 'timeout'. Supported: priority, scheduling, tags
+error: Unknown service attribute 'timeout'. Supported: priority, scheduling, auto_start, tags
  --> tests/fail/03_service_unknown_attr.rs:8:11
   |
 8 | #[service(timeout = 30)]

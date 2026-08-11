@@ -117,6 +117,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             watcher_ptr: &watcher_ptr,
             priority: &priority_tokens,
             scheduling: &scheduling_tokens,
+            auto_start: &quote! { true },
             tags: &tags_tokens,
         });
 

@@ -258,6 +258,7 @@ impl ServiceDaemonBuilder {
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),
             control_runtime: None,
+            standard_runtime: None,
             high_priority_capacity,
             high_priority_runtime: None,
             runtime_probe_tasks: Vec::new(),

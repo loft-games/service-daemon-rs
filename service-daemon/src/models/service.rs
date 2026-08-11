@@ -1,4 +1,5 @@
 use crate::ProviderDependencyWatchSet;
+use crate::models::error::{Result as ServiceResult, ServiceError};
 use crate::models::{
     DaemonInstanceId, ProviderInitError, RestartPolicy, ServiceRuntimeSnapshot,
     TriggerRuntimeSnapshot,
@@ -260,6 +261,8 @@ pub struct ServiceEntry {
     pub priority: u8,
     /// Execution scheduling and isolation policy.
     pub scheduling: ServiceScheduling,
+    /// Whether this selected service definition creates one instance at daemon startup.
+    pub auto_start: bool,
     /// Compile-time tags assigned via `#[service(tags = ["core", "infra"])]`.
     /// Defaults to an empty slice when no tags are specified.
     pub tags: &'static [&'static str],
@@ -288,6 +291,27 @@ pub(crate) trait ServiceControl: Send + Sync {
     fn trigger_runtime(&self, handle: &ServiceInstanceHandle) -> Option<TriggerRuntimeSnapshot>;
 
     fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool;
+
+    fn spawn_service_instance(
+        &self,
+        handle: &ServiceHandle,
+        control: Arc<dyn ServiceControl>,
+    ) -> BoxFuture<'static, ServiceResult<ServiceInstanceHandle>>;
+
+    fn stop_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> BoxFuture<'static, ServiceResult<bool>>;
+
+    fn remove_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> BoxFuture<'static, ServiceResult<bool>>;
+
+    fn purge_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> BoxFuture<'static, ServiceResult<bool>>;
 }
 
 /// A daemon-bound handle to a selected service definition.
@@ -370,6 +394,19 @@ impl ServiceHandle {
             return Vec::new();
         };
         control.service_instances_for_entry(self.entry_id, self.entry, control.clone())
+    }
+
+    /// Spawn a new runtime instance for this selected service definition.
+    ///
+    /// The new instance is owned by the daemon that created this handle. The
+    /// daemon must have been started so its control runtime is available.
+    pub async fn spawn(&self) -> ServiceResult<ServiceInstanceHandle> {
+        let Some(control) = self.control.upgrade() else {
+            return Err(ServiceError::RegistryError(
+                "service handle owner daemon is no longer active".to_owned(),
+            ));
+        };
+        control.spawn_service_instance(self, control.clone()).await
     }
 }
 
@@ -528,6 +565,32 @@ impl ServiceInstanceHandle {
             .upgrade()
             .is_some_and(|control| control.request_stop(self))
     }
+
+    /// Request shutdown and wait for the service task to finish.
+    ///
+    /// The instance remains registered after a successful stop.
+    pub async fn stop(&self) -> ServiceResult<bool> {
+        let Some(control) = self.control.upgrade() else {
+            return Ok(false);
+        };
+        control.stop_service_instance(self).await
+    }
+
+    /// Stop this instance and remove daemon-local runtime state for it.
+    pub async fn remove(&self) -> ServiceResult<bool> {
+        let Some(control) = self.control.upgrade() else {
+            return Ok(false);
+        };
+        control.remove_service_instance(self).await
+    }
+
+    /// Cancel, abort if needed, and remove daemon-local runtime state for this instance.
+    pub async fn purge(&self) -> ServiceResult<bool> {
+        let Some(control) = self.control.upgrade() else {
+            return Ok(false);
+        };
+        control.purge_service_instance(self).await
+    }
 }
 
 impl PartialEq for ServiceInstanceHandle {
@@ -661,6 +724,19 @@ impl ServiceInstanceRegistry {
         self.by_instance
             .get(&instance_id)
             .map(|record| record.clone())
+    }
+
+    pub(crate) fn remove(&self, instance_id: ServiceInstanceId) -> Option<ServiceInstanceRecord> {
+        let (_, record) = self.by_instance.remove(&instance_id)?;
+        let entry_id = record.entry_id();
+        if let Some(mut entry_instances) = self.by_entry.get_mut(&entry_id) {
+            entry_instances.remove(&instance_id);
+            if entry_instances.is_empty() {
+                drop(entry_instances);
+                self.by_entry.remove(&entry_id);
+            }
+        }
+        Some(record)
     }
 
     pub(crate) fn handles_for_entry(
@@ -912,6 +988,12 @@ impl ServiceDescription {
         self.entry.scheduling
     }
 
+    /// Whether this selected service definition creates one instance at daemon startup.
+    #[inline]
+    pub fn auto_start(&self) -> bool {
+        self.entry.auto_start
+    }
+
     /// Runtime instance records materialized for this selected service entry.
     #[inline]
     pub(crate) fn instance_records(&self) -> Vec<ServiceInstanceRecord> {
@@ -1159,13 +1241,15 @@ impl RegistryBuilder {
         for entry_id in projection.entry_ids() {
             let record =
                 ServiceCatalog::get(*entry_id).expect("projected service entry must exist");
-            let instance_id = ServiceInstanceId::new_v7();
-            instance_registry.insert(ServiceInstanceRecord::new(
-                instance_id,
-                record.entry_id,
-                record.entry,
-                CancellationToken::new(),
-            ));
+            if record.entry.auto_start {
+                let instance_id = ServiceInstanceId::new_v7();
+                instance_registry.insert(ServiceInstanceRecord::new(
+                    instance_id,
+                    record.entry_id,
+                    record.entry,
+                    CancellationToken::new(),
+                ));
+            }
             let service = ServiceDescription {
                 entry_id: record.entry_id,
                 entry: record.entry,
@@ -1193,6 +1277,12 @@ mod tests {
     }
 
     fn test_registry_entry_id_second_wrapper(
+        _: CancellationToken,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn test_registry_on_demand_wrapper(
         _: CancellationToken,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
@@ -1254,6 +1344,39 @@ mod tests {
         fn request_stop(&self, _handle: &ServiceInstanceHandle) -> bool {
             false
         }
+
+        fn spawn_service_instance(
+            &self,
+            _handle: &ServiceHandle,
+            _control: Arc<dyn ServiceControl>,
+        ) -> BoxFuture<'static, ServiceResult<ServiceInstanceHandle>> {
+            Box::pin(async {
+                Err(ServiceError::RegistryError(
+                    "test service control cannot spawn service instances".to_owned(),
+                ))
+            })
+        }
+
+        fn stop_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, ServiceResult<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn remove_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, ServiceResult<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn purge_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, ServiceResult<bool>> {
+            Box::pin(async { Ok(false) })
+        }
     }
 
     #[allow(unsafe_code)]
@@ -1266,6 +1389,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
+        auto_start: true,
         tags: &["__test_registry_entry_id_first__"],
     };
 
@@ -1279,12 +1403,43 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
+        auto_start: true,
         tags: &["__test_registry_entry_id_second__"],
+    };
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(SERVICE_REGISTRY)]
+    static TEST_REGISTRY_ON_DEMAND_ENTRY: ServiceEntry = ServiceEntry {
+        name: "test_registry_on_demand",
+        module: "models::service::tests",
+        params: &[],
+        wrapper: test_registry_on_demand_wrapper,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        auto_start: false,
+        tags: &["__test_registry_on_demand__"],
     };
 
     #[test]
     fn test_service_scheduling_default() {
         assert_eq!(ServiceScheduling::default(), ServiceScheduling::Standard);
+    }
+
+    #[test]
+    fn test_service_entry_auto_start_default() {
+        let entry = ServiceEntry {
+            name: "test",
+            module: "test_mod",
+            params: &[],
+            wrapper: |_| Box::pin(async { Ok(()) }),
+            watcher: None,
+            priority: 50,
+            scheduling: ServiceScheduling::Standard,
+            auto_start: true,
+            tags: &[],
+        };
+        assert!(entry.auto_start);
     }
 
     #[test]
@@ -1297,6 +1452,7 @@ mod tests {
             watcher: None,
             priority: 50,
             scheduling: ServiceScheduling::Isolated,
+            auto_start: true,
             tags: &[],
         };
         assert_eq!(entry.scheduling, ServiceScheduling::Isolated);
@@ -1640,5 +1796,22 @@ mod tests {
             second_instance.instance_id(),
             "materializing the same registry entry twice should not reuse a runtime instance ID"
         );
+    }
+
+    #[test]
+    fn registry_build_does_not_auto_start_disabled_services() {
+        let registry = Registry::builder()
+            .with_tag("__test_registry_on_demand__")
+            .build();
+        let service = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "test_registry_on_demand")
+            .expect("non-auto-start service should be selected by tag");
+
+        assert!(!service.auto_start());
+        assert!(service.instance_records().is_empty());
+        assert!(service.instance_ids().is_empty());
+        assert_eq!(registry.instance_registry.len(), 0);
     }
 }

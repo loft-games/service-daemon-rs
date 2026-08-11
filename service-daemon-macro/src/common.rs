@@ -600,6 +600,7 @@ impl TagsList {
 pub struct CommonEntryAttrs {
     pub priority: proc_macro2::TokenStream,
     pub scheduling: proc_macro2::TokenStream,
+    pub auto_start: proc_macro2::TokenStream,
     pub tags: proc_macro2::TokenStream,
 }
 
@@ -608,6 +609,7 @@ impl Default for CommonEntryAttrs {
         Self {
             priority: quote!(50),
             scheduling: quote!(service_daemon::ServiceScheduling::Standard),
+            auto_start: quote!(true),
             tags: quote!(&[]),
         }
     }
@@ -617,15 +619,30 @@ impl syn::parse::Parse for CommonEntryAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut attrs = Self::default();
         let tokens: proc_macro2::TokenStream = input.parse()?;
-        syn::meta::parser(|meta| attrs.parse_meta_for("service", meta)).parse2(tokens)?;
+        syn::meta::parser(|meta| attrs.parse_meta_for_service(meta)).parse2(tokens)?;
         Ok(attrs)
     }
 }
 
 impl CommonEntryAttrs {
+    pub fn parse_meta_for_service(
+        &mut self,
+        meta: syn::meta::ParseNestedMeta<'_>,
+    ) -> syn::Result<()> {
+        self.parse_meta_for("service", true, meta)
+    }
+
+    pub fn parse_meta_for_trigger(
+        &mut self,
+        meta: syn::meta::ParseNestedMeta<'_>,
+    ) -> syn::Result<()> {
+        self.parse_meta_for("trigger", false, meta)
+    }
+
     pub fn parse_meta_for(
         &mut self,
         attr_kind: &str,
+        allow_auto_start: bool,
         meta: syn::meta::ParseNestedMeta<'_>,
     ) -> syn::Result<()> {
         if meta.path.is_ident("priority") {
@@ -637,6 +654,16 @@ impl CommonEntryAttrs {
         if meta.path.is_ident("scheduling") {
             let ident: syn::Ident = meta.value()?.parse()?;
             self.scheduling = parse_scheduling_policy(&ident)?;
+            return Ok(());
+        }
+
+        if meta.path.is_ident("auto_start") && allow_auto_start {
+            let lit: syn::LitBool = meta.value()?.parse()?;
+            self.auto_start = if lit.value {
+                quote!(true)
+            } else {
+                quote!(false)
+            };
             return Ok(());
         }
 
@@ -653,8 +680,14 @@ impl CommonEntryAttrs {
         Err(syn::Error::new_spanned(
             meta.path,
             format!(
-                "Unknown {} attribute '{}'. Supported: priority, scheduling, tags",
-                attr_kind, attr_name
+                "Unknown {} attribute '{}'. Supported: {}",
+                attr_kind,
+                attr_name,
+                if allow_auto_start {
+                    "priority, scheduling, auto_start, tags"
+                } else {
+                    "priority, scheduling, tags"
+                }
             ),
         ))
     }
@@ -739,6 +772,7 @@ pub struct RegistryEntryInput<'a> {
     pub watcher_ptr: &'a proc_macro2::TokenStream,
     pub priority: &'a proc_macro2::TokenStream,
     pub scheduling: &'a proc_macro2::TokenStream,
+    pub auto_start: &'a proc_macro2::TokenStream,
     pub tags: &'a proc_macro2::TokenStream,
 }
 
@@ -751,6 +785,7 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
     let watcher_ptr = input.watcher_ptr;
     let priority = input.priority;
     let scheduling = input.scheduling;
+    let auto_start = input.auto_start;
     let tags = input.tags;
 
     quote! {
@@ -766,6 +801,7 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
             watcher: #watcher_ptr,
             priority: #priority,
             scheduling: #scheduling,
+            auto_start: #auto_start,
             tags: #tags,
         };
     }
