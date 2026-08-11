@@ -26,7 +26,7 @@ In your `main.rs`, you can choose which "personality" the process assumes:
 let reg = Registry::builder().with_tag("api").build();
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(reg)
         .build();
 

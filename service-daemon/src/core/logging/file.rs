@@ -91,7 +91,7 @@ static FILE_LOG_CONFIG: tokio::sync::OnceCell<FileLogConfig> = tokio::sync::Once
 
 /// Enables file-based log persistence with the given configuration.
 ///
-/// Must be called **before** `ServiceDaemon::run()` to take effect.
+/// Must be called **before** the daemon handle's `run()` to take effect.
 /// If not called, the `log_service` will only output to stderr (console).
 ///
 /// # Arguments

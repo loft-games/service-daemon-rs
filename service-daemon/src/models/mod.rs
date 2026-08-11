@@ -27,8 +27,8 @@ pub use policy::{
 };
 pub use provider_error::ProviderError;
 pub use runtime::{
-    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceRuntimeSnapshot,
-    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+    DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot,
+    ServiceRuntimeSnapshot, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 pub use service::{
     PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,

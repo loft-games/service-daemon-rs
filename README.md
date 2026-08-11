@@ -50,7 +50,7 @@ pub async fn heartbeat_service(port: Arc<Port>) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 3. Build and run the daemon
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
     Ok(())

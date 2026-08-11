@@ -39,7 +39,7 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
         .map(|instance| instance.instance_id())
         .expect("normal_exit_service should be materialized");
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(registry)
         .with_restart_policy(policy)
         .build();
@@ -73,10 +73,7 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
     );
 
     assert_eq!(
-        daemon
-            .handle()
-            .get_service_status(&service_instance_id)
-            .await,
+        daemon.get_service_status(&service_instance_id).await,
         ServiceStatus::Terminated
     );
 

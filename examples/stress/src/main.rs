@@ -43,7 +43,7 @@ async fn run_stress_test() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
 

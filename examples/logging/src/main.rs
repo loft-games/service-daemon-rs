@@ -22,7 +22,7 @@ async fn main() -> anyhow::Result<()> {
     // Enable file-based JSON log persistence (consumed by file_log_service)
     enable_file_logging(FileLogConfig::new("logs", "my-app"));
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
 

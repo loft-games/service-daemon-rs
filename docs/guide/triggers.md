@@ -176,7 +176,7 @@ let scaling = ScalingPolicy::builder()
     .scale_cooldown(Duration::from_secs(30))
     .build();
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_trigger_config(scaling)
     .build();
 ```

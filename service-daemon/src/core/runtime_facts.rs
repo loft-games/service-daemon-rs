@@ -2,17 +2,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::models::{
+    DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot,
+    ServiceInstanceId, ServiceInstanceRecord, ServiceRuntimeSnapshot, ServiceScheduling,
+    ServiceStatus, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
-use uuid::Uuid;
-
-use crate::models::{
-    DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot, ServiceInstanceId,
-    ServiceInstanceRecord, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
-    TriggerPressureSnapshot, TriggerRuntimeSnapshot,
-};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ServiceRuntimeMetadata {
@@ -193,7 +191,7 @@ impl TriggerRuntimeFactsHandle {
 }
 
 pub(crate) struct RuntimeFactsStore {
-    daemon_id: Uuid,
+    daemon_id: DaemonInstanceId,
     start_time: DateTime<Utc>,
     start_instant: Instant,
     services: DashMap<ServiceInstanceId, Arc<ServiceRuntimeRecord>>,
@@ -208,13 +206,21 @@ impl Default for RuntimeFactsStore {
 
 impl RuntimeFactsStore {
     pub(crate) fn new() -> Self {
+        Self::new_for_daemon(DaemonInstanceId::new_v7())
+    }
+
+    pub(crate) fn new_for_daemon(daemon_id: DaemonInstanceId) -> Self {
         Self {
-            daemon_id: Uuid::now_v7(),
+            daemon_id,
             start_time: Utc::now(),
             start_instant: Instant::now(),
             services: DashMap::new(),
             triggers: DashMap::new(),
         }
+    }
+
+    pub(crate) fn daemon_id(&self) -> DaemonInstanceId {
+        self.daemon_id
     }
 
     pub(crate) fn register_service_instances(&self, services: &[ServiceInstanceRecord]) {

@@ -4,7 +4,7 @@ use crate::models::ProviderInitError;
 
 use super::runtime::RuntimePreparationError;
 use super::startup_preflight::StartupPreflightError;
-use super::{ServiceDaemon, parts, runner};
+use super::{DaemonInstanceInner, parts, runner};
 
 pub(super) enum StartupError {
     ProviderGraph(ProviderInitError),
@@ -14,7 +14,7 @@ pub(super) enum StartupError {
     StartupOrchestration(JoinError),
 }
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn run_startup_pipeline(&mut self) -> Result<(), StartupError> {
         let runtimes = self
             .run_startup_preflight()

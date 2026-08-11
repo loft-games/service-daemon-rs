@@ -45,7 +45,7 @@ async fn named_pipe_example_smoke() -> anyhow::Result<()> {
     let pipe_name = unique_pipe_name("smoke");
     let _env = set_test_env(EXAMPLE_NAMED_PIPE_ENV, &pipe_name);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_restart_policy(
             RestartPolicy::builder()
                 .initial_delay(Duration::from_millis(1))

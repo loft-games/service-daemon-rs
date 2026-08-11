@@ -17,7 +17,7 @@ use crate::core::diagnostics::{DiagnosticsStore, GenerationDiagnosticsHandle};
 use crate::core::provider_scope::ProviderScope;
 use crate::core::runtime_facts::RuntimeFactsStore;
 use crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore;
-use crate::models::{ServiceCatalogProjection, ServiceInstanceId, ServiceStatus};
+use crate::models::{DaemonInstanceId, ServiceCatalogProjection, ServiceInstanceId, ServiceStatus};
 
 // ---------------------------------------------------------------------------
 // Process-Level Cancellation Token -- shared by ALL ServiceDaemon instances
@@ -75,6 +75,13 @@ impl DaemonResources {
     }
 
     pub(crate) fn new_with_diagnostics(diagnostics: Arc<DiagnosticsStore>) -> Arc<Self> {
+        Self::new_with_diagnostics_for_daemon(diagnostics, DaemonInstanceId::new_v7())
+    }
+
+    pub(crate) fn new_with_diagnostics_for_daemon(
+        diagnostics: Arc<DiagnosticsStore>,
+        daemon_id: DaemonInstanceId,
+    ) -> Arc<Self> {
         Arc::new(Self {
             status_plane: DashMap::new(),
             shelf: DashMap::new(),
@@ -83,10 +90,14 @@ impl DaemonResources {
             trigger_configs: DashMap::new(),
             diagnostics,
             provider_scope: ProviderScope::new_daemon_scope(),
-            runtime_facts: Arc::new(RuntimeFactsStore::new()),
+            runtime_facts: Arc::new(RuntimeFactsStore::new_for_daemon(daemon_id)),
             trigger_policy_overlays: Arc::new(TriggerPolicyOverlayStore::default()),
             service_catalog_projection: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn daemon_id(&self) -> DaemonInstanceId {
+        self.runtime_facts.daemon_id()
     }
 
     pub(crate) fn set_service_catalog_projection(&self, projection: Arc<ServiceCatalogProjection>) {

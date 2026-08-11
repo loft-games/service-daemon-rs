@@ -9,7 +9,7 @@ use service_daemon::{Registry, RestartPolicy, ServiceDaemon, service};
 /// without any complex lifecycle management.
 #[tokio::test]
 async fn test_minimal_startup_and_shutdown() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__test_isolation__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -51,7 +51,7 @@ async fn shutdown_responsive_service() -> anyhow::Result<()> {
 async fn test_is_shutdown_responsiveness() -> anyhow::Result<()> {
     SHUTDOWN_EXITED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__test_shutdown__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();

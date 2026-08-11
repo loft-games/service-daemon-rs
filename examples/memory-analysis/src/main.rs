@@ -491,7 +491,7 @@ async fn measure_hashmap_join_handles() -> Option<f64> {
 async fn run_e2e_test() -> Option<(u64, u64, f64)> {
     let baseline = read_rss_bytes()?;
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
 
     // Allow all services to fully initialize.

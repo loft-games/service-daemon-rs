@@ -390,7 +390,7 @@ async fn assert_observations_hold(
 }
 
 async fn run_tagged_daemon_until_observed(tag: &'static str, observed: &AtomicUsize, count: usize) {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(service_daemon::Registry::builder().with_tag(tag).build())
         .build();
     let cancel = daemon.cancel_token();
@@ -589,7 +589,7 @@ async fn simulation_runtime_provider_override_reloads_dependent_service() -> any
     SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE.store(0, Ordering::SeqCst);
 
     let (builder, handle) = MockContext::builder().with_logging(false).build();
-    let mut daemon = builder
+    let daemon = builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_runtime_provider_override")
@@ -651,7 +651,7 @@ async fn root_value_mutation_does_not_reload_daemon_after_local_override() -> an
         .with_logging(false)
         .with_provider_override(SimulationForkBoundaryProvider(42))
         .build();
-    let mut daemon = builder
+    let daemon = builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_fork_boundary")
@@ -712,7 +712,7 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
         .with_logging(false)
         .with_provider_override(SimulationLocalValueProvider(42))
         .build();
-    let mut local_daemon = local_builder
+    let local_daemon = local_builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_local_value_boundary")
@@ -729,7 +729,7 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
     });
 
     let (root_builder, _root_handle) = MockContext::builder().with_logging(false).build();
-    let mut root_daemon = root_builder
+    let root_daemon = root_builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_local_value_boundary")
@@ -803,7 +803,7 @@ async fn watch_trigger_target_resolution_uses_daemon_local_override() {
     SIMULATION_WATCH_TARGET_SECOND_VALUE.store(0, Ordering::SeqCst);
 
     let (builder, handle) = MockContext::builder().with_logging(false).build();
-    let mut daemon = builder
+    let daemon = builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_watch_target_provider")
@@ -859,7 +859,7 @@ async fn watch_trigger_extra_dependency_resolution_uses_daemon_local_override() 
     SIMULATION_WATCH_EXTRA_SECOND_DEP_VALUE.store(0, Ordering::SeqCst);
 
     let (builder, handle) = MockContext::builder().with_logging(false).build();
-    let mut daemon = builder
+    let daemon = builder
         .with_registry(
             Registry::builder()
                 .with_tag("simulation_watch_extra_dependency")

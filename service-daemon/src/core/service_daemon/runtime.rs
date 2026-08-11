@@ -6,7 +6,7 @@ use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
 use crate::core::diagnostics::{RuntimeLane, run_lane_runtime_probe};
 use crate::models::{ServiceDescription, ServiceScheduling};
 
-use super::ServiceDaemon;
+use super::DaemonInstanceInner;
 
 pub(super) const CONTROL_RUNTIME_WORKER_THREADS: usize = 1;
 pub(super) const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
@@ -71,7 +71,7 @@ fn read_available_parallelism() -> Option<NonZeroUsize> {
     std::thread::available_parallelism().ok()
 }
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) fn prepare_startup_runtimes(
         &mut self,
     ) -> Result<PreparedRuntimes, RuntimePreparationError> {

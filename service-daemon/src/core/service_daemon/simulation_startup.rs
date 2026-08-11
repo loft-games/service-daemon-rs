@@ -2,9 +2,9 @@ use crate::models::{Result as ServiceResult, ServiceError, ServiceScheduling};
 
 use super::runtime::RuntimePreparationError;
 use super::startup_preflight::StartupPreflightError;
-use super::{RestartPolicy, ServiceDaemon, parts, runner};
+use super::{DaemonInstanceInner, RestartPolicy, parts, runner};
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn run_simulation_startup(
         &mut self,
         test_policy: RestartPolicy,

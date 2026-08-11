@@ -14,9 +14,9 @@ use crate::core::provider_init::{
 };
 use crate::models::{PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, ServiceDescription};
 
-use super::ServiceDaemon;
+use super::DaemonInstanceInner;
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn eager_init_reachable_providers(&self) -> Result<(), ProviderInitError> {
         let mut providers_by_id: HashMap<TypeId, &'static ProviderEntry> = HashMap::new();
         for entry in PROVIDER_REGISTRY.iter() {

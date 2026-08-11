@@ -24,7 +24,7 @@ All services share a central **Status Plane** (`DashMap<ServiceInstanceId, Servi
 
 Service supervisors, dependency watch construction, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
-- `Standard`: host Tokio runtime integration through the runtime that called `ServiceDaemon::run()`.
+- `Standard`: host Tokio runtime integration through the runtime that called the daemon handle's `run()`.
 - `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count derived from final declared HighPriority entries.
 - `Isolated`: a private OS thread and private Tokio runtime for each generation body.
 

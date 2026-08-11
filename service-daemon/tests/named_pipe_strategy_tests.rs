@@ -345,7 +345,7 @@ async fn named_pipe_missing_peer_times_out_before_service_body() {
     let _env = set_test_env(MISSING_PEER_NAME_ENV, &name);
     MISSING_PEER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("named_pipe_missing_peer_provider_test")
@@ -421,7 +421,7 @@ async fn named_pipe_env_overrides_fallback_and_eager_runs_before_service_body() 
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("named_pipe_env_eager_provider_test")

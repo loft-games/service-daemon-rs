@@ -64,7 +64,7 @@ async fn unused_lazy_provider_service() -> anyhow::Result<()> {
 async fn test_unused_lazy_provider_is_not_initialized_at_startup() -> anyhow::Result<()> {
     UNUSED_LAZY_PROVIDER_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("unused_lazy_provider_startup")
@@ -105,7 +105,7 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
         .map(|instance| instance.instance_id())
         .expect("fatal_service should be materialized");
 
-    let mut daemon = ServiceDaemon::builder().with_registry(registry).build();
+    let daemon = ServiceDaemon::builder().with_registry(registry).build();
 
     daemon.run().await;
 
@@ -120,14 +120,11 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
 
     assert!(LAZY_HEALTHY_STOPPED.load(Ordering::SeqCst));
     assert_eq!(
-        daemon
-            .handle()
-            .get_service_status(&healthy_service_id)
-            .await,
+        daemon.get_service_status(&healthy_service_id).await,
         ServiceStatus::Terminated
     );
     assert_eq!(
-        daemon.handle().get_service_status(&fatal_service_id).await,
+        daemon.get_service_status(&fatal_service_id).await,
         ServiceStatus::Terminated
     );
 

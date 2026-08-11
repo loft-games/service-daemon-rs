@@ -220,7 +220,7 @@ async fn test_dependency_reload_transitions_through_need_reload_and_restoring() 
     RELOAD_GENERATIONS.store(0, Ordering::SeqCst);
     RELOAD_EVENTS.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_reload_contract__")
@@ -309,7 +309,7 @@ async fn test_high_priority_dependency_reload_crosses_body_lane() -> anyhow::Res
     HIGH_PRIORITY_RELOAD_GENERATIONS.store(0, Ordering::SeqCst);
     HIGH_PRIORITY_RELOAD_EVENTS.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_high_priority_reload_contract__")
@@ -386,7 +386,7 @@ async fn test_isolated_dependency_reload_crosses_generation_bridge() -> anyhow::
     ISOLATED_RELOAD_GENERATIONS.store(0, Ordering::SeqCst);
     ISOLATED_RELOAD_EVENTS.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_isolated_reload_contract__")
@@ -463,7 +463,7 @@ async fn write_lock_without_mutation_does_not_trigger_reload() -> anyhow::Result
     NOOP_RELOAD_GENERATIONS.store(0, Ordering::SeqCst);
     NOOP_RELOAD_EVENTS.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_noop_reload_contract__")

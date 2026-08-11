@@ -17,7 +17,7 @@ let policy = RestartPolicy::builder()
     .jitter_factor(0.1) // 10% randomization
     .build();
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_restart_policy(policy)
     .build();
 daemon.run().await;
@@ -58,7 +58,7 @@ let policy = RestartPolicy::builder()
     .trigger_max_retries(5) // Give up after 5 consecutive failures
     .build();
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_restart_policy(policy)
     .build();
 ```

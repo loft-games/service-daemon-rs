@@ -162,7 +162,7 @@ async fn test_god_hand_status_flip_with_real_service() {
     let status_watcher_id = service_instance_id(&registry, "status_watcher_service");
     let (builder, handle) = MockContext::builder().build();
 
-    let mut daemon = builder.with_registry(registry).build();
+    let daemon = builder.with_registry(registry).build();
 
     let cancel = daemon.cancel_token();
 

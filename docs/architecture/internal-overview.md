@@ -100,14 +100,14 @@ The control plane runs supervisors, watchers, startup waves, reload, restart/bac
 
 During daemon construction, the final selected service list is also the source for HighPriority worker-count selection. The daemon counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and applies the result only when the shared high-priority runtime is lazily created.
 
-Internally, `core/service_daemon/` keeps the public daemon facade separate from the startup control plane. The facade owns `ServiceDaemon`, `ServiceDaemonHandle`, `run()`, `wait()`, and `shutdown()`, while sibling modules handle builder assembly, provider graph validation/eager initialization, runtime preparation, and startup orchestration.
+Internally, `core/service_daemon/` keeps the public builder facade separate from the runtime owner. `ServiceDaemon` is the builder entry point, `DaemonInstanceHandle` is the public control handle, and a process-local daemon registry owns active daemon instances while sibling modules handle builder assembly, provider graph validation/eager initialization, runtime preparation, and startup orchestration.
 
 The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract and must happen through a cooperative generation boundary.
 
 Runtime facts are a separate read-only operational plane. `core::runtime_facts`
 is owned by `DaemonResources` and combines service metadata from the final
 registry, lifecycle facts from the supervisor/context handshake, and trigger
-pressure counters from `TriggerRunner`. `ServiceDaemonHandle` exposes owned
+pressure counters from `TriggerRunner`. `DaemonInstanceHandle` exposes owned
 snapshots for daemon facts, readiness grouping, service facts, and trigger facts.
 The snapshots copy facts out of the runtime; they do not expose status-plane
 guards, semaphores, diagnostics stores, or policy handles.
@@ -134,6 +134,8 @@ without changing the trigger's base policy.
 | `ServiceDescription` | Public entry-scoped daemon-local view. It exposes static metadata plus `instances()` for the runtime handles currently materialized for that entry. |
 | `ServiceHandle` | Public handle to a daemon-selected static service entry. It contains `ServiceEntryId` and `&'static ServiceEntry`, not a runtime `ServiceInstanceId`. |
 | `ServiceInstanceHandle` | Public handle to a materialized runtime instance. It contains `ServiceInstanceId`, `ServiceEntryId`, and `&'static ServiceEntry` so instance APIs can address one runtime instance without losing its static service definition. |
+| `DaemonInstanceId` | Public UUIDv7 daemon instance identity. `DaemonRuntimeSnapshot::daemon_id` uses the same typed identity as `DaemonInstanceHandle::id()`. |
+| `DaemonInstanceHandle` | Public daemon instance control handle returned by `ServiceDaemonBuilder::build()`; it provides run/wait/shutdown, diagnostics/runtime snapshots, and daemon-local service instance queries. |
 | `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
 | `DaemonRuntimeSnapshot`, `ReadinessSnapshot`, service runtime snapshots, and trigger runtime snapshots | Public read-only operational facts copied out of runtime state. |
 | `TriggerContext::pressure()` | Self-scoped read-only trigger pressure facts for the current trigger service. |

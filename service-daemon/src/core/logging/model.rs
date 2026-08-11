@@ -299,7 +299,7 @@ pub(super) fn set_log_batch_size_in(
 
 /// Sets the batch processing size for the log service drain cycle.
 ///
-/// Must be called **before** `init_logging()` or `ServiceDaemon::run()` to
+/// Must be called **before** `init_logging()` or the daemon handle's `run()` to
 /// take effect. The broadcast queue capacity is automatically derived as
 /// `batch_size * 4`.
 ///

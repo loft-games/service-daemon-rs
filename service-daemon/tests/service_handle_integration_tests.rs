@@ -64,7 +64,7 @@ async fn provider_resolves_service_handle_in_selected_daemon_projection() {
     let registry = Registry::builder()
         .with_tag("__service_handle_success__")
         .build();
-    let mut daemon = ServiceDaemon::builder().with_registry(registry).build();
+    let daemon = ServiceDaemon::builder().with_registry(registry).build();
 
     daemon.run().await;
     let ready = tokio::time::timeout(Duration::from_secs(2), async {
@@ -87,7 +87,7 @@ async fn provider_reports_handle_target_outside_daemon_projection() {
     let registry = Registry::builder()
         .with_tag("__service_handle_excluded_consumer__")
         .build();
-    let mut daemon = ServiceDaemon::builder().with_registry(registry).build();
+    let daemon = ServiceDaemon::builder().with_registry(registry).build();
     let token = daemon.cancel_token();
 
     daemon.run().await;

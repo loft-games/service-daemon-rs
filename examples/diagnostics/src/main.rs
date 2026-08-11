@@ -7,7 +7,7 @@ use tracing::info;
 async fn main() -> anyhow::Result<()> {
     service_daemon::init_logging();
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
 
     daemon.run().await;
 

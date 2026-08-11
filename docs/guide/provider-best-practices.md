@@ -85,7 +85,7 @@ identified separately by `ServiceInstanceHandle`. That instance handle carries
 both `ServiceInstanceId` and `ServiceEntryId`, so operational APIs can address a
 specific running instance while still grouping it back to the static service
 definition. `ServiceDescription::instances()` returns the currently materialized
-instance handles for one selected entry. `ServiceDaemonHandle` can read status
+instance handles for one selected entry. `DaemonInstanceHandle` can read status
 and runtime facts for a `ServiceInstanceHandle`, and can request shutdown for
 that instance without deleting it from the daemon registry.
 

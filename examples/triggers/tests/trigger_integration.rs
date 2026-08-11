@@ -17,7 +17,7 @@ fn isolated_registry() -> Registry {
 /// and the daemon can start/stop with them present.
 #[tokio::test]
 async fn test_trigger_registration() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -37,7 +37,7 @@ async fn test_trigger_registration() -> anyhow::Result<()> {
 /// Verifies that Signal triggers fire when notified.
 #[tokio::test]
 async fn test_signal_trigger_fires() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -59,7 +59,7 @@ async fn test_signal_trigger_fires() -> anyhow::Result<()> {
 /// Verifies that Watch triggers fire when the watched state changes.
 #[tokio::test]
 async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();

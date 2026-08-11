@@ -22,7 +22,7 @@ mod startup_preflight;
 
 use std::collections::HashMap;
 use std::future::pending;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 #[cfg(feature = "simulation")]
 use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
@@ -41,10 +41,12 @@ use crate::core::diagnostics::DiagnosticsStore;
 #[cfg(unix)]
 use crate::models::ServiceError;
 use crate::models::{
-    DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, ReadinessSnapshot, Result as ServiceResult,
-    SchedulingAdvisoryProfile, ServiceDescription, ServiceInstanceHandle, ServiceInstanceId,
-    ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
+    DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessSnapshot,
+    Result as ServiceResult, SchedulingAdvisoryProfile, ServiceDescription, ServiceHandle,
+    ServiceInstanceHandle, ServiceInstanceId, ServiceInstanceRegistry, ServiceRuntimeSnapshot,
+    ServiceStatus, TriggerRuntimeSnapshot,
 };
+use dashmap::DashMap;
 
 pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -52,19 +54,32 @@ use runtime::HighPriorityCapacityPlan;
 use startup_pipeline::StartupError;
 
 // ---------------------------------------------------------------------------
-// ServiceDaemonHandle -- lightweight status query interface
+// DaemonInstanceHandle -- daemon instance control interface
 // ---------------------------------------------------------------------------
 
-/// A handle to the ServiceDaemon that can be used to query status and interact with services.
+/// A handle to one daemon instance owned by the process-local daemon registry.
 #[derive(Clone)]
-pub struct ServiceDaemonHandle {
+pub struct DaemonInstanceHandle {
+    id: DaemonInstanceId,
+    inner: Arc<Mutex<DaemonInstanceInner>>,
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
     instance_registry: Arc<ServiceInstanceRegistry>,
     shutdown_token: CancellationToken,
+    external_cancel_token: Option<CancellationToken>,
 }
 
-impl ServiceDaemonHandle {
+impl DaemonInstanceHandle {
+    /// Return this daemon instance identity.
+    pub fn id(&self) -> DaemonInstanceId {
+        self.id
+    }
+
+    /// Get the cancellation token for this daemon.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.shutdown_token.clone()
+    }
+
     /// Get the current status of a service by its `ServiceInstanceId`.
     pub async fn get_service_status(&self, id: &ServiceInstanceId) -> ServiceStatus {
         self.resources
@@ -157,6 +172,65 @@ impl ServiceDaemonHandle {
         self.resources.runtime_facts.trigger_snapshot(id)
     }
 
+    /// Return all service instances owned by this daemon.
+    pub fn service_instances(&self) -> Vec<ServiceInstanceHandle> {
+        self.instance_registry
+            .records()
+            .into_iter()
+            .map(|record| record.handle())
+            .collect()
+    }
+
+    /// Return service instances for one daemon-local service definition.
+    pub fn service_instances_for(&self, handle: &ServiceHandle) -> Vec<ServiceInstanceHandle> {
+        let Some(projection) = self.resources.service_catalog_projection() else {
+            return Vec::new();
+        };
+        if projection.resolve_handle(handle.entry_id()) != Some(*handle) {
+            return Vec::new();
+        }
+        self.instance_registry.handles_for_entry(handle.entry_id())
+    }
+
+    /// Start the daemon in the background (non-blocking).
+    #[instrument(skip(self))]
+    pub async fn run(&self) {
+        let mut inner = self.inner.lock().await;
+        inner.run().await;
+    }
+
+    /// Wait for the daemon to stop and unregister it from the process-local registry.
+    #[instrument(skip(self))]
+    pub async fn wait(&self) -> ServiceResult<()> {
+        let result = {
+            let mut inner = self.inner.lock().await;
+            inner.wait().await
+        };
+        daemon_registry().unregister(self.id);
+        result
+    }
+
+    /// Trigger graceful shutdown of the daemon.
+    pub fn shutdown(&self) {
+        info!("DaemonInstanceHandle::shutdown() called, triggering graceful termination...");
+        self.shutdown_token.cancel();
+        if let Some(ref external) = self.external_cancel_token {
+            external.cancel();
+        }
+    }
+
+    /// Run for a limited duration (for testing).
+    #[cfg(feature = "simulation")]
+    #[instrument(skip(self))]
+    pub async fn run_for_duration(&self, duration: Duration) -> ServiceResult<()> {
+        let result = {
+            let mut inner = self.inner.lock().await;
+            inner.run_for_duration(duration).await
+        };
+        daemon_registry().unregister(self.id);
+        result
+    }
+
     fn status_for_snapshot(&self, id: ServiceInstanceId) -> ServiceStatus {
         self.resources
             .status_plane
@@ -166,35 +240,90 @@ impl ServiceDaemonHandle {
     }
 }
 
+struct DaemonRegistry {
+    daemons: DashMap<DaemonInstanceId, Arc<Mutex<DaemonInstanceInner>>>,
+}
+
+impl DaemonRegistry {
+    fn new() -> Self {
+        Self {
+            daemons: DashMap::new(),
+        }
+    }
+
+    fn register(&self, inner: DaemonInstanceInner) -> DaemonInstanceHandle {
+        let id = inner.resources.daemon_id();
+        let resources = inner.resources.clone();
+        let diagnostics = inner.diagnostics.clone();
+        let instance_registry = inner.instance_registry.clone();
+        let shutdown_token = inner.cancellation_token.clone();
+        let external_cancel_token = inner.external_cancel_token.clone();
+        let inner = Arc::new(Mutex::new(inner));
+        self.daemons.insert(id, inner.clone());
+        DaemonInstanceHandle {
+            id,
+            inner,
+            resources,
+            diagnostics,
+            instance_registry,
+            shutdown_token,
+            external_cancel_token,
+        }
+    }
+
+    fn unregister(&self, id: DaemonInstanceId) {
+        self.daemons.remove(&id);
+    }
+
+    #[cfg(test)]
+    fn contains(&self, id: DaemonInstanceId) -> bool {
+        self.daemons.contains_key(&id)
+    }
+}
+
+fn daemon_registry() -> &'static DaemonRegistry {
+    static DAEMON_REGISTRY: OnceLock<DaemonRegistry> = OnceLock::new();
+    DAEMON_REGISTRY.get_or_init(DaemonRegistry::new)
+}
+
 // ---------------------------------------------------------------------------
 // ServiceDaemon -- Infallible Builder pattern
 // ---------------------------------------------------------------------------
 
-/// The main orchestrator for managed services.
+/// Lightweight facade for constructing daemon instances.
 ///
-/// `ServiceDaemon` acts as both a lifecycle manager and a control handle.
-/// After calling [`run()`](ServiceDaemon::run), the daemon starts services
-/// in the background and returns control to the caller. Use
-/// [`wait()`](ServiceDaemon::wait) to block until shutdown, or
-/// [`shutdown()`](ServiceDaemon::shutdown) to trigger graceful termination.
+/// `ServiceDaemon::builder()` returns a [`ServiceDaemonBuilder`]. Building the
+/// builder registers a process-local daemon instance and returns a
+/// [`DaemonInstanceHandle`], which is the public control surface for running,
+/// waiting, shutdown, and runtime snapshots.
 ///
 /// # Examples
 /// ```rust,ignore
 /// // Non-blocking start, then wait for Ctrl+C:
-/// let mut daemon = ServiceDaemon::builder().build();
+/// let daemon = ServiceDaemon::builder().build();
 /// daemon.run().await;
 /// daemon.wait().await?;
 ///
 /// // Hierarchical integration with external CancellationToken:
 /// let root_token = CancellationToken::new();
-/// let mut daemon = ServiceDaemon::builder()
+/// let daemon = ServiceDaemon::builder()
 ///     .with_cancel_token(root_token.clone())
 ///     .build();
 /// daemon.run().await;
 /// // ... other work using root_token ...
 /// daemon.wait().await?;
 /// ```
-pub struct ServiceDaemon {
+pub struct ServiceDaemon;
+
+impl ServiceDaemon {
+    /// Start building a new daemon instance.
+    #[must_use]
+    pub fn builder() -> ServiceDaemonBuilder {
+        ServiceDaemonBuilder::new()
+    }
+}
+
+pub(crate) struct DaemonInstanceInner {
     services: Vec<ServiceDescription>,
     instance_registry: Arc<ServiceInstanceRegistry>,
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
@@ -217,7 +346,7 @@ pub struct ServiceDaemon {
     isolated_startup_permits: Arc<Semaphore>,
 }
 
-impl Drop for ServiceDaemon {
+impl Drop for DaemonInstanceInner {
     fn drop(&mut self) {
         self.abort_adaptive_recommendation_loop();
         self.shutdown_high_priority_runtime_detached();
@@ -225,75 +354,14 @@ impl Drop for ServiceDaemon {
     }
 }
 
-impl ServiceDaemon {
-    /// Start building a new `ServiceDaemon`.
-    #[must_use]
-    pub fn builder() -> ServiceDaemonBuilder {
-        ServiceDaemonBuilder::new()
-    }
-
-    /// Get the cancellation token for this daemon.
-    pub fn cancel_token(&self) -> tokio_util::sync::CancellationToken {
-        self.cancellation_token.clone()
-    }
-
-    /// Get a handle to the daemon for querying status and diagnostics.
-    pub fn handle(&self) -> ServiceDaemonHandle {
-        ServiceDaemonHandle {
-            resources: self.resources.clone(),
-            diagnostics: self.diagnostics.clone(),
-            instance_registry: self.instance_registry.clone(),
-            shutdown_token: self.cancellation_token.clone(),
-        }
-    }
-
-    /// Get the current status of a service by its `ServiceInstanceId`.
-    pub async fn get_service_status(&self, id: &ServiceInstanceId) -> ServiceStatus {
-        self.handle().get_service_status(id).await
-    }
-
-    /// Return a read-only snapshot of daemon diagnostics.
-    pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
-        self.diagnostics.snapshot().into()
-    }
-
-    /// Return read-only daemon runtime facts.
-    pub fn runtime(&self) -> DaemonRuntimeSnapshot {
-        self.handle().runtime()
-    }
-
-    /// Return a facts-only readiness grouping.
-    pub fn runtime_readiness(&self) -> ReadinessSnapshot {
-        self.handle().runtime_readiness()
-    }
-
-    /// Return read-only runtime facts for all registered services.
-    pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
-        self.handle().runtime_services()
-    }
-
-    /// Return read-only runtime facts for a service.
-    pub fn runtime_service(&self, id: ServiceInstanceId) -> Option<ServiceRuntimeSnapshot> {
-        self.handle().runtime_service(id)
-    }
-
-    /// Return read-only runtime facts for all observed triggers.
-    pub fn runtime_triggers(&self) -> Vec<TriggerRuntimeSnapshot> {
-        self.handle().runtime_triggers()
-    }
-
-    /// Return read-only runtime facts for an observed trigger.
-    pub fn runtime_trigger(&self, id: ServiceInstanceId) -> Option<TriggerRuntimeSnapshot> {
-        self.handle().runtime_trigger(id)
-    }
-
+impl DaemonInstanceInner {
     /// Start the daemon in the background (non-blocking).
     ///
     /// This method spawns all registered services using wave-based priorities
     /// and returns immediately. The daemon continues running in the background.
     ///
-    /// Use [`wait()`](ServiceDaemon::wait) to block until a shutdown signal,
-    /// or [`shutdown()`](ServiceDaemon::shutdown) to trigger graceful termination.
+    /// Use [`wait()`](DaemonInstanceHandle::wait) to block until a shutdown signal,
+    /// or [`shutdown()`](DaemonInstanceHandle::shutdown) to trigger graceful termination.
     #[instrument(skip(self))]
     pub async fn run(&mut self) -> &mut Self {
         if self.services.is_empty() {
@@ -334,7 +402,7 @@ impl ServiceDaemon {
     ///
     /// This method blocks until one of the following events occurs:
     /// - An OS signal is received (SIGINT / SIGTERM / Ctrl+C).
-    /// - The internal cancellation token is cancelled (via [`shutdown()`](ServiceDaemon::shutdown)).
+    /// - The internal cancellation token is cancelled (via [`shutdown()`](DaemonInstanceHandle::shutdown)).
     /// - An external cancellation token is cancelled (if provided via
     ///   [`with_cancel_token()`](ServiceDaemonBuilder::with_cancel_token)).
     ///
@@ -404,11 +472,11 @@ impl ServiceDaemon {
     /// Trigger graceful shutdown of the daemon.
     ///
     /// This cancels the internal `CancellationToken`, which will cause
-    /// [`wait()`](ServiceDaemon::wait) to proceed with the shutdown sequence.
+    /// [`wait()`](DaemonInstanceHandle::wait) to proceed with the shutdown sequence.
     /// If an external token was provided, it is also cancelled to propagate
     /// the shutdown signal to other components sharing that token.
     pub fn shutdown(&self) {
-        info!("ServiceDaemon::shutdown() called, triggering graceful termination...");
+        info!("Daemon instance shutdown requested, triggering graceful termination...");
         self.cancellation_token.cancel();
         // Propagate shutdown to external token if present
         if let Some(ref external) = self.external_cancel_token {
@@ -473,7 +541,7 @@ impl ServiceDaemon {
     /// Run for a limited duration (for testing).
     #[cfg(feature = "simulation")]
     #[instrument(skip(self))]
-    pub async fn run_for_duration(mut self, duration: Duration) -> ServiceResult<()> {
+    pub async fn run_for_duration(&mut self, duration: Duration) -> ServiceResult<()> {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
 
@@ -515,7 +583,7 @@ fn emit_shutdown_topology() {
 mod tests {
     use super::*;
     use crate::models::{
-        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId,
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId, ServiceHandle,
         ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceParam,
         ServiceScheduling,
     };
@@ -747,13 +815,13 @@ mod tests {
 
     #[test]
     fn builder_capacity_plan_uses_filtered_final_registry() {
-        let daemon = ServiceDaemon::builder()
+        let daemon = test_inner_builder()
             .with_registry(
                 Registry::builder()
                     .with_tag("__unit_high_priority_capacity_primary__")
                     .build(),
             )
-            .build();
+            .build_inner();
 
         assert_eq!(daemon.high_priority_capacity.entry_count(), 1);
         assert!(daemon.high_priority_capacity.worker_count().is_some());
@@ -761,7 +829,7 @@ mod tests {
 
     #[test]
     fn builder_capacity_plan_merges_infra_tags_without_double_counting() {
-        let daemon = ServiceDaemon::builder()
+        let daemon = test_inner_builder()
             .with_registry(
                 Registry::builder()
                     .with_tag("__unit_high_priority_capacity_primary__")
@@ -771,7 +839,7 @@ mod tests {
                 "__unit_high_priority_capacity_primary__",
                 "__unit_high_priority_capacity_infra__",
             ])
-            .build();
+            .build_inner();
 
         assert_eq!(daemon.high_priority_capacity.entry_count(), 2);
         assert!(daemon.high_priority_capacity.worker_count().is_some());
@@ -779,13 +847,13 @@ mod tests {
 
     #[test]
     fn builder_capacity_plan_counts_high_priority_triggers_and_services_equally() {
-        let daemon = ServiceDaemon::builder()
+        let daemon = test_inner_builder()
             .with_registry(
                 Registry::builder()
                     .with_tag("__unit_high_priority_capacity_parity__")
                     .build(),
             )
-            .build();
+            .build_inner();
 
         assert_eq!(daemon.high_priority_capacity.entry_count(), 2);
         assert!(daemon.high_priority_capacity.worker_count().is_some());
@@ -911,30 +979,128 @@ mod tests {
         let _ = tracing_subscriber::fmt::try_init();
     }
 
-    #[tokio::test]
-    async fn test_service_daemon_builder_default() {
-        setup_tracing();
+    fn test_inner_builder() -> ServiceDaemonBuilder {
+        ServiceDaemon::builder()
+    }
+
+    #[test]
+    fn daemon_instance_id_display_and_parse_use_uuid_format() {
+        let uuid = uuid::Uuid::from_u128(0x019fe6228039757196b706134213d2e7);
+        let id = DaemonInstanceId::new(uuid);
+
+        assert_eq!(
+            id.to_string(),
+            "daemon#019fe622-8039-7571-96b7-06134213d2e7"
+        );
+        assert_eq!(
+            "daemon#019fe622-8039-7571-96b7-06134213d2e7"
+                .parse::<DaemonInstanceId>()
+                .expect("prefixed daemon id should parse"),
+            id
+        );
+        assert_eq!(
+            "019fe622-8039-7571-96b7-06134213d2e7"
+                .parse::<DaemonInstanceId>()
+                .expect("bare daemon UUID should parse"),
+            id
+        );
+        assert_eq!(id.as_uuid(), uuid);
+    }
+
+    #[test]
+    fn builder_registers_daemon_instance_and_runtime_snapshot_uses_same_id() {
         let daemon = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .build();
+        let daemon_id = daemon.id();
+
+        assert!(daemon_registry().contains(daemon_id));
+        assert_eq!(daemon.runtime().daemon_id, daemon_id);
+
+        daemon_registry().unregister(daemon_id);
+    }
+
+    #[test]
+    fn dropping_handle_clone_does_not_unregister_active_daemon() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let daemon_id = daemon.id();
+        let clone = daemon.clone();
+
+        drop(daemon);
+
+        assert!(daemon_registry().contains(daemon_id));
+        daemon_registry().unregister(clone.id());
+    }
+
+    #[tokio::test]
+    async fn wait_unregisters_daemon_instance_after_terminal_cleanup() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(isolated_registry())
+            .build();
+        let daemon_id = daemon.id();
+
+        daemon.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), daemon.wait())
+            .await
+            .expect("daemon wait should observe cancellation")
+            .expect("daemon wait should complete cleanly");
+
+        assert!(!daemon_registry().contains(daemon_id));
+    }
+
+    #[test]
+    fn handle_lists_daemon_local_service_instances() {
+        let registry = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
+            .build();
+        let service = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "capacity_primary_standard_service")
+            .expect("standard test service should be selected by tag");
+        let service_handle = ServiceHandle::new(service.entry_id, service.entry);
+        let expected_instance = service
+            .instances()
+            .first()
+            .copied()
+            .expect("selected service should have one auto-start instance");
+        let daemon = ServiceDaemon::builder().with_registry(registry).build();
+
+        assert!(daemon.service_instances().contains(&expected_instance));
+        assert_eq!(
+            daemon.service_instances_for(&service_handle),
+            vec![expected_instance]
+        );
+
+        daemon_registry().unregister(daemon.id());
+    }
+
+    #[tokio::test]
+    async fn test_service_daemon_builder_default() {
+        setup_tracing();
+        let daemon = test_inner_builder()
+            .with_registry(isolated_registry())
+            .build_inner();
         debug!("test_service_daemon_builder_default passed");
         let _ = daemon;
     }
 
     #[test]
     fn build_does_not_create_high_priority_runtime() {
-        let daemon = ServiceDaemon::builder()
+        let daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
 
         assert!(daemon.high_priority_runtime.is_none());
     }
 
     #[test]
     fn ensure_high_priority_runtime_skips_standard_only_services() {
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
         daemon.services = vec![test_service(1, &STANDARD_TEST_ENTRY)];
         daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
 
@@ -948,9 +1114,9 @@ mod tests {
 
     #[test]
     fn ensure_high_priority_runtime_creates_for_high_priority_services() {
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
         daemon.services = vec![test_service(1, &HIGH_PRIORITY_TEST_ENTRY)];
         daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
 
@@ -966,9 +1132,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_keeps_high_priority_runtime_absent_for_empty_registry() {
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
 
         daemon.run().await;
 
@@ -977,9 +1143,9 @@ mod tests {
 
     #[test]
     fn shutdown_high_priority_runtime_is_noop_when_never_created() {
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
 
         daemon.shutdown_high_priority_runtime();
 
@@ -991,9 +1157,9 @@ mod tests {
         let drop_order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let high_priority_drop_order = drop_order.clone();
         let control_drop_order = drop_order.clone();
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
 
         daemon.high_priority_runtime = Some(
             tokio::runtime::Builder::new_multi_thread()
@@ -1040,10 +1206,9 @@ mod tests {
     #[tokio::test]
     async fn test_service_daemon_handle() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder()
+        let handle = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .build();
-        let handle = daemon.handle();
 
         // Initially, unknown service should be Terminated
         let status = handle
@@ -1052,7 +1217,7 @@ mod tests {
         assert_eq!(status, ServiceStatus::Terminated);
 
         // Insert a status manually and verify
-        daemon.resources.status_plane.insert(
+        handle.resources.status_plane.insert(
             ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             ServiceStatus::Healthy,
         );
@@ -1065,13 +1230,12 @@ mod tests {
     #[tokio::test]
     async fn test_service_status_update() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder()
+        let handle = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .build();
-        let handle = daemon.handle();
 
         // Insert status
-        daemon.resources.status_plane.insert(
+        handle.resources.status_plane.insert(
             ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
             ServiceStatus::Initializing,
         );
@@ -1082,7 +1246,7 @@ mod tests {
         assert_eq!(status, ServiceStatus::Initializing);
 
         // Update status
-        daemon.resources.status_plane.insert(
+        handle.resources.status_plane.insert(
             ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
             ServiceStatus::Healthy,
         );
@@ -1095,9 +1259,9 @@ mod tests {
     #[test]
     fn runtime_snapshots_are_available_from_daemon_and_handle() {
         setup_tracing();
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
         daemon.services = vec![
             test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
             test_service(1, &STANDARD_TEST_ENTRY),
@@ -1120,8 +1284,11 @@ mod tests {
             ServiceStatus::Recovering("temporary failure".to_owned()),
         );
 
-        let daemon_runtime = daemon.runtime();
-        let handle = daemon.handle();
+        let daemon_runtime = daemon
+            .resources
+            .runtime_facts
+            .daemon_snapshot(daemon.cancellation_token.is_cancelled());
+        let handle = daemon_registry().register(daemon);
         let handle_runtime = handle.runtime();
         assert_eq!(daemon_runtime.daemon_id, handle_runtime.daemon_id);
         assert_eq!(handle_runtime.service_count, 2);
@@ -1160,13 +1327,12 @@ mod tests {
     #[test]
     fn runtime_snapshot_reports_shutdown_requested() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder()
+        let handle = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .build();
-        let handle = daemon.handle();
 
         assert!(!handle.runtime().shutdown_requested);
-        daemon.shutdown();
+        handle.shutdown();
         assert!(handle.runtime().shutdown_requested);
     }
 
@@ -1191,8 +1357,7 @@ mod tests {
             instance.entry_id(),
             instance.entry(),
         );
-        let daemon = ServiceDaemon::builder().with_registry(registry).build();
-        let handle = daemon.handle();
+        let handle = ServiceDaemon::builder().with_registry(registry).build();
 
         assert!(!handle.request_stop_instance(&fake_instance));
         assert_eq!(
@@ -1216,19 +1381,16 @@ mod tests {
     #[test]
     fn diagnostics_snapshot_is_available_from_daemon_and_handle() {
         setup_tracing();
-        let daemon = ServiceDaemon::builder()
+        let handle = ServiceDaemon::builder()
             .with_registry(isolated_registry())
             .build();
-        let handle = daemon.handle();
 
-        let daemon_snapshot = daemon.diagnostics_snapshot();
         let handle_snapshot = handle.diagnostics_snapshot();
 
-        assert_eq!(daemon_snapshot, handle_snapshot);
-        assert_eq!(daemon_snapshot.services.len(), 0);
-        assert_eq!(daemon_snapshot.generations.len(), 0);
+        assert_eq!(handle_snapshot.services.len(), 0);
+        assert_eq!(handle_snapshot.generations.len(), 0);
         assert!(
-            daemon_snapshot
+            handle_snapshot
                 .lanes
                 .iter()
                 .any(|lane| { lane.runtime_lane == crate::models::DiagnosticRuntimeLane::Control })
@@ -1238,9 +1400,9 @@ mod tests {
     #[test]
     fn default_advisory_profile_spawns_recommendation_loop() {
         setup_tracing();
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
         let control_runtime = daemon
             .ensure_control_runtime()
             .expect("control runtime should build");
@@ -1254,10 +1416,10 @@ mod tests {
     #[test]
     fn disabled_advisory_profile_skips_recommendation_loop() {
         setup_tracing();
-        let mut daemon = ServiceDaemon::builder()
+        let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
             .with_scheduling_advisory_profile(SchedulingAdvisoryProfile::disabled())
-            .build();
+            .build_inner();
         let control_runtime = daemon
             .ensure_control_runtime()
             .expect("control runtime should build");
@@ -1269,9 +1431,9 @@ mod tests {
 
     #[test]
     fn default_isolated_startup_limit_uses_internal_default() {
-        let daemon = ServiceDaemon::builder()
+        let daemon = test_inner_builder()
             .with_registry(isolated_registry())
-            .build();
+            .build_inner();
 
         assert_eq!(
             daemon.isolated_startup_permits.available_permits(),
@@ -1282,10 +1444,10 @@ mod tests {
     #[test]
     fn builder_configures_isolated_startup_limit() {
         let limit = NonZeroUsize::new(2).expect("test limit should be non-zero");
-        let daemon = ServiceDaemon::builder()
+        let daemon = test_inner_builder()
             .with_registry(isolated_registry())
             .with_isolated_startup_concurrency_limit(limit)
-            .build();
+            .build_inner();
 
         assert_eq!(daemon.isolated_startup_permits.available_permits(), 2);
     }

@@ -98,7 +98,7 @@ async fn urgent_job_worker(job: Job) -> anyhow::Result<()> {
 `Standard` is the default.
 
 - Use it for normal async services and triggers.
-- It runs on the Tokio runtime that calls `ServiceDaemon::run()`.
+- It runs on the Tokio runtime that calls the daemon handle's `run()`.
 - Prefer this unless you have a concrete reason to declare another mode.
 
 ```rust,ignore

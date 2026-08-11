@@ -60,7 +60,7 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
     let _ = service_daemon::try_init_logging();
     reset_shared_controller_state().await?;
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
     let cancel = daemon.cancel_token();
@@ -131,7 +131,7 @@ async fn command_queue_correlates_reply_through_daemon_topology() -> anyhow::Res
         .replace_connection(DeviceConnection::new(Default::default()))
         .await;
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
     let cancel = daemon.cancel_token();
@@ -325,7 +325,7 @@ async fn repeated_daemon_runs_start_from_fresh_scripted_connection() -> anyhow::
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     for _ in 0..2 {
         reset_shared_controller_state().await?;
-        let mut daemon = ServiceDaemon::builder()
+        let daemon = ServiceDaemon::builder()
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();

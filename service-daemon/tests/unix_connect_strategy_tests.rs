@@ -217,7 +217,7 @@ async fn test_unix_connect_missing_peer_returns_provider_init_error() {
     let _guard = prepare_socket_path(path);
     MISSING_PEER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("unix_connect_missing_peer_provider_test")
@@ -262,7 +262,7 @@ async fn test_unix_connect_env_overrides_fallback_and_eager_runs_before_service_
         tokio::time::sleep(Duration::from_secs(5)).await;
     });
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("unix_connect_env_eager_provider_test")

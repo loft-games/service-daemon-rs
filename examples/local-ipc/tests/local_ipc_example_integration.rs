@@ -48,7 +48,7 @@ async fn local_ipc_example_starts_and_roundtrips() -> anyhow::Result<()> {
         .map_err(|error| anyhow::anyhow!("ExampleLocalIpcListener resolve failed: {error:?}"))?;
     assert_eq!(listener.name(), name);
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;

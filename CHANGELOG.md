@@ -14,12 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Release Security Contract**: Added maintainer documentation for deployment boundaries, logging safety, Unix socket deployment, TCP listener exposure, and example-production responsibilities.
 - **Service Handles**: Added `ServiceHandle` and `service_handle!(...)` so provider code can resolve a daemon-local handle to a selected static service entry by service function path.
 - **Service Instance Handles**: Added `ServiceInstanceHandle` to expose the runtime `ServiceInstanceId` together with the static `ServiceEntryId` for a materialized service instance.
+- **Daemon Instance Handles**: Added UUIDv7 `DaemonInstanceId` and `DaemonInstanceHandle` as the public daemon instance control handle returned by `ServiceDaemonBuilder::build()`.
 - **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, reachability probes, and focused Windows MSVC validation coverage.
 
 ### Changed
 
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
+- **Daemon Ownership API**: `ServiceDaemon` is now a lightweight builder facade. `ServiceDaemonBuilder::build()` registers a process-local daemon instance and returns `DaemonInstanceHandle`; the previous `ServiceDaemonHandle` type and `.handle()` flow were removed.
 - **Service Instance Model**: Runtime instances are now represented by `ServiceInstanceHandle` values stored in a daemon-local instance registry. `ServiceDescription` is entry-scoped and exposes its current instance handles instead of carrying a single instance ID and cancellation token.
 - **Service Handle Resolution**: Provider-time service handle lookup is scoped to the current daemon projection. Linked services outside the projection and unlinked targets fail with provider initialization errors instead of falling back to a global runtime instance.
 - **Provider Attribute Parser**: Shared named-tail parsing across service, trigger, and provider macros while keeping provider default/template heads as a macro-specific syntax boundary.

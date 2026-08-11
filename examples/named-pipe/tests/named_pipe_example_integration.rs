@@ -53,7 +53,7 @@ async fn named_pipe_example_starts_and_roundtrips() -> anyhow::Result<()> {
             })?;
     assert_eq!(listener.name(), pipe_name);
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
 
     tokio::time::sleep(Duration::from_secs(1)).await;

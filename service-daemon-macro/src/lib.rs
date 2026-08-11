@@ -56,7 +56,7 @@ mod trigger;
 ///
 /// Then in main.rs:
 /// ```rust,ignore
-/// let mut daemon = ServiceDaemon::builder().build();
+/// let daemon = ServiceDaemon::builder().build();
 /// daemon.run().await;
 /// daemon.wait().await?;
 /// ```

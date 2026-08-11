@@ -304,7 +304,7 @@ async fn advisory_disabled_high_priority_service() -> anyhow::Result<()> {
 async fn test_scheduling_isolation() -> anyhow::Result<()> {
     THREAD_NAMES.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_scheduling_threads__")
@@ -382,7 +382,7 @@ async fn test_multiple_isolated_services_get_distinct_private_runtimes() -> anyh
     MULTI_ISOLATED_STARTED.store(0, Ordering::SeqCst);
     MULTI_ISOLATED_THREAD_NAMES.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_multiple_isolated_services__")
@@ -459,7 +459,7 @@ async fn test_scheduling_variants_participate_in_startup_and_shutdown() -> anyho
     ISOLATED_STARTED.store(false, Ordering::SeqCst);
     ISOLATED_STOPPED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_scheduling_lifecycle__")
@@ -490,7 +490,7 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
     TRIGGER_DISPATCH_COUNT.store(0, Ordering::SeqCst);
     TRIGGER_THREAD_NAMES.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_scheduling_lanes__")
@@ -592,7 +592,7 @@ async fn test_scheduling_advisory_disable_preserves_lifecycle_and_lane() -> anyh
     ADVISORY_DISABLED_STOPPED.store(false, Ordering::SeqCst);
     ADVISORY_DISABLED_THREAD_NAMES.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_scheduling_advisory_profile_disabled__")
@@ -628,7 +628,7 @@ async fn test_isolated_generation_failure_restarts_through_bridge() -> anyhow::R
     ISOLATED_RESTART_STOPPED.store(false, Ordering::SeqCst);
     ISOLATED_RESTART_THREAD_NAMES.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_isolated_bridge_restart__")
@@ -668,7 +668,7 @@ async fn test_isolated_generation_panic_restarts_through_bridge() -> anyhow::Res
     ISOLATED_PANIC_STOPPED.store(false, Ordering::SeqCst);
     ISOLATED_PANIC_THREAD_NAMES.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_isolated_bridge_panic__")

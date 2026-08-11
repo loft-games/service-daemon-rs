@@ -1,8 +1,8 @@
 use service_daemon::{
-    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticProviderFailureBoundaryKind,
-    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
-    DiagnosticRestartDecisionKind, ProviderError, Registry, RestartPolicy, ServiceDaemon,
-    ServiceDiagnosticsSnapshot, TT::*, provider, trigger,
+    DaemonInstanceHandle, DiagnosticGenerationExitKind, DiagnosticLifecycleStats,
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, DiagnosticRestartDecisionKind, ProviderError, Registry,
+    RestartPolicy, ServiceDaemon, ServiceDiagnosticsSnapshot, TT::*, provider, trigger,
 };
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -128,7 +128,7 @@ fn phase9_policy() -> RestartPolicy {
 }
 
 async fn wait_for_service_lifecycle<F>(
-    daemon: &ServiceDaemon,
+    daemon: &DaemonInstanceHandle,
     service_name: &str,
     predicate: F,
 ) -> anyhow::Result<ServiceDiagnosticsSnapshot>
@@ -158,7 +158,7 @@ async fn test_topic_host_queue_trigger_dispatches_payload_without_downcast_panic
 -> anyhow::Result<()> {
     TOPIC_HOST_QUEUE_SMOKE_RECEIVED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_topic_host_queue_smoke__")
@@ -212,7 +212,7 @@ async fn test_trigger_dispatch_retry_exhaustion_restarts_and_records_diagnostics
 -> anyhow::Result<()> {
     RETRY_EXHAUSTION_ATTEMPTS.store(0, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_retry_exhaustion_supervision__")
@@ -253,7 +253,7 @@ async fn test_trigger_dispatch_panic_restarts_and_records_panic_diagnostics() ->
 {
     PANIC_DISPATCH_ATTEMPTS.store(0, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_panic_supervision__")
@@ -293,7 +293,7 @@ async fn test_trigger_dispatch_panic_restarts_and_records_panic_diagnostics() ->
 async fn test_trigger_provider_dependency_init_failure_shuts_down_daemon() -> anyhow::Result<()> {
     TRIGGER_FATAL_PROVIDER_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_provider_init_supervision__")
@@ -347,7 +347,7 @@ async fn test_trigger_provider_dependency_init_failure_shuts_down_daemon() -> an
 async fn test_trigger_dispatch_provider_failure_projects_dispatch_phase() -> anyhow::Result<()> {
     TRIGGER_DISPATCH_FATAL_PROVIDER_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_dispatch_provider_failure__")
@@ -397,7 +397,7 @@ async fn test_trigger_dispatch_provider_failure_projects_dispatch_phase() -> any
 #[tokio::test]
 async fn test_trigger_shutdown_with_in_flight_dispatch_does_not_record_recoverable_failure()
 -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_shutdown_inflight_supervision__")

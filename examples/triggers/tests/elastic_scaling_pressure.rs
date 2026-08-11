@@ -106,7 +106,7 @@ async fn elastic_scaling_increases_concurrency_under_pressure() -> anyhow::Resul
 
     reset_counters();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .build();
     let token = daemon.cancel_token();

@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use service_daemon::{
-    DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
+    DaemonInstanceHandle, DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
     DiagnosticProviderFailureKind, DiagnosticProviderFailureRuntimePhase,
     DiagnosticProviderFailureSourceKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
     ServiceDaemon, TT::*, provider, service, trigger,
@@ -251,8 +251,10 @@ fn phase16_policy() -> RestartPolicy {
         .build()
 }
 
-async fn run_until_provider_init_shutdown(tag: &'static str) -> anyhow::Result<ServiceDaemon> {
-    let mut daemon = ServiceDaemon::builder()
+async fn run_until_provider_init_shutdown(
+    tag: &'static str,
+) -> anyhow::Result<DaemonInstanceHandle> {
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag(tag).build())
         .with_restart_policy(phase16_policy())
         .build();
@@ -271,7 +273,7 @@ fn provider_init_boundary_source_location(prefix: &str) -> String {
         .join("provider_init_boundary_integration_tests.rs");
     format!("{prefix}{}:", file.display())
 }
-fn assert_provider_init_exit(daemon: &ServiceDaemon, service_name: &str) {
+fn assert_provider_init_exit(daemon: &DaemonInstanceHandle, service_name: &str) {
     let diagnostics = daemon.diagnostics_snapshot();
     let service = diagnostics
         .services

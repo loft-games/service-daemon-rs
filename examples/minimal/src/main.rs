@@ -20,7 +20,7 @@ use service_daemon::ServiceDaemon;
 async fn main() -> anyhow::Result<()> {
     service_daemon::init_logging();
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
 

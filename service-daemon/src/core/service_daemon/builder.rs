@@ -8,13 +8,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::context::{DaemonResources, process_token};
 use crate::core::diagnostics::DiagnosticsStore;
-use crate::models::{Registry, SchedulingAdvisoryProfile, ServiceDescription};
+use crate::models::{DaemonInstanceId, Registry, SchedulingAdvisoryProfile, ServiceDescription};
 
-use super::ServiceDaemon;
 use super::policy::RestartPolicy;
 use super::runtime::{HighPriorityCapacityPlan, ISOLATED_STARTUP_CONCURRENCY_LIMIT};
+use super::{DaemonInstanceHandle, DaemonInstanceInner, daemon_registry};
 
-/// Builder for constructing a `ServiceDaemon`.
+/// Builder for constructing a daemon instance.
 ///
 /// The `.build()` method is **infallible** -- it always returns a valid daemon.
 pub struct ServiceDaemonBuilder {
@@ -130,7 +130,7 @@ impl ServiceDaemonBuilder {
     ///
     /// When the external token is cancelled, the daemon will treat it as a
     /// shutdown signal and begin graceful termination. Conversely, when the
-    /// daemon's [`shutdown()`](ServiceDaemon::shutdown) is called, it will
+    /// daemon handle's [`shutdown()`](DaemonInstanceHandle::shutdown) is called, it will
     /// also cancel this token, propagating the signal to all other components
     /// sharing it.
     #[must_use]
@@ -152,7 +152,7 @@ impl ServiceDaemonBuilder {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let mut daemon = ServiceDaemon::builder()
+    /// let daemon = ServiceDaemon::builder()
     ///     .with_trigger_config(ScalingPolicy::builder()
     ///         .initial_concurrency(4)
     ///         .build())
@@ -178,17 +178,22 @@ impl ServiceDaemonBuilder {
         self
     }
 
-    /// Build the `ServiceDaemon`.
+    /// Build and register a daemon instance.
     ///
     /// This method is **infallible** -- it always returns a valid daemon.
     /// If no registry was provided, all statically registered services are included.
     ///
-    /// Provider dependency cycles are checked later in [`ServiceDaemon::run`]
+    /// Provider dependency cycles are checked later in [`DaemonInstanceHandle::run`]
     /// (not here) so that `build()` stays allocation-only and non-blocking.
     /// A cycle surfaces as a `tracing::error!` followed by `shutdown()`; users
     /// observe the outcome via the daemon handle / status plane.
     #[must_use]
-    pub fn build(self) -> ServiceDaemon {
+    pub fn build(self) -> DaemonInstanceHandle {
+        let inner = self.build_inner();
+        daemon_registry().register(inner)
+    }
+
+    pub(crate) fn build_inner(self) -> DaemonInstanceInner {
         let registry = self.registry.unwrap_or_else(|| Registry::builder().build());
         let (mut services, mut projection, instance_registry) = registry.into_parts();
 
@@ -223,12 +228,19 @@ impl ServiceDaemonBuilder {
 
         let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
 
+        let daemon_id = DaemonInstanceId::new_v7();
         #[cfg(feature = "simulation")]
         let resources = self.resources.unwrap_or_else(|| {
-            DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()))
+            DaemonResources::new_with_diagnostics_for_daemon(
+                Arc::new(DiagnosticsStore::new()),
+                daemon_id,
+            )
         });
         #[cfg(not(feature = "simulation"))]
-        let resources = DaemonResources::new_with_diagnostics(Arc::new(DiagnosticsStore::new()));
+        let resources = DaemonResources::new_with_diagnostics_for_daemon(
+            Arc::new(DiagnosticsStore::new()),
+            daemon_id,
+        );
         resources.set_service_catalog_projection(projection);
         let diagnostics = resources.diagnostics.clone();
         resources
@@ -243,7 +255,7 @@ impl ServiceDaemonBuilder {
             resources.trigger_configs.insert(entry.0, entry.1);
         }
 
-        ServiceDaemon {
+        DaemonInstanceInner {
             services,
             instance_registry,
             running_tasks: Arc::new(Mutex::new(HashMap::new())),

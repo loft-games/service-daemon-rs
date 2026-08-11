@@ -33,7 +33,7 @@
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
 //!     // 3. Build and run the daemon
-//!     let mut daemon = ServiceDaemon::builder().build();
+//!     let daemon = ServiceDaemon::builder().build();
 //!     daemon.run().await;
 //!     daemon.wait().await?;
 //!     Ok(())
@@ -67,15 +67,15 @@ pub use core::logging::{
 };
 pub use core::managed_state::{Mutex, RwLock, TrackedNotify, TrackedSender};
 pub use core::service_daemon::{
-    RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder, ServiceDaemonHandle,
+    DaemonInstanceHandle, RestartPolicy, RestartPolicyBuilder, ServiceDaemon, ServiceDaemonBuilder,
 };
 pub use models::service::{ServicePriority, ServiceScheduling, TriggerInstanceId};
 pub use models::trigger::TriggerTransition;
 pub use models::{
-    BackoffController, DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticAggregateStats,
-    DiagnosticConfidence, DiagnosticGenerationExitKind, DiagnosticInterpretation,
-    DiagnosticInterpretationLabel, DiagnosticLifecycleStats, DiagnosticObservationStats,
-    DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
+    BackoffController, DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot,
+    DiagnosticAggregateStats, DiagnosticConfidence, DiagnosticGenerationExitKind,
+    DiagnosticInterpretation, DiagnosticInterpretationLabel, DiagnosticLifecycleStats,
+    DiagnosticObservationStats, DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
     DiagnosticProviderFailureKind, DiagnosticProviderFailureRetry,
     DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
     DiagnosticProviderFailureStats, DiagnosticRecommendationHint, DiagnosticRestartDecisionKind,
@@ -147,10 +147,11 @@ pub use service_daemon_macro::{provider, service, service_handle, trigger};
 pub mod prelude {
     pub use crate::TT::*;
     pub use crate::{
-        DaemonDiagnosticsSnapshot, DaemonRuntimeSnapshot, DiagnosticRuntimeLane, ManagedProvided,
-        Provided, ReadinessSnapshot, SchedulingAdvisoryProfile, ServiceDaemon, ServiceError,
-        ServiceHandle, ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot,
-        ServiceScheduling, ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+        DaemonDiagnosticsSnapshot, DaemonInstanceHandle, DaemonInstanceId, DaemonRuntimeSnapshot,
+        DiagnosticRuntimeLane, ManagedProvided, Provided, ReadinessSnapshot,
+        SchedulingAdvisoryProfile, ServiceDaemon, ServiceError, ServiceHandle,
+        ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling,
+        ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,
         TriggerPressureSnapshot, TriggerRuntimeSnapshot, WatchableProvided,
         current_service_instance_id, done, is_shutdown, provider, service, service_handle, shelve,
         shelve_clone, sleep, spawn_with_context, state, trigger, trigger_config, unshelve,

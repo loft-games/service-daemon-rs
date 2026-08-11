@@ -62,7 +62,7 @@ async fn startup_service_0() -> anyhow::Result<()> {
 async fn test_ordered_startup() -> anyhow::Result<()> {
     STARTUP_SEQ.lock().unwrap().clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_ordered_startup__")
@@ -136,7 +136,7 @@ async fn shutdown_service_100() -> anyhow::Result<()> {
 async fn test_ordered_shutdown() -> anyhow::Result<()> {
     SHUTDOWN_SEQ.lock().unwrap().clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_ordered_shutdown__")
@@ -204,7 +204,7 @@ async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
     CRASH_GENERATION.store(0, Ordering::SeqCst);
     *RECOVERED_VALUE.lock().unwrap() = None;
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__test_crash_shelf__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -265,7 +265,7 @@ async fn handshake_low_prio() -> anyhow::Result<()> {
 async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
     HANDSHAKE_LOG.lock().unwrap().clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__test_handshake__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();

@@ -12,7 +12,7 @@ use service_daemon::ServiceDaemon;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
     Ok(())

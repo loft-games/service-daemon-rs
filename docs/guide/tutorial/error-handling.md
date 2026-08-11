@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         .jitter_factor(0.1)                    // Add 10% randomness
         .build();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_restart_policy(policy)
         .build();
 
@@ -68,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
         .scale_threshold(3)        // Scale up earlier under pressure
         .build();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_trigger_config(scaling)
         .build();
 

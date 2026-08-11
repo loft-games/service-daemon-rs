@@ -223,13 +223,13 @@ impl ServicePriority {
 pub enum ServiceScheduling {
     /// The default host-runtime integration mode.
     ///
-    /// The body runs on the Tokio runtime that calls `ServiceDaemon::run()`.
+    /// The body runs on the Tokio runtime that calls the daemon handle's `run()`.
     /// Best for most services that do not need a dedicated framework-owned lane.
     #[default]
     Standard,
     /// Runs the body on the daemon-owned low-contention high-priority runtime lane.
     ///
-    /// The runtime is created lazily by `ServiceDaemon::run()` only when the
+    /// The runtime is created lazily by the daemon handle's `run()` only when the
     /// final registry contains at least one high-priority service or trigger.
     /// This is an explicit declaration, not an overflow target for `Standard`.
     HighPriority,
@@ -305,6 +305,20 @@ impl ServiceHandle {
     #[inline]
     pub const fn module(&self) -> &'static str {
         self.entry.module
+    }
+}
+
+impl PartialEq for ServiceHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.entry_id == other.entry_id
+    }
+}
+
+impl Eq for ServiceHandle {}
+
+impl Hash for ServiceHandle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.entry_id.hash(state);
     }
 }
 

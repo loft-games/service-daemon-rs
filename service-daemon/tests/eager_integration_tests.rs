@@ -238,7 +238,7 @@ async fn test_async_fn_eager_init() {
     // Reset state for test
     EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_eager_test")
@@ -266,7 +266,7 @@ async fn test_async_fn_eager_init() {
 async fn test_async_fn_eager_init_failure_triggers_shutdown() {
     EAGER_FAILURE_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_eager_failure_test")
@@ -371,7 +371,7 @@ async fn test_missing_env_eager_provider_failure_triggers_shutdown() {
     assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
     MISSING_ENV_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_missing_env_failure_test")
@@ -390,7 +390,7 @@ async fn test_panicking_eager_provider_failure_triggers_shutdown() {
     PANICKING_EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
     PANICKING_EAGER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_panicking_eager_test")
@@ -409,7 +409,7 @@ async fn test_panicking_eager_provider_failure_triggers_shutdown() {
 async fn test_unreachable_eager_provider_is_not_initialized() {
     UNREACHABLE_EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_without_eager_dependency")
@@ -435,7 +435,7 @@ async fn test_reachable_eager_provider_dependency_initializes_before_service() {
     TRANSITIVE_PROVIDER_SAW_EAGER_DEP.store(false, Ordering::SeqCst);
     TRANSITIVE_SERVICE_SAW_EAGER_DEP.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_transitive_eager_dependency_test")

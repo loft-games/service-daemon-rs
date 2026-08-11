@@ -3,6 +3,8 @@
 //! These read models copy framework facts out of the daemon. They never expose
 //! runtime locks, semaphores, or control handles.
 
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -10,12 +12,58 @@ use uuid::Uuid;
 
 use super::service::{ServiceInstanceId, ServiceScheduling, ServiceStatus};
 
+/// Runtime identity for one daemon instance in this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub struct DaemonInstanceId(Uuid);
+
+impl DaemonInstanceId {
+    /// Explicitly construct a daemon instance id.
+    #[inline]
+    pub const fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    /// Allocate a new UUIDv7 daemon instance id.
+    #[inline]
+    pub fn new_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Return the underlying UUID.
+    #[inline]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for DaemonInstanceId {
+    fn default() -> Self {
+        Self(Uuid::nil())
+    }
+}
+
+impl FromStr for DaemonInstanceId {
+    type Err = uuid::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let raw = input.strip_prefix("daemon#").unwrap_or(input);
+        Uuid::parse_str(raw).map(Self)
+    }
+}
+
+impl fmt::Display for DaemonInstanceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "daemon#{}", self.0)
+    }
+}
+
 /// Daemon-level runtime facts.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonRuntimeSnapshot {
     /// Stable identifier for this daemon resource instance.
-    pub daemon_id: Uuid,
+    pub daemon_id: DaemonInstanceId,
     /// Creation time of the daemon resources.
     pub start_time: DateTime<Utc>,
     /// Monotonic elapsed time since creation.
