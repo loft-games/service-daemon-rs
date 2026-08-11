@@ -90,20 +90,17 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
     LAZY_HEALTHY_STOPPED.store(false, Ordering::SeqCst);
 
     let registry = Registry::builder().build();
-    let healthy_service = registry
-        .services()
-        .iter()
-        .find(|service| service.name() == "healthy_service")
-        .and_then(|service| service.instances().first().copied())
-        .expect("healthy_service should be materialized");
-    let fatal_service = registry
-        .services()
-        .iter()
-        .find(|service| service.name() == "fatal_service")
-        .and_then(|service| service.instances().first().copied())
-        .expect("fatal_service should be materialized");
-
     let daemon = ServiceDaemon::builder().with_registry(registry).build();
+    let healthy_service = daemon
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == "healthy_service")
+        .expect("healthy_service should be materialized");
+    let fatal_service = daemon
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == "fatal_service")
+        .expect("fatal_service should be materialized");
 
     daemon.run().await;
 
@@ -117,14 +114,8 @@ async fn test_lazy_provider_fatal_triggers_daemon_shutdown() -> anyhow::Result<(
     timeout(Duration::from_secs(5), daemon.wait()).await??;
 
     assert!(LAZY_HEALTHY_STOPPED.load(Ordering::SeqCst));
-    assert_eq!(
-        daemon.get_instance_status(&healthy_service).await,
-        ServiceStatus::Terminated
-    );
-    assert_eq!(
-        daemon.get_instance_status(&fatal_service).await,
-        ServiceStatus::Terminated
-    );
+    assert_eq!(healthy_service.status().await, ServiceStatus::Terminated);
+    assert_eq!(fatal_service.status().await, ServiceStatus::Terminated);
 
     let diagnostics = daemon.diagnostics_snapshot();
     let fatal_service = diagnostics

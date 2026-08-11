@@ -31,17 +31,23 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
     let registry = Registry::builder()
         .with_tag("__test_normal_exit_restart__")
         .build();
-    let service_instance = registry
-        .services()
-        .iter()
-        .find(|service| service.name() == "normal_exit_service")
-        .and_then(|service| service.instances().first().copied())
-        .expect("normal_exit_service should be materialized");
+    assert!(
+        registry
+            .services()
+            .iter()
+            .any(|service| service.name() == "normal_exit_service"),
+        "normal_exit_service should be materialized"
+    );
 
     let daemon = ServiceDaemon::builder()
         .with_registry(registry)
         .with_restart_policy(policy)
         .build();
+    let service_instance = daemon
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == "normal_exit_service")
+        .expect("normal_exit_service should have one instance");
 
     let cancel = daemon.cancel_token();
     daemon.run().await;
@@ -71,10 +77,7 @@ async fn test_normal_exit_restarts_without_backoff_delay() -> anyhow::Result<()>
         restart_gap
     );
 
-    assert_eq!(
-        daemon.get_instance_status(&service_instance).await,
-        ServiceStatus::Terminated
-    );
+    assert_eq!(service_instance.status().await, ServiceStatus::Terminated);
 
     let service = daemon
         .diagnostics_snapshot()

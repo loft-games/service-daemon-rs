@@ -45,8 +45,8 @@ use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessSnapshot,
     Result as ServiceResult, SchedulingAdvisoryProfile, ServiceDescription, ServiceHandle,
-    ServiceInstanceHandle, ServiceInstanceId, ServiceInstanceRegistry, ServiceRuntimeSnapshot,
-    ServiceStatus, TriggerRuntimeSnapshot,
+    ServiceInstanceControl, ServiceInstanceHandle, ServiceInstanceId, ServiceInstanceRegistry,
+    ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
 };
 use dashmap::DashMap;
 
@@ -64,11 +64,16 @@ use startup_pipeline::StartupError;
 pub struct DaemonInstanceHandle {
     id: DaemonInstanceId,
     inner: Arc<Mutex<DaemonInstanceInner>>,
-    resources: Arc<DaemonResources>,
+    control: Arc<DaemonInstanceControl>,
     diagnostics: Arc<DiagnosticsStore>,
-    instance_registry: Arc<ServiceInstanceRegistry>,
     shutdown_token: CancellationToken,
     external_cancel_token: Option<CancellationToken>,
+}
+
+struct DaemonInstanceControl {
+    id: DaemonInstanceId,
+    resources: Arc<DaemonResources>,
+    instance_registry: Arc<ServiceInstanceRegistry>,
 }
 
 impl DaemonInstanceHandle {
@@ -82,14 +87,6 @@ impl DaemonInstanceHandle {
         self.shutdown_token.clone()
     }
 
-    /// Get the current status of a service instance handle.
-    pub async fn get_instance_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus {
-        if !self.owns_instance(handle) {
-            return ServiceStatus::Terminated;
-        }
-        self.status_for_instance_id(handle.instance_id())
-    }
-
     /// Return a read-only snapshot of daemon diagnostics.
     pub fn diagnostics_snapshot(&self) -> DaemonDiagnosticsSnapshot {
         self.diagnostics.snapshot().into()
@@ -97,97 +94,54 @@ impl DaemonInstanceHandle {
 
     /// Return read-only daemon runtime facts.
     pub fn runtime(&self) -> DaemonRuntimeSnapshot {
-        self.resources
+        self.control
+            .resources
             .runtime_facts
             .daemon_snapshot(self.shutdown_token.is_cancelled())
     }
 
     /// Return a facts-only readiness grouping.
     pub fn runtime_readiness(&self) -> ReadinessSnapshot {
-        self.resources
+        self.control
+            .resources
             .runtime_facts
             .readiness_snapshot(|service_instance_id| self.status_for_snapshot(service_instance_id))
     }
 
     /// Return read-only runtime facts for all registered services.
     pub fn runtime_services(&self) -> Vec<ServiceRuntimeSnapshot> {
-        self.resources
+        self.control
+            .resources
             .runtime_facts
             .service_snapshots(|service_instance_id| self.status_for_snapshot(service_instance_id))
     }
 
-    /// Return read-only runtime facts for a service instance handle.
-    pub fn runtime_instance(
-        &self,
-        handle: &ServiceInstanceHandle,
-    ) -> Option<ServiceRuntimeSnapshot> {
-        if !self.owns_instance(handle) {
-            return None;
-        }
-        self.runtime_snapshot_for_instance_id(handle.instance_id())
-    }
-
-    /// Request shutdown for one managed service instance.
-    ///
-    /// This cancels the instance token and updates status/runtime facts. It
-    /// does not remove the instance from the daemon registry and does not wait
-    /// for the task join handle to finish.
-    pub fn request_stop_instance(&self, handle: &ServiceInstanceHandle) -> bool {
-        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
-            return false;
-        };
-        if record.handle() != *handle {
-            return false;
-        }
-
-        record.cancellation_token().cancel();
-        let shutting_down = ServiceStatus::ShuttingDown;
-        self.resources
-            .status_plane
-            .insert(handle.instance_id(), shutting_down.clone());
-        self.resources
-            .runtime_facts
-            .record_service_status(handle.instance_id(), &shutting_down);
-        self.resources.status_changed.notify_waiters();
-        true
-    }
-
     /// Return read-only runtime facts for all observed triggers.
     pub fn runtime_triggers(&self) -> Vec<TriggerRuntimeSnapshot> {
-        self.resources.runtime_facts.trigger_snapshots()
-    }
-
-    /// Return read-only runtime facts for an observed trigger service instance.
-    pub fn runtime_trigger_instance(
-        &self,
-        handle: &ServiceInstanceHandle,
-    ) -> Option<TriggerRuntimeSnapshot> {
-        if !self.owns_instance(handle) {
-            return None;
-        }
-        self.resources
-            .runtime_facts
-            .trigger_snapshot(handle.instance_id())
+        self.control.resources.runtime_facts.trigger_snapshots()
     }
 
     /// Return all service instances owned by this daemon.
     pub fn service_instances(&self) -> Vec<ServiceInstanceHandle> {
-        self.instance_registry
+        self.control
+            .instance_registry
             .records()
             .into_iter()
-            .map(|record| record.handle())
+            .map(|record| ServiceInstanceHandle::from_record(&record, self.control.clone()))
             .collect()
     }
 
     /// Return service instances for one service definition selected by this daemon.
     pub fn service_instances_for(&self, handle: &ServiceHandle) -> Vec<ServiceInstanceHandle> {
-        let Some(projection) = self.resources.service_catalog_projection() else {
+        let Some(projection) = self.control.resources.service_catalog_projection() else {
             return Vec::new();
         };
         if projection.resolve_handle(handle.entry_id()) != Some(*handle) {
             return Vec::new();
         }
-        self.instance_registry.handles_for_entry(handle.entry_id())
+        self.control
+            .instance_registry
+            .handles_for_entry(handle.entry_id(), self.control.clone())
     }
 
     /// Start the daemon in the background (non-blocking).
@@ -235,31 +189,55 @@ impl DaemonInstanceHandle {
     #[cfg(feature = "simulation")]
     pub(crate) fn simulation_set_shelf<T: Any + Send + Sync>(
         &self,
-        service_instance_id: ServiceInstanceId,
+        handle: &ServiceInstanceHandle,
         key: &str,
         value: T,
-    ) {
-        let entry = self.resources.shelf.entry(service_instance_id).or_default();
+    ) -> bool {
+        if !self.control.owns_instance(handle) {
+            return false;
+        }
+        let entry = self
+            .control
+            .resources
+            .shelf
+            .entry(handle.instance_id())
+            .or_default();
         entry.insert(key.to_string(), Box::new(value));
+        true
     }
 
     #[cfg(feature = "simulation")]
     pub(crate) fn simulation_set_status(
         &self,
-        service_instance_id: ServiceInstanceId,
+        handle: &ServiceInstanceHandle,
         status: ServiceStatus,
-    ) {
-        self.resources
+    ) -> bool {
+        if !self.control.owns_instance(handle) {
+            return false;
+        }
+        self.control
+            .resources
             .status_plane
-            .insert(service_instance_id, status);
-        self.resources.status_changed.notify_waiters();
+            .insert(handle.instance_id(), status);
+        self.control.resources.status_changed.notify_waiters();
+        true
     }
 
     #[cfg(feature = "simulation")]
-    pub(crate) fn simulation_trigger_reload(&self, service_instance_id: &ServiceInstanceId) {
-        if let Some(notify) = self.resources.reload_signals.get(service_instance_id) {
-            notify.notify_one();
+    pub(crate) fn simulation_trigger_reload(&self, handle: &ServiceInstanceHandle) -> bool {
+        if !self.control.owns_instance(handle) {
+            return false;
         }
+        if let Some(notify) = self
+            .control
+            .resources
+            .reload_signals
+            .get(&handle.instance_id())
+        {
+            notify.notify_one();
+            return true;
+        }
+        false
     }
 
     #[cfg(feature = "simulation")]
@@ -267,14 +245,16 @@ impl DaemonInstanceHandle {
     where
         T: 'static + Send + Sync + Clone,
     {
-        self.resources
+        self.control
+            .resources
             .provider_scope
             .override_local_slot(Arc::new(value));
     }
 
     #[cfg(feature = "simulation")]
     pub(crate) fn simulation_service_instance_ids(&self) -> Vec<ServiceInstanceId> {
-        self.resources
+        self.control
+            .resources
             .status_plane
             .iter()
             .map(|entry| *entry.key())
@@ -284,12 +264,16 @@ impl DaemonInstanceHandle {
     #[cfg(feature = "simulation")]
     pub(crate) fn simulation_get_shelf<T: Any + Clone + Send + Sync>(
         &self,
-        service_instance_id: ServiceInstanceId,
+        handle: &ServiceInstanceHandle,
         key: &str,
     ) -> Option<T> {
-        self.resources
+        if !self.control.owns_instance(handle) {
+            return None;
+        }
+        self.control
+            .resources
             .shelf
-            .get(&service_instance_id)
+            .get(&handle.instance_id())
             .and_then(|entry| {
                 entry
                     .get(key)
@@ -300,34 +284,39 @@ impl DaemonInstanceHandle {
     #[cfg(feature = "simulation")]
     pub(crate) fn simulation_get_status(
         &self,
-        service_instance_id: ServiceInstanceId,
+        handle: &ServiceInstanceHandle,
     ) -> Option<ServiceStatus> {
-        self.resources
+        if !self.control.owns_instance(handle) {
+            return None;
+        }
+        self.control
+            .resources
             .status_plane
-            .get(&service_instance_id)
+            .get(&handle.instance_id())
             .map(|status| status.value().clone())
     }
 
     #[cfg(feature = "simulation")]
-    pub(crate) fn simulation_has_shelf(
-        &self,
-        service_instance_id: ServiceInstanceId,
-        key: &str,
-    ) -> bool {
-        self.resources
+    pub(crate) fn simulation_has_shelf(&self, handle: &ServiceInstanceHandle, key: &str) -> bool {
+        if !self.control.owns_instance(handle) {
+            return false;
+        }
+        self.control
+            .resources
             .shelf
-            .get(&service_instance_id)
+            .get(&handle.instance_id())
             .is_some_and(|entry| entry.contains_key(key))
     }
 
     #[cfg(feature = "simulation")]
-    pub(crate) fn simulation_shelf_keys(
-        &self,
-        service_instance_id: ServiceInstanceId,
-    ) -> Vec<String> {
-        self.resources
+    pub(crate) fn simulation_shelf_keys(&self, handle: &ServiceInstanceHandle) -> Vec<String> {
+        if !self.control.owns_instance(handle) {
+            return Vec::new();
+        }
+        self.control
+            .resources
             .shelf
-            .get(&service_instance_id)
+            .get(&handle.instance_id())
             .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
             .unwrap_or_default()
     }
@@ -336,6 +325,66 @@ impl DaemonInstanceHandle {
         self.status_for_instance_id(id)
     }
 
+    fn status_for_instance_id(&self, id: ServiceInstanceId) -> ServiceStatus {
+        self.control
+            .resources
+            .status_plane
+            .get(&id)
+            .map(|status| status.clone())
+            .unwrap_or(ServiceStatus::Initializing)
+    }
+}
+
+impl ServiceInstanceControl for DaemonInstanceControl {
+    fn daemon_id(&self) -> DaemonInstanceId {
+        self.id
+    }
+
+    fn service_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus {
+        if !self.owns_instance(handle) {
+            return ServiceStatus::Terminated;
+        }
+        self.status_for_instance_id(handle.instance_id())
+    }
+
+    fn service_runtime(&self, handle: &ServiceInstanceHandle) -> Option<ServiceRuntimeSnapshot> {
+        if !self.owns_instance(handle) {
+            return None;
+        }
+        self.runtime_snapshot_for_instance_id(handle.instance_id())
+    }
+
+    fn trigger_runtime(&self, handle: &ServiceInstanceHandle) -> Option<TriggerRuntimeSnapshot> {
+        if !self.owns_instance(handle) {
+            return None;
+        }
+        self.resources
+            .runtime_facts
+            .trigger_snapshot(handle.instance_id())
+    }
+
+    fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool {
+        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
+            return false;
+        };
+        if !self.record_matches_handle(&record, handle) {
+            return false;
+        }
+
+        record.cancellation_token().cancel();
+        let shutting_down = ServiceStatus::ShuttingDown;
+        self.resources
+            .status_plane
+            .insert(handle.instance_id(), shutting_down.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(handle.instance_id(), &shutting_down);
+        self.resources.status_changed.notify_waiters();
+        true
+    }
+}
+
+impl DaemonInstanceControl {
     fn status_for_instance_id(&self, id: ServiceInstanceId) -> ServiceStatus {
         self.resources
             .status_plane
@@ -351,14 +400,27 @@ impl DaemonInstanceHandle {
         self.resources
             .runtime_facts
             .service_snapshot(id, |service_instance_id| {
-                self.status_for_snapshot(service_instance_id)
+                self.status_for_instance_id(service_instance_id)
             })
     }
 
     fn owns_instance(&self, handle: &ServiceInstanceHandle) -> bool {
+        if handle.daemon_id() != self.id {
+            return false;
+        }
         self.instance_registry
             .get(handle.instance_id())
-            .is_some_and(|record| record.handle() == *handle)
+            .is_some_and(|record| self.record_matches_handle(&record, handle))
+    }
+
+    fn record_matches_handle(
+        &self,
+        record: &crate::models::ServiceInstanceRecord,
+        handle: &ServiceInstanceHandle,
+    ) -> bool {
+        record.instance_id() == handle.instance_id()
+            && record.entry_id() == handle.entry_id()
+            && std::ptr::eq(record.entry(), handle.entry())
     }
 }
 
@@ -380,14 +442,18 @@ impl DaemonRegistry {
         let instance_registry = inner.instance_registry.clone();
         let shutdown_token = inner.cancellation_token.clone();
         let external_cancel_token = inner.external_cancel_token.clone();
+        let control = Arc::new(DaemonInstanceControl {
+            id,
+            resources,
+            instance_registry,
+        });
         let inner = Arc::new(Mutex::new(inner));
         self.daemons.insert(id, inner.clone());
         DaemonInstanceHandle {
             id,
             inner,
-            resources,
+            control,
             diagnostics,
-            instance_registry,
             shutdown_token,
             external_cancel_token,
         }
@@ -781,7 +847,9 @@ mod tests {
         let instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128));
         let instance_registry = Arc::new(ServiceInstanceRegistry::new());
         instance_registry.insert(ServiceInstanceRecord::new(
-            ServiceInstanceHandle::new(instance_id, entry_id, entry),
+            instance_id,
+            entry_id,
+            entry,
             CancellationToken::new(),
         ));
         ServiceDescription {
@@ -1205,18 +1273,15 @@ mod tests {
             .find(|service| service.name() == "capacity_primary_standard_service")
             .expect("standard test service should be selected by tag");
         let service_handle = ServiceHandle::new(service.entry_id, service.entry);
-        let expected_instance = service
-            .instances()
-            .first()
-            .copied()
-            .expect("selected service should have one auto-start instance");
         let daemon = ServiceDaemon::builder().with_registry(registry).build();
+        let expected_instances = daemon.service_instances_for(&service_handle);
+        let expected_instance = expected_instances
+            .first()
+            .cloned()
+            .expect("selected service should have one auto-start instance");
 
         assert!(daemon.service_instances().contains(&expected_instance));
-        assert_eq!(
-            daemon.service_instances_for(&service_handle),
-            vec![expected_instance]
-        );
+        assert_eq!(expected_instances, vec![expected_instance]);
 
         daemon_registry().unregister(daemon.id());
     }
@@ -1357,9 +1422,10 @@ mod tests {
             ServiceInstanceId::new(uuid::Uuid::from_u128(999)),
             ServiceEntryId::new(999),
             &STANDARD_TEST_ENTRY,
+            handle.control.clone(),
         );
 
-        let status = handle.get_instance_status(&unknown_instance).await;
+        let status = unknown_instance.status().await;
         assert_eq!(status, ServiceStatus::Terminated);
     }
 
@@ -1369,22 +1435,28 @@ mod tests {
         let registry = Registry::builder()
             .with_tag("__unit_high_priority_capacity_primary__")
             .build();
-        let instance = registry
+        let service_handle = registry
             .services()
             .iter()
             .find(|service| service.name() == "capacity_primary_standard_service")
-            .and_then(|service| service.instances().first().copied())
+            .map(|service| ServiceHandle::new(service.entry_id, service.entry))
             .expect("standard test service should be selected by tag");
         let handle = ServiceDaemon::builder().with_registry(registry).build();
+        let instance = handle
+            .service_instances_for(&service_handle)
+            .into_iter()
+            .next()
+            .expect("standard test service should have one instance");
 
-        let status = handle.get_instance_status(&instance).await;
+        let status = instance.status().await;
         assert_eq!(status, ServiceStatus::Initializing);
 
         handle
+            .control
             .resources
             .status_plane
             .insert(instance.instance_id(), ServiceStatus::Healthy);
-        let status = handle.get_instance_status(&instance).await;
+        let status = instance.status().await;
         assert_eq!(status, ServiceStatus::Healthy);
     }
 
@@ -1448,17 +1520,16 @@ mod tests {
             })
             .expect("standard test service instance should be registered");
         assert_eq!(
-            handle
-                .runtime_instance(&standard_instance)
-                .map(|snapshot| snapshot.status),
+            standard_instance.runtime().map(|snapshot| snapshot.status),
             Some(ServiceStatus::Healthy)
         );
         let fake_instance = ServiceInstanceHandle::new(
             ServiceInstanceId::new(uuid::Uuid::from_u128(999)),
             standard_instance.entry_id(),
             standard_instance.entry(),
+            handle.control.clone(),
         );
-        assert!(handle.runtime_instance(&fake_instance).is_none());
+        assert!(fake_instance.runtime().is_none());
 
         let readiness = handle.runtime_readiness();
         assert_eq!(readiness.healthy.len(), 1);
@@ -1490,33 +1561,27 @@ mod tests {
             .iter()
             .find(|service| service.name() == "capacity_primary_standard_service")
             .expect("standard test service should be selected by tag");
-        let instance = service
-            .instances()
-            .first()
-            .copied()
+        let service_handle = ServiceHandle::new(service.entry_id, service.entry);
+        let handle = ServiceDaemon::builder().with_registry(registry).build();
+        let instance = handle
+            .service_instances_for(&service_handle)
+            .into_iter()
+            .next()
             .expect("auto-start service should have an instance handle");
         let fake_instance = ServiceInstanceHandle::new(
             ServiceInstanceId::new(uuid::Uuid::from_u128(999)),
             instance.entry_id(),
             instance.entry(),
-        );
-        let handle = ServiceDaemon::builder().with_registry(registry).build();
-
-        assert!(!handle.request_stop_instance(&fake_instance));
-        assert_eq!(
-            handle.get_instance_status(&fake_instance).await,
-            ServiceStatus::Terminated
+            handle.control.clone(),
         );
 
-        assert!(handle.request_stop_instance(&instance));
+        assert!(!fake_instance.request_stop());
+        assert_eq!(fake_instance.status().await, ServiceStatus::Terminated);
+
+        assert!(instance.request_stop());
+        assert_eq!(instance.status().await, ServiceStatus::ShuttingDown);
         assert_eq!(
-            handle.get_instance_status(&instance).await,
-            ServiceStatus::ShuttingDown
-        );
-        assert_eq!(
-            handle
-                .runtime_instance(&instance)
-                .map(|snapshot| snapshot.status),
+            instance.runtime().map(|snapshot| snapshot.status),
             Some(ServiceStatus::ShuttingDown)
         );
     }

@@ -448,9 +448,7 @@ fn readiness_from_services(services: Vec<ServiceRuntimeSnapshot>) -> ReadinessSn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{
-        ServiceEntry, ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord, ServiceParam,
-    };
+    use crate::models::{ServiceEntry, ServiceEntryId, ServiceInstanceRecord, ServiceParam};
     use futures::future::BoxFuture;
     use tokio_util::sync::CancellationToken;
 
@@ -482,12 +480,12 @@ mod tests {
 
     fn service_instance_record(id: usize, entry: &'static ServiceEntry) -> ServiceInstanceRecord {
         let entry_id = ServiceEntryId::new(id);
-        let handle = ServiceInstanceHandle::new(
+        ServiceInstanceRecord::new(
             ServiceInstanceId::new(uuid::Uuid::from_u128(id as u128)),
             entry_id,
             entry,
-        );
-        ServiceInstanceRecord::new(handle, CancellationToken::new())
+            CancellationToken::new(),
+        )
     }
 
     #[test]

@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Provider Attribute Normalization**: Added explicit `default = ...` and `template = ...` provider head forms while preserving existing bare defaults and built-in template syntax.
 - **Release Security Contract**: Added maintainer documentation for deployment boundaries, logging safety, Unix socket deployment, TCP listener exposure, and example-production responsibilities.
 - **Service Handles**: Added `ServiceHandle` and `service_handle!(...)` so provider code can resolve a handle to a selected static service entry by service function path.
-- **Service Instance Handles**: Added `ServiceInstanceHandle` to expose the runtime `ServiceInstanceId` together with the static `ServiceEntryId` for a materialized service instance.
+- **Service Instance Handles**: Added daemon-bound `ServiceInstanceHandle` values that expose runtime identity, static service metadata, instance status, runtime snapshots, trigger runtime snapshots, and per-instance stop requests.
 - **Daemon Instance Handles**: Added UUIDv7 `DaemonInstanceId` and `DaemonInstanceHandle` as the public daemon instance control handle returned by `ServiceDaemonBuilder::build()`.
 - **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, reachability probes, and focused Windows MSVC validation coverage.
@@ -22,9 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
 - **Daemon Ownership API**: `ServiceDaemon` is now a lightweight builder facade. `ServiceDaemonBuilder::build()` registers a process-local daemon instance and returns `DaemonInstanceHandle`; the previous `ServiceDaemonHandle` type and `.handle()` flow were removed.
-- **Service Instance Model**: Runtime instances are now represented by `ServiceInstanceHandle` values stored in a daemon-local instance registry. `ServiceDescription` is entry-scoped and exposes its current instance handles instead of carrying a single instance ID and cancellation token.
+- **Service Instance Model**: Runtime instances are tracked as daemon-local records, while `ServiceInstanceHandle` values are created from the owning daemon handle. `ServiceDescription` is entry-scoped and exposes setup-time instance IDs instead of carrying a single instance ID and cancellation token.
 - **Service Handle Resolution**: Provider-time service handle lookup is scoped to the current daemon projection. Linked services outside the projection and unlinked targets fail with provider initialization errors instead of falling back to a global runtime instance.
-- **Simulation API**: `MockContextBuilder::build()` now returns a `SimulationHandle` that owns the simulation daemon control flow. Registry selection moves to `MockContextBuilder::with_registry(...)`, and bounded simulation runs are driven through `SimulationHandle::run_for_duration(...)`.
+- **Simulation API**: `MockContextBuilder::build()` now returns a `SimulationHandle` that owns the simulation daemon control flow. Registry selection moves to `MockContextBuilder::with_registry(...)`, bounded simulation runs are driven through `SimulationHandle::run_for_duration(...)`, and runtime shelf/status/reload operations use `ServiceInstanceHandle`.
 - **Provider Attribute Parser**: Shared named-tail parsing across service, trigger, and provider macros while keeping provider default/template heads as a macro-specific syntax boundary.
 - **Proc-macro Diagnostics**: Removed the `proc-macro-error2` dependency and routed macro errors through the repository-owned diagnostics facade while preserving stable compile-error output.
 - **Release Validation Gates**: Added `cargo deny --locked check` dependency-policy gating, documented the reviewed `cargo audit -D warnings` exception, and separated Windows local IPC provider checks into clearly named CI/manual gates.
@@ -34,7 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Memory Analysis Example**: Updated the supervisor layout model to match the current service instance identity and runtime bookkeeping structures.
 - **Private Service Visibility Diagnostics**: Stabilized the compile-time diagnostic for private service paths that are not visible to sibling modules.
-- **Web API Swagger Routes**: Fixed the `examples/web-api` OpenAPI composition so Swagger documents preserve `/api/v1/...` paths without duplicate or missing prefixes.
 - **Windows Named Pipe Providers**: Stabilized runtime ownership, busy-pipe retry behavior, listener replacement, invalid configuration diagnostics, and Windows-only compile gates.
 
 ## [0.1.0-alpha.5] - 2026-06-21

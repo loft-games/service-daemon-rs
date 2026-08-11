@@ -29,8 +29,9 @@ use tokio_util::sync::CancellationToken;
 ///     .build();
 ///
 /// simulation.run().await;
-/// simulation.set_shelf::<String>(svc_id, "db_url", "new://host".into());
-/// simulation.set_status(svc_id, ServiceStatus::NeedReload);
+/// let instance = simulation.service_instances()[0].clone();
+/// simulation.set_shelf::<String>(&instance, "db_url", "new://host".into());
+/// simulation.set_status(&instance, ServiceStatus::NeedReload);
 /// ```
 #[derive(Clone)]
 pub struct SimulationHandle {
@@ -88,36 +89,34 @@ impl SimulationHandle {
         self.daemon.service_instances_for(handle)
     }
 
-    /// Dynamically update a shelf entry for the specified service.
+    /// Dynamically update a shelf entry for the specified service instance.
     ///
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
     pub fn set_shelf<T: Any + Send + Sync>(
         &self,
-        service_instance_id: ServiceInstanceId,
+        handle: &ServiceInstanceHandle,
         key: &str,
         value: T,
-    ) {
-        self.daemon
-            .simulation_set_shelf(service_instance_id, key, value);
+    ) -> bool {
+        self.daemon.simulation_set_shelf(handle, key, value)
     }
 
-    /// Dynamically override the lifecycle status of a service.
+    /// Dynamically override the lifecycle status of a service instance.
     ///
     /// This simulates external status transitions (e.g., a dependency going unhealthy,
     /// or an operator manually marking a service for reload).
-    pub fn set_status(&self, service_instance_id: ServiceInstanceId, status: ServiceStatus) {
-        self.daemon
-            .simulation_set_status(service_instance_id, status);
+    pub fn set_status(&self, handle: &ServiceInstanceHandle, status: ServiceStatus) -> bool {
+        self.daemon.simulation_set_status(handle, status)
     }
 
-    /// Triggers a reload signal for the specified service.
+    /// Triggers a reload signal for the specified service instance.
     ///
     /// If the service has a `Watch` trigger or calls `wait_reload()`, it will
     /// be woken up immediately.
-    pub fn trigger_reload(&self, service_instance_id: &ServiceInstanceId) {
-        self.daemon.simulation_trigger_reload(service_instance_id);
+    pub fn trigger_reload(&self, handle: &ServiceInstanceHandle) -> bool {
+        self.daemon.simulation_trigger_reload(handle)
     }
 
     /// Overrides a provider for this simulation daemon only.
@@ -156,15 +155,15 @@ impl SimulationHandle {
     ///
     /// # Example
     /// ```rust,ignore
-    /// let val: Option<String> = handle.get_shelf(svc_id, "config_key");
+    /// let val: Option<String> = handle.get_shelf(&instance, "config_key");
     /// assert_eq!(val, Some("expected_value".to_string()));
     /// ```
     pub fn get_shelf<T: Any + Clone + Send + Sync>(
         &self,
-        service_instance_id: ServiceInstanceId,
+        handle: &ServiceInstanceHandle,
         key: &str,
     ) -> Option<T> {
-        self.daemon.simulation_get_shelf(service_instance_id, key)
+        self.daemon.simulation_get_shelf(handle, key)
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -172,22 +171,22 @@ impl SimulationHandle {
     /// This is the **recommended** way to inspect service status in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
     /// this call, making it safe to use across `.await` points.
-    pub fn get_status(&self, service_instance_id: ServiceInstanceId) -> Option<ServiceStatus> {
-        self.daemon.simulation_get_status(service_instance_id)
+    pub fn get_status(&self, handle: &ServiceInstanceHandle) -> Option<ServiceStatus> {
+        self.daemon.simulation_get_status(handle)
     }
 
     /// Checks whether a shelf key exists for the specified service.
     ///
     /// Returns `true` if the key is present (regardless of its type).
-    pub fn has_shelf(&self, service_instance_id: ServiceInstanceId, key: &str) -> bool {
-        self.daemon.simulation_has_shelf(service_instance_id, key)
+    pub fn has_shelf(&self, handle: &ServiceInstanceHandle, key: &str) -> bool {
+        self.daemon.simulation_has_shelf(handle, key)
     }
 
     /// Returns all shelf key names for the specified service.
     ///
     /// Returns an empty `Vec` if the service has no shelved data.
-    pub fn shelf_keys(&self, service_instance_id: ServiceInstanceId) -> Vec<String> {
-        self.daemon.simulation_shelf_keys(service_instance_id)
+    pub fn shelf_keys(&self, handle: &ServiceInstanceHandle) -> Vec<String> {
+        self.daemon.simulation_shelf_keys(handle)
     }
 }
 

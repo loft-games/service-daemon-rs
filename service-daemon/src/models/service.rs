@@ -1,5 +1,8 @@
 use crate::ProviderDependencyWatchSet;
-use crate::models::{ProviderInitError, RestartPolicy};
+use crate::models::{
+    DaemonInstanceId, ProviderInitError, RestartPolicy, ServiceRuntimeSnapshot,
+    TriggerRuntimeSnapshot,
+};
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
@@ -338,31 +341,63 @@ impl fmt::Debug for ServiceHandle {
 // ServiceInstanceHandle: daemon-local runtime service instance capability.
 // ---------------------------------------------------------------------------
 
+pub(crate) trait ServiceInstanceControl: Send + Sync {
+    fn daemon_id(&self) -> DaemonInstanceId;
+
+    fn service_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus;
+
+    fn service_runtime(&self, handle: &ServiceInstanceHandle) -> Option<ServiceRuntimeSnapshot>;
+
+    fn trigger_runtime(&self, handle: &ServiceInstanceHandle) -> Option<TriggerRuntimeSnapshot>;
+
+    fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool;
+}
+
+// ---------------------------------------------------------------------------
+// ServiceInstanceHandle: daemon-bound runtime service instance capability.
+// ---------------------------------------------------------------------------
+
 /// A handle to a daemon-local runtime service instance.
 ///
-/// This handle identifies one materialized service instance. It carries both
-/// the runtime [`ServiceInstanceId`] and the static [`ServiceEntryId`] so callers
-/// can group instances back to their service definition without treating the two
-/// IDs as interchangeable.
-#[derive(Clone, Copy)]
+/// This handle identifies one materialized service instance and is bound to
+/// the daemon instance that owns it. Service instance control methods use that
+/// daemon binding internally, so callers do not need to pass a daemon handle
+/// back into instance-level operations.
+#[derive(Clone)]
 pub struct ServiceInstanceHandle {
     instance_id: ServiceInstanceId,
     entry_id: ServiceEntryId,
     entry: &'static ServiceEntry,
+    control: Arc<dyn ServiceInstanceControl>,
 }
 
 impl ServiceInstanceHandle {
     #[inline]
-    pub(crate) const fn new(
+    pub(crate) fn new(
         instance_id: ServiceInstanceId,
         entry_id: ServiceEntryId,
         entry: &'static ServiceEntry,
+        control: Arc<dyn ServiceInstanceControl>,
     ) -> Self {
         Self {
             instance_id,
             entry_id,
             entry,
+            control,
         }
+    }
+
+    #[inline]
+    pub(crate) fn from_record(
+        record: &ServiceInstanceRecord,
+        control: Arc<dyn ServiceInstanceControl>,
+    ) -> Self {
+        Self::new(
+            record.instance_id(),
+            record.entry_id(),
+            record.entry(),
+            control,
+        )
     }
 
     /// Runtime instance ID for this service instance.
@@ -394,11 +429,49 @@ impl ServiceInstanceHandle {
     pub const fn module(&self) -> &'static str {
         self.entry.module
     }
+
+    /// Daemon instance that owns this service instance.
+    #[inline]
+    pub fn daemon_id(&self) -> DaemonInstanceId {
+        self.control.daemon_id()
+    }
+
+    /// Static service definition handle for this instance.
+    #[inline]
+    pub fn service(&self) -> ServiceHandle {
+        ServiceHandle::new(self.entry_id, self.entry)
+    }
+
+    /// Read the current lifecycle status for this service instance.
+    pub async fn status(&self) -> ServiceStatus {
+        self.control.service_status(self)
+    }
+
+    /// Return read-only runtime facts for this service instance.
+    pub fn runtime(&self) -> Option<ServiceRuntimeSnapshot> {
+        self.control.service_runtime(self)
+    }
+
+    /// Return read-only trigger runtime facts if this instance hosts a trigger.
+    pub fn trigger_runtime(&self) -> Option<TriggerRuntimeSnapshot> {
+        self.control.trigger_runtime(self)
+    }
+
+    /// Request shutdown for this managed service instance.
+    ///
+    /// This cancels the instance token and updates daemon-local status/runtime
+    /// facts. It does not remove the instance from the daemon registry and does
+    /// not wait for the task join handle to finish.
+    pub fn request_stop(&self) -> bool {
+        self.control.request_stop(self)
+    }
 }
 
 impl PartialEq for ServiceInstanceHandle {
     fn eq(&self, other: &Self) -> bool {
-        self.instance_id == other.instance_id && self.entry_id == other.entry_id
+        self.instance_id == other.instance_id
+            && self.entry_id == other.entry_id
+            && self.daemon_id() == other.daemon_id()
     }
 }
 
@@ -406,6 +479,7 @@ impl Eq for ServiceInstanceHandle {}
 
 impl Hash for ServiceInstanceHandle {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.daemon_id().hash(state);
         self.instance_id.hash(state);
         self.entry_id.hash(state);
     }
@@ -415,6 +489,7 @@ impl fmt::Debug for ServiceInstanceHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServiceInstanceHandle")
+            .field("daemon_id", &self.daemon_id())
             .field("instance_id", &self.instance_id)
             .field("entry_id", &self.entry_id)
             .field("name", &self.entry.name)
@@ -430,45 +505,46 @@ impl fmt::Debug for ServiceInstanceHandle {
 /// A daemon-local runtime record for one materialized service instance.
 #[derive(Clone)]
 pub(crate) struct ServiceInstanceRecord {
-    handle: ServiceInstanceHandle,
+    instance_id: ServiceInstanceId,
+    entry_id: ServiceEntryId,
+    entry: &'static ServiceEntry,
     cancellation_token: CancellationToken,
 }
 
 impl ServiceInstanceRecord {
     #[inline]
     pub(crate) fn new(
-        handle: ServiceInstanceHandle,
+        instance_id: ServiceInstanceId,
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
-            handle,
+            instance_id,
+            entry_id,
+            entry,
             cancellation_token,
         }
     }
 
     #[inline]
-    pub(crate) fn handle(&self) -> ServiceInstanceHandle {
-        self.handle
-    }
-
-    #[inline]
     pub(crate) fn instance_id(&self) -> ServiceInstanceId {
-        self.handle.instance_id()
+        self.instance_id
     }
 
     #[inline]
     pub(crate) fn entry_id(&self) -> ServiceEntryId {
-        self.handle.entry_id()
+        self.entry_id
     }
 
     #[inline]
     pub(crate) fn entry(&self) -> &'static ServiceEntry {
-        self.handle.entry()
+        self.entry
     }
 
     #[inline]
     pub(crate) fn name(&self) -> &'static str {
-        self.handle.name()
+        self.entry.name
     }
 
     #[inline]
@@ -524,19 +600,42 @@ impl ServiceInstanceRegistry {
             .map(|record| record.clone())
     }
 
-    pub(crate) fn handles_for_entry(&self, entry_id: ServiceEntryId) -> Vec<ServiceInstanceHandle> {
+    pub(crate) fn handles_for_entry(
+        &self,
+        entry_id: ServiceEntryId,
+        control: Arc<dyn ServiceInstanceControl>,
+    ) -> Vec<ServiceInstanceHandle> {
         let mut handles = self
             .by_entry
             .get(&entry_id)
             .map(|entry_instances| {
                 entry_instances
                     .iter()
-                    .filter_map(|instance_id| self.get(*instance_id).map(|record| record.handle()))
+                    .filter_map(|instance_id| {
+                        self.get(*instance_id).map(|record| {
+                            ServiceInstanceHandle::from_record(&record, control.clone())
+                        })
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         handles.sort_by_key(|handle| handle.instance_id());
         handles
+    }
+
+    pub(crate) fn records_for_entry(&self, entry_id: ServiceEntryId) -> Vec<ServiceInstanceRecord> {
+        let mut records = self
+            .by_entry
+            .get(&entry_id)
+            .map(|entry_instances| {
+                entry_instances
+                    .iter()
+                    .filter_map(|instance_id| self.get(*instance_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        records.sort_by_key(|record| record.instance_id());
+        records
     }
 
     pub(crate) fn records(&self) -> Vec<ServiceInstanceRecord> {
@@ -748,10 +847,23 @@ impl ServiceDescription {
         self.entry.scheduling
     }
 
-    /// Runtime instance handles materialized for this selected service entry.
+    /// Runtime instance records materialized for this selected service entry.
     #[inline]
-    pub fn instances(&self) -> Vec<ServiceInstanceHandle> {
-        self.instance_registry.handles_for_entry(self.entry_id)
+    pub(crate) fn instance_records(&self) -> Vec<ServiceInstanceRecord> {
+        self.instance_registry.records_for_entry(self.entry_id)
+    }
+
+    /// Runtime instance IDs materialized for this selected service entry.
+    ///
+    /// These IDs are useful for setup APIs that run before a daemon-bound
+    /// [`ServiceInstanceHandle`] exists. Runtime control should use instance
+    /// handles returned by `DaemonInstanceHandle` or `SimulationHandle`.
+    #[inline]
+    pub fn instance_ids(&self) -> Vec<ServiceInstanceId> {
+        self.instance_records()
+            .into_iter()
+            .map(|record| record.instance_id())
+            .collect()
     }
 }
 
@@ -983,8 +1095,12 @@ impl RegistryBuilder {
             let record =
                 ServiceCatalog::get(*entry_id).expect("projected service entry must exist");
             let instance_id = ServiceInstanceId::new_v7();
-            let handle = ServiceInstanceHandle::new(instance_id, record.entry_id, record.entry);
-            instance_registry.insert(ServiceInstanceRecord::new(handle, CancellationToken::new()));
+            instance_registry.insert(ServiceInstanceRecord::new(
+                instance_id,
+                record.entry_id,
+                record.entry,
+                CancellationToken::new(),
+            ));
             let service = ServiceDescription {
                 entry_id: record.entry_id,
                 entry: record.entry,
@@ -1015,6 +1131,47 @@ mod tests {
         _: CancellationToken,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
+    }
+
+    #[derive(Debug)]
+    struct TestServiceInstanceControl {
+        daemon_id: DaemonInstanceId,
+    }
+
+    impl TestServiceInstanceControl {
+        fn new(id: u128) -> Arc<Self> {
+            Arc::new(Self {
+                daemon_id: DaemonInstanceId::new(Uuid::from_u128(id)),
+            })
+        }
+    }
+
+    impl ServiceInstanceControl for TestServiceInstanceControl {
+        fn daemon_id(&self) -> DaemonInstanceId {
+            self.daemon_id
+        }
+
+        fn service_status(&self, _handle: &ServiceInstanceHandle) -> ServiceStatus {
+            ServiceStatus::Initializing
+        }
+
+        fn service_runtime(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> Option<ServiceRuntimeSnapshot> {
+            None
+        }
+
+        fn trigger_runtime(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> Option<TriggerRuntimeSnapshot> {
+            None
+        }
+
+        fn request_stop(&self, _handle: &ServiceInstanceHandle) -> bool {
+            false
+        }
     }
 
     #[allow(unsafe_code)]
@@ -1081,10 +1238,10 @@ mod tests {
 
         assert_eq!(service.entry_id, ServiceEntryId::new(original_index));
         let instance = service
-            .instances()
+            .instance_records()
             .first()
-            .copied()
-            .expect("auto-start service should have one instance handle");
+            .cloned()
+            .expect("auto-start service should have one instance record");
         assert_eq!(
             instance.instance_id().as_uuid().get_version_num(),
             7,
@@ -1145,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn service_instance_handle_exposes_runtime_and_entry_identity() {
+    fn service_instance_handle_exposes_runtime_entry_and_daemon_identity() {
         let registry = Registry::builder()
             .with_tag("__test_registry_entry_id_second__")
             .build();
@@ -1154,16 +1311,23 @@ mod tests {
             .iter()
             .find(|service| service.name() == "test_registry_entry_id_second")
             .expect("test service should be selected by tag");
-        let handle = service
-            .instances()
+        let record = service
+            .instance_records()
             .first()
-            .copied()
-            .expect("auto-start service should have one instance handle");
+            .cloned()
+            .expect("auto-start service should have one instance record");
+        let control = TestServiceInstanceControl::new(300);
+        let handle = ServiceInstanceHandle::from_record(&record, control.clone());
 
         assert_eq!(handle.entry_id(), service.entry_id);
         assert!(std::ptr::eq(handle.entry(), service.entry));
         assert_eq!(handle.name(), "test_registry_entry_id_second");
         assert_eq!(handle.module(), "models::service::tests");
+        assert_eq!(handle.daemon_id(), control.daemon_id());
+        assert_eq!(
+            handle.service(),
+            ServiceHandle::new(service.entry_id, service.entry)
+        );
     }
 
     #[test]
@@ -1172,36 +1336,35 @@ mod tests {
             .expect("wrapper should be indexed by global catalog");
         let record = ServiceCatalog::get(entry_id).expect("entry ID should resolve to record");
         let registry = ServiceInstanceRegistry::new();
-        let first_handle = ServiceInstanceHandle::new(
-            ServiceInstanceId::new(Uuid::from_u128(100)),
-            entry_id,
-            record.entry,
-        );
-        let second_handle = ServiceInstanceHandle::new(
-            ServiceInstanceId::new(Uuid::from_u128(101)),
-            entry_id,
-            record.entry,
-        );
+        let first_id = ServiceInstanceId::new(Uuid::from_u128(100));
+        let second_id = ServiceInstanceId::new(Uuid::from_u128(101));
 
         registry.insert(ServiceInstanceRecord::new(
-            first_handle,
+            first_id,
+            entry_id,
+            record.entry,
             CancellationToken::new(),
         ));
         registry.insert(ServiceInstanceRecord::new(
-            second_handle,
+            second_id,
+            entry_id,
+            record.entry,
             CancellationToken::new(),
         ));
 
         assert_eq!(registry.len(), 2);
         assert_eq!(
-            registry
-                .get(first_handle.instance_id())
-                .map(|record| record.handle()),
-            Some(first_handle)
+            registry.get(first_id).map(|record| record.instance_id()),
+            Some(first_id)
         );
+        let control = TestServiceInstanceControl::new(301);
+        let handles = registry.handles_for_entry(entry_id, control);
         assert_eq!(
-            registry.handles_for_entry(entry_id),
-            vec![first_handle, second_handle]
+            handles
+                .iter()
+                .map(|handle| handle.instance_id())
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id]
         );
     }
 
@@ -1218,31 +1381,25 @@ mod tests {
         let second_record =
             ServiceCatalog::get(second_entry_id).expect("second entry ID should resolve to record");
         let instance_registry = Arc::new(ServiceInstanceRegistry::new());
-        let first_handle = ServiceInstanceHandle::new(
-            ServiceInstanceId::new(Uuid::from_u128(200)),
+        let first_id = ServiceInstanceId::new(Uuid::from_u128(200));
+        let second_id = ServiceInstanceId::new(Uuid::from_u128(201));
+        let other_entry_id = ServiceInstanceId::new(Uuid::from_u128(202));
+        instance_registry.insert(ServiceInstanceRecord::new(
+            first_id,
             first_entry_id,
             first_record.entry,
-        );
-        let second_handle = ServiceInstanceHandle::new(
-            ServiceInstanceId::new(Uuid::from_u128(201)),
+            CancellationToken::new(),
+        ));
+        instance_registry.insert(ServiceInstanceRecord::new(
+            second_id,
             first_entry_id,
             first_record.entry,
-        );
-        let other_entry_handle = ServiceInstanceHandle::new(
-            ServiceInstanceId::new(Uuid::from_u128(202)),
+            CancellationToken::new(),
+        ));
+        instance_registry.insert(ServiceInstanceRecord::new(
+            other_entry_id,
             second_entry_id,
             second_record.entry,
-        );
-        instance_registry.insert(ServiceInstanceRecord::new(
-            first_handle,
-            CancellationToken::new(),
-        ));
-        instance_registry.insert(ServiceInstanceRecord::new(
-            second_handle,
-            CancellationToken::new(),
-        ));
-        instance_registry.insert(ServiceInstanceRecord::new(
-            other_entry_handle,
             CancellationToken::new(),
         ));
 
@@ -1252,7 +1409,14 @@ mod tests {
             instance_registry,
         };
 
-        assert_eq!(service.instances(), vec![first_handle, second_handle]);
+        assert_eq!(
+            service
+                .instance_records()
+                .iter()
+                .map(|record| record.instance_id())
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id]
+        );
     }
 
     #[test]
@@ -1265,18 +1429,17 @@ mod tests {
             .iter()
             .find(|service| service.name() == "test_registry_entry_id_second")
             .expect("test service should be selected by tag");
-        let instance = service
-            .instances()
+        let record = service
+            .instance_records()
             .first()
-            .copied()
-            .expect("auto-start service should have one instance handle");
+            .cloned()
+            .expect("auto-start service should have one instance record");
         let record = registry
             .instance_registry
-            .get(instance.instance_id())
+            .get(record.instance_id())
             .expect("auto-start service should have an instance record");
 
         assert_eq!(registry.instance_registry.len(), registry.services().len());
-        assert_eq!(record.handle(), instance);
         assert_eq!(record.entry_id(), service.entry_id);
         assert_eq!(record.name(), service.name());
         assert_eq!(
@@ -1287,8 +1450,11 @@ mod tests {
         assert_eq!(
             registry
                 .instance_registry
-                .handles_for_entry(service.entry_id),
-            vec![instance]
+                .records_for_entry(service.entry_id)
+                .iter()
+                .map(|record| record.instance_id())
+                .collect::<Vec<_>>(),
+            vec![record.instance_id()]
         );
     }
 
@@ -1340,15 +1506,15 @@ mod tests {
 
         assert_eq!(first_service.entry_id, second_service.entry_id);
         let first_instance = first_service
-            .instances()
+            .instance_records()
             .first()
-            .copied()
-            .expect("first auto-start service should have one instance handle");
+            .cloned()
+            .expect("first auto-start service should have one instance record");
         let second_instance = second_service
-            .instances()
+            .instance_records()
             .first()
-            .copied()
-            .expect("second auto-start service should have one instance handle");
+            .cloned()
+            .expect("second auto-start service should have one instance record");
         assert_eq!(first_instance.instance_id().as_uuid().get_version_num(), 7);
         assert_eq!(second_instance.instance_id().as_uuid().get_version_num(), 7);
         assert_ne!(

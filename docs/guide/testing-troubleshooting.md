@@ -52,8 +52,7 @@ async fn test_two_phase_simulation() {
         .services()
         .iter()
         .find(|service| service.name() == "my_service")
-        .and_then(|service| service.instances().first().copied())
-        .map(|instance| instance.instance_id())
+        .and_then(|service| service.instance_ids().first().copied())
         .expect("my_service should be selected");
 
     // 1. Set up the test shelf
@@ -70,11 +69,17 @@ async fn test_two_phase_simulation() {
         runner.wait().await.ok();
     });
 
+    let instance = simulation
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == "my_service")
+        .expect("my_service should have one instance");
+
     // 2. Update state while the daemon is running
-    simulation.set_shelf::<String>(service_instance_id, "dynamic_key", "new_val".into());
+    simulation.set_shelf::<String>(&instance, "dynamic_key", "new_val".into());
 
     // 3. Verify side-effects
-    let result = simulation.get_shelf::<String>(service_instance_id, "processed_result");
+    let result = simulation.get_shelf::<String>(&instance, "processed_result");
     assert!(result.is_some());
 
     cancel.cancel();

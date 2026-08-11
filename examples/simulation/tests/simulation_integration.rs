@@ -5,7 +5,9 @@
 
 // Import library crate so that `#[service]` registrations participate in linkme.
 use example_simulation as _;
-use service_daemon::{MockContext, Registry, ServiceInstanceId, ServiceStatus};
+use service_daemon::{
+    MockContext, Registry, ServiceInstanceHandle, ServiceInstanceId, ServiceStatus,
+};
 use std::time::Duration;
 
 fn service_instance_id(registry: &Registry, name: &str) -> ServiceInstanceId {
@@ -13,9 +15,19 @@ fn service_instance_id(registry: &Registry, name: &str) -> ServiceInstanceId {
         .services()
         .iter()
         .find(|service| service.name() == name)
-        .and_then(|service| service.instances().first().copied())
-        .map(|instance| instance.instance_id())
+        .and_then(|service| service.instance_ids().first().copied())
         .expect("service should be materialized in registry")
+}
+
+fn service_instance(
+    simulation: &service_daemon::SimulationHandle,
+    name: &str,
+) -> ServiceInstanceHandle {
+    simulation
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == name)
+        .expect("service should be materialized in simulation daemon")
 }
 
 /// E2E: A real `#[service]` reads pre-filled shelf data inside the sandbox.
@@ -44,8 +56,9 @@ async fn test_real_service_reads_pre_filled_shelf() {
         .unwrap();
 
     // Verify: the service read the pre-filled value and wrote it to "read_result"
+    let shelf_reader = service_instance(&simulation, "shelf_reader_service");
     assert_eq!(
-        simulation.get_shelf::<String>(shelf_reader_id, "read_result"),
+        simulation.get_shelf::<String>(&shelf_reader, "read_result"),
         Some("hello_from_mock".to_string()),
         "Real service should have read and persisted the pre-filled shelf value"
     );
@@ -63,8 +76,8 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
     let _ = service_daemon::try_init_logging();
 
     let registry = Registry::builder().with_tag("sim_shelf").build();
-    let shelf_reader_id = service_instance_id(&registry, "shelf_reader_service");
     let simulation = MockContext::builder().with_registry(registry).build();
+    let shelf_reader = service_instance(&simulation, "shelf_reader_service");
 
     let cancel = simulation.cancel_token();
 
@@ -78,14 +91,14 @@ async fn test_god_hand_shelf_mutation_with_real_service() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // -- SimulationHandle: inject shelf data mid-flight --
-    simulation.set_shelf::<String>(shelf_reader_id, "dynamic_key", "injected_mid_flight".into());
+    simulation.set_shelf::<String>(&shelf_reader, "dynamic_key", "injected_mid_flight".into());
 
     // Wait for the service to observe and persist the mutation
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify: the service saw the dynamically injected value
     assert_eq!(
-        simulation.get_shelf::<String>(shelf_reader_id, "dynamic_result"),
+        simulation.get_shelf::<String>(&shelf_reader, "dynamic_result"),
         Some("injected_mid_flight".to_string()),
         "Real service should have observed the SimulationHandle's dynamic shelf injection"
     );
@@ -124,21 +137,22 @@ async fn test_two_phase_god_hand_with_real_service() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Verify the service read the pre-filled value.
+    let shelf_reader = service_instance(&simulation, "shelf_reader_service");
     assert_eq!(
-        simulation.get_shelf::<String>(shelf_reader_id, "read_result"),
+        simulation.get_shelf::<String>(&shelf_reader, "read_result"),
         Some("phase1_value".to_string()),
         "Service should have read the pre-filled 'phase1_value'"
     );
 
     // SimulationHandle overwrites shelf data mid-flight.
-    simulation.set_shelf::<String>(shelf_reader_id, "dynamic_key", "phase2_value".into());
+    simulation.set_shelf::<String>(&shelf_reader, "dynamic_key", "phase2_value".into());
 
     // Wait for service to observe the mid-flight mutation.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify the service saw the dynamically injected value.
     assert_eq!(
-        simulation.get_shelf::<String>(shelf_reader_id, "dynamic_result"),
+        simulation.get_shelf::<String>(&shelf_reader, "dynamic_result"),
         Some("phase2_value".to_string()),
         "Service should have observed the SimulationHandle's 'phase2_value'"
     );
@@ -156,8 +170,8 @@ async fn test_god_hand_status_flip_with_real_service() {
     let _ = service_daemon::try_init_logging();
 
     let registry = Registry::builder().with_tag("sim_status").build();
-    let status_watcher_id = service_instance_id(&registry, "status_watcher_service");
     let simulation = MockContext::builder().with_registry(registry).build();
+    let status_watcher = service_instance(&simulation, "status_watcher_service");
 
     let cancel = simulation.cancel_token();
 
@@ -183,19 +197,19 @@ async fn test_god_hand_status_flip_with_real_service() {
     );
 
     assert!(
-        ids.contains(&status_watcher_id),
+        ids.contains(&status_watcher.instance_id()),
         "status_watcher_service should be registered"
     );
 
     // -- SimulationHandle: flip status to Healthy --
-    simulation.set_status(status_watcher_id, ServiceStatus::Healthy);
+    simulation.set_status(&status_watcher, ServiceStatus::Healthy);
 
     // Wait for service to observe the new status via state()
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // Verify: service persisted the observed status to shelf
     assert_eq!(
-        simulation.get_shelf::<String>(status_watcher_id, "observed_status"),
+        simulation.get_shelf::<String>(&status_watcher, "observed_status"),
         Some("Healthy".to_string()),
         "Real service should have observed the SimulationHandle's status flip to Healthy"
     );

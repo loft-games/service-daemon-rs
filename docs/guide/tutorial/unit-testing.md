@@ -61,8 +61,7 @@ mod tests {
             .services()
             .iter()
             .find(|service| service.name() == "shelf_reader_service")
-            .and_then(|service| service.instances().first().copied())
-            .map(|instance| instance.instance_id())
+            .and_then(|service| service.instance_ids().first().copied())
             .expect("shelf_reader_service should be selected");
         let simulation = MockContext::builder()
             .with_shelf::<String>(shelf_reader_id, "config_key", "initial_val".into())
@@ -79,13 +78,18 @@ mod tests {
         });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = simulation.get_shelf(shelf_reader_id, "read_result");
+        let shelf_reader = simulation
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "shelf_reader_service")
+            .expect("shelf_reader_service should have one instance");
+        let result: Option<String> = simulation.get_shelf(&shelf_reader, "read_result");
         assert_eq!(result, Some("initial_val".into()));
 
-        simulation.set_shelf::<String>(shelf_reader_id, "dynamic_key", "mid_flight_val".into());
+        simulation.set_shelf::<String>(&shelf_reader, "dynamic_key", "mid_flight_val".into());
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = simulation.get_shelf(shelf_reader_id, "dynamic_result");
+        let result: Option<String> = simulation.get_shelf(&shelf_reader, "dynamic_result");
         assert_eq!(result, Some("mid_flight_val".into()));
 
         cancel.cancel();
@@ -102,11 +106,11 @@ The `SimulationHandle` lets tests run, inspect, and mutate the sandbox without r
 ### Snapshot Inspection
 
 ```rust,ignore
-let service_instance_id = registry.services()[0].instances()[0].instance_id();
-let val: Option<String> = handle.get_shelf(service_instance_id, "key");
-let status = handle.get_status(service_instance_id);
+let instance = handle.service_instances()[0].clone();
+let val: Option<String> = handle.get_shelf(&instance, "key");
+let status = handle.get_status(&instance);
 
-if handle.has_shelf(service_instance_id, "key") {
+if handle.has_shelf(&instance, "key") {
     // assert or trigger the next test step
 }
 ```
@@ -114,8 +118,8 @@ if handle.has_shelf(service_instance_id, "key") {
 ### Mutation API
 
 ```rust,ignore
-handle.set_status(service_instance_id, ServiceStatus::NeedReload);
-handle.set_shelf::<String>(service_instance_id, "config_override", "NEW_VALUE".into());
+handle.set_status(&instance, ServiceStatus::NeedReload);
+handle.set_shelf::<String>(&instance, "config_override", "NEW_VALUE".into());
 ```
 
 ## 4. Supported test controls

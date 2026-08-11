@@ -202,18 +202,13 @@ impl ServiceDaemonBuilder {
         // and matching services are appended (deduplicated by ServiceEntryId).
         if !self.infra_tags.is_empty() {
             let infra_registry = Registry::builder().with_tags(self.infra_tags).build();
-            let (infra_services, infra_projection, infra_instance_registry) =
-                infra_registry.into_parts();
+            let (infra_services, infra_projection, _) = infra_registry.into_parts();
             for service in infra_services {
                 if !services
                     .iter()
                     .any(|existing| existing.entry_id == service.entry_id)
                 {
-                    for instance in service.instances() {
-                        let Some(record) = infra_instance_registry.get(instance.instance_id())
-                        else {
-                            continue;
-                        };
+                    for record in service.instance_records() {
                         instance_registry.insert(record);
                     }
                     services.push(ServiceDescription {

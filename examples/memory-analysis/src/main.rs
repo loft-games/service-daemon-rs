@@ -91,9 +91,8 @@ impl MockDaemonResources {
 #[allow(dead_code)]
 struct MockServiceDescription {
     entry_id: ServiceEntryId,
-    instance_id: ServiceInstanceId,
     entry: &'static (),
-    cancellation_token: CancellationToken,
+    instance_registry: Arc<()>,
 }
 
 // ---------------------------------------------------------------------------

@@ -105,7 +105,7 @@ The framework uses `linkme` for distributed registration, `ServiceEntryId` for s
 
 1. **Identity**: `ServiceEntryId` values come from the selected entry's original `SERVICE_REGISTRY` index. Auto-start singleton services receive fresh UUIDv7-backed `ServiceInstanceId` values when a `Registry` is materialized.
 2. **Instance registry**: Runtime instances belong to a daemon-local registry keyed by `ServiceInstanceId` with a secondary `ServiceEntryId` index. Do not add a process-global runtime instance table.
-3. **Entry descriptions**: `ServiceDescription` is an entry-scoped view. Runner/control-plane code that needs a startable instance should use `ServiceInstanceRecord`; public callers should use `ServiceInstanceHandle`.
+3. **Entry descriptions**: `ServiceDescription` is an entry-scoped view. Runner/control-plane code that needs a startable instance should use `ServiceInstanceRecord`; public callers should receive daemon-bound `ServiceInstanceHandle` values from `DaemonInstanceHandle`.
 4. **Context**: Use `current_service_instance_id()` from `service-daemon/src/core/context/api.rs` to retrieve the runtime ID of the running service instance.
 5. **Catalog projection**: Registry filtering should go through the global service catalog projection API. Do not add new direct scans of `SERVICE_REGISTRY` for tag filtering or wrapper-to-entry lookup.
 6. **Service handles**: `service_handle!(...)` resolves a `ServiceHandle` through the current daemon projection during provider initialization. The handle identifies the static entry, not a running instance.

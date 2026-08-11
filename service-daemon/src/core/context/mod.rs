@@ -506,20 +506,42 @@ mod tests {
 #[cfg(feature = "simulation")]
 mod simulation_tests {
     use crate::MockContext;
-    use crate::models::{ServiceInstanceId, ServiceStatus};
+    use crate::models::{Registry, ServiceInstanceId, ServiceStatus};
+
+    fn selected_registry() -> Registry {
+        Registry::builder()
+            .with_tag("__handle_resolver_selected__")
+            .build()
+    }
+
+    fn selected_instance_id(registry: &Registry) -> ServiceInstanceId {
+        registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "selected_handle_test_service")
+            .and_then(|service| service.instance_ids().first().copied())
+            .expect("selected test service should be materialized")
+    }
 
     #[test]
     fn test_mock_context_shelf_pre_filling() {
         // Verify that pre-filled shelf data is accessible through the handle.
-        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
+        let registry = selected_registry();
+        let svc_id = selected_instance_id(&registry);
         let handle = MockContext::builder()
             .with_shelf::<i32>(svc_id, "counter", 42)
             .with_shelf::<String>(svc_id, "name", "hello".to_string())
+            .with_registry(registry)
             .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(42));
+        assert_eq!(handle.get_shelf::<i32>(&instance, "counter"), Some(42));
         assert_eq!(
-            handle.get_shelf::<String>(svc_id, "name"),
+            handle.get_shelf::<String>(&instance, "name"),
             Some("hello".to_string())
         );
 
@@ -528,71 +550,104 @@ mod simulation_tests {
 
     #[test]
     fn test_mock_context_status_pre_filling() {
-        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
+        let registry = selected_registry();
+        let svc_id = selected_instance_id(&registry);
         let handle = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Healthy)
+            .with_registry(registry)
             .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Healthy));
+        assert_eq!(handle.get_status(&instance), Some(ServiceStatus::Healthy));
     }
 
     #[test]
     fn test_simulation_handle_dynamic_shelf_update() {
-        let handle = MockContext::builder().build();
-        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(7));
+        let handle = MockContext::builder()
+            .with_registry(selected_registry())
+            .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert!(!handle.has_shelf(svc_id, "counter"));
+        assert!(!handle.has_shelf(&instance, "counter"));
 
-        handle.set_shelf::<i32>(svc_id, "counter", 99);
+        assert!(handle.set_shelf::<i32>(&instance, "counter", 99));
 
-        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(99));
+        assert_eq!(handle.get_shelf::<i32>(&instance, "counter"), Some(99));
     }
 
     #[test]
     fn test_simulation_handle_dynamic_status_update() {
-        let svc_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
+        let registry = selected_registry();
+        let svc_id = selected_instance_id(&registry);
         let handle = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Initializing)
+            .with_registry(registry)
             .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Initializing));
+        assert_eq!(
+            handle.get_status(&instance),
+            Some(ServiceStatus::Initializing)
+        );
 
-        handle.set_status(svc_id, ServiceStatus::NeedReload);
+        assert!(handle.set_status(&instance, ServiceStatus::NeedReload));
 
-        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::NeedReload));
+        assert_eq!(
+            handle.get_status(&instance),
+            Some(ServiceStatus::NeedReload)
+        );
     }
 
     #[test]
     fn test_mock_context_isolation() {
         // Two MockContexts should have completely separate resources.
+        let registry_a = selected_registry();
+        let registry_b = selected_registry();
+        let svc_id_a = selected_instance_id(&registry_a);
+        let svc_id_b = selected_instance_id(&registry_b);
         let handle_a = MockContext::builder()
-            .with_status(
-                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
-                ServiceStatus::Healthy,
-            )
+            .with_status(svc_id_a, ServiceStatus::Healthy)
+            .with_registry(registry_a)
             .build();
         let handle_b = MockContext::builder()
-            .with_status(
-                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
-                ServiceStatus::Initializing,
-            )
+            .with_status(svc_id_b, ServiceStatus::Initializing)
+            .with_registry(registry_b)
             .build();
+        let instance_a = handle_a
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
+        let instance_b = handle_b
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
         assert_eq!(
-            handle_a.get_status(ServiceInstanceId::new(uuid::Uuid::from_u128(1))),
+            handle_a.get_status(&instance_a),
             Some(ServiceStatus::Healthy)
         );
         assert_eq!(
-            handle_b.get_status(ServiceInstanceId::new(uuid::Uuid::from_u128(1))),
+            handle_b.get_status(&instance_b),
             Some(ServiceStatus::Initializing)
         );
 
-        handle_a.set_status(
-            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
-            ServiceStatus::Terminated,
-        );
+        assert!(handle_a.set_status(&instance_a, ServiceStatus::Terminated));
         assert_eq!(
-            handle_b.get_status(ServiceInstanceId::new(uuid::Uuid::from_u128(1))),
+            handle_b.get_status(&instance_b),
             Some(ServiceStatus::Initializing)
         );
     }

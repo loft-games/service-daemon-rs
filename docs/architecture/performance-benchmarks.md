@@ -98,7 +98,7 @@ stores behind pointers (`Arc`, `DashMap` buckets, etc.).
 | :--- | ---: | :--- |
 | `BackoffController` | 144 B | Stateful retry engine: `RestartPolicy` (120 B) + current delay + attempt counter |
 | `ServiceIdentity` | 80 B | Task-local handle: `ServiceInstanceId`, `&'static str` name, 2x `CancellationToken`, `Arc<AtomicBool>` handshake flag |
-| `ServiceDescription` | 40 B | Runtime description: `ServiceEntryId` + UUID-backed `ServiceInstanceId` + `&'static ServiceEntry` ref + `CancellationToken` |
+| `ServiceDescription` | 24 B | Entry-scoped description: `ServiceEntryId` + `&'static ServiceEntry` ref + shared instance registry pointer |
 | `ServiceStatus` | 24 B | Lifecycle enum (Initializing, Healthy, Recovering, etc.) |
 | `RestartPolicy` | 120 B | Stateless backoff configuration (7 fields: delays, multiplier, jitter, timeouts) |
 | `DaemonResources` | 192 B | Shared daemon state: 3x `DashMap` + `Notify` + `DashMap<TypeId, Box<dyn Any>>` |
