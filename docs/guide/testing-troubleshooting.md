@@ -97,6 +97,8 @@ async fn test_two_phase_simulation() {
 | **Builder** | `with_registry` | Selects which registered services run inside the simulation. |
 | **Handle** | `run` / `wait` / `shutdown` | Controls the sandbox daemon lifecycle. |
 | **Handle** | `run_for_duration` | Runs the sandbox daemon for a bounded duration. |
+| **Handle** | `service_instances` | Lists daemon-bound service instance handles for runtime operations. |
+| **Handle** | `service_instances_for` | Lists runtime instances for a selected service definition handle. |
 | **Handle** | `get_shelf` | Reads a cloned value from the shelf without holding a lock after return. |
 | **Handle** | `get_status` | Reads a cloned status value without holding a lock after return. |
 | **Handle** | `set_shelf` | Writes or replaces a value in the shelf. |
@@ -105,6 +107,8 @@ async fn test_two_phase_simulation() {
 | **Handle** | `override_provider` | Replaces a provider for this simulation daemon and reloads dependent generations through the provider watch path. |
 
 Provider overrides are scoped to the simulation daemon. They do not write into the root provider slot and do not affect another simulation or production daemon in the same process.
+
+`ServiceInstanceHandle` values returned by simulation APIs are daemon-bound operation tokens, not daemon owners. They can be cloned and passed through test helpers without keeping the sandbox daemon alive. After the simulation daemon has been unregistered, stale instance handles keep their IDs and static metadata, but status reads report `Terminated`, runtime snapshots return `None`, and stop/reload/shelf operations fail without mutating daemon state.
 
 ```rust
 #[derive(Clone)]

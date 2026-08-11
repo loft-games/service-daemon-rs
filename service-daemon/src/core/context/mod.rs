@@ -48,8 +48,9 @@ pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 mod tests {
     use super::*;
     use crate::models::{
-        ScalingPolicy, ServiceEntry, ServiceInstanceId, ServiceParam, ServiceScheduling,
-        ServiceStatus,
+        DaemonInstanceId, ScalingPolicy, ServiceControl, ServiceEntry, ServiceEntryId,
+        ServiceInstanceHandle, ServiceInstanceId, ServiceParam, ServiceRuntimeSnapshot,
+        ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
     };
     use futures::future::BoxFuture;
     use linkme::distributed_slice;
@@ -69,6 +70,58 @@ mod tests {
             CancellationToken::new(),
             CancellationToken::new(),
         )
+    }
+
+    struct TestServiceControl {
+        daemon_id: DaemonInstanceId,
+        projection: Arc<crate::models::ServiceCatalogProjection>,
+    }
+
+    impl ServiceControl for TestServiceControl {
+        fn daemon_id(&self) -> DaemonInstanceId {
+            self.daemon_id
+        }
+
+        fn owns_service_entry(
+            &self,
+            entry_id: ServiceEntryId,
+            entry: &'static ServiceEntry,
+        ) -> bool {
+            self.projection
+                .resolve_entry(entry_id)
+                .is_some_and(|record| std::ptr::eq(record.entry, entry))
+        }
+
+        fn service_instances_for_entry(
+            &self,
+            _entry_id: ServiceEntryId,
+            _entry: &'static ServiceEntry,
+            _control: Arc<dyn ServiceControl>,
+        ) -> Vec<ServiceInstanceHandle> {
+            Vec::new()
+        }
+
+        fn service_status(&self, _handle: &ServiceInstanceHandle) -> ServiceStatus {
+            ServiceStatus::Terminated
+        }
+
+        fn service_runtime(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> Option<ServiceRuntimeSnapshot> {
+            None
+        }
+
+        fn trigger_runtime(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> Option<TriggerRuntimeSnapshot> {
+            None
+        }
+
+        fn request_stop(&self, _handle: &ServiceInstanceHandle) -> bool {
+            false
+        }
     }
 
     fn selected_handle_test_wrapper(
@@ -130,12 +183,19 @@ mod tests {
             .await
     }
 
-    fn resources_with_registry_tag(tag: &'static str) -> Arc<DaemonResources> {
+    fn resources_with_registry_tag(
+        tag: &'static str,
+    ) -> (Arc<DaemonResources>, Arc<dyn ServiceControl>) {
         let registry = crate::models::Registry::builder().with_tag(tag).build();
         let (_, projection, _) = registry.into_parts();
         let resources = create_test_resources();
-        resources.set_service_catalog_projection(projection);
-        resources
+        resources.set_service_catalog_projection(projection.clone());
+        let control: Arc<dyn ServiceControl> = Arc::new(TestServiceControl {
+            daemon_id: resources.daemon_id(),
+            projection,
+        });
+        resources.set_service_control(control.clone());
+        (resources, control)
     }
 
     #[test]
@@ -149,7 +209,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_handle_resolution_returns_daemon_local_handle() {
-        let resources = resources_with_registry_tag("__handle_resolver_selected__");
+        let (resources, _control) = resources_with_registry_tag("__handle_resolver_selected__");
 
         let handle = __run_daemon_resources_sync_scope(resources, || {
             __resolve_service_handle(selected_handle_test_wrapper)
@@ -163,7 +223,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_handle_resolution_reports_unlinked_target() {
-        let resources = resources_with_registry_tag("__handle_resolver_selected__");
+        let (resources, _control) = resources_with_registry_tag("__handle_resolver_selected__");
 
         let error = __run_daemon_resources_sync_scope(resources, || {
             __resolve_service_handle(unlinked_handle_test_wrapper)
@@ -178,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn service_handle_resolution_reports_linked_but_not_selected_target() {
-        let resources = resources_with_registry_tag("__handle_resolver_selected__");
+        let (resources, _control) = resources_with_registry_tag("__handle_resolver_selected__");
 
         let error = __run_daemon_resources_sync_scope(resources, || {
             __resolve_service_handle(excluded_handle_test_wrapper)

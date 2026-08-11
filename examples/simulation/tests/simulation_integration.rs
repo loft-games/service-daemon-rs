@@ -163,8 +163,8 @@ async fn test_two_phase_god_hand_with_real_service() {
 
 /// E2E: SimulationHandle flips status while a real `#[service]` is running.
 ///
-/// Uses `service_instance_ids()` to dynamically discover visible runtime
-/// instances, then flips the status via the SimulationHandle.
+/// Uses `service_instances()` to discover visible runtime instances, then
+/// flips the status via the SimulationHandle.
 #[tokio::test]
 async fn test_god_hand_status_flip_with_real_service() {
     let _ = service_daemon::try_init_logging();
@@ -188,16 +188,19 @@ async fn test_god_hand_status_flip_with_real_service() {
     // Wait for the runner to spawn the service and write initial status
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Discover visible ServiceInstanceIds. This includes both status_watcher_service
-    // and infra services (log_service) that are auto-included.
-    let ids = simulation.service_instance_ids();
+    // Discover visible ServiceInstanceHandles. This includes both
+    // status_watcher_service and infra services (log_service) that are
+    // auto-included.
+    let instances = simulation.service_instances();
     assert!(
-        !ids.is_empty(),
+        !instances.is_empty(),
         "Should have at least one service (status_watcher_service)"
     );
 
     assert!(
-        ids.contains(&status_watcher.instance_id()),
+        instances
+            .iter()
+            .any(|instance| instance.instance_id() == status_watcher.instance_id()),
         "status_watcher_service should be registered"
     );
 

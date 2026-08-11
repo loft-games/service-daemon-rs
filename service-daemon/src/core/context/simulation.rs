@@ -131,23 +131,11 @@ impl SimulationHandle {
         self.daemon.simulation_override_provider(value);
     }
 
-    /// Returns a list of all `ServiceInstanceId`s currently visible in the status plane.
-    ///
-    /// This is useful for discovering the runtime IDs assigned by `Registry`,
-    /// which are needed for `set_status()` and `trigger_reload()`.
-    ///
-    /// **Note**: Services only appear here after the runner has spawned them
-    /// and written their initial status. Call this after a short delay to ensure
-    /// services have been registered.
-    pub fn service_instance_ids(&self) -> Vec<ServiceInstanceId> {
-        self.daemon.simulation_service_instance_ids()
-    }
-
     // =========================================================================
     // Safe Read API -- lock-free accessors that return owned values
     // =========================================================================
 
-    /// Reads a shelf value by service instance ID and key, returning an owned clone.
+    /// Reads a shelf value by service instance handle and key, returning an owned clone.
     ///
     /// This is the **recommended** way to inspect shelf data in tests.
     /// The internal `DashMap` lock is acquired and released entirely within

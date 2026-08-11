@@ -87,19 +87,29 @@ pub fn __resolve_service_handle(wrapper: ServiceFn) -> Result<ServiceHandle, cra
         )
     })?;
 
-    projection.resolve_handle(entry_id).ok_or_else(|| {
-        let target = ServiceCatalog::get(entry_id)
-            .map(|record| {
-                format!(
-                    "{}::{} ({})",
-                    record.entry.module, record.entry.name, entry_id
-                )
-            })
-            .unwrap_or_else(|| entry_id.to_string());
-        crate::ProviderError::Fatal(format!(
-            "service_handle! target {target} is linked but not selected by this daemon registry"
-        ))
-    })
+    let control = resources.service_control().ok_or_else(|| {
+        crate::ProviderError::Fatal(
+            "service_handle! cannot resolve before daemon service control is initialized"
+                .to_owned(),
+        )
+    })?;
+
+    projection.resolve_entry(entry_id).map_or_else(
+        || {
+            let target = ServiceCatalog::get(entry_id)
+                .map(|record| {
+                    format!(
+                        "{}::{} ({})",
+                        record.entry.module, record.entry.name, entry_id
+                    )
+                })
+                .unwrap_or_else(|| entry_id.to_string());
+            Err(crate::ProviderError::Fatal(format!(
+                "service_handle! target {target} is linked but not selected by this daemon registry"
+            )))
+        },
+        |record| Ok(ServiceHandle::new(record.entry_id, record.entry, control)),
+    )
 }
 
 /// Returns the current lifecycle status of the calling service.

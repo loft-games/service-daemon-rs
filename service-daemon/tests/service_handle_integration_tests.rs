@@ -31,6 +31,14 @@ async fn selected_handle_consumer(
     handle: std::sync::Arc<SelectedWorkerHandle>,
 ) -> anyhow::Result<()> {
     assert_eq!(handle.0.name(), "selected_worker");
+    assert!(
+        handle
+            .0
+            .instances()
+            .iter()
+            .any(|instance| instance.name() == "selected_worker"),
+        "service handle should list instances for the selected service in its daemon"
+    );
     HANDLE_CONSUMER_READY.store(true, Ordering::SeqCst);
     done();
     wait_shutdown().await;

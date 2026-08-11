@@ -10,7 +10,7 @@ use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
@@ -266,25 +266,71 @@ pub struct ServiceEntry {
 }
 
 // ---------------------------------------------------------------------------
-// ServiceHandle: static service definition handle.
+// ServiceHandle: daemon-bound service definition handle.
 // ---------------------------------------------------------------------------
 
-/// A handle to a static service definition.
+pub(crate) trait ServiceControl: Send + Sync {
+    fn daemon_id(&self) -> DaemonInstanceId;
+
+    fn owns_service_entry(&self, entry_id: ServiceEntryId, entry: &'static ServiceEntry) -> bool;
+
+    fn service_instances_for_entry(
+        &self,
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+        control: Arc<dyn ServiceControl>,
+    ) -> Vec<ServiceInstanceHandle>;
+
+    fn service_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus;
+
+    fn service_runtime(&self, handle: &ServiceInstanceHandle) -> Option<ServiceRuntimeSnapshot>;
+
+    fn trigger_runtime(&self, handle: &ServiceInstanceHandle) -> Option<TriggerRuntimeSnapshot>;
+
+    fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool;
+}
+
+/// A daemon-bound handle to a selected service definition.
 ///
-/// The handle identifies the static service definition, not a running instance.
-/// Runtime instances use [`ServiceInstanceId`] and are allocated when a service
-/// is materialized by a daemon. A daemon verifies this handle against its own
-/// registry projection before returning daemon-local instances for it.
-#[derive(Clone, Copy)]
+/// The handle identifies one service definition inside the daemon that created
+/// it. Static metadata still comes from the selected `ServiceDescription`, while
+/// operations are delegated through daemon-local control state.
+#[derive(Clone)]
 pub struct ServiceHandle {
+    daemon_id: DaemonInstanceId,
     entry_id: ServiceEntryId,
     entry: &'static ServiceEntry,
+    control: Weak<dyn ServiceControl>,
 }
 
 impl ServiceHandle {
     #[inline]
-    pub(crate) const fn new(entry_id: ServiceEntryId, entry: &'static ServiceEntry) -> Self {
-        Self { entry_id, entry }
+    pub(crate) fn new(
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+        control: Arc<dyn ServiceControl>,
+    ) -> Self {
+        Self::from_weak(
+            entry_id,
+            entry,
+            control.daemon_id(),
+            Arc::downgrade(&control),
+        )
+    }
+
+    #[inline]
+    pub(crate) fn from_weak(
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+        daemon_id: DaemonInstanceId,
+        control: Weak<dyn ServiceControl>,
+    ) -> Self {
+        Self {
+            daemon_id,
+            entry_id,
+            entry,
+            control,
+        }
     }
 
     /// Static registry entry ID for this service definition.
@@ -310,11 +356,26 @@ impl ServiceHandle {
     pub const fn module(&self) -> &'static str {
         self.entry.module
     }
+
+    /// Daemon instance that created this service handle.
+    #[inline]
+    pub fn daemon_id(&self) -> DaemonInstanceId {
+        self.daemon_id
+    }
+
+    /// Return runtime instances for this service definition in the owning daemon.
+    #[inline]
+    pub fn instances(&self) -> Vec<ServiceInstanceHandle> {
+        let Some(control) = self.control.upgrade() else {
+            return Vec::new();
+        };
+        control.service_instances_for_entry(self.entry_id, self.entry, control.clone())
+    }
 }
 
 impl PartialEq for ServiceHandle {
     fn eq(&self, other: &Self) -> bool {
-        self.entry_id == other.entry_id
+        self.entry_id == other.entry_id && self.daemon_id() == other.daemon_id()
     }
 }
 
@@ -322,6 +383,7 @@ impl Eq for ServiceHandle {}
 
 impl Hash for ServiceHandle {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.daemon_id().hash(state);
         self.entry_id.hash(state);
     }
 }
@@ -330,27 +392,12 @@ impl fmt::Debug for ServiceHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServiceHandle")
+            .field("daemon_id", &self.daemon_id())
             .field("entry_id", &self.entry_id)
             .field("name", &self.entry.name)
             .field("module", &self.entry.module)
             .finish()
     }
-}
-
-// ---------------------------------------------------------------------------
-// ServiceInstanceHandle: daemon-local runtime service instance capability.
-// ---------------------------------------------------------------------------
-
-pub(crate) trait ServiceInstanceControl: Send + Sync {
-    fn daemon_id(&self) -> DaemonInstanceId;
-
-    fn service_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus;
-
-    fn service_runtime(&self, handle: &ServiceInstanceHandle) -> Option<ServiceRuntimeSnapshot>;
-
-    fn trigger_runtime(&self, handle: &ServiceInstanceHandle) -> Option<TriggerRuntimeSnapshot>;
-
-    fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,10 +412,11 @@ pub(crate) trait ServiceInstanceControl: Send + Sync {
 /// back into instance-level operations.
 #[derive(Clone)]
 pub struct ServiceInstanceHandle {
+    daemon_id: DaemonInstanceId,
     instance_id: ServiceInstanceId,
     entry_id: ServiceEntryId,
     entry: &'static ServiceEntry,
-    control: Arc<dyn ServiceInstanceControl>,
+    control: Weak<dyn ServiceControl>,
 }
 
 impl ServiceInstanceHandle {
@@ -377,20 +425,21 @@ impl ServiceInstanceHandle {
         instance_id: ServiceInstanceId,
         entry_id: ServiceEntryId,
         entry: &'static ServiceEntry,
-        control: Arc<dyn ServiceInstanceControl>,
+        control: Arc<dyn ServiceControl>,
     ) -> Self {
         Self {
+            daemon_id: control.daemon_id(),
             instance_id,
             entry_id,
             entry,
-            control,
+            control: Arc::downgrade(&control),
         }
     }
 
     #[inline]
     pub(crate) fn from_record(
         record: &ServiceInstanceRecord,
-        control: Arc<dyn ServiceInstanceControl>,
+        control: Arc<dyn ServiceControl>,
     ) -> Self {
         Self::new(
             record.instance_id(),
@@ -433,28 +482,40 @@ impl ServiceInstanceHandle {
     /// Daemon instance that owns this service instance.
     #[inline]
     pub fn daemon_id(&self) -> DaemonInstanceId {
-        self.control.daemon_id()
+        self.daemon_id
     }
 
     /// Static service definition handle for this instance.
     #[inline]
     pub fn service(&self) -> ServiceHandle {
-        ServiceHandle::new(self.entry_id, self.entry)
+        ServiceHandle::from_weak(
+            self.entry_id,
+            self.entry,
+            self.daemon_id,
+            self.control.clone(),
+        )
     }
 
     /// Read the current lifecycle status for this service instance.
     pub async fn status(&self) -> ServiceStatus {
-        self.control.service_status(self)
+        let Some(control) = self.control.upgrade() else {
+            return ServiceStatus::Terminated;
+        };
+        control.service_status(self)
     }
 
     /// Return read-only runtime facts for this service instance.
     pub fn runtime(&self) -> Option<ServiceRuntimeSnapshot> {
-        self.control.service_runtime(self)
+        self.control
+            .upgrade()
+            .and_then(|control| control.service_runtime(self))
     }
 
     /// Return read-only trigger runtime facts if this instance hosts a trigger.
     pub fn trigger_runtime(&self) -> Option<TriggerRuntimeSnapshot> {
-        self.control.trigger_runtime(self)
+        self.control
+            .upgrade()
+            .and_then(|control| control.trigger_runtime(self))
     }
 
     /// Request shutdown for this managed service instance.
@@ -463,7 +524,9 @@ impl ServiceInstanceHandle {
     /// facts. It does not remove the instance from the daemon registry and does
     /// not wait for the task join handle to finish.
     pub fn request_stop(&self) -> bool {
-        self.control.request_stop(self)
+        self.control
+            .upgrade()
+            .is_some_and(|control| control.request_stop(self))
     }
 }
 
@@ -603,7 +666,7 @@ impl ServiceInstanceRegistry {
     pub(crate) fn handles_for_entry(
         &self,
         entry_id: ServiceEntryId,
-        control: Arc<dyn ServiceInstanceControl>,
+        control: Arc<dyn ServiceControl>,
     ) -> Vec<ServiceInstanceHandle> {
         let mut handles = self
             .by_entry
@@ -793,11 +856,13 @@ impl ServiceCatalogProjection {
         })
     }
 
-    pub(crate) fn resolve_handle(&self, entry_id: ServiceEntryId) -> Option<ServiceHandle> {
+    pub(crate) fn resolve_entry(
+        &self,
+        entry_id: ServiceEntryId,
+    ) -> Option<GlobalServiceEntryRecord> {
         self.contains(entry_id)
             .then(|| ServiceCatalog::get(entry_id))
             .flatten()
-            .map(|record| ServiceHandle::new(record.entry_id, record.entry))
     }
 }
 
@@ -1146,9 +1211,26 @@ mod tests {
         }
     }
 
-    impl ServiceInstanceControl for TestServiceInstanceControl {
+    impl ServiceControl for TestServiceInstanceControl {
         fn daemon_id(&self) -> DaemonInstanceId {
             self.daemon_id
+        }
+
+        fn owns_service_entry(
+            &self,
+            entry_id: ServiceEntryId,
+            entry: &'static ServiceEntry,
+        ) -> bool {
+            ServiceCatalog::get(entry_id).is_some_and(|record| std::ptr::eq(record.entry, entry))
+        }
+
+        fn service_instances_for_entry(
+            &self,
+            _entry_id: ServiceEntryId,
+            _entry: &'static ServiceEntry,
+            _control: Arc<dyn ServiceControl>,
+        ) -> Vec<ServiceInstanceHandle> {
+            Vec::new()
         }
 
         fn service_status(&self, _handle: &ServiceInstanceHandle) -> ServiceStatus {
@@ -1326,8 +1408,44 @@ mod tests {
         assert_eq!(handle.daemon_id(), control.daemon_id());
         assert_eq!(
             handle.service(),
-            ServiceHandle::new(service.entry_id, service.entry)
+            ServiceHandle::new(service.entry_id, service.entry, control.clone())
         );
+    }
+
+    #[tokio::test]
+    async fn service_instance_handle_returns_stable_metadata_after_control_is_dropped() {
+        let entry_id = ServiceCatalog::entry_id_for_wrapper(test_registry_entry_id_second_wrapper)
+            .expect("wrapper should be indexed by global catalog");
+        let record = ServiceCatalog::get(entry_id).expect("entry ID should resolve to record");
+        let instance_id = ServiceInstanceId::new(Uuid::from_u128(302));
+        let daemon_id = DaemonInstanceId::new(Uuid::from_u128(303));
+        let handle = {
+            let control: Arc<dyn ServiceControl> =
+                Arc::new(TestServiceInstanceControl { daemon_id });
+            let record = ServiceInstanceRecord::new(
+                instance_id,
+                entry_id,
+                record.entry,
+                CancellationToken::new(),
+            );
+            ServiceInstanceHandle::from_record(&record, control)
+        };
+
+        assert_eq!(handle.daemon_id(), daemon_id);
+        assert_eq!(handle.instance_id(), instance_id);
+        assert_eq!(handle.entry_id(), entry_id);
+        assert!(std::ptr::eq(handle.entry(), record.entry));
+        assert_eq!(handle.name(), "test_registry_entry_id_second");
+        assert_eq!(handle.module(), "models::service::tests");
+        assert_eq!(handle.status().await, ServiceStatus::Terminated);
+        assert!(handle.runtime().is_none());
+        assert!(handle.trigger_runtime().is_none());
+        assert!(!handle.request_stop());
+
+        let service = handle.service();
+        assert_eq!(service.daemon_id(), daemon_id);
+        assert_eq!(service.entry_id(), entry_id);
+        assert!(service.instances().is_empty());
     }
 
     #[test]

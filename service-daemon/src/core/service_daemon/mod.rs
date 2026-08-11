@@ -44,9 +44,9 @@ use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessSnapshot,
-    Result as ServiceResult, SchedulingAdvisoryProfile, ServiceDescription, ServiceHandle,
-    ServiceInstanceControl, ServiceInstanceHandle, ServiceInstanceId, ServiceInstanceRegistry,
-    ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
+    Result as ServiceResult, SchedulingAdvisoryProfile, ServiceControl, ServiceDescription,
+    ServiceEntry, ServiceEntryId, ServiceHandle, ServiceInstanceHandle, ServiceInstanceId,
+    ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceStatus, TriggerRuntimeSnapshot,
 };
 use dashmap::DashMap;
 
@@ -133,15 +133,16 @@ impl DaemonInstanceHandle {
 
     /// Return service instances for one service definition selected by this daemon.
     pub fn service_instances_for(&self, handle: &ServiceHandle) -> Vec<ServiceInstanceHandle> {
-        let Some(projection) = self.control.resources.service_catalog_projection() else {
-            return Vec::new();
-        };
-        if projection.resolve_handle(handle.entry_id()) != Some(*handle) {
+        if handle.daemon_id() != self.id {
             return Vec::new();
         }
-        self.control
-            .instance_registry
-            .handles_for_entry(handle.entry_id(), self.control.clone())
+        if !self
+            .control
+            .owns_service_entry(handle.entry_id(), handle.entry())
+        {
+            return Vec::new();
+        }
+        handle.instances()
     }
 
     /// Start the daemon in the background (non-blocking).
@@ -252,16 +253,6 @@ impl DaemonInstanceHandle {
     }
 
     #[cfg(feature = "simulation")]
-    pub(crate) fn simulation_service_instance_ids(&self) -> Vec<ServiceInstanceId> {
-        self.control
-            .resources
-            .status_plane
-            .iter()
-            .map(|entry| *entry.key())
-            .collect()
-    }
-
-    #[cfg(feature = "simulation")]
     pub(crate) fn simulation_get_shelf<T: Any + Clone + Send + Sync>(
         &self,
         handle: &ServiceInstanceHandle,
@@ -335,9 +326,30 @@ impl DaemonInstanceHandle {
     }
 }
 
-impl ServiceInstanceControl for DaemonInstanceControl {
+impl ServiceControl for DaemonInstanceControl {
     fn daemon_id(&self) -> DaemonInstanceId {
         self.id
+    }
+
+    fn owns_service_entry(&self, entry_id: ServiceEntryId, entry: &'static ServiceEntry) -> bool {
+        let Some(projection) = self.resources.service_catalog_projection() else {
+            return false;
+        };
+        projection
+            .resolve_entry(entry_id)
+            .is_some_and(|record| std::ptr::eq(record.entry, entry))
+    }
+
+    fn service_instances_for_entry(
+        &self,
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+        control: Arc<dyn ServiceControl>,
+    ) -> Vec<ServiceInstanceHandle> {
+        if !self.owns_service_entry(entry_id, entry) {
+            return Vec::new();
+        }
+        self.instance_registry.handles_for_entry(entry_id, control)
     }
 
     fn service_status(&self, handle: &ServiceInstanceHandle) -> ServiceStatus {
@@ -424,8 +436,13 @@ impl DaemonInstanceControl {
     }
 }
 
+struct DaemonRegistryEntry {
+    _inner: Arc<Mutex<DaemonInstanceInner>>,
+    _control: Arc<DaemonInstanceControl>,
+}
+
 struct DaemonRegistry {
-    daemons: DashMap<DaemonInstanceId, Arc<Mutex<DaemonInstanceInner>>>,
+    daemons: DashMap<DaemonInstanceId, Arc<DaemonRegistryEntry>>,
 }
 
 impl DaemonRegistry {
@@ -444,11 +461,16 @@ impl DaemonRegistry {
         let external_cancel_token = inner.external_cancel_token.clone();
         let control = Arc::new(DaemonInstanceControl {
             id,
-            resources,
+            resources: resources.clone(),
             instance_registry,
         });
+        resources.set_service_control(control.clone());
         let inner = Arc::new(Mutex::new(inner));
-        self.daemons.insert(id, inner.clone());
+        let entry = Arc::new(DaemonRegistryEntry {
+            _inner: inner.clone(),
+            _control: control.clone(),
+        });
+        self.daemons.insert(id, entry);
         DaemonInstanceHandle {
             id,
             inner,
@@ -771,7 +793,7 @@ fn emit_shutdown_topology() {
 mod tests {
     use super::*;
     use crate::models::{
-        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId, ServiceHandle,
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId,
         ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceParam,
         ServiceScheduling,
     };
@@ -1267,13 +1289,13 @@ mod tests {
         let registry = Registry::builder()
             .with_tag("__unit_high_priority_capacity_primary__")
             .build();
-        let service = registry
-            .services()
-            .iter()
-            .find(|service| service.name() == "capacity_primary_standard_service")
-            .expect("standard test service should be selected by tag");
-        let service_handle = ServiceHandle::new(service.entry_id, service.entry);
         let daemon = ServiceDaemon::builder().with_registry(registry).build();
+        let service_handle = daemon
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "capacity_primary_standard_service")
+            .expect("standard test service should have one auto-start instance")
+            .service();
         let expected_instances = daemon.service_instances_for(&service_handle);
         let expected_instance = expected_instances
             .first()
@@ -1284,6 +1306,81 @@ mod tests {
         assert_eq!(expected_instances, vec![expected_instance]);
 
         daemon_registry().unregister(daemon.id());
+    }
+
+    #[test]
+    fn service_handle_is_scoped_to_owning_daemon() {
+        let registry_a = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
+            .build();
+        let registry_b = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
+            .build();
+        let daemon_a = ServiceDaemon::builder().with_registry(registry_a).build();
+        let daemon_b = ServiceDaemon::builder().with_registry(registry_b).build();
+        let service_handle = daemon_a
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "capacity_primary_standard_service")
+            .expect("standard test service should have one auto-start instance")
+            .service();
+
+        assert_eq!(service_handle.daemon_id(), daemon_a.id());
+        assert_eq!(service_handle.instances().len(), 1);
+        assert!(daemon_b.service_instances_for(&service_handle).is_empty());
+
+        daemon_registry().unregister(daemon_a.id());
+        daemon_registry().unregister(daemon_b.id());
+    }
+
+    #[test]
+    fn service_handle_does_not_keep_daemon_control_alive() {
+        let service_handle = {
+            let registry = Registry::builder()
+                .with_tag("__unit_high_priority_capacity_primary__")
+                .build();
+            let daemon = ServiceDaemon::builder().with_registry(registry).build();
+            let handle = daemon
+                .service_instances()
+                .into_iter()
+                .find(|instance| instance.name() == "capacity_primary_standard_service")
+                .expect("standard test service should have one auto-start instance")
+                .service();
+
+            daemon_registry().unregister(daemon.id());
+            handle
+        };
+
+        assert!(service_handle.instances().is_empty());
+    }
+
+    #[tokio::test]
+    async fn service_instance_handle_uses_registry_owned_control_until_unregister() {
+        let registry = Registry::builder()
+            .with_tag("__unit_high_priority_capacity_primary__")
+            .build();
+        let daemon = ServiceDaemon::builder().with_registry(registry).build();
+        let daemon_id = daemon.id();
+        let instance = daemon
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "capacity_primary_standard_service")
+            .expect("standard test service should have one auto-start instance");
+        let service = instance.service();
+
+        drop(daemon);
+
+        assert_eq!(instance.daemon_id(), daemon_id);
+        assert_eq!(instance.status().await, ServiceStatus::Initializing);
+        assert_eq!(service.instances().len(), 1);
+
+        daemon_registry().unregister(daemon_id);
+
+        assert_eq!(instance.status().await, ServiceStatus::Terminated);
+        assert!(instance.runtime().is_none());
+        assert!(instance.trigger_runtime().is_none());
+        assert!(!instance.request_stop());
+        assert!(service.instances().is_empty());
     }
 
     #[tokio::test]
@@ -1435,13 +1532,13 @@ mod tests {
         let registry = Registry::builder()
             .with_tag("__unit_high_priority_capacity_primary__")
             .build();
-        let service_handle = registry
-            .services()
-            .iter()
-            .find(|service| service.name() == "capacity_primary_standard_service")
-            .map(|service| ServiceHandle::new(service.entry_id, service.entry))
-            .expect("standard test service should be selected by tag");
         let handle = ServiceDaemon::builder().with_registry(registry).build();
+        let service_handle = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "capacity_primary_standard_service")
+            .expect("standard test service should have one instance")
+            .service();
         let instance = handle
             .service_instances_for(&service_handle)
             .into_iter()
@@ -1556,13 +1653,13 @@ mod tests {
         let registry = Registry::builder()
             .with_tag("__unit_high_priority_capacity_primary__")
             .build();
-        let service = registry
-            .services()
-            .iter()
-            .find(|service| service.name() == "capacity_primary_standard_service")
-            .expect("standard test service should be selected by tag");
-        let service_handle = ServiceHandle::new(service.entry_id, service.entry);
         let handle = ServiceDaemon::builder().with_registry(registry).build();
+        let service_handle = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "capacity_primary_standard_service")
+            .expect("standard test service should have one instance")
+            .service();
         let instance = handle
             .service_instances_for(&service_handle)
             .into_iter()
