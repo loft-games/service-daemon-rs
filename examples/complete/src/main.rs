@@ -15,8 +15,9 @@
 //! > mixing them leads to undefined behavior.
 
 use example_complete as _;
-use service_daemon::{RestartPolicy, ServiceDaemon};
+use service_daemon::{RestartPolicy, ServiceDaemon, ServiceError};
 use std::time::Duration;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -31,6 +32,25 @@ async fn main() -> anyhow::Result<()> {
     let daemon = ServiceDaemon::builder().with_restart_policy(policy).build();
 
     daemon.run().await;
-    daemon.wait().await?;
-    Ok(())
+
+    match daemon.wait().await {
+        Ok(()) => {
+            info!("Complete example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Complete example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Complete example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }

@@ -9,11 +9,13 @@
 //! **Run**: `cargo run -p example-unix-domain-socket`
 
 #[cfg(unix)]
+use example_unix_domain_socket as _;
+#[cfg(unix)]
 use example_unix_domain_socket::providers::EXAMPLE_UNIX_DOMAIN_SOCKET_PATH;
 #[cfg(unix)]
-use service_daemon::ServiceDaemon;
+use service_daemon::{ServiceDaemon, ServiceError};
 #[cfg(unix)]
-use std::time::Duration;
+use tracing::{error, info};
 
 #[cfg(unix)]
 fn cleanup_socket_path() -> anyhow::Result<()> {
@@ -27,23 +29,39 @@ fn cleanup_socket_path() -> anyhow::Result<()> {
 #[cfg(unix)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use example_unix_domain_socket as _;
-
     service_daemon::init_logging();
     cleanup_socket_path()?;
 
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
 
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    daemon.shutdown();
-    daemon.wait().await?;
-
+    let wait_result = daemon.wait().await;
     cleanup_socket_path()?;
-    Ok(())
+
+    match wait_result {
+        Ok(()) => {
+            info!("Unix domain socket example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Unix domain socket example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Unix domain socket example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }
 
 #[cfg(not(unix))]
 fn main() {
-    println!("The Unix domain socket example only runs on Unix targets.");
+    service_daemon::init_logging();
+    tracing::warn!("The Unix domain socket example only runs on Unix targets.");
 }

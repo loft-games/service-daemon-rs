@@ -12,8 +12,8 @@
 //! `my-app.YYYY-MM-DD` containing JSON-structured log lines.
 
 use example_logging as _;
-use service_daemon::ServiceDaemon;
-use service_daemon::{FileLogConfig, enable_file_logging};
+use service_daemon::{FileLogConfig, ServiceDaemon, ServiceError, enable_file_logging};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,7 +24,25 @@ async fn main() -> anyhow::Result<()> {
 
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-    daemon.wait().await?;
 
-    Ok(())
+    match daemon.wait().await {
+        Ok(()) => {
+            info!("Logging example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Logging example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Logging example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }

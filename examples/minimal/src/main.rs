@@ -14,7 +14,8 @@
 //! > mixing them leads to undefined behavior.
 
 use example_minimal as _;
-use service_daemon::ServiceDaemon;
+use service_daemon::{ServiceDaemon, ServiceError};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -22,7 +23,25 @@ async fn main() -> anyhow::Result<()> {
 
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-    daemon.wait().await?;
 
-    Ok(())
+    match daemon.wait().await {
+        Ok(()) => {
+            info!("Minimal example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Minimal example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Minimal example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }

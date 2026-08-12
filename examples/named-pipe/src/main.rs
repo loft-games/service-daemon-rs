@@ -11,7 +11,9 @@
 #[cfg(windows)]
 use example_named_pipe as _;
 #[cfg(windows)]
-use service_daemon::ServiceDaemon;
+use service_daemon::{ServiceDaemon, ServiceError};
+#[cfg(windows)]
+use tracing::{error, info};
 
 #[cfg(windows)]
 #[tokio::main]
@@ -20,9 +22,27 @@ async fn main() -> anyhow::Result<()> {
 
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-    daemon.wait().await?;
 
-    Ok(())
+    match daemon.wait().await {
+        Ok(()) => {
+            info!("Windows named pipe example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Windows named pipe example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Windows named pipe example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }
 
 #[cfg(not(windows))]

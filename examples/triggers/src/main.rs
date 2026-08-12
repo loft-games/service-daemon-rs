@@ -35,7 +35,8 @@
 //!
 //! **Run**: `RUST_LOG=info cargo run -p example-triggers`
 
-use service_daemon::ServiceDaemon;
+use service_daemon::{ServiceDaemon, ServiceError};
+use tracing::{error, info};
 
 // Import library modules so that `#[service]`, `#[trigger]`, and `#[provider]`
 // registrations are linked into this binary.
@@ -47,7 +48,25 @@ async fn main() -> anyhow::Result<()> {
 
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-    daemon.wait().await?;
 
-    Ok(())
+    match daemon.wait().await {
+        Ok(()) => {
+            info!("Triggers example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Triggers example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Triggers example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }
