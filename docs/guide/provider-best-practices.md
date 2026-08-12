@@ -93,7 +93,7 @@ lists existing runtime instances for that service in the owning daemon.
 `ServiceHandle`. The returned `ServiceInstanceHandle` can read its own status
 and runtime facts, request shutdown, wait for shutdown, or remove daemon-local
 runtime state for that instance. After the owning daemon is gone, status reads
-report `Terminated`, runtime snapshots return `None`, and stop/remove/purge
+report `Terminated`, runtime snapshots return `None`, and stop/remove
 requests return `false`.
 
 Service definitions default to `auto_start = true`: a selected entry creates
@@ -101,7 +101,13 @@ one runtime instance when the daemon starts. Use
 `#[service(auto_start = false)]` when the selected service definition should
 not start automatically. The service can still be resolved with
 `service_handle!(...)`; `ServiceHandle::instances()` starts empty, and
-`ServiceHandle::spawn().await` creates and starts a new runtime instance:
+`ServiceHandle::create().await` registers a new runtime instance without
+starting it. `ServiceInstanceHandle::start().await` starts a created instance,
+and `ServiceHandle::start().await` is the create-and-start convenience path.
+The daemon must have entered `run()` first. Calls made after `run()` starts but
+before startup waves finish wait until startup is complete, so provider code
+should only resolve and pass the handle; already-started services should submit
+instance creation or startup:
 
 ```rust
 #[service(auto_start = false, tags = ["workers"])]
@@ -113,10 +119,14 @@ async fn worker_service() -> anyhow::Result<()> {
 
 #[service(tags = ["controller"])]
 async fn controller(worker: std::sync::Arc<WorkerService>) -> anyhow::Result<()> {
-    let instance = worker.0.spawn().await?;
     service_daemon::done();
+    let service = worker.0.clone();
+    tokio::spawn(async move {
+        let instance = service.start().await?;
+        instance.remove().await?;
+        Ok::<(), anyhow::Error>(())
+    });
     service_daemon::wait_shutdown().await;
-    instance.remove().await?;
     Ok(())
 }
 ```

@@ -24,13 +24,16 @@ mod startup_preflight;
 use std::any::Any;
 use std::collections::HashMap;
 use std::future::pending;
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{
+    Arc, OnceLock, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 #[cfg(feature = "simulation")]
 use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
@@ -74,7 +77,44 @@ struct DaemonInstanceControl {
     id: DaemonInstanceId,
     resources: Arc<DaemonResources>,
     instance_registry: Arc<ServiceInstanceRegistry>,
+    startup_gate: Arc<StartupGate>,
+    daemon_token: CancellationToken,
     inner: Weak<Mutex<DaemonInstanceInner>>,
+}
+
+#[derive(Default)]
+struct StartupGate {
+    started: AtomicBool,
+    complete: AtomicBool,
+    notify: Notify,
+}
+
+impl StartupGate {
+    fn mark_started(&self) {
+        self.started.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn mark_complete(&self) {
+        self.complete.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn has_started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    async fn wait_until_complete_or_cancelled(&self, cancellation_token: &CancellationToken) {
+        loop {
+            if self.complete.load(Ordering::Acquire) || cancellation_token.is_cancelled() {
+                return;
+            }
+            tokio::select! {
+                _ = self.notify.notified() => {}
+                _ = cancellation_token.cancelled() => return,
+            }
+        }
+    }
 }
 
 impl DaemonInstanceHandle {
@@ -156,12 +196,10 @@ impl DaemonInstanceHandle {
     /// Wait for the daemon to stop and unregister it from the process-local registry.
     #[instrument(skip(self))]
     pub async fn wait(&self) -> ServiceResult<()> {
-        let result = {
-            let mut inner = self.inner.lock().await;
-            inner.wait().await
-        };
+        wait_for_shutdown_signal(&self.shutdown_token, &self.external_cancel_token).await?;
+        self.inner.lock().await.do_shutdown().await;
         daemon_registry().unregister(self.id);
-        result
+        Ok(())
     }
 
     /// Trigger graceful shutdown of the daemon.
@@ -396,7 +434,7 @@ impl ServiceControl for DaemonInstanceControl {
         true
     }
 
-    fn spawn_service_instance(
+    fn create_service_instance(
         &self,
         handle: &ServiceHandle,
         control: Arc<dyn ServiceControl>,
@@ -404,7 +442,17 @@ impl ServiceControl for DaemonInstanceControl {
         let entry_id = handle.entry_id();
         let entry = handle.entry();
         let inner = self.inner.clone();
+        let startup_gate = self.startup_gate.clone();
+        let daemon_token = self.daemon_token.clone();
         Box::pin(async move {
+            if !startup_gate.has_started() {
+                return Err(ServiceError::RegistryError(
+                    "cannot create service instance before daemon run() starts".to_owned(),
+                ));
+            }
+            startup_gate
+                .wait_until_complete_or_cancelled(&daemon_token)
+                .await;
             let Some(inner) = inner.upgrade() else {
                 return Err(ServiceError::RegistryError(
                     "service handle owner daemon is no longer active".to_owned(),
@@ -412,8 +460,22 @@ impl ServiceControl for DaemonInstanceControl {
             };
             let mut inner = inner.lock().await;
             inner
-                .spawn_service_instance(entry_id, entry, control.clone())
+                .create_service_instance(entry_id, entry, control.clone())
                 .await
+        })
+    }
+
+    fn start_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
+        let instance = handle.clone();
+        let inner = self.inner.clone();
+        Box::pin(async move {
+            let Some(inner) = inner.upgrade() else {
+                return Ok(false);
+            };
+            inner.lock().await.start_service_instance(&instance).await
         })
     }
 
@@ -445,7 +507,7 @@ impl ServiceControl for DaemonInstanceControl {
         })
     }
 
-    fn purge_service_instance(
+    fn force_remove_service_instance(
         &self,
         handle: &ServiceInstanceHandle,
     ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
@@ -455,7 +517,11 @@ impl ServiceControl for DaemonInstanceControl {
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
-            inner.lock().await.purge_service_instance(&instance).await
+            inner
+                .lock()
+                .await
+                .force_remove_service_instance(&instance)
+                .await
         })
     }
 }
@@ -523,11 +589,14 @@ impl DaemonRegistry {
         let instance_registry = inner.instance_registry.clone();
         let shutdown_token = inner.cancellation_token.clone();
         let external_cancel_token = inner.external_cancel_token.clone();
+        let startup_gate = inner.startup_gate.clone();
         let inner = Arc::new(Mutex::new(inner));
         let control = Arc::new(DaemonInstanceControl {
             id,
             resources: resources.clone(),
             instance_registry,
+            startup_gate,
+            daemon_token: shutdown_token.clone(),
             inner: Arc::downgrade(&inner),
         });
         resources.set_service_control(control.clone());
@@ -559,6 +628,58 @@ impl DaemonRegistry {
 fn daemon_registry() -> &'static DaemonRegistry {
     static DAEMON_REGISTRY: OnceLock<DaemonRegistry> = OnceLock::new();
     DAEMON_REGISTRY.get_or_init(DaemonRegistry::new)
+}
+
+async fn wait_for_shutdown_signal(
+    cancellation_token: &CancellationToken,
+    external_cancel_token: &Option<CancellationToken>,
+) -> ServiceResult<()> {
+    #[cfg(unix)]
+    {
+        let mut sigint = signal(SignalKind::interrupt())
+            .map_err(|e| ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e)))?;
+        let mut sigterm = signal(SignalKind::terminate())
+            .map_err(|e| ServiceError::InternalError(format!("Failed to setup SIGTERM: {}", e)))?;
+
+        tokio::select! {
+            _ = sigint.recv() => {
+                info!("Received SIGINT, shutting down...");
+            }
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM, shutting down...");
+            }
+            _ = cancellation_token.cancelled() => {
+                info!("Received internal cancellation signal, shutting down...");
+            }
+            _ = wait_external_token(external_cancel_token) => {
+                info!("Received external cancellation signal, shutting down...");
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C, shutting down...");
+            }
+            _ = cancellation_token.cancelled() => {
+                info!("Received internal cancellation signal, shutting down...");
+            }
+            _ = wait_external_token(external_cancel_token) => {
+                info!("Received external cancellation signal, shutting down...");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn wait_external_token(token: &Option<CancellationToken>) {
+    match token {
+        Some(t) => t.cancelled().await,
+        None => pending().await,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +742,7 @@ pub(crate) struct DaemonInstanceInner {
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
     isolated_startup_permits: Arc<Semaphore>,
+    startup_gate: Arc<StartupGate>,
 }
 
 impl Drop for DaemonInstanceInner {
@@ -641,6 +763,7 @@ impl DaemonInstanceInner {
     /// or [`shutdown()`](DaemonInstanceHandle::shutdown) to trigger graceful termination.
     #[instrument(skip(self))]
     pub async fn run(&mut self) -> &mut Self {
+        self.startup_gate.mark_started();
         if self.services.is_empty() {
             info!("ServiceDaemon has no services to run. Daemon started in idle mode.");
         }
@@ -664,8 +787,10 @@ impl DaemonInstanceInner {
                 }
             }
             self.shutdown();
+            self.startup_gate.mark_complete();
             return self;
         }
+        self.startup_gate.mark_complete();
 
         info!(
             "ServiceDaemon running with {} service(s).",
@@ -673,77 +798,6 @@ impl DaemonInstanceInner {
         );
 
         self
-    }
-
-    /// Wait for the daemon to stop.
-    ///
-    /// This method blocks until one of the following events occurs:
-    /// - An OS signal is received (SIGINT / SIGTERM / Ctrl+C).
-    /// - The internal cancellation token is cancelled (via [`shutdown()`](DaemonInstanceHandle::shutdown)).
-    /// - An external cancellation token is cancelled (if provided via
-    ///   [`with_cancel_token()`](ServiceDaemonBuilder::with_cancel_token)).
-    ///
-    /// After the trigger event, this method performs a graceful shutdown
-    /// of all services using wave-based priorities.
-    ///
-    /// # Errors
-    /// - `ServiceError::InternalError(...)` if the daemon cannot register a
-    ///   shutdown signal listener (for example, `SIGINT` / `SIGTERM` on Unix,
-    ///   or `Ctrl+C` on non-Unix platforms).
-    ///
-    /// Runtime service/provider failures are handled by the runner and
-    /// shutdown path rather than being returned from `wait()`.
-    ///
-    /// # Signal Guard (Layer 1 Defense)
-    /// If signal handler registration fails, this method returns `Err`
-    /// immediately to prevent an uncontrollable daemon.
-    #[instrument(skip(self))]
-    pub async fn wait(&mut self) -> ServiceResult<()> {
-        // Wait for shutdown signal (Ctrl+C, SIGTERM, or token cancellation)
-        #[cfg(unix)]
-        {
-            let mut sigint = signal(SignalKind::interrupt()).map_err(|e| {
-                ServiceError::InternalError(format!("Failed to setup SIGINT: {}", e))
-            })?;
-            let mut sigterm = signal(SignalKind::terminate()).map_err(|e| {
-                ServiceError::InternalError(format!("Failed to setup SIGTERM: {}", e))
-            })?;
-
-            tokio::select! {
-                _ = sigint.recv() => {
-                    info!("Received SIGINT, shutting down...");
-                }
-                _ = sigterm.recv() => {
-                    info!("Received SIGTERM, shutting down...");
-                }
-                _ = self.cancellation_token.cancelled() => {
-                    info!("Received internal cancellation signal, shutting down...");
-                }
-                _ = Self::wait_external_token(&self.external_cancel_token) => {
-                    info!("Received external cancellation signal, shutting down...");
-                }
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => {
-                    info!("Received Ctrl+C, shutting down...");
-                }
-                _ = self.cancellation_token.cancelled() => {
-                    info!("Received internal cancellation signal, shutting down...");
-                }
-                _ = Self::wait_external_token(&self.external_cancel_token) => {
-                    info!("Received external cancellation signal, shutting down...");
-                }
-            }
-        }
-
-        // Graceful shutdown
-        self.do_shutdown().await;
-
-        Ok(())
     }
 
     /// Trigger graceful shutdown of the daemon.
@@ -807,15 +861,6 @@ impl DaemonInstanceInner {
         info!("ServiceDaemon stopped.");
     }
 
-    /// Internal helper: wait on an external CancellationToken if present.
-    /// If no external token was provided, this future never resolves.
-    async fn wait_external_token(token: &Option<CancellationToken>) {
-        match token {
-            Some(t) => t.cancelled().await,
-            None => pending().await,
-        }
-    }
-
     /// Run for a limited duration (for testing).
     #[cfg(feature = "simulation")]
     #[instrument(skip(self))]
@@ -823,7 +868,9 @@ impl DaemonInstanceInner {
         // Use testing policy with shorter delays
         let test_policy = RestartPolicy::for_testing();
 
+        self.startup_gate.mark_started();
         self.run_simulation_startup(test_policy).await?;
+        self.startup_gate.mark_complete();
 
         tokio::time::sleep(duration).await;
 
@@ -846,7 +893,7 @@ impl DaemonInstanceInner {
         Ok(())
     }
 
-    async fn spawn_service_instance(
+    async fn create_service_instance(
         &mut self,
         entry_id: ServiceEntryId,
         entry: &'static ServiceEntry,
@@ -854,40 +901,12 @@ impl DaemonInstanceInner {
     ) -> ServiceResult<ServiceInstanceHandle> {
         if self.cancellation_token.is_cancelled() {
             return Err(ServiceError::RegistryError(
-                "cannot spawn service instance after daemon shutdown was requested".to_owned(),
+                "cannot create service instance after daemon shutdown was requested".to_owned(),
             ));
         }
         if !self.owns_service_entry(entry_id, entry) {
             return Err(ServiceError::RegistryError(format!(
                 "service entry {entry_id} is not selected by this daemon"
-            )));
-        }
-
-        let control_runtime = self
-            .control_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle().clone())
-            .ok_or_else(|| {
-                ServiceError::RegistryError(
-                    "cannot spawn service instance before daemon run() prepares runtimes"
-                        .to_owned(),
-                )
-            })?;
-        let standard_runtime = self.standard_runtime.clone().ok_or_else(|| {
-            ServiceError::RegistryError(
-                "cannot spawn service instance before standard runtime is available".to_owned(),
-            )
-        })?;
-        let high_priority_runtime = self
-            .high_priority_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle().clone());
-        if matches!(entry.scheduling, ServiceScheduling::HighPriority)
-            && high_priority_runtime.is_none()
-        {
-            return Err(ServiceError::RegistryError(format!(
-                "HighPriority service '{}' is missing the shared high-priority runtime",
-                entry.name
             )));
         }
 
@@ -901,6 +920,61 @@ impl DaemonInstanceInner {
         self.resources
             .runtime_facts
             .register_service_instances(std::slice::from_ref(&record));
+
+        Ok(ServiceInstanceHandle::from_record(&record, control))
+    }
+
+    async fn start_service_instance(
+        &mut self,
+        handle: &ServiceInstanceHandle,
+    ) -> ServiceResult<bool> {
+        if self.cancellation_token.is_cancelled() {
+            return Err(ServiceError::RegistryError(
+                "cannot start service instance after daemon shutdown was requested".to_owned(),
+            ));
+        }
+        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
+            return Ok(false);
+        };
+        if !record_matches_handle(&record, handle) {
+            return Ok(false);
+        }
+        if self
+            .running_tasks
+            .lock()
+            .await
+            .contains_key(&handle.instance_id())
+        {
+            return Ok(true);
+        }
+
+        let control_runtime = self
+            .control_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+            .ok_or_else(|| {
+                ServiceError::RegistryError(
+                    "cannot start service instance before daemon run() prepares runtimes"
+                        .to_owned(),
+                )
+            })?;
+        let standard_runtime = self.standard_runtime.clone().ok_or_else(|| {
+            ServiceError::RegistryError(
+                "cannot start service instance before standard runtime is available".to_owned(),
+            )
+        })?;
+        let high_priority_runtime = self
+            .high_priority_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone());
+        if matches!(record.scheduling(), ServiceScheduling::HighPriority)
+            && high_priority_runtime.is_none()
+        {
+            return Err(ServiceError::RegistryError(format!(
+                "HighPriority service '{}' is missing the shared high-priority runtime",
+                record.name()
+            )));
+        }
 
         runner::spawn_service(parts::SpawnServiceParts {
             service_instance_id: record.instance_id(),
@@ -924,7 +998,7 @@ impl DaemonInstanceInner {
         })
         .await;
 
-        Ok(ServiceInstanceHandle::from_record(&record, control))
+        Ok(true)
     }
 
     async fn stop_service_instance(
@@ -1003,7 +1077,7 @@ impl DaemonInstanceInner {
         Ok(true)
     }
 
-    async fn purge_service_instance(
+    async fn force_remove_service_instance(
         &mut self,
         handle: &ServiceInstanceHandle,
     ) -> ServiceResult<bool> {
@@ -1643,7 +1717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_handle_spawn_requires_running_daemon_runtimes() {
+    async fn service_handle_create_requires_running_daemon() {
         let registry = Registry::builder()
             .with_tag("__unit_high_priority_capacity_primary__")
             .build();
@@ -1656,13 +1730,13 @@ mod tests {
             .service();
 
         let err = service_handle
-            .spawn()
+            .create()
             .await
-            .expect_err("spawn should require daemon runtimes to be prepared");
+            .expect_err("create should require daemon run() to have started");
         assert!(
             err.to_string()
-                .contains("cannot spawn service instance before daemon run() prepares runtimes"),
-            "unexpected spawn error: {err}"
+                .contains("cannot create service instance before daemon run() starts"),
+            "unexpected create error: {err}"
         );
 
         daemon_registry().unregister(daemon.id());

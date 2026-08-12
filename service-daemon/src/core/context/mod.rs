@@ -123,16 +123,23 @@ mod tests {
             false
         }
 
-        fn spawn_service_instance(
+        fn create_service_instance(
             &self,
             _handle: &ServiceHandle,
             _control: Arc<dyn ServiceControl>,
         ) -> BoxFuture<'static, crate::models::Result<ServiceInstanceHandle>> {
             Box::pin(async {
                 Err(crate::models::ServiceError::RegistryError(
-                    "test service control cannot spawn service instances".to_owned(),
+                    "test service control cannot create service instances".to_owned(),
                 ))
             })
+        }
+
+        fn start_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
         }
 
         fn stop_service_instance(
@@ -149,7 +156,7 @@ mod tests {
             Box::pin(async { Ok(false) })
         }
 
-        fn purge_service_instance(
+        fn force_remove_service_instance(
             &self,
             _handle: &ServiceInstanceHandle,
         ) -> BoxFuture<'static, crate::models::Result<bool>> {

@@ -270,6 +270,7 @@ impl ServiceDaemonBuilder {
             isolated_startup_permits: Arc::new(Semaphore::new(
                 self.isolated_startup_concurrency_limit,
             )),
+            startup_gate: Arc::default(),
         }
     }
 }

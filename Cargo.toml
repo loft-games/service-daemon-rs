@@ -17,5 +17,6 @@ members = [
     "examples/local-ipc",
     "examples/web-api",
     "examples/controller-bridge",
+    "examples/on-demand",
 ]
 resolver = "2"

@@ -1,0 +1,13 @@
+[package]
+name = "example-on-demand"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "On-demand example: periodically start, stop, and remove service instances."
+
+[dependencies]
+service-daemon = { path = "../../service-daemon" }
+tokio = { version = "1.53.0", features = ["full"] }
+tracing = "0.1.44"
+anyhow = "1.0.104"

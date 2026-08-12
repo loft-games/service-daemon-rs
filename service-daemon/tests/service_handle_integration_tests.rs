@@ -11,6 +11,8 @@ static ON_DEMAND_HANDLE_READY: AtomicBool = AtomicBool::new(false);
 static ON_DEMAND_WORKER_STARTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static ON_DEMAND_WORKER_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static ON_DEMAND_INTERNAL_PROGRESS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Clone)]
 struct SelectedWorkerHandle(ServiceHandle);
@@ -21,6 +23,9 @@ struct ExcludedWorkerHandle(ServiceHandle);
 
 #[derive(Clone)]
 struct OnDemandWorkerHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct InternalWorkerHandle(ServiceHandle);
 
 #[service(tags = ["__service_handle_success__"])]
 async fn selected_worker() -> anyhow::Result<()> {
@@ -100,6 +105,43 @@ async fn on_demand_handle_consumer(
     Ok(())
 }
 
+#[service(auto_start = false, tags = ["__service_handle_internal_on_demand_spawn__"])]
+async fn internal_on_demand_worker() -> anyhow::Result<()> {
+    ON_DEMAND_INTERNAL_PROGRESS.fetch_add(1, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[provider]
+fn internal_worker_handle() -> Result<InternalWorkerHandle, ProviderError> {
+    service_handle!(internal_on_demand_worker).map(InternalWorkerHandle)
+}
+
+#[service(tags = ["__service_handle_internal_on_demand_spawn__"])]
+async fn internal_on_demand_controller(
+    handle: std::sync::Arc<InternalWorkerHandle>,
+) -> anyhow::Result<()> {
+    let service = handle.0.clone();
+    done();
+    tokio::spawn(async move {
+        let instance = service
+            .start()
+            .await
+            .expect("started service should create and start on-demand worker after startup waves");
+        while ON_DEMAND_INTERNAL_PROGRESS.load(Ordering::SeqCst) < 1 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        instance
+            .remove()
+            .await
+            .expect("started service should remove on-demand worker");
+        ON_DEMAND_INTERNAL_PROGRESS.store(2, Ordering::SeqCst);
+    });
+    wait_shutdown().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn provider_resolves_service_handle_in_selected_daemon_projection() {
     HANDLE_CONSUMER_READY.store(false, Ordering::SeqCst);
@@ -144,7 +186,7 @@ async fn provider_reports_handle_target_outside_daemon_projection() {
 }
 
 #[tokio::test]
-async fn on_demand_service_handle_spawns_stops_removes_and_purges_instances() {
+async fn on_demand_service_handle_creates_starts_stops_removes_and_force_removes_instances() {
     ON_DEMAND_HANDLE_READY.store(false, Ordering::SeqCst);
     ON_DEMAND_WORKER_STARTS.store(0, Ordering::SeqCst);
     ON_DEMAND_WORKER_HANDLE
@@ -177,16 +219,27 @@ async fn on_demand_service_handle_spawns_stops_removes_and_purges_instances() {
     );
 
     let first = on_demand_handle
-        .spawn()
+        .create()
         .await
-        .expect("on-demand service should spawn a runtime instance");
+        .expect("on-demand service should create a runtime instance");
+    assert_eq!(on_demand_handle.instances().len(), 1);
+    assert_eq!(
+        first.status().await,
+        service_daemon::ServiceStatus::Initializing
+    );
+    assert_eq!(
+        ON_DEMAND_WORKER_STARTS.load(Ordering::SeqCst),
+        0,
+        "create should not start the worker"
+    );
+    assert!(first.start().await.expect("start should complete"));
     tokio::time::timeout(Duration::from_secs(2), async {
         while ON_DEMAND_WORKER_STARTS.load(Ordering::SeqCst) < 1 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("spawned on-demand worker should start");
+    .expect("started on-demand worker should start");
     assert_eq!(first.name(), "on_demand_worker");
     assert_eq!(on_demand_handle.instances().len(), 1);
 
@@ -205,21 +258,50 @@ async fn on_demand_service_handle_spawns_stops_removes_and_purges_instances() {
     assert!(on_demand_handle.instances().is_empty());
 
     let second = on_demand_handle
-        .spawn()
+        .start()
         .await
-        .expect("on-demand service should spawn another runtime instance");
+        .expect("on-demand service should create and start another runtime instance");
     tokio::time::timeout(Duration::from_secs(2), async {
         while ON_DEMAND_WORKER_STARTS.load(Ordering::SeqCst) < 2 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("second spawned on-demand worker should start");
+    .expect("second started on-demand worker should start");
     assert_eq!(on_demand_handle.instances().len(), 1);
 
-    assert!(second.purge().await.expect("purge should complete"));
+    assert!(
+        second
+            .force_remove()
+            .await
+            .expect("force remove should complete")
+    );
     assert!(second.runtime().is_none());
     assert!(on_demand_handle.instances().is_empty());
+
+    daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
+}
+
+#[tokio::test]
+async fn started_service_can_start_on_demand_instance_after_startup_waves() {
+    ON_DEMAND_INTERNAL_PROGRESS.store(0, Ordering::SeqCst);
+    let registry = Registry::builder()
+        .with_tag("__service_handle_internal_on_demand_spawn__")
+        .build();
+    let daemon = ServiceDaemon::builder().with_registry(registry).build();
+
+    daemon.run().await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while ON_DEMAND_INTERNAL_PROGRESS.load(Ordering::SeqCst) < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("started service should create, start, stop, and remove on-demand worker");
 
     daemon.shutdown();
     daemon

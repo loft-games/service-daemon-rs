@@ -292,11 +292,16 @@ pub(crate) trait ServiceControl: Send + Sync {
 
     fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool;
 
-    fn spawn_service_instance(
+    fn create_service_instance(
         &self,
         handle: &ServiceHandle,
         control: Arc<dyn ServiceControl>,
     ) -> BoxFuture<'static, ServiceResult<ServiceInstanceHandle>>;
+
+    fn start_service_instance(
+        &self,
+        handle: &ServiceInstanceHandle,
+    ) -> BoxFuture<'static, ServiceResult<bool>>;
 
     fn stop_service_instance(
         &self,
@@ -308,7 +313,7 @@ pub(crate) trait ServiceControl: Send + Sync {
         handle: &ServiceInstanceHandle,
     ) -> BoxFuture<'static, ServiceResult<bool>>;
 
-    fn purge_service_instance(
+    fn force_remove_service_instance(
         &self,
         handle: &ServiceInstanceHandle,
     ) -> BoxFuture<'static, ServiceResult<bool>>;
@@ -396,17 +401,27 @@ impl ServiceHandle {
         control.service_instances_for_entry(self.entry_id, self.entry, control.clone())
     }
 
-    /// Spawn a new runtime instance for this selected service definition.
+    /// Create a new daemon-local instance for this selected service definition.
     ///
-    /// The new instance is owned by the daemon that created this handle. The
-    /// daemon must have been started so its control runtime is available.
-    pub async fn spawn(&self) -> ServiceResult<ServiceInstanceHandle> {
+    /// The new instance is registered with the daemon that created this handle,
+    /// but it is not started until [`ServiceInstanceHandle::start`] is called.
+    /// Calling this before the daemon's `run()` method starts returns an error.
+    /// Calls made after `run()` starts but before startup waves finish wait
+    /// until startup completes, then register the instance.
+    pub async fn create(&self) -> ServiceResult<ServiceInstanceHandle> {
         let Some(control) = self.control.upgrade() else {
             return Err(ServiceError::RegistryError(
                 "service handle owner daemon is no longer active".to_owned(),
             ));
         };
-        control.spawn_service_instance(self, control.clone()).await
+        control.create_service_instance(self, control.clone()).await
+    }
+
+    /// Create and start a new runtime instance for this service definition.
+    pub async fn start(&self) -> ServiceResult<ServiceInstanceHandle> {
+        let instance = self.create().await?;
+        instance.start().await?;
+        Ok(instance)
     }
 }
 
@@ -566,6 +581,19 @@ impl ServiceInstanceHandle {
             .is_some_and(|control| control.request_stop(self))
     }
 
+    /// Start this daemon-local service instance.
+    ///
+    /// Instances returned by [`ServiceHandle::create`] are registered but not
+    /// running until this method starts the supervisor pipeline for them.
+    /// Calling `start()` for an already running instance succeeds without
+    /// starting a duplicate task.
+    pub async fn start(&self) -> ServiceResult<bool> {
+        let Some(control) = self.control.upgrade() else {
+            return Ok(false);
+        };
+        control.start_service_instance(self).await
+    }
+
     /// Request shutdown and wait for the service task to finish.
     ///
     /// The instance remains registered after a successful stop.
@@ -584,12 +612,16 @@ impl ServiceInstanceHandle {
         control.remove_service_instance(self).await
     }
 
-    /// Cancel, abort if needed, and remove daemon-local runtime state for this instance.
-    pub async fn purge(&self) -> ServiceResult<bool> {
+    /// Force shutdown and remove daemon-local runtime state for this instance.
+    ///
+    /// This cancels the instance, aborts its task if needed, and removes
+    /// daemon-local runtime state without waiting for the service body to exit
+    /// gracefully.
+    pub async fn force_remove(&self) -> ServiceResult<bool> {
         let Some(control) = self.control.upgrade() else {
             return Ok(false);
         };
-        control.purge_service_instance(self).await
+        control.force_remove_service_instance(self).await
     }
 }
 
@@ -1345,16 +1377,23 @@ mod tests {
             false
         }
 
-        fn spawn_service_instance(
+        fn create_service_instance(
             &self,
             _handle: &ServiceHandle,
             _control: Arc<dyn ServiceControl>,
         ) -> BoxFuture<'static, ServiceResult<ServiceInstanceHandle>> {
             Box::pin(async {
                 Err(ServiceError::RegistryError(
-                    "test service control cannot spawn service instances".to_owned(),
+                    "test service control cannot create service instances".to_owned(),
                 ))
             })
+        }
+
+        fn start_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, ServiceResult<bool>> {
+            Box::pin(async { Ok(false) })
         }
 
         fn stop_service_instance(
@@ -1371,7 +1410,7 @@ mod tests {
             Box::pin(async { Ok(false) })
         }
 
-        fn purge_service_instance(
+        fn force_remove_service_instance(
             &self,
             _handle: &ServiceInstanceHandle,
         ) -> BoxFuture<'static, ServiceResult<bool>> {

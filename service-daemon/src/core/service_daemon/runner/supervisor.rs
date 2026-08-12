@@ -234,6 +234,17 @@ impl ServiceSupervisor {
         let (next_status, restart_decision, result) = match result {
             Ok(Ok(_)) => {
                 warn!("Service {} exited normally", self.name);
+                if signals.shutdown_requested {
+                    should_restart = false;
+                    return GenerationExitRecord {
+                        next_status: ServiceStatus::Terminated,
+                        should_restart,
+                        should_shutdown_daemon,
+                        restart_decision: RestartDecision::Immediate,
+                        result: GenerationResultKind::NormalExit,
+                        signals,
+                    };
+                }
                 let result = if signals.reload_requested {
                     GenerationResultKind::Reload
                 } else {
@@ -2077,6 +2088,21 @@ mod tests {
             exit_record.exit_kind(),
             GenerationExitKind::FatalServiceError
         );
+    }
+
+    #[tokio::test]
+    async fn normal_exit_after_instance_cancellation_does_not_restart() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        supervisor.cancellation_token.cancel();
+
+        let exit_record = supervisor.handle_outcome(Ok(Ok(())), &reload_token);
+
+        assert_eq!(exit_record.next_status, ServiceStatus::Terminated);
+        assert!(!exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::NormalExit);
     }
 
     #[tokio::test]
