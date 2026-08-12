@@ -16,6 +16,11 @@ pub enum NamedPipeError {
         name: &'static str,
         source: io::Error,
     },
+    UnexpectedRequest {
+        name: &'static str,
+        expected: &'static [u8],
+        actual: Vec<u8>,
+    },
     WriteResponse {
         name: &'static str,
         source: io::Error,
@@ -31,6 +36,11 @@ pub enum NamedPipeError {
     ReadResponse {
         name: &'static str,
         source: io::Error,
+    },
+    UnexpectedResponse {
+        name: &'static str,
+        expected: &'static [u8],
+        actual: Vec<u8>,
     },
 }
 
@@ -52,6 +62,14 @@ impl fmt::Display for NamedPipeError {
             Self::ReadRequest { name, .. } => {
                 write!(f, "failed to read named pipe request at {name}")
             }
+            Self::UnexpectedRequest {
+                name,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "unexpected named pipe request at {name}: expected {expected:?}, got {actual:?}"
+            ),
             Self::WriteResponse { name, .. } => {
                 write!(f, "failed to write named pipe response at {name}")
             }
@@ -64,6 +82,14 @@ impl fmt::Display for NamedPipeError {
             Self::ReadResponse { name, .. } => {
                 write!(f, "failed to read named pipe response at {name}")
             }
+            Self::UnexpectedResponse {
+                name,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "unexpected named pipe response at {name}: expected {expected:?}, got {actual:?}"
+            ),
         }
     }
 }
@@ -78,6 +104,7 @@ impl std::error::Error for NamedPipeError {
             | Self::ConnectClient { source, .. }
             | Self::WriteRequest { source, .. }
             | Self::ReadResponse { source, .. } => Some(source),
+            Self::UnexpectedRequest { .. } | Self::UnexpectedResponse { .. } => None,
         }
     }
 }

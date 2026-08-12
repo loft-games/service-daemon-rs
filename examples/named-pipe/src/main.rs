@@ -9,27 +9,24 @@
 //! **Run**: `cargo run -p example-named-pipe` on Windows.
 
 #[cfg(windows)]
-use service_daemon::ServiceDaemon;
+use example_named_pipe as _;
 #[cfg(windows)]
-use std::time::Duration;
+use service_daemon::ServiceDaemon;
 
 #[cfg(windows)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use example_named_pipe as _;
-
     service_daemon::init_logging();
 
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    daemon.shutdown();
     daemon.wait().await?;
+
     Ok(())
 }
 
 #[cfg(not(windows))]
 fn main() {
-    println!("The Windows named pipe example only runs on Windows targets.");
+    service_daemon::init_logging();
+    tracing::warn!("The Windows named pipe example only runs on Windows targets.");
 }
