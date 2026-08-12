@@ -60,6 +60,8 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/24_provider_default_expression_boundary.rs",
     "tests/pass/25_provider_explicit_key_forms.rs",
     "tests/pass/26_provider_local_ipc_templates.rs",
+    "tests/pass/30_provider_ipc_const_paths.rs",
+    "tests/pass/31_provider_env_const_paths.rs",
 ];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[
@@ -82,6 +84,8 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/29_provider_local_ipc_capacity_attr.rs",
     "tests/fail/32_provider_local_ipc_invalid_name.rs",
     "tests/fail/33_provider_local_ipc_inner_attr.rs",
+    "tests/fail/34_provider_ipc_dynamic_arg.rs",
+    "tests/fail/35_provider_ipc_dynamic_env.rs",
 ];
 
 #[cfg(not(windows))]
@@ -91,7 +95,7 @@ const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[
 ];
 
 #[cfg(windows)]
-const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[];
+const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &["tests/fail/36_provider_named_pipe_dynamic_arg.rs"];
 
 const INTEGRATION_PASS_CASES: &[&str] = &[
     "tests/pass/06_trigger_templates.rs",

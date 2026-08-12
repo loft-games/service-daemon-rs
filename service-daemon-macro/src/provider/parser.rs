@@ -26,6 +26,8 @@
 //!    named arguments (`env = "..."`, `capacity = N`). These are stored on
 //!    `ProviderNamedAttrs` regardless of the head.
 
+use quote::ToTokens;
+use syn::parse::discouraged::Speculative;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, Token};
 
@@ -110,7 +112,7 @@ pub enum ProviderHead {
 #[derive(Debug, Default)]
 pub struct ProviderNamedAttrs {
     /// Optional environment variable override (shared across all kinds).
-    pub env: Option<syn::LitStr>,
+    pub env: Option<StringTemplateArg>,
     /// Optional capacity for queue-like templates.
     pub capacity: Option<usize>,
     /// Whether this provider should be initialized eagerly at daemon startup.
@@ -122,6 +124,83 @@ pub struct ProviderNamedAttrs {
 pub struct TemplateArg {
     /// The tokens inside the template parentheses.
     pub tokens: proc_macro2::TokenStream,
+}
+
+/// A string-valued macro argument accepted by provider templates.
+///
+/// This deliberately accepts only string literals and paths to static string
+/// values. It does not accept general expressions such as `format!(...)` or
+/// function calls.
+#[derive(Debug, Clone)]
+pub enum StringTemplateArg {
+    Literal(syn::LitStr),
+    Path(syn::Path),
+}
+
+impl StringTemplateArg {
+    pub fn to_static_str_expr(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Literal(lit) => quote::quote! { #lit },
+            Self::Path(path) => quote::quote! {{
+                let value: &'static str = #path;
+                value
+            }},
+        }
+    }
+
+    pub fn to_owned_expr(&self) -> proc_macro2::TokenStream {
+        let value = self.to_static_str_expr();
+        quote::quote! { (#value).to_owned() }
+    }
+
+    pub fn literal_value(&self) -> Option<String> {
+        match self {
+            Self::Literal(lit) => Some(lit.value()),
+            Self::Path(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn value(&self) -> String {
+        self.literal_value()
+            .expect("test expected a string literal argument")
+    }
+}
+
+impl ToTokens for StringTemplateArg {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self {
+            Self::Literal(lit) => lit.to_tokens(tokens),
+            Self::Path(path) => path.to_tokens(tokens),
+        }
+    }
+}
+
+impl Parse for StringTemplateArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::LitStr) {
+            return input.parse().map(Self::Literal);
+        }
+
+        if input.peek(Ident)
+            || input.peek(Token![::])
+            || input.peek(Token![crate])
+            || input.peek(Token![self])
+            || input.peek(Token![super])
+        {
+            let fork = input.fork();
+            let path = fork.parse::<syn::Path>()?;
+            if fork.is_empty() || fork.peek(Token![,]) {
+                input.advance_to(&fork);
+                return Ok(Self::Path(path));
+            }
+        }
+
+        Err(syn::Error::new(
+            input.span(),
+            "expected a string literal or a path to a `const &'static str`",
+        ))
+    }
 }
 
 fn parse_capacity_literal(lit: syn::LitInt) -> syn::Result<usize> {
@@ -248,7 +327,12 @@ impl Parse for ProviderArgs {
                     },
                     "template" => parse_explicit_template_head(input)?,
                     "env" => {
-                        set_once(&mut named.env, &key, "env", input.parse::<syn::LitStr>()?)?;
+                        set_once(
+                            &mut named.env,
+                            &key,
+                            "env",
+                            input.parse::<StringTemplateArg>()?,
+                        )?;
                         ProviderHead::DefaultExpr {
                             default_value: None,
                         }
@@ -325,7 +409,12 @@ impl ProviderArgs {
 
             match key.to_string().as_str() {
                 "env" => {
-                    set_once(&mut named.env, &key, "env", input.parse::<syn::LitStr>()?)?;
+                    set_once(
+                        &mut named.env,
+                        &key,
+                        "env",
+                        input.parse::<StringTemplateArg>()?,
+                    )?;
                 }
                 "capacity" => {
                     let lit: syn::LitInt = input.parse()?;
@@ -366,6 +455,10 @@ mod tests {
     /// Helper: parse a token stream into ProviderArgs.
     fn parse_args(tokens: proc_macro2::TokenStream) -> syn::Result<ProviderArgs> {
         syn::parse2::<ProviderArgs>(tokens)
+    }
+
+    fn parse_string_arg(tokens: proc_macro2::TokenStream) -> syn::Result<StringTemplateArg> {
+        syn::parse2::<StringTemplateArg>(tokens)
     }
 
     #[test]
@@ -483,6 +576,30 @@ mod tests {
         let args = parse_args(quote! { "fallback", env = "MY_VAR" }).unwrap();
         assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
         assert_eq!(args.named.env.as_ref().unwrap().value(), "MY_VAR");
+    }
+
+    #[test]
+    fn env_accepts_const_path() {
+        let args = parse_args(quote! { "fallback", env = crate::config::ENV_NAME }).unwrap();
+        assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
+        assert!(matches!(
+            args.named.env.as_ref().unwrap(),
+            StringTemplateArg::Path(_)
+        ));
+    }
+
+    #[test]
+    fn env_rejects_dynamic_expression() {
+        let err = parse_args(quote! { "fallback", env = format!("ENV") }).unwrap_err();
+
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn string_template_arg_rejects_dynamic_expression() {
+        let err = parse_string_arg(quote! { format!("ENV") }).unwrap_err();
+
+        assert!(!err.to_string().is_empty());
     }
 
     #[test]
@@ -741,6 +858,23 @@ mod tests {
     }
 
     #[test]
+    fn unix_listen_template_captures_const_path_arg() {
+        let args = parse_args(quote! { UnixListen(crate::config::SOCKET_PATH) }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "UnixListen");
+                match arg {
+                    Some(arg) => {
+                        assert_eq!(arg.tokens.to_string(), "crate :: config :: SOCKET_PATH")
+                    }
+                    _ => panic!("Expected captured arg for UnixListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+    }
+
+    #[test]
     fn unix_listen_captures_inner_named_tokens_for_template_validation() {
         let args = parse_args(quote! { UnixListen("/sock", env = "VAR") }).unwrap();
         match &args.head {
@@ -787,6 +921,21 @@ mod tests {
         assert!(args.named.eager);
     }
 
+    #[test]
+    fn named_pipe_listen_template_captures_const_path_arg() {
+        let args = parse_args(quote! { NamedPipeListen(crate::pipes::PIPE_NAME) }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "NamedPipeListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "crate :: pipes :: PIPE_NAME"),
+                    _ => panic!("Expected captured arg for NamedPipeListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+    }
+
     // -- LocalIpcListen / LocalIpcConnect template branches ----------------------
 
     #[test]
@@ -820,5 +969,20 @@ mod tests {
         }
         assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_IPC");
         assert!(args.named.eager);
+    }
+
+    #[test]
+    fn local_ipc_listen_template_captures_const_path_arg() {
+        let args = parse_args(quote! { LocalIpcListen(crate::ipc::NAME) }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "LocalIpcListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "crate :: ipc :: NAME"),
+                    _ => panic!("Expected captured arg for LocalIpcListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
     }
 }

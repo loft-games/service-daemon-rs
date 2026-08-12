@@ -1,0 +1,5 @@
+error: expected a string literal or a path to a `const &'static str`
+ --> tests/fail/35_provider_ipc_dynamic_env.rs:3:48
+  |
+3 | #[provider(LocalIpcListen("valid-name"), env = format!("LOCAL_IPC_NAME"))]
+  |                                                ^^^^^^

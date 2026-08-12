@@ -58,9 +58,14 @@ Shared attributes are parsed once and rejected at compile time if duplicated:
 
 | Attribute | Accepted on | Rule |
 | :--- | :--- | :--- |
-| `env = "NAME"` | value providers and provider templates | The environment variable overrides the literal fallback when present. |
+| `env = "NAME"` or `env = CONST_PATH` | value providers and provider templates | The environment variable overrides the fallback when present. The argument must be a string literal or a path to a `const`/`static &'static str`. |
 | `capacity = N` | `Queue(...)` only | `N` must be greater than zero; value providers reject `capacity`. |
 | `eager = true` / `eager = false` | all provider forms | The value must be a boolean literal, not an identifier or expression. |
+
+`UnixListen`, `UnixConnect`, `NamedPipeListen`, `NamedPipeConnect`,
+`LocalIpcListen`, and `LocalIpcConnect` accept a string literal or a path to a
+`const`/`static &'static str` for their endpoint argument. The macro rejects
+dynamic endpoint expressions such as function calls and `format!(...)`.
 
 Unsupported attributes keep the stable parser diagnostic that lists the supported shared attributes: `env`, `capacity`, and `eager`. Named pipe templates intentionally reject first-version tuning attributes such as pipe mode, buffer sizing, ACL/security descriptors, max instances, QoS, or raw security attributes.
 

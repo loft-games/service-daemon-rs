@@ -6,13 +6,13 @@ pub const EXAMPLE_NAMED_PIPE_NAME: &str = r"\\.\pipe\service-daemon-rs-named-pip
 pub const EXAMPLE_NAMED_PIPE_ENV: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_EXAMPLE_NAME";
 
 #[provider(
-    NamedPipeListen(r"\\.\pipe\service-daemon-rs-named-pipe-example"),
-    env = "SERVICE_DAEMON_RS_NAMED_PIPE_EXAMPLE_NAME"
+    NamedPipeListen(EXAMPLE_NAMED_PIPE_NAME),
+    env = EXAMPLE_NAMED_PIPE_ENV
 )]
 pub struct ExampleNamedPipeListener;
 
 #[provider(
-    NamedPipeConnect(r"\\.\pipe\service-daemon-rs-named-pipe-example"),
-    env = "SERVICE_DAEMON_RS_NAMED_PIPE_EXAMPLE_NAME"
+    NamedPipeConnect(EXAMPLE_NAMED_PIPE_NAME),
+    env = EXAMPLE_NAMED_PIPE_ENV
 )]
 pub struct ExampleNamedPipeConnector;

@@ -155,11 +155,17 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<String>` pipe name. Init performs one `ClientOptions::open` probe; each `connect().await?` opens a fresh `NamedPipeClient`. |
 | `LocalIpcListen(Name)` / `LocalIpcConnect(Name)` | - | **Cross-platform local IPC.** Accepts a logical name and maps it to a Unix domain socket on Unix or a Windows named pipe on Windows. Use when business code only needs an `AsyncRead + AsyncWrite` stream. |
 
+`UnixListen(Path)`, `UnixConnect(Path)`, `NamedPipeListen(Name)`,
+`NamedPipeConnect(Name)`, `LocalIpcListen(Name)`, and `LocalIpcConnect(Name)`
+accept either a string literal or a path to a `const`/`static &'static str`.
+The shared `env` attribute accepts the same two forms. Dynamic string
+expressions such as `format!(...)` or function calls are rejected by the macro.
+
 ### The `Listen` Template
 
 The `Listen` provider gives you a `std::net::TcpListener` wrapped so that multiple services can share the same port across reloads. Two relevant properties:
 1. **OS-level sharing**: `get()` clones the underlying file descriptor via the kernel's `dup` syscall, so multiple services or reload generations can hold a `tokio::net::TcpListener` for the same physical port without conflicts.
-2. **Environment fallback**: `#[provider(Listen("127.0.0.1:8080"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise.
+2. **Environment fallback**: `#[provider(Listen("127.0.0.1:8080"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise. `env` may also be a path to a `const`/`static &'static str`.
 
 Like every provider, `Listen` is **lazy by default** -- the bind happens the first time a service requests it. To bind the port during the system startup wave (the case you actually want for health probes and supervisor-style liveness checks), declare it with `eager = true` (see below).
 
@@ -173,9 +179,12 @@ controls already designed.
 These two templates form the UDS counterpart of `Listen`, designed to be used as a pair: one service runs the server-side accept loop, another service (or external process) initiates connections.
 
 ```rust
+const API_SOCK: &str = "/run/myapp/sock";
+const API_SOCK_ENV: &str = "MYAPP_SOCK";
+
 // Server side
 #[derive(Clone)]
-#[provider(UnixListen("/run/myapp/sock"), env = "MYAPP_SOCK")]
+#[provider(UnixListen(API_SOCK), env = API_SOCK_ENV)]
 pub struct ApiSocket;
 
 #[service]
@@ -216,9 +225,11 @@ Windows named pipes are the Windows-side local IPC templates. They are explicit
 Windows templates, not aliases for `UnixListen` or `UnixConnect`:
 
 ```rust
+const API_PIPE: &str = r"\\.\pipe\myapp-api";
+
 // Server side
 #[derive(Clone)]
-#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]
+#[provider(NamedPipeListen(API_PIPE))]
 pub struct ApiPipe;
 
 #[service]
@@ -272,17 +283,21 @@ links whose code only needs a byte stream. The template argument is a logical
 name, not a filesystem path or pipe path:
 
 ```rust
-#[provider(LocalIpcListen("myapp-api"))]
+const API_IPC: &str = "myapp-api";
+const API_IPC_ENV: &str = "MYAPP_IPC";
+
+#[provider(LocalIpcListen(API_IPC))]
 pub struct ApiIpc;
 
-#[provider(LocalIpcConnect("myapp-api"), env = "MYAPP_IPC", eager = true)]
+#[provider(LocalIpcConnect(API_IPC), env = API_IPC_ENV, eager = true)]
 pub struct ApiClient;
 ```
 
 Logical names must be non-empty ASCII and may contain only letters, digits, `.`,
-`_`, and `-`. Literal names are checked by the macro. If `env = "VAR"` is set,
-the environment value replaces the logical name and is validated at provider
-initialization; it does not provide a raw Unix socket path or named pipe path.
+`_`, and `-`. Literal names are checked by the macro. Const/static path names
+and environment-provided names are validated at provider initialization. If
+`env = "VAR"` or `env = CONST_ENV` is set, the environment value replaces the
+logical name; it does not provide a raw Unix socket path or named pipe path.
 
 On Unix, the logical name maps to
 `$XDG_RUNTIME_DIR/service-daemon-rs/<name>.sock`, falling back to

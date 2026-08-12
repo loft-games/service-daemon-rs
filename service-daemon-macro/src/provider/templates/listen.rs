@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
+use super::super::parser::StringTemplateArg;
 use super::context::has_clone_derive;
 
 /// Generates a Listen (TCP Listener) provider with kernel-level FD cloning.
@@ -30,7 +31,7 @@ pub(in crate::provider) fn generate_listen_template(
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -46,10 +47,10 @@ pub(in crate::provider) fn generate_listen_template(
     // Build the address resolution expression:
     // - With env: try env var first, fall back to the literal default
     // - Without env: use the literal default directly
-    let addr_expr = if let Some(env_lit) = env {
-        let env_str = env_lit.value();
+    let addr_expr = if let Some(env_arg) = env {
+        let env_expr = env_arg.to_static_str_expr();
         quote! {
-            std::env::var(#env_str).unwrap_or_else(|_| #addr.to_owned())
+            std::env::var(#env_expr).unwrap_or_else(|_| #addr.to_owned())
         }
     } else {
         quote! { #addr.to_owned() }

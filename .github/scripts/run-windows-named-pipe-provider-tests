@@ -18,6 +18,7 @@ write_step_summary_header() {
         echo "  - \`cargo test --target ${TARGET} -p service-daemon --test local_ipc_roundtrip_tests\`"
         echo "  - \`cargo test --target ${TARGET} -p example-named-pipe\`"
         echo "  - \`cargo test --target ${TARGET} -p example-local-ipc\`"
+        echo "  - \`cargo test --target ${TARGET} -p example-macro-tests\`"
         echo
     } >> "${GITHUB_STEP_SUMMARY}"
 }
@@ -42,5 +43,6 @@ run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_roundtri
 run cargo test --target "${TARGET}" -p service-daemon --test local_ipc_roundtrip_tests
 run cargo test --target "${TARGET}" -p example-named-pipe
 run cargo test --target "${TARGET}" -p example-local-ipc
+run cargo test --target "${TARGET}" -p example-macro-tests
 
 write_step_summary_success

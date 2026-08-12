@@ -4,6 +4,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
+use super::super::parser::StringTemplateArg;
 use super::context::has_clone_derive;
 
 // ---------------------------------------------------------------------------
@@ -15,14 +16,18 @@ use super::context::has_clone_derive;
 //
 // Unix listen/connect templates share this path resolution. TCP listen keeps
 // its own address resolution so this split does not alter TCP expansion.
-fn unix_path_addr_expr(addr: &syn::LitStr, env: Option<&syn::LitStr>) -> proc_macro2::TokenStream {
-    if let Some(env_lit) = env {
-        let env_str = env_lit.value();
+fn unix_path_addr_expr(
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
+) -> proc_macro2::TokenStream {
+    let fallback = addr.to_owned_expr();
+    if let Some(env_arg) = env {
+        let env_expr = env_arg.to_static_str_expr();
         quote! {
-            std::env::var(#env_str).unwrap_or_else(|_| #addr.to_owned())
+            std::env::var(#env_expr).unwrap_or_else(|_| #fallback)
         }
     } else {
-        quote! { #addr.to_owned() }
+        fallback
     }
 }
 
@@ -65,8 +70,8 @@ pub(in crate::provider) fn generate_unix_listen_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -312,8 +317,8 @@ pub(in crate::provider) fn generate_unix_connect_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();

@@ -4,18 +4,23 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
+use super::super::parser::StringTemplateArg;
 use super::context::has_clone_derive;
 
 const ERROR_PIPE_BUSY: i32 = 231;
 
-fn logical_name_expr(name: &syn::LitStr, env: Option<&syn::LitStr>) -> proc_macro2::TokenStream {
-    if let Some(env_lit) = env {
-        let env_str = env_lit.value();
+fn logical_name_expr(
+    name: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
+) -> proc_macro2::TokenStream {
+    let fallback = name.to_owned_expr();
+    if let Some(env_arg) = env {
+        let env_expr = env_arg.to_static_str_expr();
         quote! {
-            std::env::var(#env_str).unwrap_or_else(|_| #name.to_owned())
+            std::env::var(#env_expr).unwrap_or_else(|_| #fallback)
         }
     } else {
-        quote! { #name.to_owned() }
+        fallback
     }
 }
 
@@ -64,8 +69,8 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    name: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    name: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -516,8 +521,8 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    name: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    name: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();

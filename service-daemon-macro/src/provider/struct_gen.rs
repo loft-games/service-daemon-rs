@@ -9,7 +9,7 @@ use syn::parse::Parser;
 use syn::spanned::Spanned;
 
 use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
-use super::parser::{ProviderArgs, ProviderHead, TemplateArg};
+use super::parser::{ProviderArgs, ProviderHead, StringTemplateArg, TemplateArg};
 use super::templates::{
     generate_broadcast_queue_template, generate_listen_template,
     generate_local_ipc_connect_template, generate_local_ipc_listen_template,
@@ -59,9 +59,11 @@ fn parse_required_template_arg<T: syn::parse::Parse>(
 
 fn validate_local_ipc_literal(
     template_name: &syn::Ident,
-    logical_name: &syn::LitStr,
+    logical_name: &StringTemplateArg,
 ) -> syn::Result<()> {
-    let value = logical_name.value();
+    let Some(value) = logical_name.literal_value() else {
+        return Ok(());
+    };
     if value.is_empty()
         || !value
             .bytes()
@@ -165,11 +167,11 @@ fn try_generate_template(
         }
         // UnixListen template (Unix domain socket listener with FD cloning)
         "UnixListen" => {
-            let bind_path = parse_required_template_arg::<syn::LitStr>(
+            let bind_path = parse_required_template_arg::<StringTemplateArg>(
                 name,
                 arg.as_ref(),
                 "UnixListen template requires a bind path",
-                r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#,
+                r#"Usage: #[provider(UnixListen("/run/myapp/sock"))] or #[provider(UnixListen(MY_SOCKET_PATH))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "UnixListen", "capacity");
@@ -185,11 +187,11 @@ fn try_generate_template(
         }
         // UnixConnect template (Unix domain socket client; reachability probe at init)
         "UnixConnect" => {
-            let connect_path = parse_required_template_arg::<syn::LitStr>(
+            let connect_path = parse_required_template_arg::<StringTemplateArg>(
                 name,
                 arg.as_ref(),
                 "UnixConnect template requires a target path",
-                r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#,
+                r#"Usage: #[provider(UnixConnect("/run/peer/sock"))] or #[provider(UnixConnect(MY_SOCKET_PATH))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "UnixConnect", "capacity");
@@ -205,11 +207,11 @@ fn try_generate_template(
         }
         // Windows named pipe listener template
         "NamedPipeListen" => {
-            let pipe_name = parse_required_template_arg::<syn::LitStr>(
+            let pipe_name = parse_required_template_arg::<StringTemplateArg>(
                 name,
                 arg.as_ref(),
                 "NamedPipeListen template requires a pipe name",
-                r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]"#,
+                r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))] or #[provider(NamedPipeListen(MY_PIPE_NAME))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -229,11 +231,11 @@ fn try_generate_template(
         }
         // Windows named pipe client template
         "NamedPipeConnect" => {
-            let pipe_name = parse_required_template_arg::<syn::LitStr>(
+            let pipe_name = parse_required_template_arg::<StringTemplateArg>(
                 name,
                 arg.as_ref(),
                 "NamedPipeConnect template requires a pipe name",
-                r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer-api"))]"#,
+                r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer-api"))] or #[provider(NamedPipeConnect(MY_PIPE_NAME))]"#,
             )?;
             if provider_args.named.capacity.is_some() {
                 return Err(syn::Error::new_spanned(
@@ -253,11 +255,11 @@ fn try_generate_template(
         }
         // Cross-platform local IPC listener template
         "LocalIpcListen" => {
-            let logical_name = parse_required_template_arg::<syn::LitStr>(
+            let logical_name = parse_required_template_arg::<StringTemplateArg>(
                 name,
                 arg.as_ref(),
                 "LocalIpcListen template requires a logical name",
-                r#"Usage: #[provider(LocalIpcListen("myapp-api"))]"#,
+                r#"Usage: #[provider(LocalIpcListen("myapp-api"))] or #[provider(LocalIpcListen(MY_IPC_NAME))]"#,
             )?;
             validate_local_ipc_literal(name, &logical_name)?;
             if provider_args.named.capacity.is_some() {
@@ -278,11 +280,11 @@ fn try_generate_template(
         }
         // Cross-platform local IPC client template
         "LocalIpcConnect" => {
-            let logical_name = parse_required_template_arg::<syn::LitStr>(
+            let logical_name = parse_required_template_arg::<StringTemplateArg>(
                 name,
                 arg.as_ref(),
                 "LocalIpcConnect template requires a logical name",
-                r#"Usage: #[provider(LocalIpcConnect("peer-api"))]"#,
+                r#"Usage: #[provider(LocalIpcConnect("peer-api"))] or #[provider(LocalIpcConnect(MY_IPC_NAME))]"#,
             )?;
             validate_local_ipc_literal(name, &logical_name)?;
             if provider_args.named.capacity.is_some() {
@@ -513,7 +515,7 @@ fn generate_extra_traits(
 fn required_env_value_provider<'a>(
     tuple_info: &'a Option<TupleStructInfo>,
     provider_args: &'a ProviderArgs,
-) -> Option<(&'a syn::LitStr, &'a syn::Type, bool)> {
+) -> Option<(&'a StringTemplateArg, &'a syn::Type, bool)> {
     let info = tuple_info.as_ref()?;
     match &provider_args.head {
         ProviderHead::DefaultExpr {
@@ -597,9 +599,9 @@ fn generate_default_impl(
     };
 
     // Build the default expression
-    let default_body = if let Some(env_lit) = env_opt {
+    let default_body = if let Some(env_arg) = env_opt {
         // Use env var with fallback to default
-        let env_str = env_lit.value();
+        let env_expr = env_arg.to_static_str_expr();
 
         let Some(default_val) = default_expr_opt else {
             return quote! {};
@@ -608,14 +610,14 @@ fn generate_default_impl(
 
         if info.is_string {
             quote! {
-                std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
+                std::env::var(#env_expr).unwrap_or_else(|_| #default_tokens)
             }
         } else {
             // Non-String type: parse the env var string into the target type.
             // This enables `#[provider(8080, env = "PORT")] struct Port(pub i32)`.
             let inner_ty = &info.inner_type;
             quote! {
-                std::env::var(#env_str)
+                std::env::var(#env_expr)
                     .ok()
                     .and_then(|v| v.parse::<#inner_ty>().ok())
                     .unwrap_or_else(|| #default_tokens)
@@ -642,19 +644,19 @@ fn generate_default_impl(
 
 fn generate_required_env_constructor(
     struct_name: &syn::Ident,
-    env_lit: &syn::LitStr,
+    env_arg: &StringTemplateArg,
     inner_type: &syn::Type,
     is_string: bool,
     managed_errors: bool,
 ) -> proc_macro2::TokenStream {
-    let env_str = env_lit.value();
+    let env_expr = env_arg.to_static_str_expr();
     let struct_name_str = struct_name.to_string();
 
     let missing_error = if managed_errors {
         quote! {
             service_daemon::ProviderError::Fatal(format!(
                 "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
-                #env_str, #struct_name_str, #env_str
+                #env_expr, #struct_name_str, #env_expr
             ))
         }
     } else {
@@ -663,7 +665,7 @@ fn generate_required_env_constructor(
                 #struct_name_str,
                 format!(
                     "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
-                    #env_str, #struct_name_str, #env_str
+                    #env_expr, #struct_name_str, #env_expr
                 ),
                 service_daemon::__private::ProviderInitSourceKind::EnvironmentMissing,
             )
@@ -672,7 +674,7 @@ fn generate_required_env_constructor(
 
     if is_string {
         return quote! {
-            let value = std::env::var(#env_str).map_err(|_| #missing_error)?;
+            let value = std::env::var(#env_expr).map_err(|_| #missing_error)?;
             Ok(std::sync::Arc::new(#struct_name(value)))
         };
     }
@@ -681,7 +683,7 @@ fn generate_required_env_constructor(
         quote! {
             service_daemon::ProviderError::Fatal(format!(
                 "Environment variable '{}' for provider '{}' cannot be parsed: {}",
-                #env_str, #struct_name_str, e
+                #env_expr, #struct_name_str, e
             ))
         }
     } else {
@@ -690,7 +692,7 @@ fn generate_required_env_constructor(
                 #struct_name_str,
                 format!(
                     "Environment variable '{}' for provider '{}' cannot be parsed: {}",
-                    #env_str, #struct_name_str, e
+                    #env_expr, #struct_name_str, e
                 ),
                 service_daemon::__private::ProviderInitSourceKind::EnvironmentParse,
             )
@@ -698,7 +700,7 @@ fn generate_required_env_constructor(
     };
 
     quote! {
-        let raw_value = std::env::var(#env_str).map_err(|_| #missing_error)?;
+        let raw_value = std::env::var(#env_expr).map_err(|_| #missing_error)?;
         let value = raw_value.parse::<#inner_type>().map_err(|e| #parse_error)?;
         Ok(std::sync::Arc::new(#struct_name(value)))
     }

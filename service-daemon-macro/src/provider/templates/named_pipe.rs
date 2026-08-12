@@ -4,18 +4,23 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
+use super::super::parser::StringTemplateArg;
 use super::context::has_clone_derive;
 
 const ERROR_PIPE_BUSY: i32 = 231;
 
-fn pipe_name_expr(addr: &syn::LitStr, env: Option<&syn::LitStr>) -> proc_macro2::TokenStream {
-    if let Some(env_lit) = env {
-        let env_str = env_lit.value();
+fn pipe_name_expr(
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
+) -> proc_macro2::TokenStream {
+    let fallback = addr.to_owned_expr();
+    if let Some(env_arg) = env {
+        let env_expr = env_arg.to_static_str_expr();
         quote! {
-            std::env::var(#env_str).unwrap_or_else(|_| #addr.to_owned())
+            std::env::var(#env_expr).unwrap_or_else(|_| #fallback)
         }
     } else {
-        quote! { #addr.to_owned() }
+        fallback
     }
 }
 
@@ -43,8 +48,8 @@ pub(in crate::provider) fn generate_named_pipe_listen_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -369,23 +374,32 @@ mod tests {
 
     #[test]
     fn pipe_name_expr_uses_literal_without_env_override() {
-        let addr = syn::LitStr::new(r"\\.\pipe\default", proc_macro2::Span::call_site());
+        let addr = StringTemplateArg::Literal(syn::LitStr::new(
+            r"\\.\pipe\default",
+            proc_macro2::Span::call_site(),
+        ));
 
         let expr = pipe_name_expr(&addr, None).to_string();
 
-        assert_eq!(expr, r#""\\\\.\\pipe\\default" . to_owned ()"#);
+        assert_eq!(expr, r#"("\\\\.\\pipe\\default") . to_owned ()"#);
     }
 
     #[test]
     fn pipe_name_expr_prefers_env_with_literal_fallback() {
-        let addr = syn::LitStr::new(r"\\.\pipe\default", proc_macro2::Span::call_site());
-        let env = syn::LitStr::new("PIPE_NAME", proc_macro2::Span::call_site());
+        let addr = StringTemplateArg::Literal(syn::LitStr::new(
+            r"\\.\pipe\default",
+            proc_macro2::Span::call_site(),
+        ));
+        let env = StringTemplateArg::Literal(syn::LitStr::new(
+            "PIPE_NAME",
+            proc_macro2::Span::call_site(),
+        ));
 
         let expr = pipe_name_expr(&addr, Some(&env)).to_string();
 
         assert!(expr.contains(r#"std :: env :: var ("PIPE_NAME")"#));
         assert!(expr.contains(r#"unwrap_or_else"#));
-        assert!(expr.contains(r#""\\\\.\\pipe\\default" . to_owned ()"#));
+        assert!(expr.contains(r#"("\\\\.\\pipe\\default") . to_owned ()"#));
     }
 
     #[test]
@@ -409,8 +423,8 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();

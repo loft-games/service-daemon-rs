@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Provider Template String Arguments**: `UnixListen`, `UnixConnect`, `NamedPipeListen`, `NamedPipeConnect`, `LocalIpcListen`, `LocalIpcConnect`, and shared provider `env` arguments now accept either a string literal or a path to a `const`/`static &'static str`; dynamic string expressions remain rejected by the macro.
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
 - **Daemon Ownership API**: `ServiceDaemon` is now a lightweight builder facade. `ServiceDaemonBuilder::build()` registers a process-local daemon instance and returns `DaemonInstanceHandle`; the previous `ServiceDaemonHandle` type and `.handle()` flow were removed.
 - **Service Instance Model**: Runtime instances are tracked as daemon-local records, while `ServiceInstanceHandle` values are created from the owning daemon handle. `ServiceDescription` is entry-scoped and exposes setup-time instance IDs instead of carrying a single instance ID and cancellation token.
