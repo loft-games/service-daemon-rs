@@ -4,15 +4,7 @@ use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum UnixDomainSocketError {
-    GetListener {
-        path: &'static str,
-        source: io::Error,
-    },
     ReadListenerLocalAddress {
-        path: &'static str,
-        source: io::Error,
-    },
-    AcceptInitializationProbe {
         path: &'static str,
         source: io::Error,
     },
@@ -45,17 +37,8 @@ pub enum UnixDomainSocketError {
 impl fmt::Display for UnixDomainSocketError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::GetListener { path, .. } => {
-                write!(f, "failed to get Tokio Unix listener at {path}")
-            }
             Self::ReadListenerLocalAddress { path, .. } => {
                 write!(f, "failed to read Unix listener local address at {path}")
-            }
-            Self::AcceptInitializationProbe { path, .. } => {
-                write!(
-                    f,
-                    "failed to accept Unix connector initialization probe at {path}"
-                )
             }
             Self::AcceptBusinessConnection { path, .. } => {
                 write!(f, "failed to accept Unix business connection at {path}")
@@ -82,9 +65,7 @@ impl fmt::Display for UnixDomainSocketError {
 impl std::error::Error for UnixDomainSocketError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::GetListener { source, .. }
-            | Self::ReadListenerLocalAddress { source, .. }
-            | Self::AcceptInitializationProbe { source, .. }
+            Self::ReadListenerLocalAddress { source, .. }
             | Self::AcceptBusinessConnection { source, .. }
             | Self::ReadRequest { source, .. }
             | Self::WriteResponse { source, .. }

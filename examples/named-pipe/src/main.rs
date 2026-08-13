@@ -3,8 +3,8 @@
 //! This example demonstrates the Windows named pipe provider templates:
 //! - `NamedPipeListen` for the server side.
 //! - `NamedPipeConnect` for the client side.
-//! - The initialization probe connection opened by `NamedPipeConnect`.
-//! - A separate business connection opened through `connect().await?`.
+//! - A `ping` / `pong` exchange over the generated `accept()` / `connect()`
+//!   stream helpers.
 //!
 //! **Run**: `cargo run -p example-named-pipe` on Windows.
 

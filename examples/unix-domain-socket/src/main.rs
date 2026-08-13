@@ -3,8 +3,8 @@
 //! This example demonstrates the Unix domain socket provider templates:
 //! - `UnixListen` for the server side.
 //! - `UnixConnect` for the client side.
-//! - The initialization probe connection opened by `UnixConnect`.
-//! - A separate business connection opened through `connect().await?`.
+//! - A `ping` / `pong` exchange over the generated `accept()` / `connect()`
+//!   stream helpers.
 //!
 //! **Run**: `cargo run -p example-unix-domain-socket`
 

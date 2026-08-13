@@ -434,8 +434,11 @@ name = "example-local-ipc"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "futures-util",
  "service-daemon",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -496,8 +499,11 @@ name = "example-named-pipe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "futures-util",
  "service-daemon",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -551,8 +557,11 @@ name = "example-unix-domain-socket"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "futures-util",
  "service-daemon",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
