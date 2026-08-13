@@ -22,7 +22,9 @@ by the macro.
 
 `NamedPipeListen` owns the server side. It stores the local pipe name, the first pending `NamedPipeServer`, and a lazily started listener manager. `try_new()` creates the first instance with `reject_remote_clients(true)` and `first_pipe_instance(true)` so startup fails if another server already owns the pipe name. `accept().await` receives an already connected server end from that manager. After each connection, the manager creates the next instance without `first_pipe_instance(true)`; if replacement creation fails, it retries internally with short backoff instead of failing the business `accept()` call.
 
-`NamedPipeConnect` owns only the local pipe name. `try_new().await` performs one reachability probe with `ClientOptions::new().open(...)` and drops the probe. `connect().await` opens a fresh independent `NamedPipeClient`. A business `connect()` can briefly observe raw `ERROR_PIPE_BUSY` while the peer listener replenishes the next server instance after the init probe; callers that expect that handoff should retry the busy result with a short bounded wait.
+`NamedPipeConnect` owns only the local pipe name. `try_new().await` validates the
+pipe name and stores it without dialing the peer. `connect().await` opens a fresh
+independent `IpcStream` and retries short `ERROR_PIPE_BUSY` windows internally.
 
 Both templates accept the same top-level shared provider attributes as other address templates: `env` and `eager`. Tuning attributes such as pipe mode, buffer sizes, ACL/security descriptors, maximum instances, QoS flags, and raw security attributes are deliberately outside the first contract.
 
@@ -54,8 +56,7 @@ This keeps the first version focused on local daemon/sidecar IPC. Remote named p
 cross-platform facade for local byte-stream IPC. They accept a logical name, not
 a platform endpoint. On Windows that logical name maps to
 `\\.\pipe\service-daemon-rs-<name>` and reuses the named-pipe local-only,
-first-instance ownership, probe, `ERROR_PIPE_BUSY` classification, and listener
-manager semantics described above.
+first-instance ownership and listener manager semantics described above.
 
 This does not replace `NamedPipeListen` or `NamedPipeConnect`. Use the explicit
 Windows templates when code or deployment needs a specific pipe path. Use

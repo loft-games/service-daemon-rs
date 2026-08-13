@@ -94,7 +94,7 @@ These two templates form the UDS counterpart of `Listen` and work as a pair: one
 
 - **`UnixListen("/path/to/sock")`**: wraps `Arc<std::os::unix::net::UnixListener>`. `accept().await?` accepts a connection from a freshly cloned listener; use `get()?` when you need direct access to that cloned `tokio::net::UnixListener`. Critical difference: at init time, if the path already exists, the template probes with `UnixStream::connect`; a live process answering means the framework refuses fatally, while a failed probe only unlinks the path after confirming it is a Unix socket. Ordinary files and other filesystem nodes are refused and preserved.
 
-- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `connect().await?` opens a fresh `tokio::net::UnixStream` on each call (no pooling -- UDS connections are local and cheap); `try_connect().await?` is the equivalent lower-level helper. At init time the template performs one reachability probe and immediately drops the connection. Pair with `eager = true` to block the startup wave until the peer sidecar / supervisor is up.
+- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `connect().await?` opens a fresh `service_daemon::IpcStream` on each call (no pooling -- UDS connections are local and cheap); `try_connect().await?` is the lower-level helper when code needs the raw Tokio `UnixStream`. Resolving the provider does not dial the peer.
 
 ```rust
 #[derive(Clone)]
@@ -107,7 +107,7 @@ pub struct PeerClient;
 
 #[service]
 pub async fn web_server(api: Arc<ApiSocket>) -> anyhow::Result<()> {
-    let (sock, _) = api.accept().await?;
+    let sock = api.accept().await?;
     // handle sock ...
     Ok(())
 }
@@ -120,7 +120,7 @@ pub async fn supervisor_caller(peer: Arc<PeerClient>) -> anyhow::Result<()> {
 }
 ```
 
-Error classification details for both sides live in [Resilience Guide § 2.3-2.4](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener). Note one subtlety: `io::ErrorKind::NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory does not exist).
+Error classification details for both sides live in [Resilience Guide § 2.3-2.4](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener). Note one subtlety: `io::ErrorKind::NotFound` is a runtime `connect().await?` error for `UnixConnect` but **Fatal** for `UnixListen` when the listener's parent directory does not exist.
 
 ### `NamedPipeListen` and `NamedPipeConnect` (Windows named pipes, Windows-only)
 
@@ -137,9 +137,9 @@ macro emits a `compile_error!` at the provider declaration site.
   next pending instance and retries replacement creation failures internally.
 
 - **`NamedPipeConnect(r"\\.\pipe\name")`**: wraps the client side. Each
-  `connect().await?` opens a fresh `NamedPipeClient`. At init time the template
-  performs one reachability probe and immediately drops the client. Pair with
-  `eager = true` when startup should wait for the peer pipe.
+  `connect().await?` opens a fresh `service_daemon::IpcStream` and retries short
+  `ERROR_PIPE_BUSY` windows internally. Resolving the provider does not dial the
+  peer pipe.
 
 Use these templates for Windows local IPC only. Use `UnixListen` / `UnixConnect`
 for Unix domain sockets and `Listen` for TCP sockets. Error classification

@@ -49,7 +49,7 @@ impl ApiPipe {
 
     pub async fn accept(
         &self,
-    ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeServer>;
+    ) -> std::io::Result<service_daemon::IpcStream>;
 }
 ```
 
@@ -90,16 +90,12 @@ impl PeerPipe {
 
     pub async fn connect(
         &self,
-    ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient>;
+    ) -> std::io::Result<service_daemon::IpcStream>;
 }
 ```
 
-Provider initialization should perform one reachability probe and immediately
-drop the connected client, matching `UnixConnect` semantics. With `eager = true`,
-this blocks the daemon startup wave until the peer pipe is reachable or provider
-init retry policy expires.
-
-Each later `connect().await?` opens a fresh independent `NamedPipeClient` using
+Provider initialization validates and stores the pipe name without dialing the
+peer. Each later `connect().await?` opens a fresh independent `IpcStream` using
 `ClientOptions::new().open(name)`. The framework should not pool named pipe
 clients in the first implementation.
 
@@ -115,26 +111,26 @@ Server-side `NamedPipeListen` provider init:
 | raw `ERROR_PIPE_BUSY` | Retryable | Instance pressure or concurrent creation race. |
 | Other I/O | Fatal by default | Do not hide unknown Windows pipe failures as transient until tests justify it. |
 
-Client-side `NamedPipeConnect` provider init:
+Client-side `NamedPipeConnect` runtime connect:
 
 | Error | Strategy | Reason |
 | :--- | :--- | :--- |
-| `NotFound` | Retryable during provider init | Peer has not created the pipe yet. |
-| raw `ERROR_PIPE_BUSY` | Retryable | All server instances are busy; Tokio documents retrying this case. |
-| `ConnectionRefused` / `ConnectionAborted` | Retryable if observed | Peer startup or immediate close race. |
-| `PermissionDenied` | Fatal | Security policy or access rights are wrong. |
-| `InvalidInput` | Fatal | Invalid pipe name or unsupported options. |
-| Other I/O | Fatal by default | Unknown Windows pipe failures should be visible first. |
+| `NotFound` | Return runtime `io::Error` | Peer has not created the pipe yet. |
+| raw `ERROR_PIPE_BUSY` | Retry briefly inside `connect().await?` | All server instances are busy; Tokio documents retrying this case. |
+| `ConnectionRefused` / `ConnectionAborted` | Return runtime `io::Error` | Peer startup or immediate close race. |
+| `PermissionDenied` | Return runtime `io::Error` | Security policy or access rights are wrong. |
+| `InvalidInput` | Fatal at provider init for invalid local pipe names; otherwise runtime `io::Error` | Invalid pipe name or unsupported options. |
+| Other I/O | Return runtime `io::Error` | Unknown Windows pipe failures should be visible first. |
 
-Runtime `connect().await` opens one fresh client and returns the raw I/O result.
-Callers that expect short listener-replacement windows should retry raw
-`ERROR_PIPE_BUSY` at the call site, as the named-pipe example and roundtrip test
-do.
+Runtime `connect().await` opens one fresh client and returns an `IpcStream`.
+Short `ERROR_PIPE_BUSY` listener-replacement windows are retried inside the
+helper.
 
-The final provider-init mapping should use the same boundary as `Listen`,
-`UnixListen`, and `UnixConnect`: retryable errors feed `ProviderError::Retryable`
-until `RestartPolicy::provider_init_timeout`, fatal errors become
-`ProviderInitError::Fatal`.
+The final provider-init mapping should keep listener setup under the same
+boundary as `Listen` and `UnixListen`: retryable errors feed
+`ProviderError::Retryable` until `RestartPolicy::provider_init_timeout`, fatal
+errors become `ProviderInitError::Fatal`. Connector runtime I/O stays at the
+`connect().await?` call site.
 
 ## Security Boundary
 
@@ -169,12 +165,11 @@ Do not use arbitrary `Path(...)` provider heads as open named pipe templates.
 Windows-only integration tests should cover:
 
 - server provider creates a pipe and accepts one client;
-- client provider succeeds when the server is already available;
+- client provider resolves without requiring a peer pipe;
 - roundtrip read/write between `NamedPipeListen` and `NamedPipeConnect`;
-- `NamedPipeConnect` retries `NotFound` until the server appears;
-- `NamedPipeConnect` classifies raw `ERROR_PIPE_BUSY` as retryable during provider init;
-- runtime `NamedPipeConnect::connect()` call sites retry raw `ERROR_PIPE_BUSY`
-  where short listener-replacement windows are expected;
+- runtime `NamedPipeConnect::connect()` reports missing peers at the call site;
+- runtime `NamedPipeConnect::connect()` retries short raw `ERROR_PIPE_BUSY`
+  listener-replacement windows internally;
 - `PermissionDenied` is fatal where practical to trigger deterministically;
 - generated non-Windows guard emits a clear compile error at the provider
   declaration site.

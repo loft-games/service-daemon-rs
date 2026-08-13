@@ -97,9 +97,10 @@ Provider helper signatures are part of the macro public contract and depend on d
 | `Notify` / `Queue` templates | Direct `Arc<T>` / lock wrappers | Framework-owned templates are infallible after macro validation. Queue capacity is a compile-time diagnostic. |
 | Provider with DI dependencies | `Result<Arc<T>, ProviderInitError>` | Dependency resolution can fail, so the helper is fallible. |
 | Required `env` provider | `Result<Arc<T>, ProviderInitError>` | Missing or malformed environment input is provider-init failure. |
-| `Listen` / `UnixListen` / `UnixConnect` templates | `Result<Arc<T>, ProviderInitError>` | Binding, probing, and filesystem/socket errors are provider-init failures. |
-| `NamedPipeListen` / `NamedPipeConnect` templates | `Result<Arc<T>, ProviderInitError>` | Windows named pipe create/probe errors are provider-init failures with Fatal/Retryable classification. |
-| `LocalIpcListen` / `LocalIpcConnect` templates | `Result<Arc<T>, ProviderInitError>` | Logical-name local IPC maps to Unix socket or Windows named pipe setup/probe errors at provider init. |
+| `Listen` / `UnixListen` templates | `Result<Arc<T>, ProviderInitError>` | Binding, stale-socket probing, and filesystem/socket errors are provider-init failures. |
+| `UnixConnect` template | `Result<Arc<T>, ProviderInitError>` | Path resolution is a provider-init concern. Runtime connection errors are returned by `connect().await?`. |
+| `NamedPipeListen` / `NamedPipeConnect` templates | `Result<Arc<T>, ProviderInitError>` | Windows named pipe listener setup errors and connector configuration errors are provider-init failures. Runtime connector I/O errors are returned by `connect().await?`. |
+| `LocalIpcListen` / `LocalIpcConnect` templates | `Result<Arc<T>, ProviderInitError>` | Logical-name local IPC maps to Unix socket or Windows named pipe listener setup and connector configuration errors at provider init. Runtime connector I/O errors are returned by `connect().await?`. |
 | Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Documented opt-in to retryable/fatal provider-init semantics. |
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.

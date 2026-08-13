@@ -150,9 +150,9 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | `Queue(T)` | `BQueue`, `BroadcastQueue` | A `tokio::sync::broadcast` channel for fan-out event distribution. |
 | `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
 | `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `get()?` for manual FD cloning. |
-| `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `tokio::net::UnixStream` on each call. Performs a one-shot reachability probe at init time, so `eager = true` blocks the startup wave until the peer is ready. |
-| `NamedPipeListen(Name)` | - | **Windows-only.** Holds a local named pipe listener wrapper. `accept().await?` yields an already connected `NamedPipeServer`; an internal manager replenishes the next pending instance and retries replacement create failures. |
-| `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<String>` pipe name. Init performs one `ClientOptions::open` probe; each `connect().await?` opens a fresh `NamedPipeClient`. |
+| `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `IpcStream` on each call. `try_connect().await?` remains available for callers that need the raw Tokio `UnixStream`. |
+| `NamedPipeListen(Name)` | - | **Windows-only.** Holds a local named pipe listener wrapper. `accept().await?` yields an `IpcStream`; an internal manager replenishes the next pending instance and retries replacement create failures. |
+| `NamedPipeConnect(Name)` | - | **Windows-only.** Holds an `Arc<String>` pipe name. Each `connect().await?` opens a fresh `IpcStream` and retries short `ERROR_PIPE_BUSY` windows internally. |
 | `LocalIpcListen(Name)` / `LocalIpcConnect(Name)` | - | **Cross-platform local IPC.** Accepts a logical name and maps it to a Unix domain socket on Unix or a Windows named pipe on Windows. Use when business code only needs an `AsyncRead + AsyncWrite` stream. |
 
 `UnixListen(Path)`, `UnixConnect(Path)`, `NamedPipeListen(Name)`,
@@ -190,7 +190,7 @@ pub struct ApiSocket;
 #[service]
 pub async fn api_server(listener: Arc<ApiSocket>) -> anyhow::Result<()> {
     loop {
-        let (sock, _) = listener.accept().await?;
+        let sock = listener.accept().await?;
         // handle sock...
     }
 }
@@ -212,12 +212,12 @@ Three behaviors that distinguish them from the TCP `Listen` template:
 
 1. **`UnixListen` recovers from stale socket files**: an unclean shutdown leaves the socket file on disk, which on the next start would normally trigger `AddrInUse`. `UnixListen` first probes the path with `UnixStream::connect`. If a live process answers, the framework refuses fatally ("held by another live process"). If the probe fails, the path is unlinked only after the framework confirms that the path itself is a Unix socket; ordinary files and other filesystem nodes are refused and preserved. See [Resilience Guide § 2.3](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener) for the full error taxonomy.
 
-2. **`UnixConnect` validates reachability at init**: the template performs a single `connect` probe and immediately drops the result. With `eager = true` this lets you block the startup wave until a peer sidecar / supervisor is up. Peer servers will see one extra `accept()` followed by an instant close per provider initialization -- treat it the same as port-scanner / health-probe traffic.
+2. **`UnixConnect` is a lightweight endpoint handle**: resolving the provider stores the configured path; dialing happens when user code calls `connect().await?`. Missing peers, permission errors, and other connection failures are ordinary runtime I/O errors at that call site.
 
 3. **Cross-platform builds**: both templates are gated by `#[cfg(unix)]`. On non-Unix targets the macro emits a `compile_error!` at the declaration site rather than silently producing a broken type. To write cross-platform code, wrap the declaration in `#[cfg(unix)] mod uds {...}` so the entire module is excluded on Windows.
 
 > [!NOTE]
-> **API form: listener handle cloning is synchronous; socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths. `get()?` and `try_connect().await?` remain available when you need the lower-level listener clone or explicitly named connection helper.
+> **API form: listener handle cloning is synchronous; socket operations are `async`**. Use `accept().await?` and `connect().await?` for the common server/client paths; both return `service_daemon::IpcStream`. `get()?` and `try_connect().await?` remain available when you need the lower-level listener clone or raw Unix stream.
 
 ### The `NamedPipeListen` and `NamedPipeConnect` Templates (Windows Named Pipes)
 
@@ -268,8 +268,8 @@ handlers. ACL and security-descriptor customization is not part of the template
 API yet.
 
 `NamedPipeConnect` validates the same local-only pipe name form. Initialization
-performs a one-shot reachability probe and drops it; each `connect().await?`
-opens a fresh independent client.
+stores the configured local pipe name; each `connect().await?` opens a fresh
+independent `IpcStream` and retries short `ERROR_PIPE_BUSY` windows internally.
 
 Both named pipe templates are gated by `#[cfg(windows)]`. On non-Windows
 targets, the macro emits a declaration-site `compile_error!`. To keep a
@@ -303,12 +303,14 @@ On Unix, the logical name maps to
 `$XDG_RUNTIME_DIR/service-daemon-rs/<name>.sock`, falling back to
 `std::env::temp_dir()/service-daemon-rs/<name>.sock` when `XDG_RUNTIME_DIR` is
 missing. The provider creates that directory, then reuses the Unix socket stale
-cleanup, live-process refusal, connect-probe, and retry/fatal classification.
+cleanup and live-process refusal behavior for listeners. Connectors resolve the
+mapped path and dial only when `connect().await?` is called.
 
 On Windows, the logical name maps to
 `\\.\pipe\service-daemon-rs-<name>` and reuses the named-pipe local-only,
-first-instance ownership, probe, busy-retry classification, and listener manager
-semantics.
+first-instance ownership and listener manager semantics for listeners.
+Connectors resolve the mapped pipe name and dial only when `connect().await?` is
+called.
 
 The public generated surface is intentionally small: listeners expose
 `name()` and `accept().await?`; connectors expose `name()` and

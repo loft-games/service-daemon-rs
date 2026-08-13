@@ -132,26 +132,30 @@ The probe-then-unlink path emits a `tracing::warn!` event with `provider` and `p
 
 ### 2.4. UnixConnect Strategy (Unix Domain Socket Client)
 
-The `UnixConnect` template performs **one connectivity probe at provider init time** and discards the result. The probe serves two purposes:
-
-1. With `eager = true`, it blocks the system startup wave until the peer is reachable. Use this for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
-2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `connect()` somewhere in the hot path.
-
-Peer servers will observe a single `accept()` followed by an instant close from the probe -- this is normal and any reasonable server already handles port-scanner / health-probe traffic the same way.
+The `UnixConnect` template is a lightweight endpoint handle. Provider
+initialization resolves the configured path and stores it; it does not open a
+reachability probe. This keeps server-side accept loops free of framework-owned
+probe connections.
 
 | OS Error | Strategy | Reason |
 | :--- | :--- | :--- |
-| `ConnectionRefused` | **Retryable** | Peer hasn't called `accept()` yet (peer is starting up). |
-| `NotFound` | **Retryable** | Peer hasn't created the socket file yet (peer init in progress). |
-| `ConnectionAborted` | **Retryable** | Peer accepted but immediately closed -- a startup race. |
-| `Interrupted`, `TimedOut` | **Retryable** | System signal during connect. |
-| `PermissionDenied` | **Fatal** | EACCES on the path -- a permissions issue is not a transient state. |
-| `InvalidInput` | **Fatal** | Path too long. |
+| `ConnectionRefused` | Runtime `io::Error` from `connect().await?` | Peer has not accepted connections yet. |
+| `NotFound` | Runtime `io::Error` from `connect().await?` | Peer has not created the socket file yet, or the configured path is wrong. |
+| `ConnectionAborted` | Runtime `io::Error` from `connect().await?` | Peer accepted and closed before the caller used the stream. |
+| `Interrupted`, `TimedOut` | Runtime `io::Error` from `connect().await?` | System interruption or timeout during connect. |
+| `PermissionDenied` | Runtime `io::Error` from `connect().await?` | EACCES on the path. |
+| `InvalidInput` | Runtime `io::Error` from `connect().await?` | Path too long or otherwise invalid for the OS. |
 
 > [!IMPORTANT]
-> `NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory missing). The same `io::ErrorKind` carries different meaning depending on which side of the connection you are.
+> `NotFound` is a runtime connection error for `UnixConnect` but **Fatal** for
+> `UnixListen` when it means the listener's parent directory is missing. The
+> same `io::ErrorKind` still carries different meaning depending on which side
+> of the connection you are.
 
-After init succeeds, `connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. `try_connect().await?` remains available as the explicitly named lower-level helper. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
+`connect().await?` opens a fresh independent `service_daemon::IpcStream` on each
+call. `try_connect().await?` remains available as the explicitly named
+lower-level helper for code that needs the raw Tokio `UnixStream`. The framework
+intentionally does not pool -- UDS connections are local and cheap to recreate.
 
 ### 2.5. NamedPipeListen Strategy (Windows Named Pipe Server)
 
@@ -185,23 +189,21 @@ unless the manager stops.
 ### 2.6. NamedPipeConnect Strategy (Windows Named Pipe Client)
 
 The `NamedPipeConnect` template stores only the local pipe name. Initialization
-performs a one-shot `ClientOptions::new().open(...)` probe and drops it, matching
-the Unix connector pattern: `eager = true` can block startup until a peer process
-is reachable, while lazy initialization validates the peer on first resolution.
+validates the pipe name form and does not dial the peer. Runtime dialing happens
+inside `connect().await?`.
 
 | OS Error | Strategy | Reason |
 | :--- | :--- | :--- |
-| `NotFound` | **Retryable** | The peer has not created the named pipe yet. |
-| Raw OS `ERROR_PIPE_BUSY` (`231`) | **Retryable** | The pipe exists, but every server instance is currently occupied. |
-| `Interrupted`, `TimedOut` | **Retryable** | Transient system interruption during open. |
-| `PermissionDenied` | **Fatal** | Access or security configuration is wrong, including denied local access. |
-| Invalid or remote pipe name | **Fatal** | The provider contract is local-only `\\.\pipe\...`. |
-| Other configuration/access errors | **Fatal** | Retrying cannot fix malformed configuration or incompatible security settings. |
+| `NotFound` | Runtime `io::Error` from `connect().await?` | The peer has not created the named pipe yet. |
+| Raw OS `ERROR_PIPE_BUSY` (`231`) | Retried inside `connect().await?` for a short bounded window | The pipe exists, but every server instance is currently occupied. |
+| `Interrupted`, `TimedOut` | Runtime `io::Error` from `connect().await?` | Transient system interruption during open. |
+| `PermissionDenied` | Runtime `io::Error` from `connect().await?` | Access or security configuration is wrong, including denied local access. |
+| Invalid or remote pipe name | **Fatal at provider init** | The provider contract is local-only `\\.\pipe\...`. |
+| Other configuration/access errors | Runtime `io::Error` from `connect().await?` | Unknown Windows pipe failures remain visible to the caller. |
 
-After init succeeds, each `connect().await?` opens a fresh independent
-`NamedPipeClient`. A runtime `connect()` can still hit `ERROR_PIPE_BUSY` if all
-server instances are occupied; retry that at the call site when the workflow
-expects short-lived busy windows.
+Each `connect().await?` opens a fresh independent `service_daemon::IpcStream`.
+The helper retries short `ERROR_PIPE_BUSY` windows internally, so example code
+does not need a Windows-specific busy-loop for normal listener replenishment.
 
 ### 2.7. LocalIpc Strategy (Cross-platform Logical Local IPC)
 
@@ -214,19 +216,17 @@ initialization and produce `ProviderError::Fatal` when invalid.
 On Unix, the provider creates the `service-daemon-rs` runtime directory under
 `XDG_RUNTIME_DIR` or, when that is unavailable, under `std::env::temp_dir()`.
 Listener startup then follows the `UnixListen` stale-socket cleanup and
-live-process refusal strategy, while connector startup follows the `UnixConnect`
-probe strategy.
+live-process refusal strategy, while connector startup only resolves the logical
+name and platform endpoint.
 
 On Windows, the provider maps the logical name to
 `\\.\pipe\service-daemon-rs-<name>`. Listener startup follows the
 `NamedPipeListen` local-only first-instance ownership strategy, while connector
-startup follows the `NamedPipeConnect` probe and `ERROR_PIPE_BUSY` retryable
-classification.
+startup validates the logical name and stores the mapped pipe name.
 
-The runtime `accept().await?` and `connect().await?` methods return raw
-`std::io::Error`s from the platform transport. Service code that expects a short
-Windows listener-replenishment window should retry raw `ERROR_PIPE_BUSY` at the
-call site, just as it would for `NamedPipeConnect`.
+The runtime `accept().await?` and `connect().await?` methods return
+`service_daemon::IpcStream` values. Platform transport failures are returned as
+raw `std::io::Error`s from those calls.
 
 ## 3. Advanced Resilience: Wave Timeouts
 

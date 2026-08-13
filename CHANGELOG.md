@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Unified IPC Streams**: Added `IpcStream`, a platform-neutral `AsyncRead` / `AsyncWrite` stream returned by IPC provider `accept()` and `connect()` helpers.
 - **Cross-platform Local IPC Providers**: Added `LocalIpcListen` and `LocalIpcConnect` provider templates that accept logical names and map them to Unix domain sockets or Windows named pipes while exposing a shared `AsyncRead`/`AsyncWrite` service shape.
 - **Provider Attribute Normalization**: Added explicit `default = ...` and `template = ...` provider head forms while preserving existing bare defaults and built-in template syntax.
 - **Release Security Contract**: Added maintainer documentation for deployment boundaries, logging safety, Unix socket deployment, TCP listener exposure, and example-production responsibilities.
@@ -18,10 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dynamic Service Instances**: Added `ServiceHandle::create().await`, `ServiceHandle::start().await`, and `ServiceInstanceHandle::start().await` for daemon-local service instances, plus an `example-on-demand` crate that demonstrates periodic start, stop, and remove.
 - **Daemon Instance Handles**: Added UUIDv7 `DaemonInstanceId` and `DaemonInstanceHandle` as the public daemon instance control handle returned by `ServiceDaemonBuilder::build()`.
 - **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
-- **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, reachability probes, and focused Windows MSVC validation coverage.
+- **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, runtime busy-pipe retry, and focused Windows MSVC validation coverage.
 
 ### Changed
 
+- **IPC Provider Helper API**: `UnixListen`, `UnixConnect`, `NamedPipeListen`, `NamedPipeConnect`, `LocalIpcListen`, and `LocalIpcConnect` now expose the common `accept().await?` / `connect().await?` path as `IpcStream`. Connector providers resolve as endpoint handles and defer dialing to `connect().await?` instead of opening an initialization probe connection.
 - **Provider Template String Arguments**: `UnixListen`, `UnixConnect`, `NamedPipeListen`, `NamedPipeConnect`, `LocalIpcListen`, `LocalIpcConnect`, and shared provider `env` arguments now accept either a string literal or a path to a `const`/`static &'static str`; dynamic string expressions remain rejected by the macro.
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
 - **Daemon Ownership API**: `ServiceDaemon` is now a lightweight builder facade. `ServiceDaemonBuilder::build()` registers a process-local daemon instance and returns `DaemonInstanceHandle`; the previous `ServiceDaemonHandle` type and `.handle()` flow were removed.
@@ -80,11 +82,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Unix Domain Socket Providers**: Added `UnixListen` and `UnixConnect` provider templates for local IPC, sidecar coordination, and Unix-only service handoff patterns, including stale-socket recovery, non-socket path refusal, reachability probes, and retryable connection initialization.
+- **Unix Domain Socket Providers**: Added `UnixListen` and `UnixConnect` provider templates for local IPC, sidecar coordination, and Unix-only service handoff patterns, including stale-socket recovery, non-socket path refusal, and lightweight connector endpoint handles.
 
 ### Changed
 
-- **Provider Guides**: Documented Unix socket listener/client setup, reachability probes, stale-socket recovery, and error classification.
+- **Provider Guides**: Documented Unix socket listener/client setup, stale-socket recovery, and error classification.
 - **Scheduling Documentation**: Added `Standard`, `HighPriority`, and `Isolated` policy guidance to the tutorial, trigger guide, macro internals, and framework extension docs.
 
 ## [0.1.0-alpha.3] - 2026-03-29
