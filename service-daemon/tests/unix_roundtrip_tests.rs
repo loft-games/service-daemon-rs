@@ -1,11 +1,7 @@
 // End-to-end test: UnixListen and UnixConnect cooperating on the same path.
 //
-// This test exercises the documented two-modal interaction:
-//   1. Peer servers will observe an accept() followed by an instant close
-//      from UnixConnect's init-time probe. The application-layer accept loop
-//      must therefore tolerate "connect-then-close" patterns.
-//   2. After the probe, UnixConnect::connect() opens a fresh independent stream
-//      for actual business traffic.
+// This test exercises the common interaction: the listener accepts one stream
+// and the connector opens one fresh business connection.
 //
 // The test does NOT spin up a full ServiceDaemon -- it directly resolves
 // both providers and drives accept/connect manually. This keeps the test
@@ -62,30 +58,12 @@ async fn test_unix_listen_connect_roundtrip() {
     let path = "target/sd-uds-rt.sock";
     let _guard = prepare_socket_path(path);
 
-    // Bring up the listener provider FIRST, so the path exists before the
-    // client provider's init-probe runs. Without this ordering the client
-    // would have to retry through NotFound until init_fallible's backoff
-    // catches the late bind -- functional but slower than necessary for a
-    // tight roundtrip test.
     let server = <RtServer as ManagedProvided>::resolve_managed()
         .await
         .expect("RtServer resolve failed");
 
-    // Spawn the server-side accept loop. It expects exactly two connections:
-    //   1. The probe from RtClient's init-time UnixStream::connect, which is
-    //      dropped immediately.
-    //   2. The real roundtrip stream from connect().
     let server_task = tokio::spawn(async move {
-        // Connection 1: probe from UnixConnect init. We accept it and drop
-        // it. The peer (UnixConnect) drops its end immediately too.
-        let (probe, _) = server
-            .accept()
-            .await
-            .expect("Failed to accept the init-time probe connection");
-        drop(probe);
-
-        // Connection 2: the actual business traffic.
-        let (mut sock, _) = server
+        let mut sock = server
             .accept()
             .await
             .expect("Failed to accept the real roundtrip connection");
@@ -100,13 +78,10 @@ async fn test_unix_listen_connect_roundtrip() {
         buf
     });
 
-    // Resolve the client provider. This performs the init-time probe (which
-    // the server task accepts as connection #1).
     let client = <RtClient as ManagedProvided>::resolve_managed()
         .await
         .expect("RtClient resolve failed");
 
-    // Open the real roundtrip stream (connection #2).
     let mut conn = client.connect().await.expect("RtClient.connect failed");
 
     conn.write_all(b"hello")

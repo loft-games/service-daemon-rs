@@ -61,6 +61,7 @@ pub use core::di::{
     ManagedProvided, Provided, ProviderDependencyChange, ProviderDependencyChangeReason,
     ProviderDependencyWatch, ProviderDependencyWatchSet, WatchableProvided,
 };
+pub use core::ipc::IpcStream;
 pub use core::logging::{
     DaemonLayer, LogBatchSizeError, MAX_LOG_BATCH_SIZE, init_logging, set_log_batch_size,
     try_init_logging,
@@ -148,7 +149,7 @@ pub mod prelude {
     pub use crate::TT::*;
     pub use crate::{
         DaemonDiagnosticsSnapshot, DaemonInstanceHandle, DaemonInstanceId, DaemonRuntimeSnapshot,
-        DiagnosticRuntimeLane, ManagedProvided, Provided, ReadinessSnapshot,
+        DiagnosticRuntimeLane, IpcStream, ManagedProvided, Provided, ReadinessSnapshot,
         SchedulingAdvisoryProfile, ServiceDaemon, ServiceError, ServiceHandle,
         ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling,
         ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,

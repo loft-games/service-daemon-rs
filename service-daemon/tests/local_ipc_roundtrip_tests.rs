@@ -87,12 +87,6 @@ mod unix_tests {
         assert_eq!(server.name(), logical_name);
 
         let server_task = tokio::spawn(async move {
-            let probe = server
-                .accept()
-                .await
-                .expect("Failed to accept the init-time probe connection");
-            drop(probe);
-
             let mut stream = server
                 .accept()
                 .await
@@ -158,12 +152,6 @@ mod unix_tests {
         assert_eq!(server.name(), logical_name);
 
         let server_task = tokio::spawn(async move {
-            let probe = server
-                .accept()
-                .await
-                .expect("Failed to accept the init-time probe connection");
-            drop(probe);
-
             let mut stream = server
                 .accept()
                 .await
@@ -236,8 +224,6 @@ mod unix_tests {
 #[cfg(windows)]
 mod windows_tests {
     use super::*;
-    use std::time::Duration;
-    use tokio::net::windows::named_pipe::NamedPipeClient;
 
     const ROUNDTRIP_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_ROUNDTRIP_NAME_0CFD61B9";
     const OVERRIDE_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_OVERRIDE_NAME_A49E8522";
@@ -245,43 +231,6 @@ mod windows_tests {
         "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_LISTEN_NAME_C64173F7";
     const INVALID_CONNECT_ENV_VAR: &str =
         "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_CONNECT_NAME_F23F5C14";
-    const ERROR_PIPE_BUSY: i32 = 231;
-
-    async fn connect_roundtrip_with_busy_retry(
-        client: &WindowsRoundtripClient,
-    ) -> std::io::Result<NamedPipeClient> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match client.connect().await {
-                Ok(conn) => return Ok(conn),
-                Err(error)
-                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
-                        && std::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    async fn connect_override_with_busy_retry(
-        client: &WindowsOverrideClient,
-    ) -> std::io::Result<NamedPipeClient> {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match client.connect().await {
-                Ok(conn) => return Ok(conn),
-                Err(error)
-                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY)
-                        && std::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
 
     #[derive(Debug)]
     #[provider(
@@ -307,12 +256,6 @@ mod windows_tests {
         assert_eq!(server.name(), logical_name);
 
         let server_task = tokio::spawn(async move {
-            let probe = server
-                .accept()
-                .await
-                .expect("Failed to accept the init-time probe connection");
-            drop(probe);
-
             let mut stream = server
                 .accept()
                 .await
@@ -335,7 +278,8 @@ mod windows_tests {
             .expect("WindowsRoundtripClient resolve failed");
         assert_eq!(client.name(), logical_name);
 
-        let mut conn = connect_roundtrip_with_busy_retry(&client)
+        let mut conn = client
+            .connect()
             .await
             .expect("WindowsRoundtripClient.connect failed");
         conn.write_all(REQUEST_PAYLOAD)
@@ -377,12 +321,6 @@ mod windows_tests {
         assert_eq!(server.name(), logical_name);
 
         let server_task = tokio::spawn(async move {
-            let probe = server
-                .accept()
-                .await
-                .expect("Failed to accept the init-time probe connection");
-            drop(probe);
-
             let mut stream = server
                 .accept()
                 .await
@@ -398,7 +336,8 @@ mod windows_tests {
             .expect("WindowsOverrideClient resolve failed");
         assert_eq!(client.name(), logical_name);
 
-        let mut conn = connect_override_with_busy_retry(&client)
+        let mut conn = client
+            .connect()
             .await
             .expect("WindowsOverrideClient.connect failed");
         let mut response = [0_u8; RESPONSE_PAYLOAD.len()];

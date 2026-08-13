@@ -320,7 +320,7 @@ pub(in crate::provider) fn generate_named_pipe_listen_template(
             /// replenishes it after each connection. Runtime failures while creating the
             /// next pending instance are retried inside that manager, so a successful
             /// `accept()` only means a connected server end is ready for business logic.
-            pub async fn accept(
+            async fn accept_raw(
                 &self,
             ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeServer> {
                 self.start_accept_manager_if_needed().await?;
@@ -333,6 +333,11 @@ pub(in crate::provider) fn generate_named_pipe_listen_template(
                 receiver.recv().await.ok_or_else(|| {
                     std::io::Error::other("named pipe listener manager stopped")
                 })
+            }
+
+            /// Accept one connection as a platform-neutral local IPC stream.
+            pub async fn accept(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.accept_raw().await.map(service_daemon::IpcStream::NamedPipeServer)
             }
 
             /// Returns the configured local named pipe path.
@@ -497,10 +502,6 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
             pub async fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let name = #name_expr;
                 Self::validate_local_name(&name)?;
-                let probe = Self::open_client(&name).map_err(|error| {
-                    Self::classify_client_open_error("probe", &name, error)
-                })?;
-                drop(probe);
                 Ok(Self {
                     name: std::sync::Arc::new(name),
                 })
@@ -524,32 +525,38 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
                     .open(name)
             }
 
-            fn classify_client_open_error(
-                operation: &str,
+            async fn open_client_with_busy_retry(
                 name: &str,
-                error: std::io::Error,
-            ) -> service_daemon::ProviderError {
-                let msg = format!(
-                    "Provider '{}' failed to {} Windows named pipe '{}': {}",
-                    #struct_name_str, operation, name, error
-                );
-                if error.raw_os_error() == Some(#ERROR_PIPE_BUSY) {
-                    return service_daemon::ProviderError::Retryable(msg);
-                }
-                match error.kind() {
-                    std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::Interrupted
-                    | std::io::ErrorKind::TimedOut => service_daemon::ProviderError::Retryable(msg),
-                    std::io::ErrorKind::PermissionDenied => service_daemon::ProviderError::Fatal(msg),
-                    _ => service_daemon::ProviderError::Fatal(msg),
+            ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    match Self::open_client(name) {
+                        Ok(client) => return Ok(client),
+                        Err(error)
+                            if error.raw_os_error() == Some(#ERROR_PIPE_BUSY)
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            service_daemon::__private::tokio::time::sleep(
+                                std::time::Duration::from_millis(10),
+                            )
+                            .await;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             }
 
-            /// Open a fresh client connection to the configured named pipe.
-            pub async fn connect(
+            async fn connect_raw(
                 &self,
             ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
-                Self::open_client(&self.name)
+                Self::open_client_with_busy_retry(&self.name).await
+            }
+
+            /// Open a fresh connection as a platform-neutral local IPC stream.
+            pub async fn connect(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.connect_raw()
+                    .await
+                    .map(service_daemon::IpcStream::NamedPipeClient)
             }
 
             /// Returns the configured local named pipe path.

@@ -285,12 +285,17 @@ pub(in crate::provider) fn generate_unix_listen_template(
                 service_daemon::__private::tokio::net::UnixListener::from_std(cloned)
             }
 
-            /// Accept one connection from the configured Unix socket.
-            pub async fn accept(&self) -> std::io::Result<(
+            async fn accept_raw(&self) -> std::io::Result<(
                 service_daemon::__private::tokio::net::UnixStream,
                 service_daemon::__private::tokio::net::unix::SocketAddr,
             )> {
                 self.get()?.accept().await
+            }
+
+            /// Accept one connection as a platform-neutral local IPC stream.
+            pub async fn accept(&self) -> std::io::Result<service_daemon::IpcStream> {
+                let (stream, _) = self.accept_raw().await?;
+                Ok(service_daemon::IpcStream::Unix(stream))
             }
 
             /// Returns the local address this socket is bound to.
@@ -336,37 +341,6 @@ pub(in crate::provider) fn generate_unix_connect_template(
         struct_name.to_string().to_uppercase()
     );
     let type_tokens = quote! { #struct_name };
-
-    // ConnectionRefused / NotFound / ConnectionAborted: peer is starting up.
-    // Retryable.
-    //   - ConnectionRefused: peer hasn't called accept() yet
-    //   - NotFound: peer hasn't created the socket file yet
-    //   - ConnectionAborted: peer accepted but immediately closed (init race)
-    // PermissionDenied: EACCES on the path -- a permissions issue is not a
-    // transient state, the operator has to fix it. Fatal.
-    let probe_and_classify = quote! {
-        // One-shot probe stream is created and immediately dropped. The
-        // sole purpose is reachability validation; we do not store it.
-        let _probe = service_daemon::__private::tokio::net::UnixStream::connect(&path)
-            .await
-            .map_err(|e| {
-                let msg = format!(
-                    "Provider '{}' failed to probe Unix socket '{}': {}",
-                    #struct_name_str, path, e
-                );
-                match e.kind() {
-                    std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::Interrupted
-                    | std::io::ErrorKind::TimedOut => {
-                        service_daemon::ProviderError::Retryable(msg)
-                    }
-                    _ => service_daemon::ProviderError::Fatal(msg),
-                }
-            })?;
-        drop(_probe);
-    };
 
     // Framework path: init_fallible provides retry/backoff/timeout. The
     // returned Arc<Self> caches only the path; subsequent try_connect()
@@ -428,7 +402,6 @@ pub(in crate::provider) fn generate_unix_connect_template(
         impl #struct_name {
             pub async fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let path = #addr_expr;
-                #probe_and_classify
                 Ok(Self {
                     path: std::sync::Arc::new(std::path::PathBuf::from(path)),
                 })
@@ -444,9 +417,9 @@ pub(in crate::provider) fn generate_unix_connect_template(
                 service_daemon::__private::tokio::net::UnixStream::connect(&*self.path).await
             }
 
-            /// Open a fresh connection to the configured Unix socket.
-            pub async fn connect(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
-                self.try_connect().await
+            /// Open a fresh connection as a platform-neutral local IPC stream.
+            pub async fn connect(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.try_connect().await.map(service_daemon::IpcStream::Unix)
             }
 
             /// Returns the configured socket path.

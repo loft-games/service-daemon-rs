@@ -261,10 +261,14 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
                 service_daemon::__private::tokio::net::UnixListener::from_std(cloned)
             }
 
-            /// Accept one connection from the configured local IPC endpoint.
-            pub async fn accept(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
+            async fn accept_raw(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
                 let (stream, _) = self.get_listener()?.accept().await?;
                 Ok(stream)
+            }
+
+            /// Accept one connection as a platform-neutral local IPC stream.
+            pub async fn accept(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.accept_raw().await.map(service_daemon::IpcStream::Unix)
             }
 
             /// Returns the configured local IPC logical name.
@@ -490,8 +494,7 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
                 }
             }
 
-            /// Accept one connection from the configured local IPC endpoint.
-            pub async fn accept(
+            async fn accept_raw(
                 &self,
             ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeServer> {
                 self.start_accept_manager_if_needed().await?;
@@ -504,6 +507,11 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
                 receiver.recv().await.ok_or_else(|| {
                     std::io::Error::other("local IPC named pipe listener manager stopped")
                 })
+            }
+
+            /// Accept one connection as a platform-neutral local IPC stream.
+            pub async fn accept(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.accept_raw().await.map(service_daemon::IpcStream::NamedPipeServer)
             }
 
             /// Returns the configured local IPC logical name.
@@ -612,25 +620,6 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
                 let name = #name_expr;
                 Self::validate_logical_name(&name)?;
                 let path = Self::unix_socket_path(&name)?;
-                let _probe = service_daemon::__private::tokio::net::UnixStream::connect(&path)
-                    .await
-                    .map_err(|e| {
-                        let msg = format!(
-                            "Provider '{}' failed to probe local IPC Unix socket '{}' for logical name '{}': {}",
-                            #struct_name_str, path.display(), name, e
-                        );
-                        match e.kind() {
-                            std::io::ErrorKind::ConnectionRefused
-                            | std::io::ErrorKind::NotFound
-                            | std::io::ErrorKind::ConnectionAborted
-                            | std::io::ErrorKind::Interrupted
-                            | std::io::ErrorKind::TimedOut => {
-                                service_daemon::ProviderError::Retryable(msg)
-                            }
-                            _ => service_daemon::ProviderError::Fatal(msg),
-                        }
-                    })?;
-                drop(_probe);
                 Ok(Self {
                     name: std::sync::Arc::new(name),
                     path: std::sync::Arc::new(path),
@@ -640,9 +629,13 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
             #validate_logical_name
             #unix_socket_path
 
-            /// Open a fresh connection to the configured local IPC endpoint.
-            pub async fn connect(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
+            async fn connect_raw(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
                 service_daemon::__private::tokio::net::UnixStream::connect(&*self.path).await
+            }
+
+            /// Open a fresh connection as a platform-neutral local IPC stream.
+            pub async fn connect(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.connect_raw().await.map(service_daemon::IpcStream::Unix)
             }
 
             /// Returns the configured local IPC logical name.
@@ -675,10 +668,6 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
                 let name = #name_expr;
                 Self::validate_logical_name(&name)?;
                 let pipe_name = Self::pipe_name(&name);
-                let probe = Self::open_client(&pipe_name).map_err(|error| {
-                    Self::classify_client_open_error("probe", &name, &pipe_name, error)
-                })?;
-                drop(probe);
                 Ok(Self {
                     name: std::sync::Arc::new(name),
                     pipe_name: std::sync::Arc::new(pipe_name),
@@ -698,33 +687,38 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
                     .open(pipe_name)
             }
 
-            fn classify_client_open_error(
-                operation: &str,
-                name: &str,
+            async fn open_client_with_busy_retry(
                 pipe_name: &str,
-                error: std::io::Error,
-            ) -> service_daemon::ProviderError {
-                let msg = format!(
-                    "Provider '{}' failed to {} local IPC named pipe '{}' for logical name '{}': {}",
-                    #struct_name_str, operation, pipe_name, name, error
-                );
-                if error.raw_os_error() == Some(#ERROR_PIPE_BUSY) {
-                    return service_daemon::ProviderError::Retryable(msg);
-                }
-                match error.kind() {
-                    std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::Interrupted
-                    | std::io::ErrorKind::TimedOut => service_daemon::ProviderError::Retryable(msg),
-                    std::io::ErrorKind::PermissionDenied => service_daemon::ProviderError::Fatal(msg),
-                    _ => service_daemon::ProviderError::Fatal(msg),
+            ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                loop {
+                    match Self::open_client(pipe_name) {
+                        Ok(client) => return Ok(client),
+                        Err(error)
+                            if error.raw_os_error() == Some(#ERROR_PIPE_BUSY)
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            service_daemon::__private::tokio::time::sleep(
+                                std::time::Duration::from_millis(10),
+                            )
+                            .await;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             }
 
-            /// Open a fresh connection to the configured local IPC endpoint.
-            pub async fn connect(
+            async fn connect_raw(
                 &self,
             ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
-                Self::open_client(&self.pipe_name)
+                Self::open_client_with_busy_retry(&self.pipe_name).await
+            }
+
+            /// Open a fresh connection as a platform-neutral local IPC stream.
+            pub async fn connect(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.connect_raw()
+                    .await
+                    .map(service_daemon::IpcStream::NamedPipeClient)
             }
 
             /// Returns the configured local IPC logical name.

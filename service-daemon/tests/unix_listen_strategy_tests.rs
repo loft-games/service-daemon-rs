@@ -289,7 +289,7 @@ async fn test_unix_listen_accept_convenience_method() {
         .expect("resolve_managed failed for AcceptListener");
 
     let accept_task = tokio::spawn(async move {
-        let (connection, _) = provider
+        let connection = provider
             .accept()
             .await
             .expect("AcceptListener.accept failed");

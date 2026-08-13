@@ -7,27 +7,13 @@
 
 #![cfg(windows)]
 
-use service_daemon::{
-    ManagedProvided, ProviderError, RestartPolicy, ServiceDaemon, provider, service,
-};
+use service_daemon::{ManagedProvided, ProviderError, provider};
 use std::ffi::OsString;
-use std::sync::{
-    LazyLock, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
 
 static ENV_VAR_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-static MISSING_PEER_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
-static ENV_EAGER_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
-static ENV_EAGER_SERVICE_SAW_ENV_NAME: AtomicBool = AtomicBool::new(false);
-static ENV_EAGER_SERVICE_SAW_PROBE: AtomicBool = AtomicBool::new(false);
-static ENV_EAGER_PROBE_ACCEPTED: AtomicBool = AtomicBool::new(false);
-static ENV_EAGER_SERVICE_READY: LazyLock<tokio::sync::Notify> =
-    LazyLock::new(tokio::sync::Notify::new);
-static ENV_EAGER_PROBE_READY: LazyLock<tokio::sync::Notify> =
-    LazyLock::new(tokio::sync::Notify::new);
 
 const SERVER_NAME_ENV: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_SERVER_NAME_5F30D1E2";
 const OWNERSHIP_NAME_ENV: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_OWNERSHIP_NAME_F1F7F85D";
@@ -266,17 +252,14 @@ async fn named_pipe_templates_reject_invalid_local_names() {
 pub struct ReadyClient;
 
 #[tokio::test]
-async fn named_pipe_connect_probe_succeeds_when_server_ready() {
-    let name = unique_pipe_name("ready-client");
+async fn named_pipe_connect_resolves_without_peer() {
+    let name = unique_pipe_name("resolve-without-peer");
     let _env = set_test_env(OK_CLIENT_NAME_ENV, &name);
-    let server = create_server(&name).expect("server create failed");
 
     let provider = <ReadyClient as ManagedProvided>::resolve_managed()
         .await
-        .expect("ReadyClient resolve failed");
+        .expect("NamedPipeConnect provider should resolve without dialing the peer");
     assert_eq!(provider.name(), name);
-
-    let _ = tokio::time::timeout(Duration::from_secs(5), server.connect()).await;
 }
 
 #[derive(Debug)]
@@ -296,13 +279,9 @@ async fn named_pipe_connect_retries_busy_pipe_until_instance_available() {
         .open(&name)
         .expect("busy holder client open failed");
 
-    match BusyRetryClient::try_new().await {
-        Err(ProviderError::Retryable(message)) => assert!(
-            message.contains("failed to probe Windows named pipe"),
-            "unexpected retryable message: {message}"
-        ),
-        other => panic!("expected retryable busy pipe, got {other:?}"),
-    }
+    let provider = <BusyRetryClient as ManagedProvided>::resolve_managed()
+        .await
+        .expect("NamedPipeConnect provider should resolve without dialing the peer");
 
     let release_name = name.clone();
     let release_task = tokio::spawn(async move {
@@ -315,10 +294,10 @@ async fn named_pipe_connect_retries_busy_pipe_until_instance_available() {
         drop(replacement);
     });
 
-    let result = BusyRetryClient::resolve().await;
+    let result = provider.connect().await;
     assert!(
         result.is_ok(),
-        "expected busy retry to recover, got {result:?}"
+        "expected runtime busy retry to recover, got {result:?}"
     );
     release_task.abort();
 }
@@ -331,40 +310,20 @@ async fn named_pipe_connect_retries_busy_pipe_until_instance_available() {
 )]
 pub struct MissingPeerClient;
 
-#[service(tags = ["named_pipe_missing_peer_provider_test"])]
-async fn missing_peer_client_service(
-    _client: std::sync::Arc<MissingPeerClient>,
-) -> anyhow::Result<()> {
-    MISSING_PEER_SERVICE_ENTERED.store(true, Ordering::SeqCst);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn named_pipe_missing_peer_times_out_before_service_body() {
+#[tokio::test]
+async fn named_pipe_missing_peer_errors_on_connect_call() {
     let name = unique_pipe_name("missing-peer");
     let _env = set_test_env(MISSING_PEER_NAME_ENV, &name);
-    MISSING_PEER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let daemon = ServiceDaemon::builder()
-        .with_registry(
-            service_daemon::Registry::builder()
-                .with_tag("named_pipe_missing_peer_provider_test")
-                .build(),
-        )
-        .with_restart_policy(
-            RestartPolicy::builder()
-                .initial_delay(Duration::from_millis(1))
-                .max_delay(Duration::from_millis(5))
-                .jitter_factor(0.0)
-                .provider_init_timeout(Duration::from_millis(20))
-                .build(),
-        )
-        .build();
+    let provider = <MissingPeerClient as ManagedProvided>::resolve_managed()
+        .await
+        .expect("NamedPipeConnect provider should resolve without dialing the peer");
 
-    daemon.run().await;
-
-    assert!(daemon.cancel_token().is_cancelled());
-    assert!(!MISSING_PEER_SERVICE_ENTERED.load(Ordering::SeqCst));
+    let error = provider
+        .connect()
+        .await
+        .expect_err("connect() should report the missing peer at the call site");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[derive(Debug)]
@@ -375,82 +334,14 @@ async fn named_pipe_missing_peer_times_out_before_service_body() {
 )]
 pub struct EnvEagerClient;
 
-#[service(tags = ["named_pipe_env_eager_provider_test"])]
-async fn env_eager_client_service(client: std::sync::Arc<EnvEagerClient>) -> anyhow::Result<()> {
-    ENV_EAGER_SERVICE_ENTERED.store(true, Ordering::SeqCst);
-
-    if !ENV_EAGER_PROBE_ACCEPTED.load(Ordering::SeqCst) {
-        let _ =
-            tokio::time::timeout(Duration::from_secs(5), ENV_EAGER_PROBE_READY.notified()).await;
-    }
-
-    ENV_EAGER_SERVICE_SAW_PROBE.store(
-        ENV_EAGER_PROBE_ACCEPTED.load(Ordering::SeqCst),
-        Ordering::SeqCst,
-    );
-    ENV_EAGER_SERVICE_SAW_ENV_NAME.store(
-        client.name() == std::env::var(ENV_EAGER_NAME_ENV).unwrap_or_default(),
-        Ordering::SeqCst,
-    );
-    ENV_EAGER_SERVICE_READY.notify_one();
-
-    service_daemon::done();
-    while !service_daemon::is_shutdown() {
-        service_daemon::sleep(Duration::from_millis(10)).await;
-    }
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn named_pipe_env_overrides_fallback_and_eager_runs_before_service_body() -> anyhow::Result<()>
-{
-    ENV_EAGER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
-    ENV_EAGER_SERVICE_SAW_ENV_NAME.store(false, Ordering::SeqCst);
-    ENV_EAGER_SERVICE_SAW_PROBE.store(false, Ordering::SeqCst);
-    ENV_EAGER_PROBE_ACCEPTED.store(false, Ordering::SeqCst);
-
+#[tokio::test]
+async fn named_pipe_env_overrides_fallback_without_peer_probe() {
     let name = unique_pipe_name("env-eager");
     let _env = set_test_env(ENV_EAGER_NAME_ENV, &name);
-    let server = create_server(&name)?;
-    let accept_task = tokio::spawn(async move {
-        if server.connect().await.is_ok() {
-            ENV_EAGER_PROBE_ACCEPTED.store(true, Ordering::SeqCst);
-            ENV_EAGER_PROBE_READY.notify_one();
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    });
 
-    let daemon = ServiceDaemon::builder()
-        .with_registry(
-            service_daemon::Registry::builder()
-                .with_tag("named_pipe_env_eager_provider_test")
-                .build(),
-        )
-        .with_restart_policy(
-            RestartPolicy::builder()
-                .initial_delay(Duration::from_millis(1))
-                .max_delay(Duration::from_millis(5))
-                .jitter_factor(0.0)
-                .provider_init_timeout(Duration::from_millis(200))
-                .build(),
-        )
-        .build();
-    let cancel = daemon.cancel_token();
+    let provider = <EnvEagerClient as ManagedProvided>::resolve_managed()
+        .await
+        .expect("env override should resolve without requiring a listening peer");
 
-    daemon.run().await;
-
-    if !ENV_EAGER_SERVICE_ENTERED.load(Ordering::SeqCst) {
-        tokio::time::timeout(Duration::from_secs(5), ENV_EAGER_SERVICE_READY.notified()).await?;
-    }
-
-    assert!(ENV_EAGER_SERVICE_ENTERED.load(Ordering::SeqCst));
-    assert!(ENV_EAGER_SERVICE_SAW_ENV_NAME.load(Ordering::SeqCst));
-    assert!(ENV_EAGER_SERVICE_SAW_PROBE.load(Ordering::SeqCst));
-
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await??;
-    accept_task.abort();
-
-    Ok(())
+    assert_eq!(provider.name(), name);
 }

@@ -185,7 +185,7 @@ fn try_generate_template(
                 provider_args.named.eager,
             ))
         }
-        // UnixConnect template (Unix domain socket client; reachability probe at init)
+        // UnixConnect template (Unix domain socket client; dials on connect()).
         "UnixConnect" => {
             let connect_path = parse_required_template_arg::<StringTemplateArg>(
                 name,
