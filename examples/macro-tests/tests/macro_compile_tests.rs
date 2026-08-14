@@ -20,6 +20,7 @@ const SERVICE_PASS_CASES: &[&str] = &[
     "tests/pass/27_service_wrapper_path_visibility.rs",
     "tests/pass/28_service_handle_macro_path_visibility.rs",
     "tests/pass/29_service_input_template.rs",
+    "tests/pass/32_service_input_internal_name_hygiene.rs",
 ];
 
 const SERVICE_FAIL_CASES: &[&str] = &[
@@ -36,6 +37,7 @@ const SERVICE_FAIL_CASES: &[&str] = &[
     "tests/fail/39_service_input_arc_dependency.rs",
     "tests/fail/42_service_input_owned.rs",
     "tests/fail/43_service_input_mut_ref.rs",
+    "tests/fail/44_service_input_explicit_lifetime.rs",
     "tests/fail/33_service_handle_rejects_generic_path.rs",
 ];
 

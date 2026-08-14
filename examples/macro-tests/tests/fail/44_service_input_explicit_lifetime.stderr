@@ -1,0 +1,8 @@
+error: #[input] parameters must use lifetime elision.
+
+         = help: Use #[input] value: &YourInputType. The framework borrows input from the instance record for each service generation.
+
+ --> tests/fail/44_service_input_explicit_lifetime.rs:6:32
+  |
+6 | async fn worker(#[input] job: &'static Job) -> anyhow::Result<()> {
+  |                                ^^^^^^^

@@ -1,3 +1,4 @@
+use proc_macro2::{Ident, Span};
 use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
@@ -447,6 +448,12 @@ impl ParamProcessor {
                 "Use #[input] value: &YourInputType, not &mut YourInputType.",
             ));
         }
+        if input_ref.lifetime.is_some() {
+            return Err(syn::Error::new_spanned(
+                &input_ref.lifetime,
+                "#[input] parameters must use lifetime elision.\n\n  = help: Use #[input] value: &YourInputType. The framework borrows input from the instance record for each service generation.\n",
+            ));
+        }
         let input_type = &input_ref.elem;
         let (_, wrapper) = decompose_type(input_type);
         if wrapper.is_some() {
@@ -471,10 +478,14 @@ impl ParamProcessor {
         self.clean_inputs.push(clean_arg);
 
         let arg_name_str = arg_name.to_string();
-        let input_binding = format_ident!("__service_input_{}", arg_name);
+        let service_invocation = service_invocation_ident();
+        let input_binding = Ident::new(
+            &format!("__service_daemon_input_{}", arg_name),
+            Span::mixed_site(),
+        );
         let type_str = quote!(#input_type).to_string().replace(' ', "");
         self.resolve_tokens.push(quote! {
-            let #input_binding = __service_invocation
+            let #input_binding = #service_invocation
                 .input::<#input_type>(#arg_name_str)?;
         });
         self.call_args.push(quote! {
@@ -888,17 +899,22 @@ pub fn generate_wrapper_fn(
     wrapper_name: &syn::Ident,
     content: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    let service_invocation = service_invocation_ident();
     quote! {
         /// Auto-generated wrapper - resolves dependencies and executes logic
         pub fn #wrapper_name(
-            __service_invocation: service_daemon::__private::ServiceInvocationContext,
+            #service_invocation: service_daemon::__private::ServiceInvocationContext,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
-                let token = __service_invocation.cancellation_token();
+                let token = #service_invocation.cancellation_token();
                 #content
             })
         }
     }
+}
+
+fn service_invocation_ident() -> Ident {
+    Ident::new("__service_daemon_invocation", Span::mixed_site())
 }
 
 #[cfg(test)]
