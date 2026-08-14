@@ -85,6 +85,7 @@ impl<'a> TemplateContext<'a> {
             user_span: struct_name.span(),
             param_entries: &[],
             eager,
+            cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
             framework_init_fn: &framework_init_fn,
             managed_init_fn: &managed_init_fn,
             helper_style,

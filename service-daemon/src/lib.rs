@@ -120,8 +120,11 @@ pub mod __private {
         provider_init_failure_into_error, with_provider_runtime_phase,
     };
     pub use crate::core::provider_scope::{
-        provider_changed, provider_dependency_watch, resolve_provider_managed,
-        resolve_provider_mutex, resolve_provider_rwlock, resolve_provider_snapshot,
+        ProviderCacheScope, provider_changed, provider_dependency_watch, resolve_provider_managed,
+        resolve_provider_managed_with_scope, resolve_provider_mutex,
+        resolve_provider_mutex_with_scope, resolve_provider_rwlock,
+        resolve_provider_rwlock_with_scope, resolve_provider_snapshot,
+        resolve_provider_snapshot_with_scope,
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{

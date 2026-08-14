@@ -39,10 +39,15 @@ pub(crate) struct ProviderSlotId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ProviderBindingKind {
     InheritedRoot,
-    #[cfg(test)]
     Local,
     #[cfg(any(test, feature = "simulation"))]
     Override,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderCacheScope {
+    Inherited,
+    DaemonLocal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +113,10 @@ impl ProviderScope {
         self.id
     }
 
+    fn is_root(&self) -> bool {
+        self.id == ProviderScopeId::root()
+    }
+
     pub(crate) fn effective_binding(&self, type_id: TypeId) -> ProviderBindingSnapshot {
         if let Some(binding) = self.local_bindings.get(&type_id) {
             return ProviderBindingSnapshot {
@@ -156,14 +165,12 @@ impl ProviderScope {
         }
     }
 
-    #[cfg(any(test, feature = "simulation"))]
     fn notify_binding_changed(&self, type_id: TypeId) {
         if let Some(notify) = self.binding_changes.get(&type_id) {
             notify.notify_waiters();
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn create_empty_local_slot<T>(&self) -> ProviderBindingSnapshot
     where
         T: 'static + Send + Sync + Clone,
@@ -174,6 +181,23 @@ impl ProviderScope {
             slot
         });
         self.mutate_binding(type_id, ProviderBindingKind::Local)
+    }
+
+    fn ensure_local_slot<T>(&self) -> Option<Arc<StateManager<T>>>
+    where
+        T: 'static + Send + Sync + Clone,
+    {
+        if self.is_root() {
+            return None;
+        }
+
+        let type_id = TypeId::of::<T>();
+        let binding = self.effective_binding(type_id);
+        if binding.slot_id.scope_id != self.id {
+            self.create_empty_local_slot::<T>();
+        }
+
+        self.local_slot::<T>()
     }
 
     #[cfg(test)]
@@ -237,7 +261,6 @@ impl ProviderScope {
         self.mutate_binding(type_id, kind)
     }
 
-    #[cfg(any(test, feature = "simulation"))]
     fn mutate_binding(
         &self,
         type_id: TypeId,
@@ -273,6 +296,13 @@ where
     scope.local_slot_for_binding::<T>(binding)
 }
 
+fn current_daemon_local_provider_manager<T>() -> Option<Arc<StateManager<T>>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    current_provider_scope().ensure_local_slot::<T>()
+}
+
 pub async fn resolve_provider_snapshot<T, F, Fut, E>(
     root_manager: &'static StateManager<T>,
     init: F,
@@ -286,6 +316,28 @@ where
         local_manager.resolve_snapshot_result(init).await
     } else {
         root_manager.resolve_snapshot_result(init).await
+    }
+}
+
+pub async fn resolve_provider_snapshot_with_scope<T, F, Fut, E>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+    init: F,
+) -> Result<Arc<T>, E>
+where
+    T: 'static + Send + Sync + Clone,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Arc<T>, E>> + Send,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => resolve_provider_snapshot(root_manager, init).await,
+        ProviderCacheScope::DaemonLocal => {
+            if let Some(local_manager) = current_daemon_local_provider_manager::<T>() {
+                local_manager.resolve_snapshot_result(init).await
+            } else {
+                root_manager.resolve_snapshot_result(init).await
+            }
+        }
     }
 }
 
@@ -305,6 +357,28 @@ where
     }
 }
 
+pub async fn resolve_provider_rwlock_with_scope<T, F, Fut, E>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+    init: F,
+) -> Result<Arc<TrackedRwLock<T>>, E>
+where
+    T: 'static + Send + Sync + Clone,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Arc<T>, E>> + Send,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => resolve_provider_rwlock(root_manager, init).await,
+        ProviderCacheScope::DaemonLocal => {
+            if let Some(local_manager) = current_daemon_local_provider_manager::<T>() {
+                local_manager.resolve_rwlock_result(init).await
+            } else {
+                root_manager.resolve_rwlock_result(init).await
+            }
+        }
+    }
+}
+
 pub async fn resolve_provider_mutex<T, F, Fut, E>(
     root_manager: &'static StateManager<T>,
     init: F,
@@ -321,6 +395,28 @@ where
     }
 }
 
+pub async fn resolve_provider_mutex_with_scope<T, F, Fut, E>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+    init: F,
+) -> Result<Arc<TrackedMutex<T>>, E>
+where
+    T: 'static + Send + Sync + Clone,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Arc<T>, E>> + Send,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => resolve_provider_mutex(root_manager, init).await,
+        ProviderCacheScope::DaemonLocal => {
+            if let Some(local_manager) = current_daemon_local_provider_manager::<T>() {
+                local_manager.resolve_mutex_result(init).await
+            } else {
+                root_manager.resolve_mutex_result(init).await
+            }
+        }
+    }
+}
+
 pub async fn resolve_provider_managed<T, F, Fut>(
     root_manager: &'static StateManager<T>,
     init: F,
@@ -334,6 +430,28 @@ where
         local_manager.resolve_snapshot_result(init).await
     } else {
         root_manager.resolve_managed_result(init).await
+    }
+}
+
+pub async fn resolve_provider_managed_with_scope<T, F, Fut>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+    init: F,
+) -> Result<Arc<T>, ProviderError>
+where
+    T: 'static + Send + Sync + Clone,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<Arc<T>, ProviderError>> + Send,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => resolve_provider_managed(root_manager, init).await,
+        ProviderCacheScope::DaemonLocal => {
+            if let Some(local_manager) = current_daemon_local_provider_manager::<T>() {
+                local_manager.resolve_snapshot_result(init).await
+            } else {
+                root_manager.resolve_managed_result(init).await
+            }
+        }
     }
 }
 

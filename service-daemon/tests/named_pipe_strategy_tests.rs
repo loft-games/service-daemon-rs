@@ -9,11 +9,12 @@
 
 use service_daemon::{ManagedProvided, ProviderError, provider};
 use std::ffi::OsString;
-use std::sync::{LazyLock, Mutex};
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+use tokio::sync::Mutex as AsyncMutex;
 
-static ENV_VAR_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static ENV_VAR_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
 const SERVER_NAME_ENV: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_SERVER_NAME_5F30D1E2";
 const OWNERSHIP_NAME_ENV: &str = "SERVICE_DAEMON_RS_NAMED_PIPE_OWNERSHIP_NAME_F1F7F85D";
@@ -32,9 +33,6 @@ struct EnvVarGuard {
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        let _lock = ENV_VAR_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {
             if let Some(previous) = &self.previous {
                 std::env::set_var(self.key, previous);
@@ -46,9 +44,6 @@ impl Drop for EnvVarGuard {
 }
 
 fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
-    let _lock = ENV_VAR_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var_os(key);
     unsafe {
         std::env::set_var(key, value);
@@ -104,6 +99,7 @@ pub struct NamedPipeServerProvider;
 
 #[tokio::test]
 async fn named_pipe_listen_creates_server_and_exposes_name() {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("server-name");
     let _env = set_test_env(SERVER_NAME_ENV, &name);
 
@@ -130,6 +126,7 @@ pub struct AcceptReplacementFailureServer;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_pipe_listen_recovers_after_cancelled_accept_wait() -> anyhow::Result<()> {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("accept-cancel");
     let _env = set_test_env(ACCEPT_CANCEL_NAME_ENV, &name);
 
@@ -162,6 +159,7 @@ async fn named_pipe_listen_recovers_after_cancelled_accept_wait() -> anyhow::Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_pipe_listen_delivers_connection_while_replacement_retries() -> anyhow::Result<()> {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("accept-replacement-fail");
     let _env = set_test_env(ACCEPT_REPLACEMENT_FAIL_NAME_ENV, &name);
 
@@ -207,6 +205,7 @@ pub struct OwnershipCollisionServer;
 
 #[tokio::test]
 async fn named_pipe_listen_first_instance_collision_is_fatal() {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("ownership-collision");
     let _env = set_test_env(OWNERSHIP_NAME_ENV, &name);
     let _existing = create_server(&name).expect("pre-existing server create failed");
@@ -253,6 +252,7 @@ pub struct ReadyClient;
 
 #[tokio::test]
 async fn named_pipe_connect_resolves_without_peer() {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("resolve-without-peer");
     let _env = set_test_env(OK_CLIENT_NAME_ENV, &name);
 
@@ -271,6 +271,7 @@ pub struct BusyRetryClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_pipe_connect_retries_busy_pipe_until_instance_available() {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("busy-retry");
     let _env = set_test_env(BUSY_RETRY_NAME_ENV, &name);
 
@@ -312,6 +313,7 @@ pub struct MissingPeerClient;
 
 #[tokio::test]
 async fn named_pipe_missing_peer_errors_on_connect_call() {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("missing-peer");
     let _env = set_test_env(MISSING_PEER_NAME_ENV, &name);
 
@@ -336,6 +338,7 @@ pub struct EnvEagerClient;
 
 #[tokio::test]
 async fn named_pipe_env_overrides_fallback_without_peer_probe() {
+    let _env_lock = ENV_VAR_LOCK.lock().await;
     let name = unique_pipe_name("env-eager");
     let _env = set_test_env(ENV_EAGER_NAME_ENV, &name);
 

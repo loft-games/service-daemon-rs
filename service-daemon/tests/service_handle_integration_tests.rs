@@ -10,6 +10,8 @@ use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
 static HANDLE_CONSUMER_READY: AtomicBool = AtomicBool::new(false);
+static REPEATED_HANDLE_READY: AtomicUsize = AtomicUsize::new(0);
+static REPEATED_HANDLE_PROVIDER_INITS: AtomicUsize = AtomicUsize::new(0);
 static ON_DEMAND_HANDLE_READY: AtomicBool = AtomicBool::new(false);
 static ON_DEMAND_WORKER_STARTS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -56,6 +58,9 @@ static ISOLATION_INPUT_VALUES: LazyLock<AsyncMutex<Vec<(usize, usize)>>> =
 
 #[derive(Clone)]
 struct SelectedWorkerHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct RepeatedWorkerHandle(ServiceHandle);
 
 #[allow(dead_code)]
 #[derive(Clone)]
@@ -142,6 +147,33 @@ async fn selected_handle_consumer(
         "service handle should list instances for the selected service in its daemon"
     );
     HANDLE_CONSUMER_READY.store(true, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[service(tags = ["__service_handle_repeated_daemon__"])]
+async fn repeated_worker() -> anyhow::Result<()> {
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[provider]
+fn repeated_worker_handle() -> Result<RepeatedWorkerHandle, ProviderError> {
+    REPEATED_HANDLE_PROVIDER_INITS.fetch_add(1, Ordering::SeqCst);
+    service_handle!(repeated_worker).map(RepeatedWorkerHandle)
+}
+
+#[service(tags = ["__service_handle_repeated_daemon__"])]
+async fn repeated_handle_consumer(
+    handle: std::sync::Arc<RepeatedWorkerHandle>,
+) -> anyhow::Result<()> {
+    assert!(
+        wait_for_service_handle_instance(&handle.0, "repeated_worker").await,
+        "service handle provider should resolve a daemon-local handle"
+    );
+    REPEATED_HANDLE_READY.fetch_add(1, Ordering::SeqCst);
     done();
     wait_shutdown().await;
     Ok(())
@@ -603,6 +635,28 @@ async fn wait_for_service_handle_instance(
     .is_ok()
 }
 
+async fn run_repeated_service_handle_daemon_until_ready(expected_ready: usize) {
+    let registry = Registry::builder()
+        .with_tag("__service_handle_repeated_daemon__")
+        .build();
+    let daemon = ServiceDaemon::builder().with_registry(registry).build();
+
+    daemon.run().await;
+    let ready = tokio::time::timeout(Duration::from_secs(2), async {
+        while REPEATED_HANDLE_READY.load(Ordering::SeqCst) < expected_ready {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
+    assert!(ready.is_ok(), "service handle consumer should become ready");
+}
+
 fn assert_same_allocation(ptrs: &[usize], expected_len: usize, label: &'static str) {
     assert!(
         ptrs.len() >= expected_len,
@@ -637,6 +691,21 @@ async fn provider_resolves_service_handle_in_selected_daemon_projection() {
         .await
         .expect("daemon should shut down cleanly");
     assert!(ready.is_ok(), "service handle consumer should become ready");
+}
+
+#[tokio::test]
+async fn service_handle_provider_cache_is_daemon_local() {
+    REPEATED_HANDLE_READY.store(0, Ordering::SeqCst);
+    REPEATED_HANDLE_PROVIDER_INITS.store(0, Ordering::SeqCst);
+
+    run_repeated_service_handle_daemon_until_ready(1).await;
+    run_repeated_service_handle_daemon_until_ready(2).await;
+
+    assert_eq!(
+        REPEATED_HANDLE_PROVIDER_INITS.load(Ordering::SeqCst),
+        2,
+        "service_handle! providers must not reuse a daemon-bound handle from the root provider cache"
+    );
 }
 
 #[tokio::test]

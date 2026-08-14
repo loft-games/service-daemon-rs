@@ -97,6 +97,38 @@ fn provider_help_note_error(
     )
 }
 
+fn block_uses_service_handle_macro(block: &syn::Block) -> bool {
+    token_stream_uses_service_handle_macro(block.to_token_stream())
+}
+
+fn token_stream_uses_service_handle_macro(tokens: proc_macro2::TokenStream) -> bool {
+    let mut service_handle_ident_seen = false;
+
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                service_handle_ident_seen = ident == "service_handle";
+            }
+            proc_macro2::TokenTree::Punct(punct)
+                if service_handle_ident_seen && punct.as_char() == '!' =>
+            {
+                return true;
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                if token_stream_uses_service_handle_macro(group.stream()) {
+                    return true;
+                }
+                service_handle_ident_seen = false;
+            }
+            _ => {
+                service_handle_ident_seen = false;
+            }
+        }
+    }
+
+    false
+}
+
 pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parsed_item = parse_macro_input!(item as Item);
     let args = parse_macro_input!(attr as ProviderArgs);
@@ -115,6 +147,29 @@ pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expanded {
         Ok(tokens) => tokens,
         Err(err) => TokenStream::from(err.to_compile_error()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_uses_service_handle_macro;
+
+    #[test]
+    fn detects_service_handle_macro_in_provider_block() {
+        let block: syn::Block =
+            syn::parse_quote!({ service_daemon::service_handle!(worker).map(WorkerHandle) });
+
+        assert!(block_uses_service_handle_macro(&block));
+    }
+
+    #[test]
+    fn ignores_service_handle_identifier_without_macro_call() {
+        let block: syn::Block = syn::parse_quote!({
+            let service_handle = WorkerHandle::default();
+            service_handle
+        });
+
+        assert!(!block_uses_service_handle_macro(&block));
     }
 }
 
@@ -324,6 +379,11 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
         HelperStyle::Infallible
     };
     let provider_origin = format!("#[provider] function {fn_name_str}");
+    let cache_scope = if block_uses_service_handle_macro(fn_block) {
+        quote! { service_daemon::__private::ProviderCacheScope::DaemonLocal }
+    } else {
+        quote! { service_daemon::__private::ProviderCacheScope::Inherited }
+    };
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
         singleton_name: &singleton_name,
@@ -331,6 +391,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
         user_span: return_type.span(),
         param_entries: &param_entries,
         eager,
+        cache_scope,
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style,

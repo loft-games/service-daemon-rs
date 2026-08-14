@@ -3,13 +3,16 @@
 
 use service_daemon::{ManagedProvided, ProviderError, provider};
 use std::ffi::OsString;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Mutex as AsyncMutex;
 
 const REQUEST_PAYLOAD: &[u8] = b"\x00local-ipc-request\xff";
 const RESPONSE_PAYLOAD: &[u8] = b"\xfeok\x00response";
 
 static IPC_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ENV_VAR_LOCK: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
 struct EnvVarGuard {
     key: &'static str,
@@ -79,6 +82,7 @@ mod unix_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unix_local_ipc_listen_connect_roundtrip() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR, "unix-roundtrip");
 
         let server = <UnixRoundtripServer as ManagedProvided>::resolve_managed()
@@ -144,6 +148,7 @@ mod unix_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unix_local_ipc_env_overrides_logical_name() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "unix-override");
 
         let server = <UnixOverrideServer as ManagedProvided>::resolve_managed()
@@ -196,6 +201,7 @@ mod unix_tests {
 
     #[tokio::test]
     async fn unix_local_ipc_listen_env_override_invalid_logical_name_is_fatal() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
 
         match <UnixInvalidEnvServer as ManagedProvided>::resolve_managed().await {
@@ -209,6 +215,7 @@ mod unix_tests {
 
     #[tokio::test]
     async fn unix_local_ipc_connect_env_override_invalid_logical_name_is_fatal() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
 
         match <UnixInvalidEnvClient as ManagedProvided>::resolve_managed().await {
@@ -248,6 +255,7 @@ mod windows_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_local_ipc_listen_connect_roundtrip() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR, "windows-roundtrip");
 
         let server = <WindowsRoundtripServer as ManagedProvided>::resolve_managed()
@@ -313,6 +321,7 @@ mod windows_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_local_ipc_env_overrides_logical_name() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "windows-override");
 
         let server = <WindowsOverrideServer as ManagedProvided>::resolve_managed()
@@ -365,6 +374,7 @@ mod windows_tests {
 
     #[tokio::test]
     async fn windows_local_ipc_listen_env_override_invalid_logical_name_is_fatal() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
 
         match <WindowsInvalidEnvServer as ManagedProvided>::resolve_managed().await {
@@ -378,6 +388,7 @@ mod windows_tests {
 
     #[tokio::test]
     async fn windows_local_ipc_connect_env_override_invalid_logical_name_is_fatal() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
         let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
 
         match <WindowsInvalidEnvClient as ManagedProvided>::resolve_managed().await {
