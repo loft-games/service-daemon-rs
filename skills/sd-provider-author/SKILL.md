@@ -1,6 +1,6 @@
 ---
 name: sd-provider-author
-description: "[user] Author service-daemon-rs #[provider] dependency providers. Use when writing or reviewing a #[provider] (value, env, template, struct, or async-fn form) for the service-daemon Rust framework, or when deciding fallible Result<T, ProviderError> error semantics (Fatal vs Retryable) and lazy vs eager initialization."
+description: "[user] Author service-daemon-rs #[provider] dependency providers. Use when writing or reviewing a #[provider] (value, env, template, struct, or async-fn form) for the service-daemon Rust framework, or when deciding fallible Result provider error semantics (Fatal vs Retryable) and lazy vs eager initialization."
 ---
 
 # Authoring `#[provider]` for service-daemon-rs

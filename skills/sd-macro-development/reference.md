@@ -5,25 +5,50 @@
 Generated code constructs these; the runtime reads them. Changing a field means
 updating **both** the struct and every macro that emits it.
 
-`ServiceEntry` (service.rs:210) — emitted by `#[service]` and `#[trigger]`:
+`ServiceEntry` — emitted by `#[service]` and `#[trigger]`:
 
 ```rust
 pub struct ServiceEntry {
     pub name: &'static str,
     pub module: &'static str,
     pub params: &'static [ServiceParam],
-    pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
+    pub input: Option<ServiceInputDescriptor>,
+    pub wrapper: fn(ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>>,
     pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub priority: u8,
-  pub scheduling: ServiceScheduling,
+    pub scheduling: ServiceScheduling,
     pub tags: &'static [&'static str],
 }
 ```
 
-`ProviderEntry` (service.rs:326) — emitted by `#[provider]`. Unlike `ServiceEntry`
-it carries **no** wrapper or priority; its job is dependency metadata for graph
-analysis (Provider→Provider edges, cycle detection) plus the `eager` opt-in. Fields
-begin with `name` and `module` (the defining module path).
+`input: None` means the selected service auto-starts one instance during daemon
+startup. `input: Some(ServiceInputDescriptor { ... })` marks a service template:
+the registry selects the definition, but callers must create runtime instances via
+`ServiceHandle::create(input)` or `ServiceHandle::start(input)`.
+The runtime validates the supplied type against the descriptor before registering
+the instance; non-template services accept only unit input for manual dynamic
+creation.
+
+`ProviderEntry` — emitted by `#[provider]`:
+
+```rust
+pub struct ProviderEntry {
+    pub name: &'static str,
+    pub module: &'static str,
+    pub type_id: TypeId,
+    pub params: &'static [ServiceParam],
+    pub eager: bool,
+    pub init: fn(
+        RestartPolicy,
+        CancellationToken,
+    ) -> BoxFuture<'static, Result<(), ProviderInitError>>,
+}
+```
+
+Unlike `ServiceEntry`, providers do not carry a service wrapper or priority. The
+entry owns provider metadata for graph analysis (`type_id`, Provider->Provider
+edges), the eager-init flag, and the type-erased initializer used by startup
+preflight/provider scoping.
 
 Both slices are re-exported for consumers at `service-daemon/src/lib.rs:117` and
 `service-daemon/src/models/mod.rs:22` (`SERVICE_REGISTRY`, `PROVIDER_REGISTRY`,
@@ -65,7 +90,7 @@ Macro behavior is verified with **trybuild** (`trybuild = "1.0.116"`):
   `02_service_rejects_payload.rs`, `11_only_provided_cannot_inject_managed.rs`),
   each paired with a `.stderr` snapshot of the expected diagnostic.
 
-When you add or change a compile error, add/Update the matching `tests/fail/`
+When you add or change a compile error, add/update the matching `tests/fail/`
 fixture and refresh its `.stderr` (trybuild can regenerate it; review the diff).
 Run with `cargo test -p example-macro-tests`.
 

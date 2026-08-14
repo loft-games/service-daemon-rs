@@ -30,7 +30,11 @@ Weak signals (probably don't migrate yet):
 ## How to migrate (incremental — one task at a time)
 
 **1. A long-running loop becomes a `#[service]`.** Keep the loop body; replace the
-spawn/supervise glue with the macro. Dependencies are injected as `Arc<T>`.
+spawn/supervise glue with the macro. Dependencies are injected as `Arc<T>`. If the
+old system dynamically starts many copies with per-instance config, model it as a
+service template with one `#[input] cfg: &Cfg` parameter. Expose its
+daemon-bound `ServiceHandle` from a provider, then create/start instances with
+`create(cfg)` / `start(cfg)`.
 
 ```rust
 use std::time::Duration;
@@ -61,7 +65,7 @@ non-blocking (it brings services up and returns); `wait()` is what keeps the
 process alive. Binding `daemon` matters — dropping it tears everything down.
 
 ```rust
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_registry(registry) // optional: omit to run every discovered service
     .build();
 daemon.run().await; // spawns services wave by wave, returns immediately
@@ -89,6 +93,7 @@ one and follow the order:
 | Step | Skill | What it covers |
 | :--- | :--- | :--- |
 | Wrap a loop as a service | `sd-service-author` | `#[service]` shape, readiness `done()`, interruptible `sleep`, restart semantics. |
+| Model on-demand workers | `sd-service-author` + `sd-daemon-bootstrap` | `#[input]` service templates, `service_handle!`, and `ServiceHandle::create/start`. |
 | Turn shared resources into providers | `sd-provider-author` | `#[provider]`, lazy vs `eager`, `ProviderError::Fatal` vs `Retryable`, DI forms. |
 | React to events / timers / changes | `sd-trigger-author` | `#[trigger]` host families: `Queue` / `Cron` / `Signal` / `Watch`. |
 | Share mutable state, persist across restart | `sd-state-management` | `Arc<RwLock<T>>`, `Watch` notifications, the keyed Shelf. |

@@ -7,13 +7,55 @@
 pub async fn name(dep_a: Arc<A>, dep_b: Arc<B>) -> anyhow::Result<()> { /* ... */ }
 ```
 
-- Every parameter is a dependency injected as `Arc<T>` for a `#[provider]` type.
-  (Triggers, not services, are the place where a non-`Arc` payload parameter
-  appears — see the `sd-trigger-author` skill.)
+- Most parameters are dependencies injected as `Arc<T>`, `Arc<RwLock<T>>`, or
+  `Arc<Mutex<T>>` for `#[provider]` types.
+- A service template may declare **one** startup input parameter:
+  `#[input] cfg: &Config`. It must be an immutable reference with lifetime
+  elision, not `&mut`, not `Arc<T>`, and not combined with `#[payload]`.
+- Bare non-`Arc` parameters without `#[input]` are rejected for services. Trigger
+  payload parameters remain trigger-only; see the `sd-trigger-author` skill.
 - Return `anyhow::Result<()>`. Returning a framework `ServiceError` (below) via
   `.into()` lets the supervisor classify the outcome.
 - `async fn` is strongly preferred. A sync service must be annotated
   `#[allow(sync_handler)]` or it warns at runtime.
+
+### Service templates and on-demand instances
+
+```rust
+pub struct WorkerConfig {
+    pub id: u64,
+    pub heartbeat_interval: std::time::Duration,
+}
+
+#[service(tags = ["on-demand"])]
+pub async fn worker(#[input] config: &WorkerConfig) -> anyhow::Result<()> {
+    service_daemon::done();
+    while service_daemon::sleep(config.heartbeat_interval).await {
+        // work for this instance
+    }
+    Ok(())
+}
+```
+
+Declaring `#[input]` makes the service a template: it is selected by `Registry`,
+but no instance is created during daemon startup. Resolve a daemon-bound
+`ServiceHandle` with `service_handle!(path::to::worker)` in a provider, wrap it
+in a provider type, and inject that wrapper into whichever controller service
+needs to spawn workers. Then call:
+
+- `handle.create(input).await` to register an instance without starting it.
+- `handle.start(input).await` to create and start an instance.
+- `instance.start().await`, `stop().await`, `remove().await`, or
+  `request_stop()` for instance-level control.
+
+The input value is owned by the service instance record and reused across restart
+or reload generations for that instance. Different created instances own distinct
+input allocations.
+
+For services without `#[input]`, the selected definition auto-starts one instance
+during daemon startup. Calling `ServiceHandle::create` on such a handle is only
+valid with unit input (`create(())`); non-unit input is rejected because the
+service did not declare startup input.
 
 ## 2. Lifecycle helpers (call from the service body)
 
@@ -47,6 +89,8 @@ The supervisor classifies how a generation exits:
   not a failure (so it does not accumulate backoff).
 - A provider-init failure during lazy startup is treated as a daemon-wide boundary
   failure (the daemon shuts down).
+- A service-template input type mismatch at `create(input)`/`start(input)` is a
+  runtime validation error before the instance starts.
 
 Use a structured framework error on resource-acquisition paths so the supervisor
 sees the right classification, e.g. `ServiceError::runtime_io("clone TCP listener", e)`

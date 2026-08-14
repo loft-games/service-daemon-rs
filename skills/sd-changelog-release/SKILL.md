@@ -22,6 +22,11 @@ git tag | sort -V   # if v0.1.0-alpha.4 exists, that section is frozen
 If the version is tagged, it shipped — your change belongs under `[Unreleased]`,
 not in the released section.
 
+`AGENTS.md` and `TODO.md` are internal working documents in this repository by
+default. Do not quote or summarize their current-only planning details in
+`CHANGELOG.md`, release notes, PR text, or public docs unless the user explicitly
+asks to publish that internal context.
+
 ## Recording a change
 
 Under `## [Unreleased]`, add a bullet to the right `###` subsection:

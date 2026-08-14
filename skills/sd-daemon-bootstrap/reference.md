@@ -2,7 +2,8 @@
 
 ## 1. `ServiceDaemon::builder()` → `ServiceDaemonBuilder`
 
-Every method is chainable and optional. `build()` is infallible.
+Every method is chainable and optional. `build()` is infallible and returns a
+`DaemonInstanceHandle`.
 
 | Method | Purpose |
 | :--- | :--- |
@@ -13,10 +14,10 @@ Every method is chainable and optional. `build()` is infallible.
 | `with_cancel_token(CancellationToken)` | Supply an external token so something other than a signal can drive shutdown. |
 | `with_trigger_config<C: 'static + Clone + Send + Sync>(C)` | Inject a typed config object visible to trigger hosts. |
 | `with_infra_tags(&[&'static str])` | Mark certain tags as infrastructure for ordering/advisory purposes. |
-| `build()` | Produce the `ServiceDaemon`. Never fails. |
+| `build()` | Produce and register the daemon instance handle. Never fails. |
 
 ```rust
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_registry(registry)
     .with_restart_policy(policy)
     .build();
@@ -33,16 +34,17 @@ let mut daemon = ServiceDaemon::builder()
 
 A registry with no `with_tag` selects nothing extra by tag — be explicit about
 your selection model. `build()` with no registry at all (skip `with_registry`)
-runs every discovered service.
+selects every discovered service. Selected services without `#[input]` auto-start
+one instance; selected service templates with `#[input]` are definition handles
+only until code calls `ServiceHandle::create(input)` or `start(input)`.
 
-## 3. Lifecycle methods on `ServiceDaemon`
+## 3. Lifecycle methods on the daemon handle
 
 | Method | Blocking? | Behavior |
 | :--- | :--- | :--- |
-| `run(&mut self) -> &mut Self` | No | Brings the daemon up wave by wave, then returns. |
-| `wait(&mut self) -> ServiceResult<()>` | Yes | Blocks until SIGINT / SIGTERM / Ctrl+C or the cancel token fires, then performs graceful shutdown. |
+| `run(&self)` | No | Brings the daemon up wave by wave, then returns. |
+| `wait(&self) -> ServiceResult<()>` | Yes | Blocks until SIGINT / SIGTERM / Ctrl+C or the cancel token fires, then performs graceful shutdown. |
 | `shutdown(&self)` | No | Signals shutdown from elsewhere (another task, a handler). |
-| `run_for_duration(self, Duration) -> ServiceResult<()>` | Yes | **`#[cfg(feature = "simulation")]` only** — run, then auto-shutdown after the duration. For deterministic tests. |
 
 The usual pairing is `run().await` then `wait().await?`. `run()` alone does
 not keep the process alive.
@@ -51,7 +53,7 @@ not keep the process alive.
 
 - Startup proceeds in **descending** priority (high values first); shutdown in
   **ascending** priority (low values first).
-- Priority is a `u8`, default `50`. Constants (`service_daemon::Priority`):
+- Priority is a `u8`, default `50`. Constants (`service_daemon::ServicePriority`):
   `EXTERNAL = 0`, `DEFAULT = 50`, `STORAGE = 80`, `SYSTEM = 100`.
 - Each wave waits for its members to become healthy before the next wave starts,
   bounded by `RestartPolicy::wave_spawn_timeout` (and `wave_stop_timeout` on the
@@ -72,8 +74,9 @@ let policy = RestartPolicy::builder()
     .build();
 ```
 
-## 6. Choosing run vs run_for_duration
+## 6. Choosing production vs simulation execution
 
 - Production binary → `run().await; wait().await?;`
-- Deterministic test under the `simulation` feature → `run_for_duration(self, d)`.
+- Deterministic test under the `simulation` feature → `MockContext` /
+  `SimulationHandle::run_for_duration(d)`.
   See the `sd-simulation-testing` skill for the full test harness.

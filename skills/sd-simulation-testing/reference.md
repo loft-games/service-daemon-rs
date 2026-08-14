@@ -1,8 +1,9 @@
 # Simulation testing reference
 
 All types are exported from the crate root under the `simulation` feature:
-`MockContext`, `MockContextBuilder`, `SimulationHandle`. `run_for_duration` is a
-method on `ServiceDaemon`, also `simulation`-gated.
+`MockContext`, `MockContextBuilder`, and `SimulationHandle`. Simulation runs are
+driven through `SimulationHandle`; production `ServiceDaemon` does not expose
+these helpers.
 
 ## 1. `MockContext` / `MockContextBuilder` (pre-start setup)
 
@@ -15,12 +16,13 @@ method on `ServiceDaemon`, also `simulation`-gated.
 | `with_status(service_instance_id, status) -> Self` | Pre-set a service's lifecycle status (e.g. simulate a dependency's state). |
 | `with_provider_override::<T: 'static + Send + Sync + Clone>(value) -> Self` | Install a fake provider value into the sandbox scope before start. |
 | `with_logging(enable: bool) -> Self` | Include framework logging services. Default `true`; set `false` for lightweight tests. |
-| `build() -> (ServiceDaemonBuilder, SimulationHandle)` | Produce the isolated builder + the handle. |
+| `with_registry(Registry) -> Self` | Select the real service(s) to run inside the isolated sandbox. |
+| `build() -> SimulationHandle` | Produce the isolated daemon handle. |
 
-The returned `ServiceDaemonBuilder` is isolated: an empty registry (no
-auto-discovery), a testing restart policy, and the pre-filled resources injected.
-Call `.with_registry(Registry::builder().with_tag("...").build())` to opt the real
-service(s) under test in by tag, then `.build()` the daemon.
+The returned `SimulationHandle` wraps an isolated daemon: empty registry by
+default, a testing restart policy, and pre-filled resources injected. Call
+`.with_registry(Registry::builder().with_tag("...").build())` before `.build()` to
+opt the real service(s) under test in by tag.
 
 ## 2. `SimulationHandle` (runtime mutate + read)
 
@@ -30,45 +32,69 @@ Cloneable; holds `Arc`-backed resources shared with the running daemon.
 
 | Method | Effect |
 | :--- | :--- |
-| `set_shelf::<T>(service_instance_id, key, value)` | Inject a shelf entry mid-flight; visible on the service's next `unshelve`. |
-| `set_status(service_instance_id, status)` | Override lifecycle status and notify watchers. |
-| `trigger_reload(&service_instance_id)` | Fire the service's reload signal (wakes a `Watch` / reload waiter). |
+| `run().await` / `wait().await` / `shutdown()` | Start, wait for, or stop the sandbox daemon. |
+| `run_for_duration(duration).await` | Run the sandbox daemon for a bounded duration and shut it down. |
+| `service_instances() -> Vec<ServiceInstanceHandle>` | List runtime instance handles after the runner has spawned services. |
+| `service_instances_for(&ServiceHandle) -> Vec<ServiceInstanceHandle>` | List runtime instance handles for one selected service definition. |
+| `set_shelf::<T>(&ServiceInstanceHandle, key, value)` | Inject a shelf entry mid-flight; visible on the service's next `unshelve`. |
+| `set_status(&ServiceInstanceHandle, status)` | Override lifecycle status and notify watchers. |
+| `trigger_reload(&ServiceInstanceHandle)` | Fire the service's reload signal (wakes a `Watch` / reload waiter). |
 | `override_provider::<T: 'static + Send + Sync + Clone>(value)` | Swap a provider binding; watching generations reload via the provider watch path. |
-| `service_instance_ids() -> Vec<ServiceInstanceId>` | List runtime instance IDs **after** the runner has spawned services. |
 
 **Lock-free readers (safe across `.await`):**
 
 | Method | Returns |
 | :--- | :--- |
-| `get_shelf::<T: Clone>(service_instance_id, key) -> Option<T>` | Owned clone of a shelf value. The recommended way to assert. |
-| `get_status(service_instance_id) -> Option<ServiceStatus>` | Owned current status. |
-| `has_shelf(service_instance_id, key) -> bool` | Whether a key exists. |
-| `shelf_keys(service_instance_id) -> Vec<String>` | All shelf keys for the service. |
+| `get_shelf::<T: Clone>(&ServiceInstanceHandle, key) -> Option<T>` | Owned clone of a shelf value. The recommended way to assert. |
+| `get_status(&ServiceInstanceHandle) -> Option<ServiceStatus>` | Owned current status. |
+| `has_shelf(&ServiceInstanceHandle, key) -> bool` | Whether a key exists. |
+| `shelf_keys(&ServiceInstanceHandle) -> Vec<String>` | All shelf keys for the service. |
 
 ## 3. Driving the run
 
-`ServiceDaemon::run_for_duration(self, Duration) -> ServiceResult<()>` runs the
-daemon, then auto-shuts-down after the duration. Deterministic and `simulation`
--only. For a **mid-flight** mutation, spawn the run and mutate via the handle while
-it is in flight:
+`SimulationHandle::run_for_duration(Duration) -> ServiceResult<()>` runs the
+sandbox daemon, then auto-shuts-down after the duration. Deterministic and
+`simulation`-only. For a **mid-flight** mutation, clone the handle, spawn the run,
+then discover `ServiceInstanceHandle`s after the runner has started:
 
 ```rust
-let h = handle.clone();
-let task = tokio::spawn(async move { daemon.run_for_duration(Duration::from_secs(3)).await.ok(); });
+let runner = simulation.clone();
+let task = tokio::spawn(async move { runner.run_for_duration(Duration::from_secs(3)).await.ok(); });
 tokio::time::sleep(Duration::from_millis(200)).await; // let services spawn
-h.set_shelf::<String>(svc_id, "dynamic_key", "injected".into());
+let instance = simulation
+    .service_instances()
+    .into_iter()
+    .find(|instance| instance.name() == "service_under_test")
+    .expect("service should be materialized");
+simulation.set_shelf::<String>(&instance, "dynamic_key", "injected".into());
 task.await.ok();
-assert_eq!(h.get_shelf::<String>(svc_id, "dynamic_result"), Some(/* ... */));
+assert_eq!(simulation.get_shelf::<String>(&instance, "dynamic_result"), Some(/* ... */));
 ```
 
-## 4. Obtaining a `ServiceInstanceId`
+## 4. Obtaining service IDs and handles
 
 `with_shelf` / `with_status` need a `ServiceInstanceId` *before* the daemon starts.
-For current auto-start singleton services, derive the static `ServiceEntryId` from
-the service's `SERVICE_REGISTRY` position and convert it with
-`ServiceInstanceId::from(entry_id)`. After the runner has spawned services you can
-enumerate runtime IDs with `handle.service_instance_ids()`. Keep the
-service-under-test simple and single, so its instance ID is unambiguous.
+Build the same `Registry` that the simulation will use, then read the materialized
+ID from the selected `ServiceDescription`:
+
+```rust
+let registry = Registry::builder().with_tag("sim_shelf").build();
+let svc_id = registry
+    .services()
+    .iter()
+    .find(|service| service.name() == "shelf_reader_service")
+    .and_then(|service| service.instance_ids().first().copied())
+    .expect("service should be materialized in registry");
+let simulation = MockContext::builder()
+    .with_shelf::<String>(svc_id, "config_key", "hello".into())
+    .with_registry(registry)
+    .build();
+```
+
+After the runner has spawned services, use `SimulationHandle::service_instances()`
+or `service_instances_for(&ServiceHandle)` and pass `&ServiceInstanceHandle` to
+runtime mutation/read APIs. Keep the service-under-test simple and single, so the
+selected instance is unambiguous.
 
 ## 5. `ServiceStatus` values
 

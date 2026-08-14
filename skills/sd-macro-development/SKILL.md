@@ -30,7 +30,7 @@ Each macro module separates *parsing the input* from *emitting tokens*:
 
 | Module | Files |
 | :--- | :--- |
-| `service/` | `mod.rs` (orchestration), `codegen.rs` (wrapper + entry emission). |
+| `service/` | `mod.rs` (orchestration) and `parser.rs` (named attributes). Shared wrapper + entry helpers live in `common.rs`. |
 | `provider/` | `mod.rs`, `parser.rs` (attribute parsing), `templates.rs` (special provider types like `Queue`/`Notify`), `struct_gen.rs` (DI impls). |
 | `trigger/` | `mod.rs`, `parser.rs` (attributes), `codegen.rs` (host selection + wrapper). |
 | `common/` | shared helpers across the three. |
@@ -46,15 +46,17 @@ Generated code registers itself into two `linkme` distributed slices defined in
 ```rust
 #[allow(unsafe_code)]            // linkme expands to #[link_section], which
 #[distributed_slice]            // edition 2024 treats as unsafe
-pub static SERVICE_REGISTRY: [ServiceEntry];   // service.rs:304
+pub static SERVICE_REGISTRY: [ServiceEntry];
 
 #[allow(unsafe_code)]
 #[distributed_slice]
-pub static PROVIDER_REGISTRY: [ProviderEntry]; // service.rs:314
+pub static PROVIDER_REGISTRY: [ProviderEntry];
 ```
 
 `#[service]` / `#[trigger]` emit a `ServiceEntry`; `#[provider]` emits a
-`ProviderEntry`. Their fields are the contract between codegen and the runtime.
+`ProviderEntry`. `ServiceEntry.input` distinguishes auto-start services from
+on-demand service templates, and generated wrappers now receive a
+`ServiceInvocationContext` rather than a bare cancellation token.
 
 ## Companions
 

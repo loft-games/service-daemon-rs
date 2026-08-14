@@ -47,7 +47,8 @@ declaring an example-local error type.
 
 ## Source of truth
 
-- Reference examples: `examples/minimal/`, `examples/triggers/`, `examples/web-api/`
+- Reference examples: `examples/minimal/`, `examples/triggers/`,
+  `examples/web-api/`, `examples/on-demand/`
 - Contributor workflow: `docs/CONTRIBUTING.md`
   (`cargo test --workspace`, `cargo expand -p example-complete`,
   `cargo clippy --workspace -- -D warnings`, Conventional Commits)

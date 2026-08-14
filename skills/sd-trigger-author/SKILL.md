@@ -1,6 +1,6 @@
 ---
 name: sd-trigger-author
-description: "[user] Author service-daemon-rs #[trigger] handlers. Use when writing or reviewing a #[trigger] for the service-daemon Rust framework: choosing the host (Cron/Queue/Event/Watch), wiring it to a provider target, and declaring the payload (by value) vs dependencies (Arc<T>)."
+description: "[user] Author service-daemon-rs #[trigger] handlers. Use when writing or reviewing a #[trigger] for the service-daemon Rust framework: choosing the host (Cron/Queue/Event/Watch), wiring it to a provider target, and declaring the payload by value versus Arc dependencies."
 ---
 
 # Authoring `#[trigger]` for service-daemon-rs
@@ -23,8 +23,11 @@ This SKILL.md is the entry point. Load the companions for depth:
 #[trigger(Host(Target), priority = N)]
 ```
 
-`Host` is one of the host families below; `Target` is the `#[provider]` type that
-supplies the event source. Handlers are `async` and return `anyhow::Result<()>`.
+`Host` is a Rust type path implementing `TriggerHost<Target>`; `Target` is the
+`#[provider]` type that supplies the event source. Built-in aliases are available
+as short names through the prelude and under `TT::*`, but the parser intentionally
+does not validate against a closed keyword list. Handlers are `async` and return
+`anyhow::Result<()>`.
 
 | Host family | Fires when… | Target provider | Handler payload |
 | :--- | :--- | :--- | :--- |

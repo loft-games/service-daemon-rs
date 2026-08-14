@@ -67,7 +67,9 @@ pub struct ConfigurableListener;
 #[provider(UnixListen("/run/myapp/sock"))]
 pub struct ControlSocket;
 
-#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]
+const PEER_SOCK_PATH: &str = "/run/peer/sock";
+
+#[provider(UnixConnect(PEER_SOCK_PATH), env = "PEER_SOCK", eager = true)]
 pub struct PeerSocket;
 
 #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]
@@ -87,9 +89,12 @@ Syntax rules (enforced by the parser):
 
 - `capacity = N` is only valid on `Queue`/`BQueue` templates and must be `> 0`.
 - `Listen`/`UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect` take
-  a **string literal** address/path; `LocalIpcListen`/`LocalIpcConnect` take a
-  logical name containing only ASCII letters, digits, `.`, `_`, and `-`;
-  `Queue`/`BQueue` take a **type**.
+  a string literal or a path to a `const/static &'static str` address/path.
+  `LocalIpcListen`/`LocalIpcConnect` take a string literal or `const/static
+  &'static str` logical name containing only ASCII letters, digits, `.`, `_`, and
+  `-`; `Queue`/`BQueue` take a **type**.
+- Dynamic string expressions such as `format!(...)` or function calls are outside
+  the public contract for template paths and env names.
 - Named attributes (`env`, `capacity`, `eager`) go **outside** the template
   parentheses: `#[provider(Listen("addr"), env = "VAR")]`, never
   `#[provider(Listen("addr", env = "VAR"))]` (that is a compile error).

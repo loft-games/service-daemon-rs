@@ -3,11 +3,12 @@
 ## Changing an entry struct without updating every emitter
 
 `ServiceEntry` is emitted by **both** `#[service]` and `#[trigger]`. Adding,
-removing, or reordering a field means updating both `service/codegen.rs` and
-`trigger/codegen.rs` (and `provider/struct_gen.rs` for `ProviderEntry`). Miss one
-and the generated code stops compiling — or worse, compiles with a wrong field
-order. The struct in `service-daemon/src/models/service.rs` and the codegen are a
-single contract; change them together.
+removing, or reordering a field means updating the shared entry emitter in
+`common.rs` plus the service/trigger call sites that populate
+`RegistryEntryInput` (and `provider/impls.rs` for `ProviderEntry`). Miss one and
+the generated code stops compiling — or worse, compiles with a wrong field order.
+The struct in `service-daemon/src/models/service.rs` and the codegen are a single
+contract; change them together.
 
 ## Dropping `#[allow(unsafe_code)]` on the distributed slices
 
@@ -27,10 +28,11 @@ expand this into every target triple.
 
 ## Editing the parser and codegen as one blob
 
-The modules deliberately split parsing (`parser.rs`) from emission (`codegen.rs` /
-`struct_gen.rs` / `templates.rs`). Folding attribute parsing into the token-emitting
-code makes both harder to test and review. Add new attribute handling in the
-parser; add new generated shapes in codegen.
+The modules deliberately split parsing (`parser.rs`) from emission (`common.rs`,
+`trigger/codegen.rs`, `provider/impls.rs`, `provider/struct_gen.rs`, and
+`provider/templates/`). Folding attribute parsing into token-emitting code makes
+both harder to test and review. Add new attribute handling in the parser; add new
+generated shapes in codegen.
 
 ## Forgetting to refresh trybuild `.stderr` snapshots
 

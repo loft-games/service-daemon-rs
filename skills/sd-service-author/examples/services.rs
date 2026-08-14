@@ -46,3 +46,19 @@ pub async fn worker(cfg: Arc<AppConfig>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// On-demand service template. The #[input] value is owned by each created
+// service instance and borrowed by every generation of that instance.
+pub struct WorkerConfig {
+    pub id: u64,
+    pub heartbeat_interval: Duration,
+}
+
+#[service(tags = ["on-demand"])]
+pub async fn on_demand_worker(#[input] cfg: &WorkerConfig) -> anyhow::Result<()> {
+    service_daemon::done();
+    while service_daemon::sleep(cfg.heartbeat_interval).await {
+        process_worker(cfg.id).await?;
+    }
+    Ok(())
+}

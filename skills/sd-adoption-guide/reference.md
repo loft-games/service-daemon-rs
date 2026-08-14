@@ -11,6 +11,7 @@ Map each existing construct to its framework primitive:
 | You currently have | Becomes |
 | :--- | :--- |
 | A `tokio::spawn`ed loop you supervise by hand | a `#[service]` |
+| Dynamically-created worker instances with per-instance config | a `#[service]` template with `#[input] cfg: &Cfg` plus daemon-bound `ServiceHandle::create(cfg)` / `start(cfg)` |
 | A shared client / pool / config behind a global or `OnceCell` | a `#[provider]` injected as `Arc<T>` |
 | An `mpsc`/`broadcast` consumer task | a `#[trigger(Queue(..))]` |
 | A timer / interval task | a `#[trigger(Cron(..))]` |
@@ -28,9 +29,13 @@ Dependencies must exist before the things that need them, so port in this order:
    body; replace the spawn/supervise glue with the macro. Use the interruptible
    `service_daemon::sleep(d).await` (returns `false` on shutdown) instead of
    `tokio::time::sleep`, and `service_daemon::is_shutdown()` as the loop guard.
-3. **Triggers last.** Convert event consumers, timers, and reload reactions into
+3. **On-demand services when needed.** If an old task is instantiated with
+   runtime config, declare one `#[input] cfg: &Cfg` parameter, select the template
+   by tag, expose a daemon-bound `ServiceHandle` from a provider, and create
+   instances through that handle.
+4. **Triggers last.** Convert event consumers, timers, and reload reactions into
    `#[trigger]`s so the framework drives them.
-4. **Bootstrap.** Assemble `main()` with `ServiceDaemon::builder()`, then
+5. **Bootstrap.** Assemble `main()` with `ServiceDaemon::builder()`, then
    `daemon.run().await; daemon.wait().await?;`.
 
 ## 3. Readiness and the handshake

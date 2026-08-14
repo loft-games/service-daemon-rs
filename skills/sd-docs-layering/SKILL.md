@@ -34,6 +34,11 @@ Ask, in order:
 4. *Is this internal mechanism explanation, not something a user calls?* →
    `docs/architecture/`.
 
+`AGENTS.md` and `TODO.md` are internal working documents by default in this repo:
+use them to guide current work, but do not migrate their current-only blockers,
+handoff notes, or planning details into public docs, changelog entries, PR text,
+or commit messages unless the user explicitly says that boundary is overridden.
+
 ## Keep the beginner path clean
 
 The tutorial is a curated curve. Strict, advanced, or rarely-needed APIs do **not**

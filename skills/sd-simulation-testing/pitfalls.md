@@ -2,17 +2,18 @@
 
 ## Forgetting to enable the `simulation` feature
 
-`MockContext`, `SimulationHandle`, and `ServiceDaemon::run_for_duration` only exist
-under `features = ["simulation"]`. Without it the test won't compile (the symbols
-are absent). Enable the feature on the `service-daemon` dependency in the test
-crate.
+`MockContext`, `SimulationHandle`, and `SimulationHandle::run_for_duration` only
+exist under `features = ["simulation"]`. Without it the test won't compile (the
+symbols are absent). Enable the feature on the `service-daemon` dependency in the
+test crate.
 
-## Calling `service_instance_ids()` before services have spawned
+## Enumerating runtime handles before services have spawned
 
 The status plane is populated as the runner spawns services. Calling
-`handle.service_instance_ids()` immediately after `run_for_duration` starts may
-return an empty or partial list. For mid-flight work, let services spawn first
-(a short `tokio::time::sleep`) before enumerating or mutating by instance ID.
+`simulation.service_instances()` immediately after `run_for_duration` starts may
+return an empty or partial list. For mid-flight work, let services spawn first (a
+short `tokio::time::sleep`) before enumerating handles. Runtime mutation/read APIs
+take `&ServiceInstanceHandle`, not a bare `ServiceInstanceId`.
 
 ## Expecting `run_for_duration` to block forever
 

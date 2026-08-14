@@ -1,18 +1,18 @@
 ---
 name: sd-service-author
-description: "[user] Author service-daemon-rs #[service] functions. Use when writing or reviewing a #[service] for the service-daemon Rust framework: the function signature, dependency injection as Arc<T>, the shutdown-aware loop, readiness handshake (done()), and fatal-vs-recoverable error semantics."
+description: "[user] Author service-daemon-rs #[service] functions. Use when writing or reviewing a #[service] for the service-daemon Rust framework: Arc dependency injection, optional #[input] service-template startup values, shutdown-aware loops, readiness handshake (done()), and fatal-vs-recoverable error semantics."
 ---
 
 # Authoring `#[service]` for service-daemon-rs
 
 A `#[service]` is a long-running async task the daemon supervises: it resolves the
-function's dependencies, places it on a runtime, starts it in a priority wave,
-restarts it on recoverable failure, and signals shutdown.
+function's dependencies, places it on a runtime, starts auto-start services in a
+priority wave, restarts generations on recoverable failure, and signals shutdown.
 
 This SKILL.md is the entry point. Load the companions for depth:
 
 - `reference.md` — signature rules, lifecycle helpers, error/restart semantics,
-  scheduling modes, and the readiness handshake.
+  service-template `#[input]`, scheduling modes, and the readiness handshake.
 - `pitfalls.md` — the mistakes that compile but misbehave.
 - `examples/` — copy-paste service templates.
 
@@ -37,6 +37,9 @@ pub async fn heartbeat(cfg: Arc<AppConfig>) -> anyhow::Result<()> {
 
 - Dependencies are injected as `Arc<T>` (every `#[provider]` type). The macro
   resolves them; you never construct them.
+- A service template may add one startup input parameter as `#[input] cfg: &T`.
+  Templates are selected by the registry but do not auto-start; create instances
+  through a daemon-bound `ServiceHandle::create(input)` or `start(input)`.
 - Prefer `async fn`. A synchronous service requires `#[allow(sync_handler)]` or it
 emits a runtime warning.
 - Register happens automatically (link-time); no manual registration.
@@ -53,6 +56,8 @@ emits a runtime warning.
    with no restart. An ordinary `Err(..)` or panic restarts it with backoff. A
    clean `Ok(())` starts a fresh generation immediately (not counted as failure).
 4. **Set `priority`** to order startup waves (high→low) and shutdown (low→high).
+5. **Use `#[input]` only for on-demand service templates.** The input is borrowed
+   as `&T` for each generation and is owned by the service instance record.
 
 See `reference.md` for the full lifecycle and error model, and the
 `sd-daemon-bootstrap` skill (if installed) for wiring services into a daemon.

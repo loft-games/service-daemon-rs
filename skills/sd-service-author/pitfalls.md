@@ -35,3 +35,32 @@ explicitly and return a structured `ServiceError` (e.g.
 
 A synchronous `#[service] fn` warns at runtime. Either make it `async`, or annotate
 `#[allow(sync_handler)]` when it is intentionally synchronous and does no I/O.
+
+## Bare service parameters without `#[input]`
+
+Services do not accept trigger-style payload parameters. A non-`Arc` service
+parameter must be the single on-demand startup input and must be marked
+`#[input]`. Otherwise wrap dependencies as `Arc<T>`, `Arc<RwLock<T>>`, or
+`Arc<Mutex<T>>`.
+
+## Invalid `#[input]` shape
+
+`#[input]` is only for service templates and must look like
+`#[input] cfg: &Config`: immutable reference, lifetime elision, no `Arc`, no
+`&mut`, and only one input parameter per service. Wrap multiple values in one
+owned config struct and pass that to `ServiceHandle::create(input)` or
+`ServiceHandle::start(input)`.
+
+## Expecting service templates to auto-start
+
+A service with `#[input]` is selected by the registry but starts with zero
+instances. Resolve a daemon-bound `ServiceHandle` and call `create(input)` or
+`start(input)`; otherwise the template definition is available but no worker body
+runs.
+
+## Passing input to a non-template service handle
+
+Services without `#[input]` already auto-start one instance when selected. If you
+manually create another instance through a `ServiceHandle`, pass `()` only.
+Passing any other value is rejected with "does not declare #[input] but received
+input type".

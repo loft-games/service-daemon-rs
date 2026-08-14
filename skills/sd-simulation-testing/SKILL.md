@@ -25,30 +25,41 @@ use service_daemon::{MockContext, Registry};
 
 #[tokio::test]
 async fn service_reads_shelved_config() {
-    // 1. Build the sandbox: pre-fill shelf, override providers, etc.
-    let (builder, handle) = MockContext::builder()
-        .with_shelf::<String>(svc_id, "config_key", "hello".into())
-        .build(); // -> (ServiceDaemonBuilder, SimulationHandle)
+    // 1. Select the real service under test and derive its pre-start ID.
+    let registry = Registry::builder().with_tag("sim_shelf").build();
+    let svc_id = registry
+        .services()
+        .iter()
+        .find(|service| service.name() == "shelf_reader_service")
+        .and_then(|service| service.instance_ids().first().copied())
+        .expect("service should be materialized in registry");
 
-    // 2. Select the real service(s) under test by tag, then build the daemon.
-    let mut daemon = builder
-        .with_registry(Registry::builder().with_tag("sim_shelf").build())
+    // 2. Build the sandbox: pre-fill shelf, override providers, etc.
+    let simulation = MockContext::builder()
+        .with_shelf::<String>(svc_id, "config_key", "hello".into())
+        .with_registry(registry)
         .build();
 
-    // 3. Run deterministically for a bounded time (simulation-only API).
-    daemon.run_for_duration(Duration::from_millis(500)).await.ok();
+    // 3. Run deterministically for a bounded time.
+    simulation.run_for_duration(Duration::from_millis(500)).await.ok();
 
-    // 4. Assert via the lock-free read API on the handle.
+    // 4. Assert via the lock-free read API on the runtime handle.
+    let service = simulation
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == "shelf_reader_service")
+        .expect("service should be materialized in simulation daemon");
     assert_eq!(
-        handle.get_shelf::<String>(svc_id, "read_result"),
+        simulation.get_shelf::<String>(&service, "read_result"),
         Some("hello".to_string())
     );
 }
 ```
 
-`MockContext::builder().build()` returns a **`(ServiceDaemonBuilder, SimulationHandle)`**
-pair. The builder is pre-isolated (no auto-discovery) — you opt services in by tag.
-`run_for_duration(d)` is the deterministic driver and exists **only** under the
+`MockContext::builder().with_registry(...).build()` returns a cloneable
+**`SimulationHandle`** wrapping an isolated daemon. The builder starts with an
+empty registry; opt services in by tag before `build()`. `run_for_duration(d)` is
+the deterministic driver on `SimulationHandle` and exists **only** under the
 `simulation` feature.
 
 ## The two roles
@@ -58,12 +69,13 @@ pair. The builder is pre-isolated (no auto-discovery) — you opt services in by
 - **`SimulationHandle`** (cloneable) — *during/after* the run: mutate with
   `set_shelf` / `set_status` / `trigger_reload` / `override_provider`, and read
   with the lock-free `get_shelf` / `get_status` / `has_shelf` / `shelf_keys`.
+  Runtime mutation/read APIs take `&ServiceInstanceHandle`.
 
 ## Companions
 
 - `reference.md` — every `MockContextBuilder` and `SimulationHandle` method,
-  `ServiceEntryId` to `ServiceInstanceId` discovery, and the mid-flight mutation
-  pattern.
+  pre-start `ServiceInstanceId` discovery, runtime `ServiceInstanceHandle`
+  discovery, and the mid-flight mutation pattern.
 - `pitfalls.md` — the traps (forgetting the feature, IDs before spawn, holding
   locks across await, no-op province of `run_for_duration`).
 - `examples/simulation_test.rs` — a full pre-fill + mid-flight + assert test.

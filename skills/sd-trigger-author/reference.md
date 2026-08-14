@@ -24,7 +24,9 @@
 
 ## 3. Handler signature: payload vs dependencies
 
-Triggers are the only place a non-`Arc` parameter is allowed — it is the **payload**.
+For triggers, a non-`Arc` parameter is the **payload**. Services have their own
+separate non-`Arc` exception, `#[input] cfg: &Cfg`, for on-demand service
+templates; do not use trigger payload rules for services.
 
 ```rust
 // Queue: the published item is passed by value (auto-cloned per subscriber).
