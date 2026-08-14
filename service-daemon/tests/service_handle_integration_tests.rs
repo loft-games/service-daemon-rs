@@ -138,11 +138,7 @@ async fn selected_handle_consumer(
 ) -> anyhow::Result<()> {
     assert_eq!(handle.0.name(), "selected_worker");
     assert!(
-        handle
-            .0
-            .instances()
-            .iter()
-            .any(|instance| instance.name() == "selected_worker"),
+        wait_for_service_handle_instance(&handle.0, "selected_worker").await,
         "service handle should list instances for the selected service in its daemon"
     );
     HANDLE_CONSUMER_READY.store(true, Ordering::SeqCst);
@@ -588,6 +584,23 @@ fn reset_handle(slot: &Mutex<Option<ServiceHandle>>) {
     slot.lock()
         .expect("service handle mutex should not be poisoned")
         .take();
+}
+
+async fn wait_for_service_handle_instance(
+    handle: &ServiceHandle,
+    instance_name: &'static str,
+) -> bool {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !handle
+            .instances()
+            .iter()
+            .any(|instance| instance.name() == instance_name)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 fn assert_same_allocation(ptrs: &[usize], expected_len: usize, label: &'static str) {
