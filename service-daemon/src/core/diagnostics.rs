@@ -151,6 +151,7 @@ pub(crate) struct ProviderFailureSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RestartDecisionKind {
     Immediate,
+    BackoffNormalExit,
     BackoffRecoverableError,
     BackoffPanic,
     BackoffIsolatedStartupFailure,
@@ -839,6 +840,12 @@ impl DiagnosticsStore {
         failures.push_back(failure);
     }
 
+    pub(crate) fn remove_service_instance(&self, service_instance_id: ServiceInstanceId) {
+        self.services.remove(&service_instance_id);
+        self.generations
+            .retain(|(entry_service_id, _), _| *entry_service_id != service_instance_id);
+    }
+
     #[cfg(test)]
     pub(crate) fn service_snapshot(
         &self,
@@ -1003,6 +1010,49 @@ mod tests {
                 elapsed,
             ),
         );
+    }
+
+    #[test]
+    fn remove_service_instance_drops_service_and_generation_diagnostics_only() {
+        let store = DiagnosticsStore::new();
+        let removed_id = ServiceInstanceId::new(uuid::Uuid::from_u128(31));
+        let retained_id = ServiceInstanceId::new(uuid::Uuid::from_u128(32));
+
+        let removed_first =
+            store.register_generation(removed_id, "removed", 1, RuntimeLane::Standard);
+        removed_first.record_exit(GenerationExitKind::NormalExit);
+        let removed_second =
+            store.register_generation(removed_id, "removed", 2, RuntimeLane::HighPriority);
+        removed_second.record_exit(GenerationExitKind::RecoverableError);
+        let retained = store.register_generation(retained_id, "retained", 1, RuntimeLane::Standard);
+        retained.record_exit(GenerationExitKind::Panic);
+        record_standard_lane_probe(&store, Duration::from_millis(275));
+        store.record_provider_failure(ProviderFailureSnapshot {
+            provider: "RetainedProvider",
+            phase: ProviderFailureRuntimePhase::StartupEagerInit,
+            boundary: ProviderFailureBoundaryKind::EagerInit,
+            source: ProviderFailureSourceKind::UserProviderFatal,
+            failure_kind: ProviderFailureKind::Fatal,
+            retry: None,
+            error: "provider failed".to_owned(),
+        });
+
+        store.remove_service_instance(removed_id);
+
+        assert!(store.service_snapshot(removed_id).is_none());
+        assert!(store.generation_snapshot(removed_id, 1).is_none());
+        assert!(store.generation_snapshot(removed_id, 2).is_none());
+        assert!(store.service_snapshot(retained_id).is_some());
+        assert!(store.generation_snapshot(retained_id, 1).is_some());
+        assert_eq!(
+            store
+                .lane_snapshot(RuntimeLane::Standard)
+                .aggregate
+                .runtime_probe
+                .completed,
+            1
+        );
+        assert_eq!(store.snapshot().provider_failures.len(), 1);
     }
 
     fn interpretation_labels(

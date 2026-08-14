@@ -3,6 +3,7 @@ use service_daemon::{
     ServiceStatus, done, provider, service, service_handle, sleep, wait_shutdown,
 };
 use std::collections::HashSet;
+use std::future::pending;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
@@ -17,6 +18,19 @@ static ON_DEMAND_INTERNAL_PROGRESS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static ON_DEMAND_WORKER_INPUT_SUM: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+static REMOVE_HANDLES_READY: AtomicBool = AtomicBool::new(false);
+static STUBBORN_REMOVE_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static PEER_REMOVE_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static STUBBORN_REMOVE_STARTS: AtomicUsize = AtomicUsize::new(0);
+static PEER_REMOVE_STARTS: AtomicUsize = AtomicUsize::new(0);
+static CANCEL_REMOVE_HANDLES_READY: AtomicBool = AtomicBool::new(false);
+static STUBBORN_CANCEL_REMOVE_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static STUBBORN_CANCEL_REMOVE_STARTS: AtomicUsize = AtomicUsize::new(0);
+static STOP_HANDLES_READY: AtomicBool = AtomicBool::new(false);
+static STUBBORN_STOP_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static PEER_STOP_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static STUBBORN_STOP_STARTS: AtomicUsize = AtomicUsize::new(0);
+static PEER_STOP_STARTS: AtomicUsize = AtomicUsize::new(0);
 static LIFECYCLE_HANDLES_READY: AtomicBool = AtomicBool::new(false);
 static NORMAL_RESTART_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
 static RECOVERABLE_RESTART_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
@@ -52,6 +66,21 @@ struct OnDemandWorkerHandle(ServiceHandle);
 
 #[derive(Clone)]
 struct InternalWorkerHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct StubbornRemoveHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct PeerRemoveHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct StubbornCancelRemoveHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct StubbornStopHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct PeerStopHandle(ServiceHandle);
 
 #[derive(Clone)]
 struct NormalRestartWorkerHandle(ServiceHandle);
@@ -203,6 +232,119 @@ async fn internal_on_demand_controller(
             .expect("started service should remove on-demand worker");
         ON_DEMAND_INTERNAL_PROGRESS.store(12, Ordering::SeqCst);
     });
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[service(tags = ["__service_handle_graceful_remove__"])]
+async fn stubborn_remove_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
+    STUBBORN_REMOVE_STARTS.fetch_add(1, Ordering::SeqCst);
+    done();
+    pending::<()>().await;
+    Ok(())
+}
+
+#[provider]
+fn stubborn_remove_handle() -> Result<StubbornRemoveHandle, ProviderError> {
+    service_handle!(stubborn_remove_worker).map(StubbornRemoveHandle)
+}
+
+#[service(tags = ["__service_handle_graceful_remove__"])]
+async fn peer_remove_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
+    PEER_REMOVE_STARTS.fetch_add(1, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[provider]
+fn peer_remove_handle() -> Result<PeerRemoveHandle, ProviderError> {
+    service_handle!(peer_remove_worker).map(PeerRemoveHandle)
+}
+
+#[service(tags = ["__service_handle_graceful_remove__"], priority = 80)]
+async fn remove_handle_catalog(
+    stubborn: std::sync::Arc<StubbornRemoveHandle>,
+    peer: std::sync::Arc<PeerRemoveHandle>,
+) -> anyhow::Result<()> {
+    *STUBBORN_REMOVE_HANDLE
+        .lock()
+        .expect("stubborn remove handle mutex should not be poisoned") = Some(stubborn.0.clone());
+    *PEER_REMOVE_HANDLE
+        .lock()
+        .expect("peer remove handle mutex should not be poisoned") = Some(peer.0.clone());
+    REMOVE_HANDLES_READY.store(true, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[service(tags = ["__service_handle_cancelled_remove__"])]
+async fn stubborn_cancel_remove_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
+    STUBBORN_CANCEL_REMOVE_STARTS.fetch_add(1, Ordering::SeqCst);
+    done();
+    pending::<()>().await;
+    Ok(())
+}
+
+#[provider]
+fn stubborn_cancel_remove_handle() -> Result<StubbornCancelRemoveHandle, ProviderError> {
+    service_handle!(stubborn_cancel_remove_worker).map(StubbornCancelRemoveHandle)
+}
+
+#[service(tags = ["__service_handle_cancelled_remove__"], priority = 80)]
+async fn cancel_remove_handle_catalog(
+    stubborn: std::sync::Arc<StubbornCancelRemoveHandle>,
+) -> anyhow::Result<()> {
+    *STUBBORN_CANCEL_REMOVE_HANDLE
+        .lock()
+        .expect("stubborn cancellation remove handle mutex should not be poisoned") =
+        Some(stubborn.0.clone());
+    CANCEL_REMOVE_HANDLES_READY.store(true, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[service(tags = ["__service_handle_graceful_stop__"])]
+async fn stubborn_stop_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
+    STUBBORN_STOP_STARTS.fetch_add(1, Ordering::SeqCst);
+    done();
+    pending::<()>().await;
+    Ok(())
+}
+
+#[provider]
+fn stubborn_stop_handle() -> Result<StubbornStopHandle, ProviderError> {
+    service_handle!(stubborn_stop_worker).map(StubbornStopHandle)
+}
+
+#[service(tags = ["__service_handle_graceful_stop__"])]
+async fn peer_stop_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
+    PEER_STOP_STARTS.fetch_add(1, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[provider]
+fn peer_stop_handle() -> Result<PeerStopHandle, ProviderError> {
+    service_handle!(peer_stop_worker).map(PeerStopHandle)
+}
+
+#[service(tags = ["__service_handle_graceful_stop__"], priority = 80)]
+async fn stop_handle_catalog(
+    stubborn: std::sync::Arc<StubbornStopHandle>,
+    peer: std::sync::Arc<PeerStopHandle>,
+) -> anyhow::Result<()> {
+    *STUBBORN_STOP_HANDLE
+        .lock()
+        .expect("stubborn stop handle mutex should not be poisoned") = Some(stubborn.0.clone());
+    *PEER_STOP_HANDLE
+        .lock()
+        .expect("peer stop handle mutex should not be poisoned") = Some(peer.0.clone());
+    STOP_HANDLES_READY.store(true, Ordering::SeqCst);
+    done();
     wait_shutdown().await;
     Ok(())
 }
@@ -370,6 +512,69 @@ async fn wait_for_lifecycle_handles() {
     })
     .await
     .expect("lifecycle handle catalog should publish service handles");
+}
+
+async fn wait_for_remove_handles() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !REMOVE_HANDLES_READY.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("remove handle catalog should publish service handles");
+}
+
+async fn wait_for_cancel_remove_handles() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !CANCEL_REMOVE_HANDLES_READY.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancel remove handle catalog should publish service handles");
+}
+
+async fn wait_for_stop_handles() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !STOP_HANDLES_READY.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stop handle catalog should publish service handles");
+}
+
+async fn wait_for_instance_status(
+    instance: &service_daemon::ServiceInstanceHandle,
+    expected: ServiceStatus,
+    reason: &'static str,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while instance.status().await != expected {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(reason);
+}
+
+async fn wait_for_instance_removed(
+    handle: &ServiceHandle,
+    instance: &service_daemon::ServiceInstanceHandle,
+    reason: &'static str,
+) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while instance.runtime().is_some()
+            || handle
+                .instances()
+                .iter()
+                .any(|candidate| candidate.instance_id() == instance.instance_id())
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(reason);
 }
 
 fn clone_handle(slot: &Mutex<Option<ServiceHandle>>, name: &'static str) -> ServiceHandle {
@@ -773,10 +978,33 @@ async fn on_demand_service_handle_creates_starts_stops_removes_and_force_removes
         first.runtime().is_some(),
         "stop should leave runtime facts registered until remove"
     );
+    assert!(
+        daemon
+            .diagnostics_snapshot()
+            .services
+            .iter()
+            .any(|service| service.service_instance_id == first.instance_id()),
+        "started instance should have service diagnostics before remove"
+    );
 
     assert!(first.remove().await.expect("remove should complete"));
     assert!(first.runtime().is_none());
     assert!(on_demand_handle.instances().is_empty());
+    let diagnostics = daemon.diagnostics_snapshot();
+    assert!(
+        diagnostics
+            .services
+            .iter()
+            .all(|service| service.service_instance_id != first.instance_id()),
+        "remove should drop service diagnostics for the removed instance"
+    );
+    assert!(
+        diagnostics
+            .generations
+            .iter()
+            .all(|generation| generation.service_instance_id != first.instance_id()),
+        "remove should drop generation diagnostics for the removed instance"
+    );
 
     let second = on_demand_handle
         .start(WorkerJob { value: 3 })
@@ -800,6 +1028,323 @@ async fn on_demand_service_handle_creates_starts_stops_removes_and_force_removes
     );
     assert!(second.runtime().is_none());
     assert!(on_demand_handle.instances().is_empty());
+
+    daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
+}
+
+#[tokio::test]
+async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
+    STOP_HANDLES_READY.store(false, Ordering::SeqCst);
+    STUBBORN_STOP_STARTS.store(0, Ordering::SeqCst);
+    PEER_STOP_STARTS.store(0, Ordering::SeqCst);
+    reset_handle(&STUBBORN_STOP_HANDLE);
+    reset_handle(&PEER_STOP_HANDLE);
+
+    let registry = Registry::builder()
+        .with_tag("__service_handle_graceful_stop__")
+        .build();
+    let daemon = ServiceDaemon::builder()
+        .with_registry(registry)
+        .with_restart_policy(
+            RestartPolicy::builder()
+                .wave_stop_timeout(Duration::from_millis(400))
+                .build(),
+        )
+        .build();
+
+    daemon.run().await;
+    wait_for_stop_handles().await;
+    let stubborn_handle = clone_handle(&STUBBORN_STOP_HANDLE, "stubborn stop");
+    let peer_handle = clone_handle(&PEER_STOP_HANDLE, "peer stop");
+
+    let stubborn = stubborn_handle
+        .start(WorkerJob { value: 1 })
+        .await
+        .expect("stubborn worker should start");
+    wait_for_counter(
+        &STUBBORN_STOP_STARTS,
+        1,
+        "stubborn worker should enter first generation",
+    )
+    .await;
+
+    let stopping = tokio::spawn({
+        let stubborn = stubborn.clone();
+        async move { stubborn.stop().await }
+    });
+
+    wait_for_instance_status(
+        &stubborn,
+        ServiceStatus::ShuttingDown,
+        "stop should mark the target as shutting down while grace is pending",
+    )
+    .await;
+    assert!(
+        stubborn_handle
+            .instances()
+            .iter()
+            .any(|instance| instance.instance_id() == stubborn.instance_id()),
+        "graceful stop should keep the target registered"
+    );
+    assert_eq!(
+        stubborn.runtime().map(|snapshot| snapshot.status),
+        Some(ServiceStatus::ShuttingDown)
+    );
+    assert!(
+        !stubborn.request_stop(),
+        "same-instance request_stop should be a no-op while stop is pending"
+    );
+
+    let same_start = tokio::time::timeout(Duration::from_millis(150), stubborn.start())
+        .await
+        .expect("same-instance start should not wait for the stop grace period")
+        .expect("same-instance start should complete");
+    assert!(!same_start);
+    let same_stop = tokio::time::timeout(Duration::from_millis(150), stubborn.stop())
+        .await
+        .expect("same-instance stop should not wait for the stop grace period")
+        .expect("same-instance stop should complete");
+    assert!(!same_stop);
+    let same_remove = tokio::time::timeout(Duration::from_millis(150), stubborn.remove())
+        .await
+        .expect("same-instance remove should not wait for the stop grace period")
+        .expect("same-instance remove should complete");
+    assert!(!same_remove);
+    let same_force_remove =
+        tokio::time::timeout(Duration::from_millis(150), stubborn.force_remove())
+            .await
+            .expect("same-instance force_remove should not wait for the stop grace period")
+            .expect("same-instance force_remove should complete");
+    assert!(!same_force_remove);
+
+    let peer = tokio::time::timeout(
+        Duration::from_millis(150),
+        peer_handle.start(WorkerJob { value: 2 }),
+    )
+    .await
+    .expect("other instance start should not wait for the stop grace period")
+    .expect("other instance start should complete");
+    wait_for_counter(
+        &PEER_STOP_STARTS,
+        1,
+        "peer worker should start while stubborn stop is waiting",
+    )
+    .await;
+    assert!(peer.remove().await.expect("peer worker should remove"));
+
+    let stopped = tokio::time::timeout(Duration::from_secs(2), stopping)
+        .await
+        .expect("stubborn stop should finish after grace timeout")
+        .expect("stubborn stop task should not panic")
+        .expect("stubborn stop should complete");
+    assert!(stopped);
+    assert_eq!(stubborn.status().await, ServiceStatus::Terminated);
+    assert!(
+        stubborn.runtime().is_some(),
+        "stop should leave runtime facts registered until remove"
+    );
+    assert!(
+        stubborn_handle
+            .instances()
+            .iter()
+            .any(|instance| instance.instance_id() == stubborn.instance_id()),
+        "stop should keep the target registered after termination"
+    );
+
+    assert!(
+        stubborn
+            .remove()
+            .await
+            .expect("stubborn worker should remove")
+    );
+    assert!(stubborn.runtime().is_none());
+
+    daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
+}
+
+#[tokio::test]
+async fn graceful_remove_keeps_target_visible_without_blocking_other_instances() {
+    REMOVE_HANDLES_READY.store(false, Ordering::SeqCst);
+    STUBBORN_REMOVE_STARTS.store(0, Ordering::SeqCst);
+    PEER_REMOVE_STARTS.store(0, Ordering::SeqCst);
+    reset_handle(&STUBBORN_REMOVE_HANDLE);
+    reset_handle(&PEER_REMOVE_HANDLE);
+
+    let registry = Registry::builder()
+        .with_tag("__service_handle_graceful_remove__")
+        .build();
+    let daemon = ServiceDaemon::builder()
+        .with_registry(registry)
+        .with_restart_policy(
+            RestartPolicy::builder()
+                .wave_stop_timeout(Duration::from_millis(400))
+                .build(),
+        )
+        .build();
+
+    daemon.run().await;
+    wait_for_remove_handles().await;
+    let stubborn_handle = clone_handle(&STUBBORN_REMOVE_HANDLE, "stubborn remove");
+    let peer_handle = clone_handle(&PEER_REMOVE_HANDLE, "peer remove");
+
+    let stubborn = stubborn_handle
+        .start(WorkerJob { value: 1 })
+        .await
+        .expect("stubborn worker should start");
+    wait_for_counter(
+        &STUBBORN_REMOVE_STARTS,
+        1,
+        "stubborn worker should enter first generation",
+    )
+    .await;
+
+    let removing = tokio::spawn({
+        let stubborn = stubborn.clone();
+        async move { stubborn.remove().await }
+    });
+    wait_for_instance_status(
+        &stubborn,
+        ServiceStatus::ShuttingDown,
+        "remove should mark the target as shutting down while grace is pending",
+    )
+    .await;
+
+    assert!(
+        stubborn_handle
+            .instances()
+            .iter()
+            .any(|instance| instance.instance_id() == stubborn.instance_id()),
+        "graceful remove should keep the target registered until cleanup"
+    );
+    assert_eq!(
+        stubborn.runtime().map(|snapshot| snapshot.status),
+        Some(ServiceStatus::ShuttingDown)
+    );
+
+    let same_start = tokio::time::timeout(Duration::from_millis(150), stubborn.start())
+        .await
+        .expect("same-instance start should not wait for the remove grace period")
+        .expect("same-instance start should complete");
+    assert!(!same_start);
+    let same_stop = tokio::time::timeout(Duration::from_millis(150), stubborn.stop())
+        .await
+        .expect("same-instance stop should not wait for the remove grace period")
+        .expect("same-instance stop should complete");
+    assert!(!same_stop);
+    let same_remove = tokio::time::timeout(Duration::from_millis(150), stubborn.remove())
+        .await
+        .expect("same-instance remove should not wait for the remove grace period")
+        .expect("same-instance remove should complete");
+    assert!(!same_remove);
+    let same_force_remove =
+        tokio::time::timeout(Duration::from_millis(150), stubborn.force_remove())
+            .await
+            .expect("same-instance force_remove should not wait for the remove grace period")
+            .expect("same-instance force_remove should complete");
+    assert!(!same_force_remove);
+
+    let peer = tokio::time::timeout(
+        Duration::from_millis(150),
+        peer_handle.start(WorkerJob { value: 2 }),
+    )
+    .await
+    .expect("other instance start should not wait for the remove grace period")
+    .expect("peer worker should start");
+    wait_for_counter(
+        &PEER_REMOVE_STARTS,
+        1,
+        "peer worker should start while stubborn remove is waiting",
+    )
+    .await;
+    assert!(peer.remove().await.expect("peer worker should remove"));
+
+    let removed = tokio::time::timeout(Duration::from_secs(2), removing)
+        .await
+        .expect("stubborn remove should finish after grace timeout")
+        .expect("stubborn remove task should not panic")
+        .expect("stubborn remove should complete");
+    assert!(removed);
+    assert!(stubborn.runtime().is_none());
+    assert!(
+        stubborn_handle
+            .instances()
+            .iter()
+            .all(|instance| instance.instance_id() != stubborn.instance_id())
+    );
+
+    daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
+}
+
+#[tokio::test]
+async fn graceful_remove_cleanup_survives_cancelled_caller() {
+    CANCEL_REMOVE_HANDLES_READY.store(false, Ordering::SeqCst);
+    STUBBORN_CANCEL_REMOVE_STARTS.store(0, Ordering::SeqCst);
+    reset_handle(&STUBBORN_CANCEL_REMOVE_HANDLE);
+
+    let registry = Registry::builder()
+        .with_tag("__service_handle_cancelled_remove__")
+        .build();
+    let daemon = ServiceDaemon::builder()
+        .with_registry(registry)
+        .with_restart_policy(
+            RestartPolicy::builder()
+                .wave_stop_timeout(Duration::from_millis(300))
+                .build(),
+        )
+        .build();
+
+    daemon.run().await;
+    wait_for_cancel_remove_handles().await;
+    let stubborn_handle = clone_handle(
+        &STUBBORN_CANCEL_REMOVE_HANDLE,
+        "stubborn cancellation remove",
+    );
+
+    let stubborn = stubborn_handle
+        .start(WorkerJob { value: 1 })
+        .await
+        .expect("stubborn worker should start");
+    wait_for_counter(
+        &STUBBORN_CANCEL_REMOVE_STARTS,
+        1,
+        "stubborn worker should enter first generation",
+    )
+    .await;
+
+    let removing = tokio::spawn({
+        let stubborn = stubborn.clone();
+        async move { stubborn.remove().await }
+    });
+    wait_for_instance_status(
+        &stubborn,
+        ServiceStatus::ShuttingDown,
+        "remove should mark the target as shutting down before caller cancellation",
+    )
+    .await;
+    removing.abort();
+    assert!(
+        removing.await.is_err(),
+        "test should cancel the caller waiting on remove"
+    );
+
+    wait_for_instance_removed(
+        &stubborn_handle,
+        &stubborn,
+        "daemon-owned cleanup should finish after caller cancellation",
+    )
+    .await;
 
     daemon.shutdown();
     daemon

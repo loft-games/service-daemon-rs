@@ -431,6 +431,9 @@ impl From<internal::GenerationExitKind> for DiagnosticGenerationExitKind {
 pub enum DiagnosticRestartDecisionKind {
     /// The supervisor restarted immediately without backoff.
     Immediate,
+    /// The supervisor restarted with backoff after a service generation returned `Ok(())`
+    /// without a shutdown or reload control signal.
+    BackoffNormalExit,
     /// The supervisor restarted with backoff after a recoverable error.
     BackoffRecoverableError,
     /// The supervisor restarted with backoff after a panic.
@@ -445,6 +448,7 @@ impl From<internal::RestartDecisionKind> for DiagnosticRestartDecisionKind {
     fn from(value: internal::RestartDecisionKind) -> Self {
         match value {
             internal::RestartDecisionKind::Immediate => Self::Immediate,
+            internal::RestartDecisionKind::BackoffNormalExit => Self::BackoffNormalExit,
             internal::RestartDecisionKind::BackoffRecoverableError => Self::BackoffRecoverableError,
             internal::RestartDecisionKind::BackoffPanic => Self::BackoffPanic,
             internal::RestartDecisionKind::BackoffIsolatedStartupFailure => {

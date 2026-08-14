@@ -79,7 +79,7 @@ Fatal outcomes stop the current service generation without entering the retry/ba
 - `ProviderInitError` during lazy service startup: the supervisor treats this as a daemon-wide startup/runtime boundary failure, requests daemon shutdown, and terminates the affected service.
 - Ordinary `Err(...)` and panics are different: they transition the service into `Recovering(...)` and restart with backoff.
 
-A normal `Ok(())` return is also distinct from failure recovery. The supervisor still starts a fresh generation, but it does so immediately and records success on the backoff controller instead of counting the exit as another failure.
+A service generation that returns `Ok(())` without a shutdown or reload control signal is distinct from failure recovery at the Rust result level, but it is still an unexpected service lifecycle termination. The supervisor starts a fresh generation through `RestartPolicy` backoff and records the exit kind as `NormalExit`. Shutdown-driven `Ok(())` remains terminal, and reload-driven `Ok(())` remains an immediate generation replacement.
 
 Trigger handlers run inside trigger service generations. A single handler `Err` is retried by the trigger runner; retry exhaustion and dispatch infrastructure errors are bridged back to the supervisor as recoverable generation failures. Dispatch task panics keep their panic classification, so panic lifecycle counters and backoff behavior remain consistent with ordinary service panics.
 
@@ -97,7 +97,7 @@ Each service generation is registered in an internal diagnostics store when the 
 
 The supervisor includes a compact per-generation summary in the outcome tracing event. The public `DaemonDiagnosticsSnapshot` exposes distilled service, generation, and lane summaries through read-only daemon/handle methods. Generation-detail snapshot retention is bounded to the most recent 1024 generations per service so crash loops do not make snapshot collection and sorting unbounded; service and lane aggregates still accumulate across evicted generation details. Standard service and Standard lane summaries can include interpretation labels, confidence, and investigation hints, but those labels are derived from snapshot facts and do not change generation lifecycle, restart/backoff, reload, shutdown, or body placement. The store, windows, evaluator, recommendation fingerprints, thresholds, and mutation paths remain internal. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
 
-`last_exit_kind` and `last_restart_decision` are intentionally separate lifecycle facts. Clean exits and reloads record an immediate restart decision; recoverable service errors and trigger retry exhaustion record recoverable backoff; service or trigger dispatch panics record panic backoff; isolated startup failures record isolated-startup backoff. Fatal service errors, provider-init terminal errors, and shutdown exits do not synthesize a restart decision because they bypass the restart loop.
+`last_exit_kind` and `last_restart_decision` are intentionally separate lifecycle facts. Service generations that return `Ok(())` without a shutdown or reload control signal record `NormalExit` plus normal-exit backoff; reloads record an immediate restart decision; recoverable service errors and trigger retry exhaustion record recoverable backoff; service or trigger dispatch panics record panic backoff; isolated startup failures record isolated-startup backoff. Fatal service errors, provider-init terminal errors, and shutdown exits do not synthesize a restart decision because they bypass the restart loop.
 
 ### 1.5. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 
@@ -113,7 +113,7 @@ The controller tracks the uptime of the current service generation. When a servi
 #### Restart Storm Guard
 Service supervisors layer an internal restart-storm guard on top of the policy backoff. Recoverable service errors, panics, and isolated startup failures are counted in a short sliding window; once the threshold is reached, the effective restart delay becomes `max(policy_delay, storm_guard_delay)`.
 
-This guard is deliberately not a public `RestartPolicy` knob yet. Clean `Ok(())` exits and reloads reset both the backoff controller and the storm guard, fatal/provider-init outcomes bypass the guard, and shutdown still interrupts any restart wait immediately.
+This guard is deliberately not a public `RestartPolicy` knob yet. Reloads reset both the backoff controller and the storm guard; service generations that return `Ok(())` without a shutdown or reload control signal advance the normal `RestartPolicy` backoff path; fatal/provider-init outcomes bypass the guard, and shutdown still interrupts any restart wait immediately.
 
 ## 2. Wave-Based Orchestration
 

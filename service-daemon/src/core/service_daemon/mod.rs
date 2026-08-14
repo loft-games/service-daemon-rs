@@ -29,12 +29,11 @@ use std::sync::{
     Arc, OnceLock, Weak,
     atomic::{AtomicBool, Ordering},
 };
-#[cfg(feature = "simulation")]
 use std::time::Duration;
 #[cfg(all(feature = "simulation", test))]
 use std::time::Instant;
 use tokio::runtime::{Handle, Runtime};
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument};
@@ -52,7 +51,7 @@ use crate::models::{
     ServiceInstanceId, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceRuntimeSnapshot,
     ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
 };
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 
 pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -78,9 +77,38 @@ struct DaemonInstanceControl {
     id: DaemonInstanceId,
     resources: Arc<DaemonResources>,
     instance_registry: Arc<ServiceInstanceRegistry>,
+    removing_instances: Arc<DashSet<ServiceInstanceId>>,
+    stopping_instances: Arc<DashSet<ServiceInstanceId>>,
     startup_gate: Arc<StartupGate>,
     daemon_token: CancellationToken,
     inner: Weak<Mutex<DaemonInstanceInner>>,
+}
+
+#[derive(Clone)]
+struct ServiceInstanceCleanupParts {
+    instance_registry: Arc<ServiceInstanceRegistry>,
+    running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
+    resources: Arc<DaemonResources>,
+    diagnostics: Arc<DiagnosticsStore>,
+    removing_instances: Arc<DashSet<ServiceInstanceId>>,
+    stopping_instances: Arc<DashSet<ServiceInstanceId>>,
+}
+
+struct PreparedServiceStop {
+    record: ServiceInstanceRecord,
+    task: Option<JoinHandle<()>>,
+    grace_period: Duration,
+    control_runtime: Option<Handle>,
+    resources: Arc<DaemonResources>,
+    stopping_instances: Arc<DashSet<ServiceInstanceId>>,
+}
+
+struct PreparedServiceRemoval {
+    record: ServiceInstanceRecord,
+    task: Option<JoinHandle<()>>,
+    grace_period: Duration,
+    control_runtime: Option<Handle>,
+    cleanup: ServiceInstanceCleanupParts,
 }
 
 #[derive(Default)]
@@ -416,6 +444,9 @@ impl ServiceControl for DaemonInstanceControl {
     }
 
     fn request_stop(&self, handle: &ServiceInstanceHandle) -> bool {
+        if self.is_lifecycle_operation_pending(handle.instance_id()) {
+            return false;
+        }
         let Some(record) = self.instance_registry.get(handle.instance_id()) else {
             return false;
         };
@@ -482,7 +513,14 @@ impl ServiceControl for DaemonInstanceControl {
     ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
         let instance = handle.clone();
         let inner = self.inner.clone();
+        let removing_instances = self.removing_instances.clone();
+        let stopping_instances = self.stopping_instances.clone();
         Box::pin(async move {
+            if removing_instances.contains(&instance.instance_id())
+                || stopping_instances.contains(&instance.instance_id())
+            {
+                return Ok(false);
+            }
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
@@ -496,11 +534,36 @@ impl ServiceControl for DaemonInstanceControl {
     ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
         let instance = handle.clone();
         let inner = self.inner.clone();
+        let removing_instances = self.removing_instances.clone();
+        let stopping_instances = self.stopping_instances.clone();
         Box::pin(async move {
+            if removing_instances.contains(&instance.instance_id())
+                || stopping_instances.contains(&instance.instance_id())
+            {
+                return Ok(false);
+            }
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
-            inner.lock().await.stop_service_instance(&instance).await
+            let prepared = {
+                let mut inner = inner.lock().await;
+                inner.prepare_stop_service_instance(&instance).await?
+            };
+            let Some(prepared) = prepared else {
+                return Ok(false);
+            };
+            let (tx, rx) = oneshot::channel();
+            let control_runtime = prepared.control_runtime.clone();
+            let task = async move {
+                let result = finish_graceful_service_stop(prepared).await;
+                let _ = tx.send(result);
+            };
+            if let Some(runtime) = control_runtime {
+                runtime.spawn(task);
+            } else {
+                tokio::spawn(task);
+            }
+            rx.await.unwrap_or(Ok(false))
         })
     }
 
@@ -510,11 +573,36 @@ impl ServiceControl for DaemonInstanceControl {
     ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
         let instance = handle.clone();
         let inner = self.inner.clone();
+        let removing_instances = self.removing_instances.clone();
+        let stopping_instances = self.stopping_instances.clone();
         Box::pin(async move {
+            if removing_instances.contains(&instance.instance_id())
+                || stopping_instances.contains(&instance.instance_id())
+            {
+                return Ok(false);
+            }
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
-            inner.lock().await.remove_service_instance(&instance).await
+            let prepared = {
+                let mut inner = inner.lock().await;
+                inner.prepare_remove_service_instance(&instance).await?
+            };
+            let Some(prepared) = prepared else {
+                return Ok(false);
+            };
+            let (tx, rx) = oneshot::channel();
+            let control_runtime = prepared.control_runtime.clone();
+            let task = async move {
+                let result = finish_graceful_service_removal(prepared).await;
+                let _ = tx.send(result);
+            };
+            if let Some(runtime) = control_runtime {
+                runtime.spawn(task);
+            } else {
+                tokio::spawn(task);
+            }
+            rx.await.unwrap_or(Ok(false))
         })
     }
 
@@ -524,7 +612,14 @@ impl ServiceControl for DaemonInstanceControl {
     ) -> futures::future::BoxFuture<'static, ServiceResult<bool>> {
         let instance = handle.clone();
         let inner = self.inner.clone();
+        let removing_instances = self.removing_instances.clone();
+        let stopping_instances = self.stopping_instances.clone();
         Box::pin(async move {
+            if removing_instances.contains(&instance.instance_id())
+                || stopping_instances.contains(&instance.instance_id())
+            {
+                return Ok(false);
+            }
             let Some(inner) = inner.upgrade() else {
                 return Ok(false);
             };
@@ -566,6 +661,11 @@ impl DaemonInstanceControl {
             .is_some_and(|record| self.record_matches_handle(&record, handle))
     }
 
+    fn is_lifecycle_operation_pending(&self, instance_id: ServiceInstanceId) -> bool {
+        self.removing_instances.contains(&instance_id)
+            || self.stopping_instances.contains(&instance_id)
+    }
+
     fn record_matches_handle(
         &self,
         record: &crate::models::ServiceInstanceRecord,
@@ -598,6 +698,8 @@ impl DaemonRegistry {
         let resources = inner.resources.clone();
         let diagnostics = inner.diagnostics.clone();
         let instance_registry = inner.instance_registry.clone();
+        let removing_instances = inner.removing_instances.clone();
+        let stopping_instances = inner.stopping_instances.clone();
         let shutdown_token = inner.cancellation_token.clone();
         let external_cancel_token = inner.external_cancel_token.clone();
         let startup_gate = inner.startup_gate.clone();
@@ -606,6 +708,8 @@ impl DaemonRegistry {
             id,
             resources: resources.clone(),
             instance_registry,
+            removing_instances,
+            stopping_instances,
             startup_gate,
             daemon_token: shutdown_token.clone(),
             inner: Arc::downgrade(&inner),
@@ -733,6 +837,8 @@ impl ServiceDaemon {
 pub(crate) struct DaemonInstanceInner {
     services: Vec<ServiceDescription>,
     instance_registry: Arc<ServiceInstanceRegistry>,
+    removing_instances: Arc<DashSet<ServiceInstanceId>>,
+    stopping_instances: Arc<DashSet<ServiceInstanceId>>,
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
     restart_policy: RestartPolicy,
     cancellation_token: CancellationToken,
@@ -975,6 +1081,9 @@ impl DaemonInstanceInner {
         if !record_matches_handle(&record, handle) {
             return Ok(false);
         }
+        if self.is_lifecycle_operation_pending(handle.instance_id()) {
+            return Ok(false);
+        }
         if self
             .running_tasks
             .lock()
@@ -1038,15 +1147,23 @@ impl DaemonInstanceInner {
         Ok(true)
     }
 
-    async fn stop_service_instance(
+    async fn prepare_stop_service_instance(
         &mut self,
         handle: &ServiceInstanceHandle,
-    ) -> ServiceResult<bool> {
+    ) -> ServiceResult<Option<PreparedServiceStop>> {
         let Some(record) = self.instance_registry.get(handle.instance_id()) else {
-            return Ok(false);
+            return Ok(None);
         };
         if !record_matches_handle(&record, handle) {
-            return Ok(false);
+            return Ok(None);
+        }
+        if self.is_lifecycle_operation_pending(handle.instance_id()) {
+            return Ok(None);
+        }
+
+        let mut running_tasks = self.running_tasks.lock().await;
+        if !self.stopping_instances.insert(handle.instance_id()) {
+            return Ok(None);
         }
 
         record.cancellation_token().cancel();
@@ -1059,59 +1176,64 @@ impl DaemonInstanceInner {
             .record_service_status(handle.instance_id(), &shutting_down);
         self.resources.status_changed.notify_waiters();
 
-        let task = {
-            self.running_tasks
-                .lock()
-                .await
-                .remove(&handle.instance_id())
-        };
-        if let Some(mut task) = task {
-            let grace_period = self.restart_policy.wave_stop_timeout;
-            tokio::select! {
-                result = &mut task => {
-                    if let Err(err) = result
-                        && !err.is_cancelled()
-                    {
-                        tracing::warn!(
-                            service = %record.name(),
-                            service_instance_id = %record.instance_id(),
-                            error = ?err,
-                            "Service instance ended unexpectedly while stopping"
-                        );
-                    }
-                }
-                _ = tokio::time::sleep(grace_period) => {
-                    tracing::warn!(
-                        service = %record.name(),
-                        service_instance_id = %record.instance_id(),
-                        "Service instance did not stop within grace period, forcing abort"
-                    );
-                    task.abort();
-                    let _ = task.await;
-                }
-            }
-        }
+        let task = running_tasks.remove(&handle.instance_id());
+        drop(running_tasks);
 
-        let terminated = ServiceStatus::Terminated;
-        self.resources
-            .status_plane
-            .insert(handle.instance_id(), terminated.clone());
-        self.resources
-            .runtime_facts
-            .record_service_status(handle.instance_id(), &terminated);
-        self.resources.status_changed.notify_waiters();
-        Ok(true)
+        Ok(Some(PreparedServiceStop {
+            record,
+            task,
+            grace_period: self.restart_policy.wave_stop_timeout,
+            control_runtime: self
+                .control_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle().clone()),
+            resources: self.resources.clone(),
+            stopping_instances: self.stopping_instances.clone(),
+        }))
     }
 
-    async fn remove_service_instance(
+    async fn prepare_remove_service_instance(
         &mut self,
         handle: &ServiceInstanceHandle,
-    ) -> ServiceResult<bool> {
-        if !self.stop_service_instance(handle).await? {
-            return Ok(false);
+    ) -> ServiceResult<Option<PreparedServiceRemoval>> {
+        let Some(record) = self.instance_registry.get(handle.instance_id()) else {
+            return Ok(None);
+        };
+        if !record_matches_handle(&record, handle) {
+            return Ok(None);
         }
-        self.cleanup_service_instance(handle.instance_id()).await;
-        Ok(true)
+        if self.is_lifecycle_operation_pending(handle.instance_id()) {
+            return Ok(None);
+        }
+
+        let mut running_tasks = self.running_tasks.lock().await;
+        if !self.removing_instances.insert(handle.instance_id()) {
+            return Ok(None);
+        }
+
+        record.cancellation_token().cancel();
+        let shutting_down = ServiceStatus::ShuttingDown;
+        self.resources
+            .status_plane
+            .insert(handle.instance_id(), shutting_down.clone());
+        self.resources
+            .runtime_facts
+            .record_service_status(handle.instance_id(), &shutting_down);
+        self.resources.status_changed.notify_waiters();
+
+        let task = running_tasks.remove(&handle.instance_id());
+        drop(running_tasks);
+
+        Ok(Some(PreparedServiceRemoval {
+            record,
+            task,
+            grace_period: self.restart_policy.wave_stop_timeout,
+            control_runtime: self
+                .control_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle().clone()),
+            cleanup: self.cleanup_parts(),
+        }))
     }
 
     async fn force_remove_service_instance(
@@ -1122,6 +1244,9 @@ impl DaemonInstanceInner {
             return Ok(false);
         };
         if !record_matches_handle(&record, handle) {
+            return Ok(false);
+        }
+        if self.is_lifecycle_operation_pending(handle.instance_id()) {
             return Ok(false);
         }
 
@@ -1144,21 +1269,20 @@ impl DaemonInstanceInner {
         self.resources
             .runtime_facts
             .record_service_status(handle.instance_id(), &terminated);
-        self.cleanup_service_instance(handle.instance_id()).await;
+        cleanup_service_instance(self.cleanup_parts(), handle.instance_id()).await;
         self.resources.status_changed.notify_waiters();
         Ok(true)
     }
 
-    async fn cleanup_service_instance(&self, instance_id: ServiceInstanceId) {
-        self.instance_registry.remove(instance_id);
-        self.running_tasks.lock().await.remove(&instance_id);
-        self.resources.status_plane.remove(&instance_id);
-        self.resources.shelf.remove(&instance_id);
-        self.resources.reload_signals.remove(&instance_id);
-        self.resources
-            .runtime_facts
-            .remove_service_instance(instance_id);
-        self.resources.status_changed.notify_waiters();
+    fn cleanup_parts(&self) -> ServiceInstanceCleanupParts {
+        ServiceInstanceCleanupParts {
+            instance_registry: self.instance_registry.clone(),
+            running_tasks: self.running_tasks.clone(),
+            resources: self.resources.clone(),
+            diagnostics: self.diagnostics.clone(),
+            removing_instances: self.removing_instances.clone(),
+            stopping_instances: self.stopping_instances.clone(),
+        }
     }
 
     fn owns_service_entry(&self, entry_id: ServiceEntryId, entry: &'static ServiceEntry) -> bool {
@@ -1166,6 +1290,104 @@ impl DaemonInstanceInner {
             .iter()
             .any(|service| service.entry_id == entry_id && std::ptr::eq(service.entry, entry))
     }
+
+    fn is_lifecycle_operation_pending(&self, instance_id: ServiceInstanceId) -> bool {
+        self.removing_instances.contains(&instance_id)
+            || self.stopping_instances.contains(&instance_id)
+    }
+}
+
+async fn finish_graceful_service_stop(prepared: PreparedServiceStop) -> ServiceResult<bool> {
+    if let Some(mut task) = prepared.task {
+        tokio::select! {
+            result = &mut task => {
+                if let Err(err) = result
+                    && !err.is_cancelled()
+                {
+                    tracing::warn!(
+                        service = %prepared.record.name(),
+                        service_instance_id = %prepared.record.instance_id(),
+                        error = ?err,
+                        "Service instance ended unexpectedly while stopping"
+                    );
+                }
+            }
+            _ = tokio::time::sleep(prepared.grace_period) => {
+                tracing::warn!(
+                    service = %prepared.record.name(),
+                    service_instance_id = %prepared.record.instance_id(),
+                    "Service instance did not stop within grace period, forcing abort"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    let terminated = ServiceStatus::Terminated;
+    prepared
+        .resources
+        .status_plane
+        .insert(prepared.record.instance_id(), terminated.clone());
+    prepared
+        .resources
+        .runtime_facts
+        .record_service_status(prepared.record.instance_id(), &terminated);
+    prepared
+        .stopping_instances
+        .remove(&prepared.record.instance_id());
+    prepared.resources.status_changed.notify_waiters();
+    Ok(true)
+}
+
+async fn finish_graceful_service_removal(prepared: PreparedServiceRemoval) -> ServiceResult<bool> {
+    if let Some(mut task) = prepared.task {
+        tokio::select! {
+            result = &mut task => {
+                if let Err(err) = result
+                    && !err.is_cancelled()
+                {
+                    tracing::warn!(
+                        service = %prepared.record.name(),
+                        service_instance_id = %prepared.record.instance_id(),
+                        error = ?err,
+                        "Service instance ended unexpectedly while removing"
+                    );
+                }
+            }
+            _ = tokio::time::sleep(prepared.grace_period) => {
+                tracing::warn!(
+                    service = %prepared.record.name(),
+                    service_instance_id = %prepared.record.instance_id(),
+                    "Service instance did not stop within grace period, forcing abort"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
+    }
+
+    cleanup_service_instance(prepared.cleanup, prepared.record.instance_id()).await;
+    Ok(true)
+}
+
+async fn cleanup_service_instance(
+    cleanup: ServiceInstanceCleanupParts,
+    instance_id: ServiceInstanceId,
+) {
+    cleanup.instance_registry.remove(instance_id);
+    cleanup.running_tasks.lock().await.remove(&instance_id);
+    cleanup.resources.status_plane.remove(&instance_id);
+    cleanup.resources.shelf.remove(&instance_id);
+    cleanup.resources.reload_signals.remove(&instance_id);
+    cleanup
+        .resources
+        .runtime_facts
+        .remove_service_instance(instance_id);
+    cleanup.diagnostics.remove_service_instance(instance_id);
+    cleanup.removing_instances.remove(&instance_id);
+    cleanup.stopping_instances.remove(&instance_id);
+    cleanup.resources.status_changed.notify_waiters();
 }
 
 #[cfg(feature = "diagnostics")]

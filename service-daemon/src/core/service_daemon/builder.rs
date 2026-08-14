@@ -254,6 +254,8 @@ impl ServiceDaemonBuilder {
         DaemonInstanceInner {
             services,
             instance_registry,
+            removing_instances: Arc::new(dashmap::DashSet::new()),
+            stopping_instances: Arc::new(dashmap::DashSet::new()),
             running_tasks: Arc::new(Mutex::new(HashMap::new())),
             restart_policy: self.restart_policy,
             cancellation_token: process_token().child_token(),

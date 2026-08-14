@@ -205,7 +205,8 @@ submit a temporary overlay with
 
 `last_exit_kind` describes why the previous recorded generation ended. `last_restart_decision` describes the most recent restart path the supervisor actually entered. Keeping these facts separate avoids making users infer restart meaning from delay values alone.
 
-- Clean `Ok(())` exits and reload restarts record `DiagnosticRestartDecisionKind::Immediate`.
+- Service generations that return `Ok(())` without a shutdown or reload control signal record `DiagnosticGenerationExitKind::NormalExit` and `DiagnosticRestartDecisionKind::BackoffNormalExit`.
+- Reload restarts record `DiagnosticRestartDecisionKind::Immediate`.
 - Recoverable service errors, trigger retry exhaustion, and trigger dispatch infrastructure failures record `BackoffRecoverableError`.
 - Service panics and trigger dispatch panics record `BackoffPanic`.
 - Isolated thread/runtime/bridge startup failures record `BackoffIsolatedStartupFailure`.

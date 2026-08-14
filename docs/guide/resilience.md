@@ -4,7 +4,7 @@ This guide explains how `ServiceDaemon` ensures application stability through au
 
 ## 1. Automatic Restarts: Exponential Backoff & Jitter
 
-Services that fail (return `Err`) are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues. Clean `Ok(())` exits also start a new generation and restart immediately, without advancing the backoff counter.
+Services that fail (return `Err`) are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues. A service generation that returns `Ok(())` without a shutdown or reload control signal also starts a new generation through `RestartPolicy`, because services are expected to keep running until controlled shutdown, reload, or fatal termination.
 
 ```rust
 use service_daemon::{ServiceDaemon, RestartPolicy};
@@ -27,7 +27,7 @@ daemon.wait().await?;
 ### 1.1. Backoff, Jitter & Restart Storm Protection
 The framework uses a unified `BackoffController` to manage retry delays, consecutive failure counts, and interruption-aware waiting. This ensures that both standard services and trigger handlers follow the same resilience policy.
 
-Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service failures happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, clean `Ok(())` exits still restart immediately, and reload/shutdown signals still interrupt restart waits.
+Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service terminations happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, service generations that return `Ok(())` without a shutdown or reload control signal restart through `RestartPolicy`, and reload/shutdown signals still interrupt restart waits.
 
 > [!NOTE]
 > **Internal Architecture**: For the `BackoffController` state machine, restart-storm guard, and self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#15-backoffcontroller-internals).
@@ -38,7 +38,7 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 
 | Layer | Retry Behavior | How to Stop |
 | :--- | :--- | :--- |
-| **Service** | Restarts forever; failures use backoff plus an internal storm guard, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
+| **Service** | Restarts forever; recoverable errors, panics, and uncontrolled `Ok(())` exits use `RestartPolicy` backoff plus an internal storm guard; reloads restart immediately | Return `ServiceError::Fatal` from the service function |
 | **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
 | **Trigger dispatch** | A handler failure is retried inside the current dispatch; retry exhaustion becomes a recoverable trigger-service generation failure | Set `trigger_max_retries` on the `RestartPolicy` to bound each dispatch |
 

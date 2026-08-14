@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Service Instance Handles**: Added daemon-bound `ServiceInstanceHandle` values that expose runtime identity, static service metadata, instance status, runtime snapshots, trigger runtime snapshots, and per-instance stop requests.
 - **Service Template Inputs**: Added `#[input]` service parameters. A service with one `#[input] value: &T` parameter is selected as a template and receives shared access to typed per-instance startup input when created or started.
 - **Dynamic Service Instances**: Added `ServiceHandle::create(input).await`, `ServiceHandle::start(input).await`, and `ServiceInstanceHandle::start().await` for daemon-local service instances, plus an `example-on-demand` crate that demonstrates periodic start, stop, and remove.
+- **Normal Exit Diagnostics**: Added `DiagnosticRestartDecisionKind::BackoffNormalExit` for service generations that return `Ok(())` without a shutdown or reload control signal and restart through `RestartPolicy`.
 - **Daemon Instance Handles**: Added UUIDv7 `DaemonInstanceId` and `DaemonInstanceHandle` as the public daemon instance control handle returned by `ServiceDaemonBuilder::build()`.
 - **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only pipe validation, first-instance ownership checks, runtime busy-pipe retry, and focused Windows MSVC validation coverage.
@@ -42,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Memory Analysis Example**: Updated the supervisor layout model to match the current service instance identity and runtime bookkeeping structures.
+- **Dynamic Service Lifecycle Cleanup**: Dynamic instance removal now clears per-instance service and generation diagnostics while preserving daemon-level lane and provider failure history.
+- **Dynamic Service Lifecycle Blocking**: `ServiceInstanceHandle::stop()` and graceful `remove()` no longer hold the daemon-wide control lock while waiting for a stubborn service to finish, so other dynamic instance lifecycle operations can continue.
+- **Normal Service Exit Restart Policy**: Service generations that return `Ok(())` without a shutdown or reload control signal now restart through `RestartPolicy` backoff instead of immediate restart, preventing tight restart loops while preserving `NormalExit` lifecycle diagnostics.
 - **Private Service Visibility Diagnostics**: Stabilized the compile-time diagnostic for private service paths that are not visible to sibling modules.
 - **Windows Named Pipe Providers**: Stabilized runtime ownership, busy-pipe retry behavior, listener replacement, invalid configuration diagnostics, and Windows-only compile gates.
 

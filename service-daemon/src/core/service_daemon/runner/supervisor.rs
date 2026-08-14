@@ -94,6 +94,7 @@ impl GenerationExitRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RestartFailureKind {
+    NormalExit,
     RecoverableError,
     Panic,
     IsolatedStartupFailure,
@@ -110,6 +111,9 @@ impl RestartDecision {
     pub(super) fn diagnostics_kind(self) -> DiagnosticsRestartDecisionKind {
         match self {
             Self::Immediate => DiagnosticsRestartDecisionKind::Immediate,
+            Self::WithBackoff(RestartFailureKind::NormalExit) => {
+                DiagnosticsRestartDecisionKind::BackoffNormalExit
+            }
             Self::WithBackoff(RestartFailureKind::RecoverableError) => {
                 DiagnosticsRestartDecisionKind::BackoffRecoverableError
             }
@@ -262,7 +266,11 @@ impl ServiceSupervisor {
                     } else {
                         ServiceStatus::Initializing
                     },
-                    RestartDecision::Immediate,
+                    if signals.reload_requested {
+                        RestartDecision::Immediate
+                    } else {
+                        RestartDecision::WithBackoff(RestartFailureKind::NormalExit)
+                    },
                     result,
                 )
             }
@@ -417,7 +425,7 @@ impl ServiceSupervisor {
 
     /// Waits for the restart delay, allowing early exit on reload or cancellation.
     /// Returns `true` if restart should proceed, `false` if shutdown was requested.
-    /// Immediate restarts after a clean exit or reload do not advance the backoff counter.
+    /// Reload restarts are immediate; ordinary service generation exits use policy backoff.
     pub(super) async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
         let RestartDecision::WithBackoff(failure_kind) = decision else {
             self.record_restart_decision(decision, Duration::ZERO, Duration::ZERO, false);
@@ -1577,6 +1585,10 @@ mod tests {
             DiagnosticsRestartDecisionKind::Immediate
         );
         assert_eq!(
+            RestartDecision::WithBackoff(RestartFailureKind::NormalExit).diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::BackoffNormalExit
+        );
+        assert_eq!(
             RestartDecision::WithBackoff(RestartFailureKind::RecoverableError).diagnostics_kind(),
             DiagnosticsRestartDecisionKind::BackoffRecoverableError
         );
@@ -1594,6 +1606,40 @@ mod tests {
                 .diagnostics_kind(),
             DiagnosticsRestartDecisionKind::BackoffInternalSupervisorError
         );
+    }
+
+    #[tokio::test]
+    async fn unexpected_normal_exit_uses_backoff_without_changing_exit_kind() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let exit_record = supervisor.handle_outcome(Ok(Ok(())), &reload_token);
+
+        assert_eq!(exit_record.next_status, ServiceStatus::Initializing);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(
+            exit_record.restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::NormalExit)
+        );
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::NormalExit);
+    }
+
+    #[tokio::test]
+    async fn unexpected_normal_exit_advances_backoff_and_storm_guard() {
+        let mut supervisor = test_supervisor(fast_policy());
+
+        assert!(
+            supervisor
+                .wait_for_restart(RestartDecision::WithBackoff(RestartFailureKind::NormalExit,))
+                .await
+        );
+
+        let storm_decision = supervisor
+            .restart_storm
+            .record_failure(Instant::now(), Duration::from_millis(1));
+        assert_eq!(supervisor.backoff.attempt_count(), 1);
+        assert_eq!(storm_decision.window_failures, 2);
     }
 
     #[tokio::test]
@@ -2133,6 +2179,21 @@ mod tests {
         assert!(!exit_record.should_shutdown_daemon);
         assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
         assert_eq!(exit_record.exit_kind(), GenerationExitKind::NormalExit);
+    }
+
+    #[tokio::test]
+    async fn normal_exit_after_reload_request_restarts_immediately() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+
+        let exit_record = supervisor.handle_outcome(Ok(Ok(())), &reload_token);
+
+        assert_eq!(exit_record.next_status, ServiceStatus::Restoring);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::Reload);
     }
 
     #[tokio::test]
