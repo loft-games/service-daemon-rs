@@ -53,6 +53,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         param_entries,
         mut watcher_arms,
         di_idents,
+        ..
     } = match crate::common::try_extract_trigger_params(sig) {
         Ok(params) => params,
         Err(err) => return TokenStream::from(err.to_compile_error()),
@@ -113,11 +114,11 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             entry_name: &entry_name,
             fn_name_str: &fn_name_str,
             param_entries: &param_entries,
+            input_entry: &quote! { None },
             wrapper_name: &wrapper_name,
             watcher_ptr: &watcher_ptr,
             priority: &priority_tokens,
             scheduling: &scheduling_tokens,
-            auto_start: &quote! { true },
             tags: &tags_tokens,
         });
 

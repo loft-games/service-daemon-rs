@@ -19,7 +19,7 @@ const SERVICE_PASS_CASES: &[&str] = &[
     "tests/pass/20_service_visibility_in_super_path.rs",
     "tests/pass/27_service_wrapper_path_visibility.rs",
     "tests/pass/28_service_handle_macro_path_visibility.rs",
-    "tests/pass/29_service_auto_start_false.rs",
+    "tests/pass/29_service_input_template.rs",
 ];
 
 const SERVICE_FAIL_CASES: &[&str] = &[
@@ -31,6 +31,11 @@ const SERVICE_FAIL_CASES: &[&str] = &[
     "tests/fail/13_service_private_not_visible_to_sibling.rs",
     "tests/fail/14_service_invalid_scheduling.rs",
     "tests/fail/15_service_auto_scheduling.rs",
+    "tests/fail/37_service_auto_start_removed.rs",
+    "tests/fail/38_service_multiple_inputs.rs",
+    "tests/fail/39_service_input_arc_dependency.rs",
+    "tests/fail/42_service_input_owned.rs",
+    "tests/fail/43_service_input_mut_ref.rs",
     "tests/fail/33_service_handle_rejects_generic_path.rs",
 ];
 
@@ -41,6 +46,7 @@ const TRIGGER_FAIL_CASES: &[&str] = &[
     "tests/fail/09_trigger_payload_plus_dependency_hint.rs",
     "tests/fail/12_non_watchable_provider_cannot_watch.rs",
     "tests/fail/16_trigger_control_scheduling.rs",
+    "tests/fail/40_trigger_rejects_input.rs",
 ];
 
 const PROVIDER_PASS_CASES: &[&str] = &[
@@ -86,6 +92,7 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/33_provider_local_ipc_inner_attr.rs",
     "tests/fail/34_provider_ipc_dynamic_arg.rs",
     "tests/fail/35_provider_ipc_dynamic_env.rs",
+    "tests/fail/41_provider_rejects_input.rs",
 ];
 
 #[cfg(not(windows))]

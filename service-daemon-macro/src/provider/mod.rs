@@ -183,9 +183,16 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
             ));
         }
 
-        if let syn::FnArg::Typed(syn::PatType { pat, ty, .. }) = arg
+        if let syn::FnArg::Typed(syn::PatType { attrs, pat, ty, .. }) = arg
             && let syn::Pat::Ident(pat_ident) = &**pat
         {
+            if attrs.iter().any(|attr| attr.path().is_ident("input")) {
+                return Err(provider_help_error(
+                    arg,
+                    "#[input] is only supported by #[service]",
+                    "Provider function parameters must be Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> dependencies",
+                ));
+            }
             let arg_name = &pat_ident.ident;
             let (inner_type, wrapper) = decompose_type(ty);
 

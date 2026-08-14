@@ -7,7 +7,7 @@ use crate::models::{
 use dashmap::DashMap;
 use futures::future::BoxFuture;
 use linkme::distributed_slice;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use uuid::Uuid;
 
-pub type ServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
+pub type ServiceFn = fn(ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>>;
 
 // ---------------------------------------------------------------------------
 // ServiceEntryId: static registry identity.
@@ -196,6 +196,112 @@ pub struct ServiceParam {
     pub type_id: TypeId,
 }
 
+/// Static description of a service instance input parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceInputDescriptor {
+    /// The parameter name as declared in the function signature.
+    pub name: &'static str,
+    /// The input type name, used for diagnostics.
+    pub type_name: &'static str,
+    /// Compiler-assigned type identity for runtime validation.
+    pub type_id: TypeId,
+}
+
+#[derive(Clone)]
+pub(crate) struct ServiceInputPayload {
+    type_name: &'static str,
+    type_id: TypeId,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
+impl ServiceInputPayload {
+    pub(crate) fn new<T>(value: T) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        Self {
+            type_name: std::any::type_name::<T>(),
+            type_id: TypeId::of::<T>(),
+            value: Arc::new(value),
+        }
+    }
+
+    pub fn get<T>(
+        &self,
+        service_name: &'static str,
+        input_name: &'static str,
+    ) -> anyhow::Result<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let expected_type = std::any::type_name::<T>();
+        if self.type_id != TypeId::of::<T>() {
+            return Err(anyhow::anyhow!(
+                "service '{}' input '{}' expected type '{}' but received '{}'",
+                service_name,
+                input_name,
+                expected_type,
+                self.type_name
+            ));
+        }
+
+        self.value.clone().downcast::<T>().map_err(|_| {
+            anyhow::anyhow!(
+                "service '{}' input '{}' expected type '{}' but failed to downcast received '{}'",
+                service_name,
+                input_name,
+                expected_type,
+                self.type_name
+            )
+        })
+    }
+}
+
+/// Runtime invocation context passed from the daemon to generated service wrappers.
+#[derive(Clone)]
+pub struct ServiceInvocationContext {
+    service_name: &'static str,
+    cancellation_token: CancellationToken,
+    input: Option<ServiceInputPayload>,
+}
+
+impl ServiceInvocationContext {
+    #[inline]
+    pub(crate) fn new(
+        service_name: &'static str,
+        cancellation_token: CancellationToken,
+        input: Option<ServiceInputPayload>,
+    ) -> Self {
+        Self {
+            service_name,
+            cancellation_token,
+            input,
+        }
+    }
+
+    /// Cancellation token for this service instance generation.
+    #[inline]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
+    }
+
+    /// Clone and type-check the instance input for a template service.
+    pub fn input<T>(&self, input_name: &'static str) -> anyhow::Result<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let payload = self.input.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "service '{}' requires input '{}' of type '{}' but no input was provided",
+                self.service_name,
+                input_name,
+                std::any::type_name::<T>()
+            )
+        })?;
+        payload.get::<T>(self.service_name, input_name)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ServicePriority;
 
@@ -256,13 +362,12 @@ pub struct ServiceEntry {
     pub name: &'static str,
     pub module: &'static str,
     pub params: &'static [ServiceParam],
-    pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
+    pub input: Option<ServiceInputDescriptor>,
+    pub wrapper: ServiceFn,
     pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub priority: u8,
     /// Execution scheduling and isolation policy.
     pub scheduling: ServiceScheduling,
-    /// Whether this selected service definition creates one instance at daemon startup.
-    pub auto_start: bool,
     /// Compile-time tags assigned via `#[service(tags = ["core", "infra"])]`.
     /// Defaults to an empty slice when no tags are specified.
     pub tags: &'static [&'static str],
@@ -295,6 +400,9 @@ pub(crate) trait ServiceControl: Send + Sync {
     fn create_service_instance(
         &self,
         handle: &ServiceHandle,
+        input: Option<ServiceInputPayload>,
+        actual_input_type_name: &'static str,
+        actual_input_type_id: TypeId,
         control: Arc<dyn ServiceControl>,
     ) -> BoxFuture<'static, ServiceResult<ServiceInstanceHandle>>;
 
@@ -408,18 +516,33 @@ impl ServiceHandle {
     /// Calling this before the daemon's `run()` method starts returns an error.
     /// Calls made after `run()` starts but before startup waves finish wait
     /// until startup completes, then register the instance.
-    pub async fn create(&self) -> ServiceResult<ServiceInstanceHandle> {
+    pub async fn create<T>(&self, input: T) -> ServiceResult<ServiceInstanceHandle>
+    where
+        T: Any + Send + Sync + 'static,
+    {
         let Some(control) = self.control.upgrade() else {
             return Err(ServiceError::RegistryError(
                 "service handle owner daemon is no longer active".to_owned(),
             ));
         };
-        control.create_service_instance(self, control.clone()).await
+        let type_name = std::any::type_name::<T>();
+        let type_id = TypeId::of::<T>();
+        let payload = if self.entry.input.is_some() {
+            Some(ServiceInputPayload::new(input))
+        } else {
+            None
+        };
+        control
+            .create_service_instance(self, payload, type_name, type_id, control.clone())
+            .await
     }
 
     /// Create and start a new runtime instance for this service definition.
-    pub async fn start(&self) -> ServiceResult<ServiceInstanceHandle> {
-        let instance = self.create().await?;
+    pub async fn start<T>(&self, input: T) -> ServiceResult<ServiceInstanceHandle>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        let instance = self.create(input).await?;
         instance.start().await?;
         Ok(instance)
     }
@@ -667,6 +790,7 @@ pub(crate) struct ServiceInstanceRecord {
     entry_id: ServiceEntryId,
     entry: &'static ServiceEntry,
     cancellation_token: CancellationToken,
+    input: Option<ServiceInputPayload>,
 }
 
 impl ServiceInstanceRecord {
@@ -677,11 +801,23 @@ impl ServiceInstanceRecord {
         entry: &'static ServiceEntry,
         cancellation_token: CancellationToken,
     ) -> Self {
+        Self::with_input(instance_id, entry_id, entry, cancellation_token, None)
+    }
+
+    #[inline]
+    pub(crate) fn with_input(
+        instance_id: ServiceInstanceId,
+        entry_id: ServiceEntryId,
+        entry: &'static ServiceEntry,
+        cancellation_token: CancellationToken,
+        input: Option<ServiceInputPayload>,
+    ) -> Self {
         Self {
             instance_id,
             entry_id,
             entry,
             cancellation_token,
+            input,
         }
     }
 
@@ -724,6 +860,11 @@ impl ServiceInstanceRecord {
     #[inline]
     pub(crate) fn cancellation_token(&self) -> CancellationToken {
         self.cancellation_token.clone()
+    }
+
+    #[inline]
+    pub(crate) fn invocation_context(&self) -> ServiceInvocationContext {
+        ServiceInvocationContext::new(self.name(), self.cancellation_token(), self.input.clone())
     }
 }
 
@@ -1022,8 +1163,14 @@ impl ServiceDescription {
 
     /// Whether this selected service definition creates one instance at daemon startup.
     #[inline]
-    pub fn auto_start(&self) -> bool {
-        self.entry.auto_start
+    pub fn is_auto_start(&self) -> bool {
+        self.entry.input.is_none()
+    }
+
+    /// Whether this service definition requires per-instance startup input.
+    #[inline]
+    pub fn is_template(&self) -> bool {
+        self.entry.input.is_some()
     }
 
     /// Runtime instance records materialized for this selected service entry.
@@ -1273,7 +1420,7 @@ impl RegistryBuilder {
         for entry_id in projection.entry_ids() {
             let record =
                 ServiceCatalog::get(*entry_id).expect("projected service entry must exist");
-            if record.entry.auto_start {
+            if record.entry.input.is_none() {
                 let instance_id = ServiceInstanceId::new_v7();
                 instance_registry.insert(ServiceInstanceRecord::new(
                     instance_id,
@@ -1303,19 +1450,19 @@ mod tests {
     use super::*;
 
     fn test_registry_entry_id_first_wrapper(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
     fn test_registry_entry_id_second_wrapper(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
     fn test_registry_on_demand_wrapper(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -1380,6 +1527,9 @@ mod tests {
         fn create_service_instance(
             &self,
             _handle: &ServiceHandle,
+            _input: Option<ServiceInputPayload>,
+            _actual_input_type_name: &'static str,
+            _actual_input_type_id: TypeId,
             _control: Arc<dyn ServiceControl>,
         ) -> BoxFuture<'static, ServiceResult<ServiceInstanceHandle>> {
             Box::pin(async {
@@ -1428,7 +1578,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: true,
+        input: None,
         tags: &["__test_registry_entry_id_first__"],
     };
 
@@ -1442,7 +1592,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: true,
+        input: None,
         tags: &["__test_registry_entry_id_second__"],
     };
 
@@ -1456,7 +1606,11 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: false,
+        input: Some(ServiceInputDescriptor {
+            name: "job",
+            type_name: "usize",
+            type_id: TypeId::of::<usize>(),
+        }),
         tags: &["__test_registry_on_demand__"],
     };
 
@@ -1466,7 +1620,7 @@ mod tests {
     }
 
     #[test]
-    fn test_service_entry_auto_start_default() {
+    fn test_service_entry_without_input_is_auto_start() {
         let entry = ServiceEntry {
             name: "test",
             module: "test_mod",
@@ -1475,10 +1629,10 @@ mod tests {
             watcher: None,
             priority: 50,
             scheduling: ServiceScheduling::Standard,
-            auto_start: true,
+            input: None,
             tags: &[],
         };
-        assert!(entry.auto_start);
+        assert!(entry.input.is_none());
     }
 
     #[test]
@@ -1491,10 +1645,43 @@ mod tests {
             watcher: None,
             priority: 50,
             scheduling: ServiceScheduling::Isolated,
-            auto_start: true,
+            input: None,
             tags: &[],
         };
         assert_eq!(entry.scheduling, ServiceScheduling::Isolated);
+    }
+
+    #[test]
+    fn service_input_payload_reuses_declared_input_allocation() {
+        #[derive(Debug)]
+        struct InputConfig {
+            value: usize,
+        }
+
+        let payload = ServiceInputPayload::new(InputConfig { value: 7 });
+        let first = payload
+            .get::<InputConfig>("worker", "job")
+            .expect("input should downcast to declared type");
+        let second = payload
+            .get::<InputConfig>("worker", "job")
+            .expect("input should be reusable across generations");
+
+        assert_eq!(first.value, 7);
+        assert_eq!(second.value, 7);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn service_input_payload_reports_type_mismatch() {
+        let payload = ServiceInputPayload::new(7_usize);
+        let err = payload
+            .get::<String>("worker", "job")
+            .expect_err("wrong input type should fail");
+
+        assert!(
+            err.to_string().contains("expected type"),
+            "unexpected mismatch error: {err}"
+        );
     }
 
     #[test]
@@ -1838,7 +2025,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_build_does_not_auto_start_disabled_services() {
+    fn registry_build_does_not_auto_start_template_services() {
         let registry = Registry::builder()
             .with_tag("__test_registry_on_demand__")
             .build();
@@ -1846,9 +2033,10 @@ mod tests {
             .services()
             .iter()
             .find(|service| service.name() == "test_registry_on_demand")
-            .expect("non-auto-start service should be selected by tag");
+            .expect("template service should be selected by tag");
 
-        assert!(!service.auto_start());
+        assert!(service.is_template());
+        assert!(!service.is_auto_start());
         assert!(service.instance_records().is_empty());
         assert!(service.instance_ids().is_empty());
         assert_eq!(registry.instance_registry.len(), 0);

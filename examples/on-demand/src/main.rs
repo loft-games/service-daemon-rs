@@ -1,9 +1,9 @@
 //! # On-Demand Service Instance Example
 //!
 //! This example demonstrates:
-//! - Marking a service definition with `#[service(auto_start = false)]`
+//! - Defining a service template with a `#[input]` startup parameter
 //! - Resolving a daemon-bound `ServiceHandle` from a provider
-//! - Creating runtime instances with `ServiceHandle::create().await`
+//! - Creating runtime instances with `ServiceHandle::create(input).await`
 //! - Starting created instances with `ServiceInstanceHandle::start().await`
 //! - Stopping and cleaning instances with `ServiceInstanceHandle`
 //!

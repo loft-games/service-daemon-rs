@@ -22,6 +22,7 @@ mod startup_preflight;
 
 #[cfg(feature = "simulation")]
 use std::any::Any;
+use std::any::TypeId;
 use std::collections::HashMap;
 use std::future::pending;
 use std::sync::{
@@ -47,9 +48,9 @@ use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessSnapshot,
     Result as ServiceResult, SchedulingAdvisoryProfile, ServiceControl, ServiceDescription,
-    ServiceEntry, ServiceEntryId, ServiceHandle, ServiceInstanceHandle, ServiceInstanceId,
-    ServiceInstanceRecord, ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceScheduling,
-    ServiceStatus, TriggerRuntimeSnapshot,
+    ServiceEntry, ServiceEntryId, ServiceHandle, ServiceInputPayload, ServiceInstanceHandle,
+    ServiceInstanceId, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceRuntimeSnapshot,
+    ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
 };
 use dashmap::DashMap;
 
@@ -437,6 +438,9 @@ impl ServiceControl for DaemonInstanceControl {
     fn create_service_instance(
         &self,
         handle: &ServiceHandle,
+        input: Option<ServiceInputPayload>,
+        actual_input_type_name: &'static str,
+        actual_input_type_id: TypeId,
         control: Arc<dyn ServiceControl>,
     ) -> futures::future::BoxFuture<'static, ServiceResult<ServiceInstanceHandle>> {
         let entry_id = handle.entry_id();
@@ -460,7 +464,14 @@ impl ServiceControl for DaemonInstanceControl {
             };
             let mut inner = inner.lock().await;
             inner
-                .create_service_instance(entry_id, entry, control.clone())
+                .create_service_instance(
+                    entry_id,
+                    entry,
+                    input,
+                    actual_input_type_name,
+                    actual_input_type_id,
+                    control.clone(),
+                )
                 .await
         })
     }
@@ -897,6 +908,9 @@ impl DaemonInstanceInner {
         &mut self,
         entry_id: ServiceEntryId,
         entry: &'static ServiceEntry,
+        input: Option<ServiceInputPayload>,
+        actual_input_type_name: &'static str,
+        actual_input_type_id: TypeId,
         control: Arc<dyn ServiceControl>,
     ) -> ServiceResult<ServiceInstanceHandle> {
         if self.cancellation_token.is_cancelled() {
@@ -909,12 +923,34 @@ impl DaemonInstanceInner {
                 "service entry {entry_id} is not selected by this daemon"
             )));
         }
+        match entry.input {
+            Some(expected) if actual_input_type_id != expected.type_id => {
+                return Err(ServiceError::RegistryError(format!(
+                    "service '{}' expects input '{}' of type '{}' but received '{}'",
+                    entry.name, expected.name, expected.type_name, actual_input_type_name
+                )));
+            }
+            Some(expected) if input.is_none() => {
+                return Err(ServiceError::RegistryError(format!(
+                    "service '{}' expects input '{}' of type '{}' but no input was provided",
+                    entry.name, expected.name, expected.type_name
+                )));
+            }
+            None if actual_input_type_id != TypeId::of::<()>() => {
+                return Err(ServiceError::RegistryError(format!(
+                    "service '{}' does not declare #[input] but received input type '{}'",
+                    entry.name, actual_input_type_name
+                )));
+            }
+            _ => {}
+        }
 
-        let record = ServiceInstanceRecord::new(
+        let record = ServiceInstanceRecord::with_input(
             ServiceInstanceId::new_v7(),
             entry_id,
             entry,
             CancellationToken::new(),
+            input,
         );
         self.instance_registry.insert(record.clone());
         self.resources
@@ -980,6 +1016,7 @@ impl DaemonInstanceInner {
             service_instance_id: record.instance_id(),
             name: record.name(),
             run: record.entry().wrapper,
+            invocation_context: record.invocation_context(),
             watcher: record.entry().watcher,
             policy: self.restart_policy,
             scheduling: record.scheduling(),
@@ -1185,7 +1222,7 @@ mod tests {
     }
 
     fn noop_service(
-        _: CancellationToken,
+        _: crate::models::ServiceInvocationContext,
     ) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -1198,7 +1235,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: true,
+        input: None,
         tags: &["__unit_runtime_standard__"],
     };
 
@@ -1210,7 +1247,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::HighPriority,
-        auto_start: true,
+        input: None,
         tags: &["__unit_runtime_high_priority__"],
     };
 
@@ -1222,7 +1259,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Isolated,
-        auto_start: true,
+        input: None,
         tags: &["__unit_runtime_isolated__"],
     };
 
@@ -1730,7 +1767,7 @@ mod tests {
             .service();
 
         let err = service_handle
-            .create()
+            .create(())
             .await
             .expect_err("create should require daemon run() to have started");
         assert!(

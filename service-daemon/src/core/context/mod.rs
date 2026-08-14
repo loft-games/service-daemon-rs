@@ -49,8 +49,9 @@ mod tests {
     use super::*;
     use crate::models::{
         DaemonInstanceId, ScalingPolicy, ServiceControl, ServiceEntry, ServiceEntryId,
-        ServiceHandle, ServiceInstanceHandle, ServiceInstanceId, ServiceParam,
-        ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
+        ServiceHandle, ServiceInstanceHandle, ServiceInstanceId, ServiceInvocationContext,
+        ServiceParam, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
+        TriggerRuntimeSnapshot,
     };
     use futures::future::BoxFuture;
     use linkme::distributed_slice;
@@ -126,6 +127,9 @@ mod tests {
         fn create_service_instance(
             &self,
             _handle: &ServiceHandle,
+            _input: Option<crate::models::ServiceInputPayload>,
+            _actual_input_type_name: &'static str,
+            _actual_input_type_id: TypeId,
             _control: Arc<dyn ServiceControl>,
         ) -> BoxFuture<'static, crate::models::Result<ServiceInstanceHandle>> {
             Box::pin(async {
@@ -165,19 +169,19 @@ mod tests {
     }
 
     fn selected_handle_test_wrapper(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
     fn excluded_handle_test_wrapper(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
     fn unlinked_handle_test_wrapper(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
@@ -192,7 +196,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: true,
+        input: None,
         tags: &["__handle_resolver_selected__"],
     };
 
@@ -206,7 +210,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: true,
+        input: None,
         tags: &["__handle_resolver_excluded__"],
     };
 

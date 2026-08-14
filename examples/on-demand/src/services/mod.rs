@@ -1,13 +1,14 @@
 //! Services that demonstrate on-demand runtime instance management.
 //!
-//! The `template` module contains service definitions that are selected by the
-//! daemon but do not auto-start. The controller service resolves a
-//! daemon-bound `ServiceHandle` and periodically creates short-lived runtime
-//! instances from that definition.
+//! The `template` module contains service definitions that declare `#[input]`
+//! startup values. The controller service resolves a daemon-bound
+//! `ServiceHandle` and periodically creates short-lived runtime instances from
+//! that definition.
 
 pub mod template;
 
 use crate::providers::WorkerService;
+use crate::services::template::WorkerConfig;
 use service_daemon::{done, service, sleep};
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -21,8 +22,15 @@ pub async fn worker_controller(worker: Arc<WorkerService>) -> anyhow::Result<()>
     );
     done();
 
+    let mut next_job_id = 1_u64;
     while !service_daemon::is_shutdown() {
-        if let Err(err) = run_worker_once(&worker).await {
+        let config = WorkerConfig {
+            id: next_job_id,
+            heartbeat_interval: Duration::from_millis(250),
+        };
+        next_job_id += 1;
+
+        if let Err(err) = run_worker_once(&worker, config).await {
             error!(error = ?err, "on-demand worker lifecycle failed");
             if !sleep(Duration::from_secs(1)).await {
                 break;
@@ -38,18 +46,24 @@ pub async fn worker_controller(worker: Arc<WorkerService>) -> anyhow::Result<()>
     Ok(())
 }
 
-pub async fn run_worker_once(worker_service: &WorkerService) -> anyhow::Result<()> {
+pub async fn run_worker_once(
+    worker_service: &WorkerService,
+    config: WorkerConfig,
+) -> anyhow::Result<()> {
     info!(
         service = worker_service.name(),
         instances = worker_service.instances().len(),
+        worker_id = config.id,
         "starting one on-demand worker lifecycle"
     );
 
     // start is the create-and-run convenience path for common on-demand usage.
     // When callers need to decide later when execution should begin, use
-    // `worker_service.create().await` to get a ServiceInstanceHandle without
-    // running it, then call `instance.start().await` when ready.
-    let worker = match worker_service.start().await {
+    // `worker_service.create(config).await` to get a ServiceInstanceHandle
+    // without running it, then call `instance.start().await` whenever the
+    // instance should actually begin. The input is instance configuration and
+    // remains available to every generation of that instance.
+    let worker = match worker_service.start(config).await {
         Ok(worker) => worker,
         Err(error) => {
             error!(error = ?error, "failed to create and start worker instance");

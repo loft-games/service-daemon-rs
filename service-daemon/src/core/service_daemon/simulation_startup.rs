@@ -48,6 +48,7 @@ impl DaemonInstanceInner {
                     service_instance_id: service.instance_id(),
                     name: service.name(),
                     run: service.entry().wrapper,
+                    invocation_context: service.invocation_context(),
                     watcher: service.entry().watcher,
                     policy: test_policy,
                     scheduling: service.scheduling(),

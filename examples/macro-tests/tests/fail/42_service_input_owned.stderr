@@ -1,0 +1,8 @@
+error: #[input] parameters must be immutable shared references.
+
+         = help: Use #[input] value: &YourInputType. Pass owned input to ServiceHandle::create(input) or ServiceHandle::start(input).
+
+ --> tests/fail/42_service_input_owned.rs:6:17
+  |
+6 | async fn worker(#[input] job: Job) -> anyhow::Result<()> {
+  |                 ^^^^^^^^^^^^^^^^^

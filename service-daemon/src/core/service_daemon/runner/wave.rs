@@ -170,6 +170,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
                 service_instance_id: service.instance_id(),
                 name: service.name(),
                 run: service.entry().wrapper,
+                invocation_context: service.invocation_context(),
                 watcher: service.entry().watcher,
                 policy: restart_policy,
                 scheduling: service.scheduling(),

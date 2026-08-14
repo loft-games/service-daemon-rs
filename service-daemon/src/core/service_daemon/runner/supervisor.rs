@@ -13,7 +13,10 @@ use crate::core::diagnostics::{
 };
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 use crate::models::policy::RestartStormGuard;
-use crate::models::{BackoffController, ServiceError, ServiceFn, ServiceInstanceId, ServiceStatus};
+use crate::models::{
+    BackoffController, ServiceError, ServiceFn, ServiceInstanceId, ServiceInvocationContext,
+    ServiceStatus,
+};
 use crate::{ProviderDependencyWatchSet, ProviderInitError};
 
 use super::super::parts::{
@@ -134,6 +137,7 @@ pub(super) struct ServiceSupervisor {
     pub(super) service_instance_id: ServiceInstanceId,
     pub(super) name: &'static str,
     pub(super) run: ServiceFn,
+    pub(super) invocation_context: ServiceInvocationContext,
     pub(super) watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub(super) scheduling: ServiceScheduling,
     pub(super) body_lanes: BodyExecutionLanes,
@@ -164,6 +168,7 @@ impl ServiceSupervisor {
             service_instance_id,
             name,
             run,
+            invocation_context,
             watcher,
             policy,
             scheduling,
@@ -180,6 +185,7 @@ impl ServiceSupervisor {
             service_instance_id,
             name,
             run,
+            invocation_context,
             watcher,
             scheduling,
             body_lanes,
@@ -606,7 +612,7 @@ impl ServiceSupervisor {
             name: self.name,
             generation: self.generation,
             run: self.run,
-            cancellation_token: self.cancellation_token.clone(),
+            invocation_context: self.invocation_context.clone(),
             reload_token: reload_token.clone(),
             resources: self.resources.clone(),
             diagnostics: diagnostics.clone(),
@@ -902,6 +908,7 @@ pub(super) async fn spawn_service(parts: SpawnServiceParts) {
         service_instance_id,
         name,
         run,
+        invocation_context,
         watcher,
         policy,
         scheduling,
@@ -920,6 +927,7 @@ pub(super) async fn spawn_service(parts: SpawnServiceParts) {
         service_instance_id,
         name,
         run,
+        invocation_context,
         watcher,
         policy,
         scheduling,
@@ -1024,12 +1032,15 @@ mod tests {
         }
     }
 
-    fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn noop_service(_: ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
-    fn cancellable_service(token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn cancellable_service(
+        context: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async move {
+            let token = context.cancellation_token();
             token.cancelled().await;
             Ok(())
         })
@@ -1060,7 +1071,9 @@ mod tests {
         .expect("thread records should reach expected length")
     }
 
-    fn no_live_remap_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn no_live_remap_service(
+        _: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async {
             record_current_thread_name(NO_LIVE_REMAP_THREADS.clone()).await;
             crate::done();
@@ -1080,7 +1093,7 @@ mod tests {
     }
 
     fn standard_to_isolated_remap_service(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async {
             record_current_thread_name(STANDARD_TO_ISOLATED_THREADS.clone()).await;
@@ -1095,7 +1108,7 @@ mod tests {
     }
 
     fn isolated_to_standard_remap_service(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async {
             record_current_thread_name(ISOLATED_TO_STANDARD_THREADS.clone()).await;
@@ -1144,6 +1157,10 @@ mod tests {
         }
     }
 
+    fn test_invocation_context(name: &'static str) -> ServiceInvocationContext {
+        ServiceInvocationContext::new(name, CancellationToken::new(), None)
+    }
+
     struct RemapSupervisorShared {
         resources: Arc<DaemonResources>,
         diagnostics: Arc<DiagnosticsStore>,
@@ -1162,6 +1179,11 @@ mod tests {
             service_instance_id,
             name,
             run,
+            invocation_context: ServiceInvocationContext::new(
+                name,
+                shared.cancellation_token.clone(),
+                None,
+            ),
             watcher: None,
             policy: fast_policy(),
             scheduling: declared_scheduling,
@@ -1199,6 +1221,7 @@ mod tests {
                 service_instance_id,
                 name: "default_resolver",
                 run: noop_service,
+                invocation_context: test_invocation_context("default_resolver"),
                 watcher: None,
                 policy: fast_policy(),
                 scheduling: declared_scheduling,
@@ -1409,7 +1432,7 @@ mod tests {
             name: "body_bridge",
             generation: 1,
             run: noop_service,
-            cancellation_token: CancellationToken::new(),
+            invocation_context: test_invocation_context("body_bridge"),
             reload_token: CancellationToken::new(),
             resources: DaemonResources::new(),
             diagnostics: store.register_generation(
@@ -1476,6 +1499,7 @@ mod tests {
             service_instance_id,
             name: "control_watcher",
             run: cancellable_service,
+            invocation_context: test_invocation_context("control_watcher"),
             watcher: Some(control_runtime_watcher),
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Standard,
@@ -1521,6 +1545,7 @@ mod tests {
             service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             name: "test_service",
             run: noop_service,
+            invocation_context: test_invocation_context("test_service"),
             watcher: None,
             policy,
             scheduling: ServiceScheduling::Standard,
@@ -1726,6 +1751,7 @@ mod tests {
             service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             name: "isolated_startup",
             run: noop_service,
+            invocation_context: test_invocation_context("isolated_startup"),
             watcher: None,
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Isolated,
@@ -1825,7 +1851,11 @@ mod tests {
             name: "isolated_gate",
             generation: 1,
             run: noop_service,
-            cancellation_token,
+            invocation_context: ServiceInvocationContext::new(
+                "isolated_gate",
+                cancellation_token,
+                None,
+            ),
             reload_token: CancellationToken::new(),
             resources: DaemonResources::new(),
             diagnostics: store.register_generation(

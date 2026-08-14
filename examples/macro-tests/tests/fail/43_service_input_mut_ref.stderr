@@ -1,0 +1,8 @@
+error: #[input] parameters must be immutable shared references.
+
+         = help: Use #[input] value: &YourInputType, not &mut YourInputType.
+
+ --> tests/fail/43_service_input_mut_ref.rs:6:17
+  |
+6 | async fn worker(#[input] job: &mut Job) -> anyhow::Result<()> {
+  |                 ^^^^^^^^^^^^^^^^^^^^^^

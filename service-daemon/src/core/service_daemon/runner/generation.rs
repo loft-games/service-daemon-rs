@@ -17,7 +17,7 @@ use crate::core::diagnostics::{
     ShutdownBoundaryResultKind, ShutdownResidualActionKind, run_generation_runtime_probe,
 };
 use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
-use crate::models::{ServiceFn, ServiceInstanceId};
+use crate::models::{ServiceFn, ServiceInstanceId, ServiceInvocationContext};
 
 pub(super) type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
 const DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -110,7 +110,7 @@ pub(super) struct ServiceGenerationParts {
     pub(super) name: &'static str,
     pub(super) generation: u64,
     pub(super) run: ServiceFn,
-    pub(super) cancellation_token: CancellationToken,
+    pub(super) invocation_context: ServiceInvocationContext,
     pub(super) reload_token: CancellationToken,
     pub(super) resources: Arc<DaemonResources>,
     pub(super) diagnostics: GenerationDiagnosticsHandle,
@@ -125,7 +125,7 @@ fn run_scoped_service_generation(
             name,
             generation,
             run,
-            cancellation_token,
+            invocation_context,
             reload_token,
             resources,
             diagnostics,
@@ -145,7 +145,7 @@ fn run_scoped_service_generation(
         let identity = ServiceIdentity::new_generation_with_diagnostics(
             service_instance_id,
             name,
-            cancellation_token.clone(),
+            invocation_context.cancellation_token(),
             reload_token,
             diagnostics,
         );
@@ -153,7 +153,7 @@ fn run_scoped_service_generation(
         __run_service_scope(identity, resources, || async move {
             with_provider_runtime_phase(
                 phase,
-                AssertUnwindSafe(run(cancellation_token).instrument(span)).catch_unwind(),
+                AssertUnwindSafe(run(invocation_context).instrument(span)).catch_unwind(),
             )
             .await
         })
@@ -253,7 +253,7 @@ pub(super) fn run_isolated_service_generation(
         let name = parts.name;
         let service_instance_id = parts.service_instance_id;
         let generation = parts.generation;
-        let cancellation_token = parts.cancellation_token.clone();
+        let cancellation_token = parts.invocation_context.cancellation_token();
         let reload_token = parts.reload_token.clone();
         let permit = tokio::select! {
             permit = startup_permits.acquire_owned() => match permit {

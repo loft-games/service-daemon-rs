@@ -453,11 +453,13 @@ fn readiness_from_services(services: Vec<ServiceRuntimeSnapshot>) -> ReadinessSn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ServiceEntry, ServiceEntryId, ServiceInstanceRecord, ServiceParam};
+    use crate::models::{
+        ServiceEntry, ServiceEntryId, ServiceInstanceRecord, ServiceInvocationContext, ServiceParam,
+    };
     use futures::future::BoxFuture;
     use tokio_util::sync::CancellationToken;
 
-    fn noop_service(_token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn noop_service(_context: ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
@@ -469,7 +471,7 @@ mod tests {
         watcher: None,
         priority: 50,
         scheduling: ServiceScheduling::Standard,
-        auto_start: true,
+        input: None,
         tags: &[],
     };
 
@@ -481,7 +483,7 @@ mod tests {
         watcher: None,
         priority: 80,
         scheduling: ServiceScheduling::HighPriority,
-        auto_start: true,
+        input: None,
         tags: &[],
     };
 

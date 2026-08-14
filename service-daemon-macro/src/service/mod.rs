@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{ItemFn, Visibility, parse_macro_input};
+use syn::{FnArg, ItemFn, Pat, Visibility, parse_macro_input};
 
 use crate::common::{ExtractedParams, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
@@ -17,7 +17,6 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as ServiceAttr);
     let priority_tokens = args.priority;
     let scheduling_tokens = args.scheduling;
-    let auto_start_tokens = args.auto_start;
     let tags_tokens = args.tags;
 
     let input = parse_macro_input!(item as ItemFn);
@@ -40,6 +39,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         call_args,
         param_entries,
         watcher_arms,
+        input_entry,
         ..
     } = match crate::common::try_extract_service_params(sig) {
         Ok(params) => params,
@@ -48,6 +48,17 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let mut clean_sig = sig.clone();
     clean_sig.inputs = clean_inputs;
+    let projection_call_args = clean_sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            FnArg::Typed(pat_type) => match &*pat_type.pat {
+                Pat::Ident(pat_ident) => Some(pat_ident.ident.clone()),
+                _ => None,
+            },
+            FnArg::Receiver(_) => None,
+        })
+        .collect::<Vec<_>>();
 
     let wrapper_name = format_ident!("{}_wrapper", fn_name);
     let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
@@ -79,9 +90,9 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let user_fn_projection = if matches!(vis, Visibility::Inherited) {
         let bridge_call = if is_async {
-            quote! { #scope_mod::#fn_name(#(#call_args),*).await }
+            quote! { #scope_mod::#fn_name(#(#projection_call_args),*).await }
         } else {
-            quote! { #scope_mod::#fn_name(#(#call_args),*) }
+            quote! { #scope_mod::#fn_name(#(#projection_call_args),*) }
         };
 
         quote! {
@@ -108,11 +119,11 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             entry_name: &entry_name,
             fn_name_str: &fn_name_str,
             param_entries: &param_entries,
+            input_entry: &input_entry.unwrap_or_else(|| quote! { None }),
             wrapper_name: &wrapper_name,
             watcher_ptr: &watcher_ptr,
             priority: &priority_tokens,
             scheduling: &scheduling_tokens,
-            auto_start: &auto_start_tokens,
             tags: &tags_tokens,
         });
 

@@ -1,0 +1,8 @@
+error: #[input] is only supported by #[service]
+
+         = help: Provider function parameters must be Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> dependencies
+
+ --> tests/fail/41_provider_rejects_input.rs:6:10
+  |
+6 | fn value(#[input] dependency: Dependency) -> usize {
+  |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

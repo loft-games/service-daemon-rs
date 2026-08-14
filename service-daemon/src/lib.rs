@@ -86,10 +86,10 @@ pub use models::{
     ProviderInitError, ReadinessServiceError, ReadinessSnapshot, Registry, RegistryBuilder, Result,
     RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
     SchedulingAdvisoryProfile, ServiceDiagnosticsSnapshot, ServiceEntryId, ServiceError,
-    ServiceHandle, ServiceInstanceHandle, ServiceInstanceId, ServiceRuntimeSnapshot, ServiceStatus,
-    TT, TriggerContext, TriggerHandler, TriggerHost, TriggerMessage, TriggerPolicyOverlay,
-    TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError, TriggerPressureSnapshot,
-    TriggerRuntimeSnapshot,
+    ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId,
+    ServiceInvocationContext, ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext,
+    TriggerHandler, TriggerHost, TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
+    TriggerPolicyOverlayError, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)
@@ -126,7 +126,8 @@ pub mod __private {
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
         PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceEntryId,
-        ServiceFn, ServiceHandle, ServiceInstanceHandle, ServiceInstanceId, ServiceParam,
+        ServiceFn, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId,
+        ServiceInvocationContext, ServiceParam,
     };
 
     pub use futures;
@@ -151,8 +152,8 @@ pub mod prelude {
         DaemonDiagnosticsSnapshot, DaemonInstanceHandle, DaemonInstanceId, DaemonRuntimeSnapshot,
         DiagnosticRuntimeLane, IpcStream, ManagedProvided, Provided, ReadinessSnapshot,
         SchedulingAdvisoryProfile, ServiceDaemon, ServiceError, ServiceHandle,
-        ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling,
-        ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+        ServiceInputDescriptor, ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot,
+        ServiceScheduling, ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,
         TriggerPressureSnapshot, TriggerRuntimeSnapshot, WatchableProvided,
         current_service_instance_id, done, is_shutdown, provider, service, service_handle, shelve,
         shelve_clone, sleep, spawn_with_context, state, trigger, trigger_config, unshelve,

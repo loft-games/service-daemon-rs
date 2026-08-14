@@ -4,7 +4,6 @@
 //!
 //! - **Empty**: `#[provider]`
 //! - **Template**: `#[provider(Notify)]`, `#[provider(Queue(String))]`,
-//!   `#[provider(template = Queue(String))]`,
 //!   `#[provider(Queue(ComplexJob), capacity = 500)]`,
 //!   `#[provider(Listen("0.0.0.0:8080"))]`,
 //!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`,
@@ -15,7 +14,6 @@
 //!   `#[provider(LocalIpcListen("myapp-api"))]`,
 //!   `#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
-//!   `#[provider(default = 8080)]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
 //!
 //! ## Two-phase parsing

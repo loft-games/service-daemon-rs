@@ -58,8 +58,13 @@ another service without looking up the registry by string name.
 ```rust
 use service_daemon::{ProviderError, ServiceHandle, provider, service, service_handle};
 
-#[service(auto_start = false, tags = ["workers"])]
-async fn worker_service() -> anyhow::Result<()> {
+struct WorkerJob {
+    id: u64,
+}
+
+#[service(tags = ["workers"])]
+async fn worker_service(#[input] job: &WorkerJob) -> anyhow::Result<()> {
+    let _ = job.id;
     service_daemon::done();
     service_daemon::wait_shutdown().await;
     Ok(())
@@ -96,22 +101,27 @@ runtime state for that instance. After the owning daemon is gone, status reads
 report `Terminated`, runtime snapshots return `None`, and stop/remove
 requests return `false`.
 
-Service definitions default to `auto_start = true`: a selected entry creates
-one runtime instance when the daemon starts. Use
-`#[service(auto_start = false)]` when the selected service definition should
-not start automatically. The service can still be resolved with
-`service_handle!(...)`; `ServiceHandle::instances()` starts empty, and
-`ServiceHandle::create().await` registers a new runtime instance without
-starting it. `ServiceInstanceHandle::start().await` starts a created instance,
-and `ServiceHandle::start().await` is the create-and-start convenience path.
+Service definitions without `#[input]` create one runtime instance when the
+daemon starts. A service definition with one `#[input] value: &T` parameter is a
+template service: it is still selected by the daemon projection and can be
+resolved with `service_handle!(...)`, but `ServiceHandle::instances()` starts
+empty. `ServiceHandle::create(input).await` accepts an owned `T`, stores it with
+the instance, and registers a new runtime instance without starting it.
+`ServiceInstanceHandle::start().await` starts a created instance, and
+`ServiceHandle::start(input).await` is the create-and-start convenience path.
 The daemon must have entered `run()` first. Calls made after `run()` starts but
 before startup waves finish wait until startup is complete, so provider code
 should only resolve and pass the handle; already-started services should submit
 instance creation or startup:
 
 ```rust
-#[service(auto_start = false, tags = ["workers"])]
-async fn worker_service() -> anyhow::Result<()> {
+struct WorkerJob {
+    id: u64,
+}
+
+#[service(tags = ["workers"])]
+async fn worker_service(#[input] job: &WorkerJob) -> anyhow::Result<()> {
+    let _ = job.id;
     service_daemon::done();
     service_daemon::wait_shutdown().await;
     Ok(())
@@ -122,7 +132,7 @@ async fn controller(worker: std::sync::Arc<WorkerService>) -> anyhow::Result<()>
     service_daemon::done();
     let service = worker.0.clone();
     tokio::spawn(async move {
-        let instance = service.start().await?;
+        let instance = service.start(WorkerJob { id: 1 }).await?;
         instance.remove().await?;
         Ok::<(), anyhow::Error>(())
     });
