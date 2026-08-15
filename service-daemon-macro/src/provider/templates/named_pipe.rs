@@ -531,11 +531,23 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
                 name: &str,
             ) -> std::io::Result<service_daemon::__private::tokio::net::windows::named_pipe::NamedPipeClient> {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                let mut observed_busy = false;
                 loop {
                     match Self::open_client(name) {
                         Ok(client) => return Ok(client),
                         Err(error)
                             if error.raw_os_error() == Some(#ERROR_PIPE_BUSY)
+                                && std::time::Instant::now() < deadline =>
+                        {
+                            observed_busy = true;
+                            service_daemon::__private::tokio::time::sleep(
+                                std::time::Duration::from_millis(10),
+                            )
+                            .await;
+                        }
+                        Err(error)
+                            if observed_busy
+                                && error.kind() == std::io::ErrorKind::NotFound
                                 && std::time::Instant::now() < deadline =>
                         {
                             service_daemon::__private::tokio::time::sleep(

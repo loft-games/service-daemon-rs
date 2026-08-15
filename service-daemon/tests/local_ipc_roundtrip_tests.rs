@@ -238,6 +238,19 @@ mod windows_tests {
         "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_LISTEN_NAME_C64173F7";
     const INVALID_CONNECT_ENV_VAR: &str =
         "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_INVALID_CONNECT_NAME_F23F5C14";
+    const BUSY_RETRY_ENV_VAR: &str = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_BUSY_RETRY_NAME_E2844B06";
+
+    fn pipe_name(logical_name: &str) -> String {
+        format!(r"\\.\pipe\service-daemon-rs-{logical_name}")
+    }
+
+    fn create_single_instance_server(
+        pipe_name: &str,
+    ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+        let mut options = tokio::net::windows::named_pipe::ServerOptions::new();
+        options.max_instances(1);
+        options.create(pipe_name)
+    }
 
     #[derive(Debug)]
     #[provider(
@@ -319,6 +332,13 @@ mod windows_tests {
     )]
     pub struct WindowsOverrideClient;
 
+    #[derive(Debug)]
+    #[provider(
+        LocalIpcConnect("service-daemon-rs-local-ipc-windows-busy-retry"),
+        env = "SERVICE_DAEMON_RS_LOCAL_IPC_WINDOWS_BUSY_RETRY_NAME_E2844B06"
+    )]
+    pub struct WindowsBusyRetryClient;
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_local_ipc_env_overrides_logical_name() {
         let _env_lock = ENV_VAR_LOCK.lock().await;
@@ -356,6 +376,42 @@ mod windows_tests {
         assert_eq!(&response, RESPONSE_PAYLOAD);
 
         server_task.await.expect("Server task panicked");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn windows_local_ipc_connect_retries_busy_pipe_replacement_gap() {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let (_env_var, logical_name) = set_local_ipc_name(BUSY_RETRY_ENV_VAR, "windows-busy-retry");
+        let pipe_name = pipe_name(&logical_name);
+
+        let busy_server =
+            create_single_instance_server(&pipe_name).expect("busy server create failed");
+        let busy_client = tokio::net::windows::named_pipe::ClientOptions::new()
+            .open(&pipe_name)
+            .expect("busy holder client open failed");
+
+        let provider = <WindowsBusyRetryClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("WindowsBusyRetryClient resolve failed");
+        assert_eq!(provider.name(), logical_name);
+
+        let release_name = pipe_name.clone();
+        let release_task = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            drop(busy_client);
+            drop(busy_server);
+            let replacement = create_single_instance_server(&release_name)
+                .expect("replacement server create failed");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            drop(replacement);
+        });
+
+        let result = provider.connect().await;
+        assert!(
+            result.is_ok(),
+            "expected LocalIpcConnect busy retry to survive replacement gap, got {result:?}"
+        );
+        release_task.abort();
     }
 
     #[derive(Debug)]
