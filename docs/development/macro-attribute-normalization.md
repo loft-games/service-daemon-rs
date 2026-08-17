@@ -36,11 +36,11 @@ entry attributes:
 - `scheduling = ...`
 - `tags = [...]`
 
-Auto-start is not a service attribute. It is inferred from the service
-signature: no `#[input]` parameter means the selected entry is auto-started,
-while one `#[input] value: &T` parameter means the selected entry is a template
-service. `ServiceHandle::create(input)` and `ServiceHandle::start(input)` accept
-owned `T` and the generated wrapper passes `&T` to each generation.
+Startup materialization is inferred from the service signature: no `#[input]`
+parameter means the selected entry materializes one startup instance, while one
+`#[input] value: &T` parameter means the selected entry is a template service.
+`ServiceHandle::create(input)` and `ServiceHandle::start(input)` accept owned
+`T` and the generated wrapper passes `&T` to each generation.
 
 `#[trigger(Host(Target), ...)]` has a custom head and a common named tail. The
 host is parsed as an open `syn::Path` and emitted into the `TriggerHost<Target>`

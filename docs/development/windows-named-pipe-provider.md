@@ -1,7 +1,7 @@
 # Windows Named Pipe Provider Contract
 
 This note records the design direction for Windows local IPC provider templates
-and the boundary they keep after the cross-platform `LocalIpc` facade was added.
+and the boundary they keep with the cross-platform `LocalIpc` facade.
 
 ## Decision
 
@@ -19,8 +19,8 @@ Do not make `UnixListen` or `UnixConnect` mean named pipes on Windows. Existing
 Unix socket templates stay Unix-only with their current `compile_error!` guard
 on non-Unix targets.
 
-`LocalIpcListen` / `LocalIpcConnect` now exist as a logical-name facade over
-Unix sockets and Windows named pipes. They do not accept raw platform endpoints;
+`LocalIpcListen` / `LocalIpcConnect` provide a logical-name facade over Unix
+sockets and Windows named pipes. They do not accept raw platform endpoints;
 explicit `NamedPipe*` templates remain the low-level Windows API when code needs
 native pipe-path control.
 
@@ -115,19 +115,20 @@ Client-side `NamedPipeConnect` runtime connect:
 
 | Error | Strategy | Reason |
 | :--- | :--- | :--- |
-| `NotFound` | Return runtime `io::Error` | Peer has not created the pipe yet. |
+| `NotFound` before any busy observation | Return runtime `io::Error` | Peer has not created the pipe yet. |
 | raw `ERROR_PIPE_BUSY` | Retry briefly inside `connect().await?` | All server instances are busy; Tokio documents retrying this case. |
+| `NotFound` after `ERROR_PIPE_BUSY` | Retry within the same bounded busy retry window | The listener may be rolling over from a busy single-instance server to a replacement instance. |
 | `ConnectionRefused` / `ConnectionAborted` | Return runtime `io::Error` | Peer startup or immediate close race. |
 | `PermissionDenied` | Return runtime `io::Error` | Security policy or access rights are wrong. |
 | `InvalidInput` | Fatal at provider init for invalid local pipe names; otherwise runtime `io::Error` | Invalid pipe name or unsupported options. |
 | Other I/O | Return runtime `io::Error` | Unknown Windows pipe failures should be visible first. |
 
 Runtime `connect().await` opens one fresh client and returns an `IpcStream`.
-Short `ERROR_PIPE_BUSY` listener-replacement windows are retried inside the
-helper.
+Short busy listener-replacement windows are retried inside the helper, including
+transient `NotFound` results after a busy observation.
 
-The final provider-init mapping should keep listener setup under the same
-boundary as `Listen` and `UnixListen`: retryable errors feed
+Provider-init mapping keeps listener setup under the same boundary as `Listen`
+and `UnixListen`: retryable errors feed
 `ProviderError::Retryable` until `RestartPolicy::provider_init_timeout`, fatal
 errors become `ProviderInitError::Fatal`. Connector runtime I/O stays at the
 `connect().await?` call site.

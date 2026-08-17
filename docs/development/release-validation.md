@@ -188,7 +188,7 @@ The Windows commands are wired into `.github/workflows/rust.yml` as the
 
 The Windows commands need real named-pipe permissions. A restricted-token sandbox can turn otherwise valid local pipe opens into `PermissionDenied`, so release validation should run them in a normal Windows test context.
 
-`docs/development/windows-named-pipe-ipc.md` records why the Windows named pipe provider contract uses explicit `NamedPipeListen` / `NamedPipeConnect` templates, and how the `LocalIpc*` facade now layers logical names over Unix sockets or Windows named pipes.
+`docs/development/windows-named-pipe-ipc.md` records why the Windows named pipe provider contract uses explicit `NamedPipeListen` / `NamedPipeConnect` templates, and how the `LocalIpc*` facade layers logical names over Unix sockets or Windows named pipes.
 
 ## Release Checklist
 

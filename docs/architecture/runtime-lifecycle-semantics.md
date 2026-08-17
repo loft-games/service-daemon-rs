@@ -7,9 +7,9 @@
 > failure context are represented before they are projected into public
 > diagnostics and status summaries.
 
-## 1. Problem statement
+## 1. Lifecycle model
 
-The runtime currently reports many lifecycle outcomes through single-value classifications such as `GenerationExitKind`, `ServiceStatus`, and human-readable summaries. That is too narrow for boundary cases where multiple facts are true at the same time:
+Runtime lifecycle outcomes are represented as structured facts before they are projected into compact public status summaries. Single-value classifications such as `GenerationExitKind`, `ServiceStatus`, and human-readable summaries are too narrow for boundary cases where multiple facts are true at the same time:
 
 - a reload was requested while the generation returned an error;
 - a reload was requested while the generation panicked;
@@ -28,7 +28,7 @@ The runtime currently reports many lifecycle outcomes through single-value class
 
 ## 3. Generation outcome matrix
 
-A generation exit should be represented as a structured record with at least these dimensions:
+A generation exit is represented as a structured record with at least these dimensions:
 
 | Dimension | Examples | Purpose |
 | :--- | :--- | :--- |
@@ -37,7 +37,7 @@ A generation exit should be represented as a structured record with at least the
 | Restart decision | immediate, backoff by failure kind, no restart | What the supervisor should do next. |
 | Daemon action | continue, request shutdown, terminate service | Whether the broader daemon should keep running. |
 
-Candidate internal shape:
+Illustrative internal shape:
 
 ```rust
 struct GenerationExitRecord {
@@ -63,17 +63,17 @@ struct GenerationSignalFacts {
 }
 ```
 
-This shape is illustrative, not final API. The required semantic change is that `reload_requested` and `shutdown_requested` become parallel facts instead of overwriting `result`.
+This shape is internal, not public API. `reload_requested` and `shutdown_requested` are parallel facts instead of overwriting `result`.
 
-Current behavior:
+Runtime behavior:
 
-- `service-daemon/src/core/service_daemon/runner/supervisor.rs` now uses an internal `GenerationExitRecord` with `GenerationResultKind` and `GenerationSignalFacts`.
+- `service-daemon/src/core/service_daemon/runner/supervisor.rs` uses an internal `GenerationExitRecord` with `GenerationResultKind` and `GenerationSignalFacts`.
 - Reload is recorded as `signals.reload_requested` instead of overwriting recoverable errors, trigger dispatch failures, or panics.
 - Clean exit while reload is requested still projects to reload/restoring semantics.
 
 ### 3.1 Reload plus failure
 
-| Scenario | Target facts | Target projection |
+| Scenario | Recorded facts | Projection |
 | :--- | :--- | :--- |
 | Reload requested, then generation returns `Ok(())` | `result = NormalExit`, `reload_requested = true` | A reload-driven restart may be immediate. |
 | Reload requested, then generation returns recoverable error | `result = RecoverableError`, `reload_requested = true` | Diagnostics show the error and the reload request. |
@@ -92,7 +92,7 @@ Shutdown can encounter work that has already crossed an internal boundary. The r
 | Isolated runtime join | wait for bridge outcome, then bounded join the OS thread | thread not joined in time | joined/timed out, bridge closed, panic, runtime build failure |
 | Trigger dispatch drain | stop accepting new events, drain in-flight dispatches | in-flight dispatch residual remains | started, completed, failed, timed out, residual |
 
-Candidate shared projection:
+Illustrative shared projection:
 
 ```rust
 enum ShutdownBoundary {
@@ -118,7 +118,7 @@ enum ShutdownResidualAction {
 }
 ```
 
-The target compromise is **graceful boundary + observable residual**:
+The shutdown design uses **graceful boundary + observable residual**:
 
 - no indefinite shutdown wait;
 - no silent drop;
@@ -127,21 +127,21 @@ The target compromise is **graceful boundary + observable residual**:
 
 ## 5. Isolated service contract
 
-Target shutdown contract for isolated service generations:
+Shutdown contract for isolated service generations:
 
 1. send or observe cancellation;
 2. wait for the service generation outcome bridge;
 3. bounded-join the backing OS thread;
 4. record whether the thread joined, timed out, panicked, failed to build its runtime, or closed the bridge before reporting an outcome.
 
-Current behavior:
+Runtime behavior:
 
-- `run_isolated_service_generation(...)` now stores an internal `IsolatedRuntimeHandle` containing the outcome receiver and OS thread join handle.
+- `run_isolated_service_generation(...)` stores an internal `IsolatedRuntimeHandle` containing the outcome receiver and OS thread join handle.
 - After the outcome bridge resolves, the supervisor attempts a bounded join using the internal default timeout.
 - Joined, timed-out, and panicked join outcomes are distinguished internally and projected into the public diagnostics snapshot through bounded shutdown boundary stats.
 - Test coverage locks joined, panic, timeout residual helper paths, and public diagnostics projection.
 
-Candidate internal handle:
+Illustrative internal handle:
 
 ```rust
 struct IsolatedRuntimeHandle {
@@ -154,7 +154,7 @@ This handle should remain internal unless a separate public configuration/API de
 
 ## 6. Trigger shutdown contract
 
-Target trigger shutdown contract:
+Trigger shutdown contract:
 
 1. enter closing state;
 2. stop polling hosts for new events;
@@ -163,14 +163,14 @@ Target trigger shutdown contract:
 5. record completed, failed, timed out, and residual dispatch counts;
 6. continue shutdown without silently losing residual facts.
 
-Current behavior:
+Runtime behavior:
 
 - `TriggerRunner::run_with_host(...)` enters shutdown drain mode when shutdown arrives while dispatches are in flight.
 - Shutdown drain stops polling the host for new events and waits for in-flight dispatches to finish or for the internal default drain timeout.
 - The timeout helper returns `TriggerDrainOutcome { completed, failed, timed_out, residual }`, logs residual dispatches, and projects the drain outcome into the public diagnostics snapshot when a generation diagnostics scope is present.
 - Test coverage locks completed drain, timeout residual helper paths, public diagnostics projection, and host-specific tail event delivery guarantees.
 
-Candidate internal outcome:
+Illustrative internal outcome:
 
 ```rust
 struct TriggerDrainOutcome {
@@ -207,7 +207,7 @@ Provider failures need two independent dimensions:
 | Resolve boundary | `SnapshotResolve`, `RwLockResolve`, `MutexResolve`, `EagerInit` | Which provider access path failed? |
 | Source kind | `user_provider_fatal`, `user_provider_retryable_timeout`, `environment_missing`, `panic`, `cancelled`, ... | What produced the failure? |
 
-Candidate internal shape:
+Illustrative internal shape:
 
 ```rust
 enum ProviderRuntimePhase {
@@ -233,7 +233,7 @@ struct ProviderFailureContext {
 }
 ```
 
-Current behavior:
+Runtime behavior:
 
 - `ProviderInitBoundaryContext` stores provider name, runtime phase, and resolve boundary.
 - Runtime phase is supplied by an internal task-local scope so user service, trigger, and provider signatures do not change.

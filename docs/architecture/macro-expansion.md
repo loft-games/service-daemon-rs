@@ -10,7 +10,7 @@ When you annotate a function, the macro generates:
 3. A `static` registry entry collected by `linkme` with the metadata the daemon needs at runtime.
 
 `#[service]` accepts named metadata attributes such as `priority`,
-`scheduling`, and `tags`. Auto-start behavior is inferred from the function
+`scheduling`, and `tags`. Startup behavior is inferred from the function
 signature: a service with no `#[input]` parameter creates one startup instance
 when selected, while a service with a single `#[input] value: &T` parameter is a
 template service and starts only when code calls `ServiceHandle::create(input)`

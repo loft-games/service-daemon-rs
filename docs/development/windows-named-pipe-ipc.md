@@ -25,6 +25,9 @@ by the macro.
 `NamedPipeConnect` owns only the local pipe name. `try_new().await` validates the
 pipe name and stores it without dialing the peer. `connect().await` opens a fresh
 independent `IpcStream` and retries short `ERROR_PIPE_BUSY` windows internally.
+If a retry loop has already observed `ERROR_PIPE_BUSY`, transient `NotFound`
+results are treated as the same listener-replacement gap and retried within the
+same bounded retry window.
 
 Both templates accept the same top-level shared provider attributes as other address templates: `env` and `eager`. Tuning attributes such as pipe mode, buffer sizes, ACL/security descriptors, maximum instances, QoS flags, and raw security attributes are deliberately outside the first contract.
 
@@ -52,9 +55,9 @@ This keeps the first version focused on local daemon/sidecar IPC. Remote named p
 
 ## LocalIpc Facade
 
-`LocalIpcListen(Name)` and `LocalIpcConnect(Name)` now provide the
-cross-platform facade for local byte-stream IPC. They accept a logical name, not
-a platform endpoint. On Windows that logical name maps to
+`LocalIpcListen(Name)` and `LocalIpcConnect(Name)` provide the cross-platform
+facade for local byte-stream IPC. They accept a logical name, not a platform
+endpoint. On Windows that logical name maps to
 `\\.\pipe\service-daemon-rs-<name>` and reuses the named-pipe local-only,
 first-instance ownership and listener manager semantics described above.
 
