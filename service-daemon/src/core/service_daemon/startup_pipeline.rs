@@ -45,7 +45,10 @@ impl DaemonInstanceInner {
                     isolated_startup_permits: self.isolated_startup_permits.clone(),
                     control_runtime: control_runtime.clone(),
                     standard_runtime: runtimes.standard,
-                    high_priority_runtime: runtimes.high_priority,
+                    high_priority_pool: runtimes
+                        .high_priority
+                        .as_ref()
+                        .map(|_| self.high_priority_runtime_pool.state()),
                     daemon_token: self.cancellation_token.clone(),
                 }));
 

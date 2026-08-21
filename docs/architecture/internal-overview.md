@@ -81,6 +81,7 @@ graph TD
         CR[Internal Control Runtime]
         SCP[Service Control Plane]
         AD[Diagnostics Analyzer]
+        HP[HighPriority Runtime Policy]
         BL[Body Execution Lanes]
     end
 
@@ -92,19 +93,21 @@ graph TD
     SD -->|own| CR
     CR -->|run| SCP
     CR -->|run| AD
+    CR -->|run| HP
     AD -->|sample| SCP
+    HP -->|place/scale/rollover| BL
     SCP -->|supervise| BL
     BL -->|execute| S
     BL -->|execute| T
 ```
 
-The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, and the advisory analyzer on the daemon-owned control runtime. User service and trigger bodies execute on their statically declared mode (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
+The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, the advisory analyzer, and the HighPriority runtime policy loop on the daemon-owned control runtime. User service and trigger bodies execute on their statically declared mode (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
 
-During daemon construction, the final selected service list is also the source for HighPriority worker-count selection. The daemon counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and applies the result only when the shared high-priority runtime is lazily created.
+During daemon construction, the final selected service list is the source for initial HighPriority capacity selection. The daemon counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and applies the result when the first high-priority shard is lazily created. After startup, `HighPriorityRuntimePolicy` owns the mode-internal control loop. It reads HighPriority shard observations and live assignment facts, creates additional high-priority runtime shards within the configured worker cap, and may request cooperative generation rollover so a future generation can be placed on a less pressured shard. It never changes a service's declared `ServiceScheduling` mode and never migrates an already running future.
 
 Internally, `core/service_daemon/` keeps the public builder facade separate from the runtime owner. `ServiceDaemon` is the builder entry point, `DaemonInstanceHandle` is the public control handle, and a process-local daemon registry owns active daemon instances while sibling modules handle builder assembly, provider graph validation/eager initialization, runtime preparation, and startup orchestration.
 
-The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, and runtime lane pressure. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract and must happen through a cooperative generation boundary.
+The diagnostics analyzer is internal and recommendation-first. It reads windowed lane/service/generation observations and logs advisory recommendations, but it does not change public scheduling semantics or move a running future. Public diagnostics use distilled `DaemonDiagnosticsSnapshot` read models with stable observation facts such as lifecycle exit kind, restart decision kind, restart/backoff delays, runtime lane pressure, HighPriority shard observations, and recent HighPriority placement decisions. Interpretation labels, confidence, and hints remain read-only metadata for Standard runtime symptoms, while the store, windows, evaluator, recommendation model, thresholds, sampler, and lane resolver stay crate-private. HighPriority control-loop decisions are separate from advisory diagnostics and happen through the policy/cooldown/capacity rules.
 
 Runtime facts are a separate read-only operational plane. `core::runtime_facts`
 is owned by `DaemonResources` and combines service metadata from the final
@@ -138,8 +141,8 @@ without changing the trigger's base policy.
 | `ServiceInstanceHandle` | Public handle to a materialized runtime instance owned by one daemon. It contains instance identity, static service metadata, daemon identity, and a weak daemon-local control reference for instance status, runtime facts, trigger facts, stop, and remove operations. |
 | `DaemonInstanceId` | Public UUIDv7 daemon instance identity. `DaemonRuntimeSnapshot::daemon_id` uses the same typed identity as `DaemonInstanceHandle::id()`. |
 | `DaemonInstanceHandle` | Public daemon instance control handle returned by `ServiceDaemonBuilder::build()`; it provides run/wait/shutdown, diagnostics/runtime snapshots, and daemon-local service instance queries. |
-| `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries; snapshot reads do not drive reload, restart, advisory evaluation, or lane remap. |
-| `DaemonRuntimeSnapshot`, `ReadinessSnapshot`, service runtime snapshots, and trigger runtime snapshots | Public read-only operational facts copied out of runtime state. |
+| `DaemonDiagnosticsSnapshot` and handle read methods | Public read-only diagnostics summaries, including HighPriority shard observations and recent placement decisions; snapshot reads do not drive reload, restart, advisory evaluation, scale-out, or lane remap. |
+| `DaemonRuntimeSnapshot`, `ReadinessSnapshot`, service runtime snapshots, and trigger runtime snapshots | Public read-only operational facts copied out of runtime state, including HighPriority shard capacity and per-service shard placement facts. |
 | `TriggerContext::pressure()` | Self-scoped read-only trigger pressure facts for the current trigger service. |
 | `TriggerContext::request_policy_overlay(...)` / `clear_policy_overlay(...)` | Temporary trigger policy overlay scoped by the current service generation; overlays require TTL, reason, bounds validation, and generation cleanup. |
 | Provider root fallback | Public helper behavior for `T::resolve()` outside daemon context; it is a convenience path, not the owner of every daemon's effective provider binding. |
@@ -147,8 +150,9 @@ without changing the trigger's base policy.
 | Simulation provider override | Feature-gated testing surface that installs daemon-local provider bindings; no production override API is exposed. |
 | `DiagnosticLifecycleStats::last_restart_decision` | Public read-only restart-path fact; not a restart command and not a policy override. |
 | `DiagnosticInterpretation` labels, confidence, and hints | Public read-only interpretation metadata for Standard diagnostics facts; not a command surface and not a public evaluator/threshold API. |
-| `SchedulingAdvisoryProfile` | Public advisory emission control only; it does not change lifecycle, body placement, or declared scheduling. |
-| HighPriority capacity plan | Internal runtime topology decision derived from the final declared HighPriority entries; no production public worker-count override is exposed. |
+| `SchedulingAdvisoryProfile` | Public advisory emission control only; it does not change lifecycle, body placement, declared scheduling, or HighPriority runtime policy behavior. |
+| `HighPriorityRuntimePolicy` | Public builder-time policy for HighPriority shard scale-out, placement cooldowns, rollover throttling, and worker caps. It acts only inside declared `HighPriority` mode. |
+| HighPriority capacity plan | Internal startup topology decision derived from the final declared HighPriority entries; later scale-out is governed by `HighPriorityRuntimePolicy`. |
 | Isolated startup concurrency limit | Public builder knob for isolated startup allocation admission only, not a limit on running isolated body lifetime. |
 | Per-service restart override and scheduling hints | Not exposed; any such API needs a separate design and must stay within the declared mode. |
 | Diagnostics store, windows, evaluator, recommendation model, sampler, and lane resolver | Internal-only implementation details, not exported as public schema or command surfaces. |

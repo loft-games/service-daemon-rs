@@ -82,6 +82,18 @@ Runtime behavior:
 
 The runtime records reload as a signal fact so it does not overwrite recoverable errors, trigger dispatch failures, provider initialization errors, or panics.
 
+### 3.2 HighPriority policy rollover
+
+HighPriority runtime policy rollover uses the reload signal path as a cooperative generation boundary. The policy does not move a running Tokio future between runtime shards. Instead, it records a placement decision, notifies the service's reload signal, and lets the current generation exit at its normal reload-safe point. The next generation resolves providers again and receives a fresh HighPriority shard placement.
+
+This is represented as reload lifecycle, not service failure:
+
+- the exiting generation records reload facts when it observes the signal;
+- the replacement generation starts immediately, like other reload-driven generation replacements;
+- the rollover does not enter `RestartPolicy` backoff;
+- the rollover does not increment restart-storm failure accounting;
+- any state that must survive the boundary should use ordinary framework mechanisms such as the Shelf or managed providers.
+
 ## 4. Shutdown boundary matrix
 
 Shutdown can encounter work that has already crossed an internal boundary. The runtime should use bounded graceful waits and record residual work.

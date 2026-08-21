@@ -20,6 +20,8 @@ Good signals to adopt:
 - You have startup ordering / readiness dependencies between background tasks.
 - You wire shared resources (listeners, clients, config) through ad-hoc globals.
 - You want config/state changes to reload dependent tasks.
+- You need daemon-managed dynamic worker instances with per-instance input, or
+  latency-sensitive cooperative workers that fit `HighPriority` runtime policy.
 
 Weak signals (probably don't migrate yet):
 
@@ -76,6 +78,10 @@ daemon.wait().await?; // blocks until SIGINT / SIGTERM / Ctrl+C
 runs high→low in waves and shutdown runs low→high. A service signals readiness with
 `service_daemon::done()` (or implicitly via the first `is_shutdown()`/`sleep()`
 call). State that must survive a restart goes on the daemon's per-service Shelf.
+For cooperative latency-sensitive workers, declare `scheduling = HighPriority`
+and let `HighPriorityRuntimePolicy` manage shard placement/scale-out. Do not use
+HighPriority for blocking loops; use `Isolated` when a body needs a private
+thread/runtime boundary.
 
 ## Don't
 

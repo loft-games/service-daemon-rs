@@ -3,9 +3,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::models::{
-    DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot,
-    ServiceInstanceId, ServiceInstanceRecord, ServiceRuntimeSnapshot, ServiceScheduling,
-    ServiceStatus, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+    DaemonInstanceId, DaemonRuntimeSnapshot, HighPriorityRuntimeShardSnapshot, HighPriorityShardId,
+    ReadinessServiceError, ReadinessSnapshot, ServiceInstanceId, ServiceInstanceRecord,
+    ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TriggerPressureSnapshot,
+    TriggerRuntimeSnapshot,
 };
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
@@ -40,6 +41,7 @@ struct ServiceRuntimeState {
     last_error: Option<String>,
     current_backoff: Option<Duration>,
     healthy_since: Option<DateTime<Utc>>,
+    high_priority_shard_id: Option<HighPriorityShardId>,
 }
 
 struct ServiceRuntimeRecord {
@@ -62,6 +64,7 @@ impl ServiceRuntimeRecord {
             service_name: self.metadata.service_name,
             priority: self.metadata.priority,
             declared_scheduling: self.metadata.declared_scheduling,
+            high_priority_shard_id: state.high_priority_shard_id,
             status,
             generation: state.generation,
             restart_count: state.restart_count,
@@ -196,6 +199,7 @@ pub(crate) struct RuntimeFactsStore {
     start_instant: Instant,
     services: DashMap<ServiceInstanceId, Arc<ServiceRuntimeRecord>>,
     triggers: DashMap<ServiceInstanceId, Arc<TriggerRuntimeRecord>>,
+    high_priority_shards: DashMap<HighPriorityShardId, HighPriorityRuntimeShardSnapshot>,
 }
 
 impl Default for RuntimeFactsStore {
@@ -216,6 +220,7 @@ impl RuntimeFactsStore {
             start_instant: Instant::now(),
             services: DashMap::new(),
             triggers: DashMap::new(),
+            high_priority_shards: DashMap::new(),
         }
     }
 
@@ -245,8 +250,41 @@ impl RuntimeFactsStore {
             shutdown_requested,
             service_count: self.services.len(),
             trigger_count: self.triggers.len(),
+            high_priority_shards: self.high_priority_shard_snapshots(),
             generated_at: Utc::now(),
         }
+    }
+
+    pub(crate) fn record_high_priority_shards(
+        &self,
+        shards: Vec<HighPriorityRuntimeShardSnapshot>,
+    ) {
+        self.high_priority_shards.clear();
+        for shard in shards {
+            self.high_priority_shards.insert(shard.shard_id, shard);
+        }
+    }
+
+    fn high_priority_shard_snapshots(&self) -> Vec<HighPriorityRuntimeShardSnapshot> {
+        let mut snapshots: Vec<_> = self
+            .high_priority_shards
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        snapshots.sort_by_key(|snapshot| snapshot.shard_id);
+        snapshots
+    }
+
+    pub(crate) fn record_service_high_priority_shard(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        shard_id: Option<HighPriorityShardId>,
+    ) {
+        let Some(record) = self.services.get(&service_instance_id) else {
+            return;
+        };
+        let mut state = record.state.lock();
+        state.high_priority_shard_id = shard_id;
     }
 
     pub(crate) fn record_service_started(

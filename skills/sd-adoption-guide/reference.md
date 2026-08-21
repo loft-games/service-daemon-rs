@@ -12,6 +12,7 @@ Map each existing construct to its framework primitive:
 | :--- | :--- |
 | A `tokio::spawn`ed loop you supervise by hand | a `#[service]` |
 | Dynamically-created worker instances with per-instance config | a `#[service]` template with `#[input] cfg: &Cfg` plus daemon-bound `ServiceHandle::create(cfg)` / `start(cfg)` |
+| Cooperative latency-sensitive workers | `#[service(scheduling = HighPriority)]` plus daemon-level `HighPriorityRuntimePolicy` |
 | A shared client / pool / config behind a global or `OnceCell` | a `#[provider]` injected as `Arc<T>` |
 | An `mpsc`/`broadcast` consumer task | a `#[trigger(Queue(..))]` |
 | A timer / interval task | a `#[trigger(Cron(..))]` |
@@ -33,9 +34,14 @@ Dependencies must exist before the things that need them, so port in this order:
    runtime config, declare one `#[input] cfg: &Cfg` parameter, select the template
    by tag, expose a daemon-bound `ServiceHandle` from a provider, and create
    instances through that handle.
-4. **Triggers last.** Convert event consumers, timers, and reload reactions into
+4. **HighPriority only when the work is cooperative.** For latency-sensitive async
+   workers, declare `scheduling = HighPriority` and tune
+   `HighPriorityRuntimePolicy` at daemon bootstrap if the defaults do not fit.
+   The policy can add shards and request cooperative generation rollover, but it
+   cannot make blocking or CPU-heavy code safe.
+5. **Triggers last.** Convert event consumers, timers, and reload reactions into
    `#[trigger]`s so the framework drives them.
-5. **Bootstrap.** Assemble `main()` with `ServiceDaemon::builder()`, then
+6. **Bootstrap.** Assemble `main()` with `ServiceDaemon::builder()`, then
    `daemon.run().await; daemon.wait().await?;`.
 
 ## 3. Readiness and the handshake

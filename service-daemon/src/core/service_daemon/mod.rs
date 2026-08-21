@@ -10,6 +10,7 @@
 //! - `startup_pipeline`: Production startup orchestration after shared preflight.
 
 mod builder;
+pub(crate) mod high_priority;
 mod parts;
 mod policy;
 mod provider_graph;
@@ -30,8 +31,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-#[cfg(all(feature = "simulation", test))]
-use std::time::Instant;
 use tokio::runtime::{Handle, Runtime};
 use tokio::sync::{Mutex, Notify, Semaphore, oneshot};
 use tokio::task::JoinHandle;
@@ -52,6 +51,7 @@ use crate::models::{
     ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
 };
 use dashmap::{DashMap, DashSet};
+use high_priority::HighPriorityRuntimePool;
 
 pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -218,8 +218,20 @@ impl DaemonInstanceHandle {
     /// Start the daemon in the background (non-blocking).
     #[instrument(skip(self))]
     pub async fn run(&self) {
-        let mut inner = self.inner.lock().await;
-        inner.run().await;
+        let control_runtime = {
+            let mut inner = self.inner.lock().await;
+            inner.run().await;
+            inner
+                .control_runtime
+                .as_ref()
+                .map(|runtime| runtime.handle().clone())
+        };
+        if let Some(control_runtime) = control_runtime {
+            self.inner
+                .lock()
+                .await
+                .spawn_high_priority_policy_loop(&control_runtime, self.inner.clone());
+        }
     }
 
     /// Wait for the daemon to stop and unregister it from the process-local registry.
@@ -847,10 +859,11 @@ pub(crate) struct DaemonInstanceInner {
     /// Handle for the runtime that hosts standard service bodies.
     standard_runtime: Option<Handle>,
     high_priority_capacity: HighPriorityCapacityPlan,
-    /// Shared runtime lazily created for HighPriority service bodies.
-    high_priority_runtime: Option<Runtime>,
+    /// Framework-owned runtime shards for HighPriority service bodies.
+    high_priority_runtime_pool: HighPriorityRuntimePool,
     runtime_probe_tasks: Vec<JoinHandle<()>>,
     adaptive_recommendation_task: Option<JoinHandle<()>>,
+    high_priority_policy_task: Option<JoinHandle<()>>,
     scheduling_advisory_profile: SchedulingAdvisoryProfile,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
@@ -865,6 +878,7 @@ pub(crate) struct DaemonInstanceInner {
 impl Drop for DaemonInstanceInner {
     fn drop(&mut self) {
         self.abort_adaptive_recommendation_loop();
+        self.abort_high_priority_policy_loop();
         self.shutdown_high_priority_runtime_detached();
         self.shutdown_control_runtime_detached();
     }
@@ -967,6 +981,7 @@ impl DaemonInstanceInner {
         }
 
         self.stop_adaptive_recommendation_loop().await;
+        self.stop_high_priority_policy_loop().await;
         self.stop_runtime_probes().await;
         self.standard_runtime = None;
         self.shutdown_high_priority_runtime();
@@ -1002,6 +1017,7 @@ impl DaemonInstanceInner {
         .await;
 
         self.stop_adaptive_recommendation_loop().await;
+        self.stop_high_priority_policy_loop().await;
         self.stop_runtime_probes().await;
         self.standard_runtime = None;
         self.shutdown_high_priority_runtime_detached();
@@ -1108,12 +1124,10 @@ impl DaemonInstanceInner {
                 "cannot start service instance before standard runtime is available".to_owned(),
             )
         })?;
-        let high_priority_runtime = self
-            .high_priority_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle().clone());
+        let high_priority_pool = (!self.high_priority_runtime_pool.is_empty())
+            .then(|| self.high_priority_runtime_pool.state());
         if matches!(record.scheduling(), ServiceScheduling::HighPriority)
-            && high_priority_runtime.is_none()
+            && high_priority_pool.is_none()
         {
             return Err(ServiceError::RegistryError(format!(
                 "HighPriority service '{}' is missing the shared high-priority runtime",
@@ -1132,7 +1146,7 @@ impl DaemonInstanceInner {
             supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime),
             body_lanes: parts::BodyExecutionLanes {
                 standard: standard_runtime,
-                high_priority: high_priority_runtime,
+                high_priority: high_priority_pool,
             },
             body_lane_resolver: parts::BodyLaneResolver::default(),
             running_tasks: self.running_tasks.clone(),
@@ -1411,9 +1425,9 @@ fn record_matches_handle(record: &ServiceInstanceRecord, handle: &ServiceInstanc
 mod tests {
     use super::*;
     use crate::models::{
-        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId,
-        ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceParam,
-        ServiceScheduling,
+        HighPriorityRuntimePolicy, HighPriorityShardId, ProviderEntry, ProviderInitError, Registry,
+        ServiceEntry, ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord,
+        ServiceInstanceRegistry, ServiceParam, ServiceScheduling,
     };
     use crate::{TT::*, provider, service, trigger};
     use std::any::TypeId;
@@ -1424,7 +1438,7 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tracing::debug;
     #[cfg(feature = "diagnostics")]
     use tracing::field::{Field, Visit};
@@ -2046,7 +2060,7 @@ mod tests {
             .with_registry(isolated_registry())
             .build_inner();
 
-        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.high_priority_runtime_pool.is_empty());
     }
 
     #[test]
@@ -2056,13 +2070,17 @@ mod tests {
             .build_inner();
         daemon.services = vec![test_service(1, &STANDARD_TEST_ENTRY)];
         daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
+        daemon.high_priority_runtime_pool = HighPriorityRuntimePool::new(
+            daemon.high_priority_runtime_pool.policy(),
+            daemon.high_priority_capacity,
+        );
 
         let runtime = daemon
             .ensure_high_priority_runtime()
             .expect("runtime check should not fail for standard-only services");
 
         assert!(runtime.is_none());
-        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.high_priority_runtime_pool.is_empty());
     }
 
     #[test]
@@ -2072,15 +2090,19 @@ mod tests {
             .build_inner();
         daemon.services = vec![test_service(1, &HIGH_PRIORITY_TEST_ENTRY)];
         daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
+        daemon.high_priority_runtime_pool = HighPriorityRuntimePool::new(
+            daemon.high_priority_runtime_pool.policy(),
+            daemon.high_priority_capacity,
+        );
 
         let runtime = daemon
             .ensure_high_priority_runtime()
             .expect("runtime creation should succeed for high-priority services");
 
         assert!(runtime.is_some());
-        assert!(daemon.high_priority_runtime.is_some());
+        assert!(!daemon.high_priority_runtime_pool.is_empty());
         daemon.shutdown_high_priority_runtime();
-        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.high_priority_runtime_pool.is_empty());
     }
 
     #[tokio::test]
@@ -2091,7 +2113,7 @@ mod tests {
 
         daemon.run().await;
 
-        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.high_priority_runtime_pool.is_empty());
     }
 
     #[test]
@@ -2102,32 +2124,71 @@ mod tests {
 
         daemon.shutdown_high_priority_runtime();
 
-        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.high_priority_runtime_pool.is_empty());
+    }
+
+    #[test]
+    fn high_priority_policy_tick_scales_out_after_sustained_shard_pressure() {
+        let mut daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_high_priority_runtime_policy(HighPriorityRuntimePolicy::for_testing())
+            .build_inner();
+        daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime should build");
+        daemon.diagnostics.record_high_priority_shard_observation(
+            HighPriorityShardId(0),
+            crate::core::diagnostics::SleepObservation {
+                source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                reason: crate::core::diagnostics::SleepExitReason::Completed,
+                requested: Duration::from_millis(250),
+                elapsed: Duration::from_millis(270),
+                drift: Duration::from_millis(20),
+            },
+        );
+
+        daemon.evaluate_high_priority_runtime_policy(Instant::now());
+
+        let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
+        assert_eq!(runtime.high_priority_shards.len(), 2);
+        assert!(runtime.high_priority_shards.iter().any(|shard| {
+            shard.shard_id == HighPriorityShardId(0)
+                && shard.pressure_state == crate::models::HighPriorityShardPressureState::Pressured
+        }));
+        let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
+            daemon.diagnostics.snapshot().into();
+        assert!(
+            diagnostics
+                .high_priority_placement_decisions
+                .iter()
+                .any(|decision| decision.kind
+                    == crate::models::DiagnosticHighPriorityPlacementDecisionKind::ScaleOut)
+        );
+
+        daemon.shutdown_high_priority_runtime();
     }
 
     #[tokio::test]
     async fn do_shutdown_drops_high_priority_runtime_before_control_runtime() {
         let drop_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let high_priority_drop_order = drop_order.clone();
         let control_drop_order = drop_order.clone();
         let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
             .build_inner();
 
-        daemon.high_priority_runtime = Some(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .worker_threads(1)
-                .thread_name("test-high-priority-drop")
-                .on_thread_stop(move || {
-                    high_priority_drop_order
-                        .lock()
-                        .expect("drop order mutex should not be poisoned")
-                        .push("high_priority");
-                })
-                .build()
-                .expect("high-priority runtime should build"),
+        daemon.services = vec![test_service(1, &HIGH_PRIORITY_TEST_ENTRY)];
+        daemon.high_priority_capacity = HighPriorityCapacityPlan::from_services(&daemon.services);
+        daemon.high_priority_runtime_pool = HighPriorityRuntimePool::new(
+            daemon.high_priority_runtime_pool.policy(),
+            daemon.high_priority_capacity,
         );
+        daemon
+            .ensure_high_priority_runtime()
+            .expect("high-priority runtime should build");
         daemon.control_runtime = Some(
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -2145,14 +2206,14 @@ mod tests {
 
         daemon.do_shutdown().await;
 
-        assert!(daemon.high_priority_runtime.is_none());
+        assert!(daemon.high_priority_runtime_pool.is_empty());
         assert!(daemon.control_runtime.is_none());
         assert_eq!(
             drop_order
                 .lock()
                 .expect("drop order mutex should not be poisoned")
                 .as_slice(),
-            ["high_priority", "control"]
+            ["control"]
         );
     }
 

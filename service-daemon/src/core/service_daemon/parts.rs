@@ -9,11 +9,15 @@ use tokio_util::sync::CancellationToken;
 use crate::ProviderDependencyWatchSet;
 use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::{
-    ServiceFn, ServiceInstanceId, ServiceInstanceRecord, ServiceInvocationContext,
-    ServiceScheduling,
+    HighPriorityShardId, ServiceFn, ServiceInstanceId, ServiceInstanceRecord,
+    ServiceInvocationContext, ServiceScheduling,
 };
 
 use super::super::context::DaemonResources;
+use super::high_priority::{
+    HighPriorityPlacementDecision, HighPriorityPlacementDecisionKind, HighPriorityPlacementReason,
+    HighPriorityRuntimePoolState,
+};
 use super::policy::RestartPolicy;
 
 pub(super) struct ServiceSupervisorParts {
@@ -41,17 +45,36 @@ pub(super) enum SupervisorSpawnLane {
 #[derive(Clone)]
 pub(super) struct BodyExecutionLanes {
     pub standard: Handle,
-    pub high_priority: Option<Handle>,
+    pub high_priority: Option<Arc<HighPriorityRuntimePoolState>>,
 }
 
 impl BodyExecutionLanes {
-    pub(super) fn resolve(&self, scheduling: ServiceScheduling) -> Option<BodyExecutionLane> {
+    pub(super) fn resolve(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        generation: u64,
+        scheduling: ServiceScheduling,
+    ) -> Option<BodyExecutionLane> {
         match scheduling {
             ServiceScheduling::Standard => Some(BodyExecutionLane::Standard(self.standard.clone())),
-            ServiceScheduling::HighPriority => self
-                .high_priority
-                .as_ref()
-                .map(|runtime| BodyExecutionLane::HighPriority(runtime.clone())),
+            ServiceScheduling::HighPriority => {
+                let Some(pool) = self.high_priority.as_ref() else {
+                    return Some(BodyExecutionLane::UnavailableHighPriority(
+                        HighPriorityPlacementDecision {
+                            shard_id: None,
+                            kind: HighPriorityPlacementDecisionKind::Suppressed,
+                            reason: HighPriorityPlacementReason::NoHighPriorityRuntime,
+                        },
+                    ));
+                };
+                pool.select_generation(service_instance_id, generation)
+                    .map(|(shard, decision)| BodyExecutionLane::HighPriority {
+                        shard_id: shard.shard_id,
+                        runtime: shard.handle,
+                        decision,
+                        accounting: pool.clone(),
+                    })
+            }
             ServiceScheduling::Isolated => Some(BodyExecutionLane::Isolated),
         }
     }
@@ -99,16 +122,25 @@ impl BodyLaneResolver {
 #[derive(Clone)]
 pub(super) enum BodyExecutionLane {
     Standard(Handle),
-    HighPriority(Handle),
+    HighPriority {
+        shard_id: HighPriorityShardId,
+        runtime: Handle,
+        decision: HighPriorityPlacementDecision,
+        accounting: Arc<HighPriorityRuntimePoolState>,
+    },
     Isolated,
+    UnavailableHighPriority(HighPriorityPlacementDecision),
 }
 
 impl fmt::Debug for BodyExecutionLane {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Standard(_) => formatter.write_str("Standard"),
-            Self::HighPriority(_) => formatter.write_str("HighPriority"),
+            Self::HighPriority { shard_id, .. } => {
+                write!(formatter, "HighPriority({shard_id})")
+            }
             Self::Isolated => formatter.write_str("Isolated"),
+            Self::UnavailableHighPriority(_) => formatter.write_str("HighPriority(Unavailable)"),
         }
     }
 }
@@ -141,7 +173,7 @@ pub(super) struct SpawnAllServicesParts {
     pub isolated_startup_permits: Arc<Semaphore>,
     pub control_runtime: Handle,
     pub standard_runtime: Handle,
-    pub high_priority_runtime: Option<Handle>,
+    pub high_priority_pool: Option<Arc<HighPriorityRuntimePoolState>>,
     pub daemon_token: CancellationToken,
 }
 

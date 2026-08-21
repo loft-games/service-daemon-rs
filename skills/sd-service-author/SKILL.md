@@ -54,7 +54,8 @@ emits a runtime warning.
    handshake (the first `is_shutdown()`/`sleep()` call marks the service healthy).
 3. **Classify failure.** Returning `ServiceError::Fatal` terminates the service
    with no restart. An ordinary `Err(..)` or panic restarts it with backoff. A
-   clean `Ok(())` starts a fresh generation immediately (not counted as failure).
+   clean `Ok(())` without shutdown/reload is unexpected for a long-running
+   service and restarts through `RestartPolicy` normal-exit backoff.
 4. **Set `priority`** to order startup waves (high→low) and shutdown (low→high).
 5. **Use `#[input]` only for on-demand service templates.** The input is borrowed
    as `&T` for each generation and is owned by the service instance record.

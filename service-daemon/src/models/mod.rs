@@ -8,26 +8,29 @@ pub mod trigger;
 
 pub use diagnostics::{
     DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
-    DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
-    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
-    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
-    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
-    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
-    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
-    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticGenerationExitKind, DiagnosticHighPriorityPlacementDecision,
+    DiagnosticHighPriorityPlacementDecisionKind, DiagnosticHighPriorityPlacementReason,
+    DiagnosticInterpretation, DiagnosticInterpretationLabel, DiagnosticLifecycleStats,
+    DiagnosticObservationStats, DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
+    DiagnosticProviderFailureKind, DiagnosticProviderFailureRetry,
+    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
+    DiagnosticProviderFailureStats, DiagnosticRecommendationHint, DiagnosticRestartDecisionKind,
+    DiagnosticRuntimeLane, DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
     DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
     DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot,
-    RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
+    HighPriorityShardDiagnosticsSnapshot, RuntimeLaneDiagnosticsSnapshot,
+    ServiceDiagnosticsSnapshot,
 };
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{
-    BackoffController, RestartPolicy, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
-    SchedulingAdvisoryProfile, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
-    TriggerPolicyOverlayError,
+    BackoffController, HighPriorityRuntimePolicy, HighPriorityRuntimePolicyBuilder, RestartPolicy,
+    ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
+    TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
 };
 pub use provider_error::ProviderError;
 pub use runtime::{
-    DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot,
+    DaemonInstanceId, DaemonRuntimeSnapshot, HighPriorityRuntimeShardSnapshot, HighPriorityShardId,
+    HighPriorityShardPressureState, ReadinessServiceError, ReadinessSnapshot,
     ServiceRuntimeSnapshot, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
 pub use service::{

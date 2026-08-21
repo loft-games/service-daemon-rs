@@ -10,6 +10,7 @@ Every method is chainable and optional. `build()` is infallible and returns a
 | `with_registry(Registry)` | Restrict which discovered services run. Default = all static services. |
 | `with_restart_policy(RestartPolicy)` | Supervision: restart limits, backoff, provider-init timeout, wave timeouts. |
 | `with_scheduling_advisory_profile(SchedulingAdvisoryProfile)` | Tune the scheduling advisory plane. |
+| `with_high_priority_runtime_policy(HighPriorityRuntimePolicy)` | Tune HighPriority shard scale-out, placement cooldowns, rollover throttling, and worker caps. |
 | `with_isolated_startup_concurrency_limit(NonZeroUsize)` | Cap how many `Isolated`-scheduled services start at once. |
 | `with_cancel_token(CancellationToken)` | Supply an external token so something other than a signal can drive shutdown. |
 | `with_trigger_config<C: 'static + Clone + Send + Sync>(C)` | Inject a typed config object visible to trigger hosts. |
@@ -74,7 +75,36 @@ let policy = RestartPolicy::builder()
     .build();
 ```
 
-## 6. Choosing production vs simulation execution
+## 6. `HighPriorityRuntimePolicy`
+
+`#[service(scheduling = HighPriority)]` and `#[trigger(..., scheduling = HighPriority)]`
+are still the only source-level declarations for the HighPriority mode. The
+daemon builder controls how that mode is managed at runtime.
+
+By default, the daemon enables a conservative HighPriority runtime policy:
+
+- initial capacity comes from the final selected HighPriority service/trigger
+  entries;
+- total HighPriority worker threads are capped by available CPU parallelism
+  unless you set a smaller/larger explicit cap;
+- sustained shard probe pressure can create additional HighPriority shards;
+- cooperative rollover can ask an existing HighPriority generation to reload so
+  the next generation receives a better shard placement.
+
+Disable the policy only when you need the old static HighPriority shape:
+
+```rust
+use service_daemon::{HighPriorityRuntimePolicy, ServiceDaemon};
+
+let daemon = ServiceDaemon::builder()
+    .with_high_priority_runtime_policy(HighPriorityRuntimePolicy::disabled())
+    .build();
+```
+
+`SchedulingAdvisoryProfile` is separate: disabling advisory logs does not disable
+HighPriority scale-out or rollover.
+
+## 7. Choosing production vs simulation execution
 
 - Production binary → `run().await; wait().await?;`
 - Deterministic test under the `simulation` feature → `MockContext` /

@@ -8,7 +8,7 @@ use tracing::{error, info, warn};
 use crate::ServiceScheduling;
 use crate::core::context::{__run_daemon_resources_sync_scope, DaemonResources};
 use crate::core::diagnostics::{
-    DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
+    DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind, GenerationRegistration,
     RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane,
 };
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
@@ -520,14 +520,33 @@ impl ServiceSupervisor {
             self.scheduling,
         );
         let runtime_lane = RuntimeLane::from(resolved_scheduling);
-        self.generation_diagnostics = Some(self.diagnostics.register_generation(
-            self.service_instance_id,
-            self.name,
-            self.generation,
-            runtime_lane,
-        ));
         self.generation_scheduling = Some(resolved_scheduling);
-        self.generation_body_lane = self.body_lanes.resolve(resolved_scheduling);
+        self.generation_body_lane = self.body_lanes.resolve(
+            self.service_instance_id,
+            self.generation,
+            resolved_scheduling,
+        );
+        let (high_priority_shard_id, placement_decision) = self
+            .generation_body_lane
+            .as_ref()
+            .map_or((None, None), |lane| match lane {
+                BodyExecutionLane::HighPriority {
+                    shard_id, decision, ..
+                } => (Some(*shard_id), Some(*decision)),
+                BodyExecutionLane::UnavailableHighPriority(decision) => (None, Some(*decision)),
+                _ => (None, None),
+            });
+        self.generation_diagnostics = Some(self.diagnostics.register_generation_with_placement(
+            GenerationRegistration {
+                service_instance_id: self.service_instance_id,
+                service_name: self.name,
+                generation: self.generation,
+                declared_scheduling: self.scheduling,
+                lane: runtime_lane,
+                high_priority_shard_id,
+                placement_decision,
+            },
+        ));
         self.generation_start = Some(Instant::now());
         self.reload_token = Some(CancellationToken::new());
         self.dependency_watch_set = match self.watcher {
@@ -547,6 +566,8 @@ impl ServiceSupervisor {
             resolved_scheduling = ?resolved_scheduling,
             body_lane = ?self.generation_body_lane,
             runtime_lane = ?runtime_lane,
+            high_priority_shard_id = ?high_priority_shard_id,
+            placement_decision = ?placement_decision,
             status = ?start_status,
             "Starting service generation"
         );
@@ -556,11 +577,19 @@ impl ServiceSupervisor {
             &start_status,
         );
         self.resources
+            .runtime_facts
+            .record_service_high_priority_shard(self.service_instance_id, high_priority_shard_id);
+        self.resources
             .status_plane
             .insert(self.service_instance_id, start_status);
         self.resources.status_changed.notify_waiters();
 
-        if self.generation_body_lane.is_none() {
+        if self.generation_body_lane.is_none()
+            || matches!(
+                self.generation_body_lane,
+                Some(BodyExecutionLane::UnavailableHighPriority(_))
+            )
+        {
             return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
                 "service '{}' resolved to HighPriority without an available high-priority runtime",
                 self.name
@@ -626,13 +655,22 @@ impl ServiceSupervisor {
             diagnostics: diagnostics.clone(),
         };
         let mut generation_future = match &body_lane {
-            BodyExecutionLane::Standard(runtime) | BodyExecutionLane::HighPriority(runtime) => {
+            BodyExecutionLane::Standard(runtime) => {
+                run_body_service_generation(generation_parts, runtime.clone())
+            }
+            BodyExecutionLane::HighPriority { runtime, .. } => {
                 run_body_service_generation(generation_parts, runtime.clone())
             }
             BodyExecutionLane::Isolated => run_isolated_service_generation(
                 generation_parts,
                 self.isolated_startup_permits.clone(),
             ),
+            BodyExecutionLane::UnavailableHighPriority(_) => {
+                return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
+                    "service '{}' entered Running without an available high-priority runtime",
+                    self.name
+                )))));
+            }
         };
 
         let result = if let Some(watch_set) = self.dependency_watch_set.take() {
@@ -691,6 +729,14 @@ impl ServiceSupervisor {
     /// Decides whether the service should restart (--> `Restart`) or stop
     /// permanently (--> `Terminated`).
     pub(super) async fn on_outcome(&mut self, result: ServiceGenerationOutcome) -> SupervisorState {
+        if let Some(BodyExecutionLane::HighPriority { accounting, .. }) = &self.generation_body_lane
+        {
+            accounting.release_generation(self.service_instance_id, self.generation);
+            self.resources
+                .runtime_facts
+                .record_high_priority_shards(accounting.snapshot());
+        }
+
         let elapsed_ms = self
             .generation_start
             .map(|start| duration_millis(start.elapsed()));
@@ -1158,10 +1204,11 @@ mod tests {
     }
 
     fn test_body_lanes_with_high_priority() -> BodyExecutionLanes {
-        let current = tokio::runtime::Handle::current();
         BodyExecutionLanes {
-            standard: current.clone(),
-            high_priority: Some(current),
+            standard: tokio::runtime::Handle::current(),
+            high_priority: Some(
+                crate::core::service_daemon::high_priority::HighPriorityRuntimePoolState::for_test_current_runtime(),
+            ),
         }
     }
 
@@ -1251,7 +1298,8 @@ mod tests {
                 supervisor.generation_body_lane.as_ref(),
             ) {
                 (ServiceScheduling::Standard, Some(BodyExecutionLane::Standard(_))) => {}
-                (ServiceScheduling::HighPriority, Some(BodyExecutionLane::HighPriority(_))) => {}
+                (ServiceScheduling::HighPriority, Some(BodyExecutionLane::HighPriority { .. })) => {
+                }
                 (ServiceScheduling::Isolated, Some(BodyExecutionLane::Isolated)) => {}
                 (_, lane) => panic!("unexpected body lane: {:?}", lane),
             }

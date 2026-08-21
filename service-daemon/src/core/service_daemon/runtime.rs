@@ -1,15 +1,29 @@
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
-use crate::core::diagnostics::{RuntimeLane, run_lane_runtime_probe};
-use crate::models::{ServiceDescription, ServiceScheduling};
+use crate::core::diagnostics::{
+    DiagnosticsSnapshot, ObservationStatsSnapshot, RuntimeLane,
+    run_high_priority_shard_runtime_probe, run_lane_runtime_probe,
+};
+use crate::core::service_daemon::high_priority::{
+    HighPriorityPlacementDecision, HighPriorityPlacementDecisionKind, HighPriorityPlacementReason,
+    observation_has_pressure,
+};
+use crate::models::{
+    HighPriorityShardId, HighPriorityShardPressureState, ServiceDescription, ServiceScheduling,
+};
 
 use super::DaemonInstanceInner;
 
 pub(super) const CONTROL_RUNTIME_WORKER_THREADS: usize = 1;
 pub(super) const ISOLATED_STARTUP_CONCURRENCY_LIMIT: usize = 4;
+const HIGH_PRIORITY_POLICY_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(super) struct PreparedRuntimes {
     pub(super) control: Option<Handle>,
@@ -94,8 +108,8 @@ impl DaemonInstanceInner {
             self.spawn_adaptive_recommendation_loop(runtime);
         }
         self.spawn_runtime_probe(&standard, RuntimeLane::Standard);
-        if let Some(runtime) = high_priority.as_ref() {
-            self.spawn_runtime_probe(runtime, RuntimeLane::HighPriority);
+        if high_priority.is_some() {
+            self.spawn_high_priority_runtime_probes();
         }
 
         Ok(PreparedRuntimes {
@@ -129,25 +143,19 @@ impl DaemonInstanceInner {
             return Ok(None);
         };
 
-        if self.high_priority_runtime.is_none() {
+        if self.high_priority_runtime_pool.is_empty() {
             tracing::info!(
                 high_priority_entries = self.high_priority_capacity.entry_count(),
                 high_priority_worker_threads = worker_count.get(),
-                "Creating high-priority runtime from static capacity plan"
-            );
-            self.high_priority_runtime = Some(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(worker_count.get())
-                    .thread_name("svc-high-priority")
-                    .build()?,
+                "Creating initial high-priority runtime shard from static capacity plan"
             );
         }
 
-        Ok(self
-            .high_priority_runtime
-            .as_ref()
-            .map(|runtime| runtime.handle().clone()))
+        let handle = self.high_priority_runtime_pool.prepare_initial_runtime()?;
+        self.resources
+            .runtime_facts
+            .record_high_priority_shards(self.high_priority_runtime_pool.snapshot());
+        Ok(handle)
     }
 
     pub(super) fn spawn_runtime_probe(&mut self, handle: &Handle, lane: RuntimeLane) {
@@ -155,6 +163,34 @@ impl DaemonInstanceInner {
         let token = self.cancellation_token.clone();
         self.runtime_probe_tasks
             .push(handle.spawn(run_lane_runtime_probe(diagnostics, lane, token)));
+    }
+
+    pub(super) fn spawn_high_priority_runtime_probes(&mut self) {
+        let diagnostics = self.diagnostics.clone();
+        let token = self.cancellation_token.clone();
+        for shard in self.high_priority_runtime_pool.shard_handles() {
+            self.spawn_high_priority_runtime_probe(
+                shard.handle.clone(),
+                shard.shard_id,
+                diagnostics.clone(),
+                token.clone(),
+            );
+        }
+    }
+
+    fn spawn_high_priority_runtime_probe(
+        &mut self,
+        handle: Handle,
+        shard_id: HighPriorityShardId,
+        diagnostics: std::sync::Arc<crate::core::diagnostics::DiagnosticsStore>,
+        token: CancellationToken,
+    ) {
+        self.runtime_probe_tasks
+            .push(handle.spawn(run_high_priority_shard_runtime_probe(
+                diagnostics,
+                shard_id,
+                token,
+            )));
     }
 
     pub(super) fn spawn_adaptive_recommendation_loop(&mut self, handle: &Handle) {
@@ -168,6 +204,23 @@ impl DaemonInstanceInner {
         let token = self.cancellation_token.clone();
         self.adaptive_recommendation_task =
             Some(handle.spawn(run_adaptive_scheduling_recommendations(diagnostics, token)));
+    }
+
+    pub(super) fn spawn_high_priority_policy_loop(
+        &mut self,
+        handle: &Handle,
+        inner: Arc<Mutex<DaemonInstanceInner>>,
+    ) {
+        if self.high_priority_policy_task.is_some()
+            || self.high_priority_runtime_pool.is_empty()
+            || !self.high_priority_runtime_pool.policy().is_enabled()
+        {
+            return;
+        }
+
+        let token = self.cancellation_token.clone();
+        self.high_priority_policy_task =
+            Some(handle.spawn(run_high_priority_runtime_policy_loop(inner, token)));
     }
 
     pub(super) async fn stop_runtime_probes(&mut self) {
@@ -189,18 +242,32 @@ impl DaemonInstanceInner {
         }
     }
 
+    pub(super) async fn stop_high_priority_policy_loop(&mut self) {
+        if let Some(handle) = self.high_priority_policy_task.take()
+            && let Err(err) = handle.await
+            && !err.is_cancelled()
+        {
+            tracing::error!(error = ?err, "HighPriority runtime policy loop ended unexpectedly");
+        }
+    }
+
     pub(super) fn abort_adaptive_recommendation_loop(&mut self) {
         if let Some(handle) = self.adaptive_recommendation_task.take() {
             handle.abort();
         }
     }
 
-    pub(super) fn shutdown_high_priority_runtime(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take()
-            && let Err(panic) = std::thread::spawn(move || drop(runtime)).join()
-        {
-            tracing::error!(?panic, "High-priority runtime shutdown thread panicked");
+    pub(super) fn abort_high_priority_policy_loop(&mut self) {
+        if let Some(handle) = self.high_priority_policy_task.take() {
+            handle.abort();
         }
+    }
+
+    pub(super) fn shutdown_high_priority_runtime(&mut self) {
+        self.high_priority_runtime_pool.shutdown();
+        self.resources
+            .runtime_facts
+            .record_high_priority_shards(Vec::new());
     }
 
     pub(super) fn shutdown_control_runtime(&mut self) {
@@ -212,9 +279,10 @@ impl DaemonInstanceInner {
     }
 
     pub(super) fn shutdown_high_priority_runtime_detached(&mut self) {
-        if let Some(runtime) = self.high_priority_runtime.take() {
-            let _ = std::thread::spawn(move || drop(runtime));
-        }
+        self.high_priority_runtime_pool.shutdown_detached();
+        self.resources
+            .runtime_facts
+            .record_high_priority_shards(Vec::new());
     }
 
     pub(super) fn shutdown_control_runtime_detached(&mut self) {
@@ -222,4 +290,269 @@ impl DaemonInstanceInner {
             let _ = std::thread::spawn(move || drop(runtime));
         }
     }
+}
+
+async fn run_high_priority_runtime_policy_loop(
+    inner: Arc<Mutex<DaemonInstanceInner>>,
+    token: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep(HIGH_PRIORITY_POLICY_INTERVAL) => {
+                tokio::select! {
+                    mut inner = inner.lock() => {
+                        inner.evaluate_high_priority_runtime_policy(Instant::now());
+                    }
+                    _ = token.cancelled() => break,
+                }
+            }
+            _ = token.cancelled() => break,
+        }
+    }
+}
+
+impl DaemonInstanceInner {
+    pub(super) fn evaluate_high_priority_runtime_policy(&mut self, now: Instant) {
+        if self.high_priority_runtime_pool.is_empty() {
+            return;
+        }
+
+        let policy = self.high_priority_runtime_pool.policy();
+        if !policy.is_enabled() {
+            self.record_high_priority_policy_suppressed(
+                HighPriorityPlacementReason::PolicyDisabled,
+            );
+            return;
+        }
+
+        let snapshot = self.diagnostics.snapshot();
+        let mut pressured_shards = Vec::new();
+        let mut enough_samples = false;
+        for shard in self.high_priority_runtime_pool.snapshot() {
+            let observation = snapshot
+                .high_priority_shards
+                .iter()
+                .find(|observed| observed.shard_id == shard.shard_id)
+                .map(|observed| &observed.aggregate.runtime_probe);
+            let pressure_state = match observation {
+                Some(observation)
+                    if observation.completed >= policy.minimum_completed_samples()
+                        && observation_has_pressure(
+                            observation.completed,
+                            observation.avg_drift_ms,
+                            policy,
+                        ) =>
+                {
+                    enough_samples = true;
+                    pressured_shards.push(shard.shard_id);
+                    HighPriorityShardPressureState::Pressured
+                }
+                Some(observation)
+                    if observation.completed >= policy.minimum_completed_samples() =>
+                {
+                    enough_samples = true;
+                    HighPriorityShardPressureState::Nominal
+                }
+                _ => HighPriorityShardPressureState::Unknown,
+            };
+            self.high_priority_runtime_pool
+                .state()
+                .record_pressure(shard.shard_id, pressure_state);
+        }
+
+        if !enough_samples {
+            self.record_high_priority_policy_suppressed(
+                HighPriorityPlacementReason::InsufficientSamples,
+            );
+            self.sync_high_priority_runtime_facts();
+            return;
+        }
+
+        let any_pressure = !pressured_shards.is_empty();
+        if !self
+            .high_priority_runtime_pool
+            .record_pressure_window(any_pressure)
+        {
+            self.sync_high_priority_runtime_facts();
+            return;
+        }
+        if !any_pressure {
+            self.sync_high_priority_runtime_facts();
+            return;
+        }
+
+        if global_runtime_pressure(&snapshot, policy) {
+            self.record_high_priority_policy_suppressed(
+                HighPriorityPlacementReason::GlobalPressure,
+            );
+            self.sync_high_priority_runtime_facts();
+            return;
+        }
+
+        let scale_out = self
+            .high_priority_runtime_pool
+            .scale_out(now, HighPriorityPlacementReason::PressureScaleOut);
+        let new_shard_id = match scale_out {
+            Ok(shard_id) => shard_id,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "HighPriority runtime policy failed to create runtime shard"
+                );
+                None
+            }
+        };
+
+        if let Some(shard_id) = new_shard_id {
+            self.record_high_priority_policy_decision(HighPriorityPlacementDecision {
+                shard_id: Some(shard_id),
+                kind: HighPriorityPlacementDecisionKind::ScaleOut,
+                reason: HighPriorityPlacementReason::PressureScaleOut,
+            });
+            if let Some(shard) = self.high_priority_runtime_pool.shard_handle(shard_id) {
+                self.spawn_high_priority_runtime_probe(
+                    shard.handle,
+                    shard.shard_id,
+                    self.diagnostics.clone(),
+                    self.cancellation_token.clone(),
+                );
+            }
+            tracing::info!(
+                high_priority_shard_id = %shard_id,
+                "HighPriority runtime policy scaled out"
+            );
+        } else {
+            self.sync_scale_out_suppression_to_diagnostics(now);
+        }
+
+        self.request_high_priority_rollovers(new_shard_id, &pressured_shards, now);
+        self.sync_high_priority_runtime_facts();
+    }
+
+    fn request_high_priority_rollovers(
+        &mut self,
+        target_shard_id: Option<HighPriorityShardId>,
+        pressured_shards: &[HighPriorityShardId],
+        now: Instant,
+    ) {
+        let Some(target_shard_id) = target_shard_id.or_else(|| {
+            self.high_priority_runtime_pool
+                .snapshot()
+                .into_iter()
+                .filter(|shard| !pressured_shards.contains(&shard.shard_id))
+                .min_by_key(|shard| (shard.active_generations, shard.shard_id))
+                .map(|shard| shard.shard_id)
+        }) else {
+            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::NoBetterShard);
+            return;
+        };
+
+        let policy = self.high_priority_runtime_pool.policy();
+        if !policy.rollover_enabled() || policy.max_rollovers_per_window() == 0 {
+            self.record_high_priority_policy_suppressed(
+                HighPriorityPlacementReason::PolicyDisabled,
+            );
+            return;
+        }
+        if !self.high_priority_runtime_pool.rollover_allowed(now) {
+            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::Cooldown);
+            return;
+        }
+
+        let mut remaining = self
+            .high_priority_runtime_pool
+            .policy()
+            .max_rollovers_per_window();
+        for shard_id in pressured_shards {
+            for (service_instance_id, generation) in self
+                .high_priority_runtime_pool
+                .state()
+                .active_on_shard(*shard_id)
+            {
+                if remaining == 0 {
+                    return;
+                }
+                if let Some(signal) = self.resources.reload_signals.get(&service_instance_id) {
+                    signal.notify_one();
+                    let decision = HighPriorityPlacementDecision {
+                        shard_id: Some(target_shard_id),
+                        kind: HighPriorityPlacementDecisionKind::Rollover,
+                        reason: HighPriorityPlacementReason::PolicyRollover,
+                    };
+                    self.record_high_priority_policy_decision(decision);
+                    tracing::info!(
+                        service_instance_id = %service_instance_id,
+                        generation,
+                        source_high_priority_shard_id = %shard_id,
+                        target_high_priority_shard_id = %target_shard_id,
+                        "HighPriority runtime policy requested cooperative generation rollover"
+                    );
+                    remaining -= 1;
+                }
+            }
+        }
+    }
+
+    fn sync_scale_out_suppression_to_diagnostics(&self, _now: Instant) {
+        let reason = if self.high_priority_runtime_pool.total_worker_threads()
+            >= self.high_priority_runtime_pool.max_worker_threads()
+        {
+            HighPriorityPlacementReason::MaxCapacity
+        } else {
+            HighPriorityPlacementReason::Cooldown
+        };
+        self.record_high_priority_policy_suppressed(reason);
+    }
+
+    fn record_high_priority_policy_suppressed(&self, reason: HighPriorityPlacementReason) {
+        self.record_high_priority_policy_decision(HighPriorityPlacementDecision {
+            shard_id: None,
+            kind: HighPriorityPlacementDecisionKind::Suppressed,
+            reason,
+        });
+    }
+
+    fn record_high_priority_policy_decision(&self, decision: HighPriorityPlacementDecision) {
+        self.diagnostics
+            .record_high_priority_placement_decision(decision);
+        tracing::debug!(
+            high_priority_shard_id = ?decision.shard_id,
+            decision_kind = ?decision.kind,
+            decision_reason = ?decision.reason,
+            "HighPriority runtime placement decision"
+        );
+    }
+
+    fn sync_high_priority_runtime_facts(&self) {
+        self.resources
+            .runtime_facts
+            .record_high_priority_shards(self.high_priority_runtime_pool.snapshot());
+    }
+}
+
+fn global_runtime_pressure(
+    snapshot: &DiagnosticsSnapshot,
+    policy: crate::models::HighPriorityRuntimePolicy,
+) -> bool {
+    lane_runtime_probe_pressure(snapshot, RuntimeLane::Control, policy)
+        && lane_runtime_probe_pressure(snapshot, RuntimeLane::Standard, policy)
+}
+
+fn lane_runtime_probe_pressure(
+    snapshot: &DiagnosticsSnapshot,
+    lane: RuntimeLane,
+    policy: crate::models::HighPriorityRuntimePolicy,
+) -> bool {
+    snapshot
+        .lanes
+        .iter()
+        .find(|snapshot| snapshot.runtime_lane == lane)
+        .is_some_and(|snapshot| observation_pressure(&snapshot.aggregate.runtime_probe, policy))
+}
+
+fn observation_pressure(
+    observation: &ObservationStatsSnapshot,
+    policy: crate::models::HighPriorityRuntimePolicy,
+) -> bool {
+    observation_has_pressure(observation.completed, observation.avg_drift_ms, policy)
 }

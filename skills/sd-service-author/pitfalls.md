@@ -21,9 +21,11 @@ lifecycle helper, it can leave dependents in later waves waiting until
 
 ## Treating `Ok(())` as "done forever"
 
-A clean `Ok(())` return starts a fresh generation immediately. If a service should
-run once and stop, that is not what `Ok(())` means — model completion explicitly
-(e.g. wait on shutdown) rather than returning early.
+A clean `Ok(())` return without a shutdown or reload signal is unexpected
+termination for a long-running service. The daemon records `NormalExit` and
+starts a fresh generation through `RestartPolicy` normal-exit backoff. If a
+service should run once and stop, model completion explicitly outside the service
+lifecycle rather than returning early.
 
 ## Swallowing resource errors with `?`
 

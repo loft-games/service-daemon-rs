@@ -32,7 +32,10 @@ impl DaemonInstanceInner {
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let body_lanes = parts::BodyExecutionLanes {
                 standard: runtimes.standard.clone(),
-                high_priority: runtimes.high_priority.clone(),
+                high_priority: runtimes
+                    .high_priority
+                    .as_ref()
+                    .map(|_| self.high_priority_runtime_pool.state()),
             };
             for service in self.instance_registry.records() {
                 if matches!(service.scheduling(), ServiceScheduling::HighPriority)

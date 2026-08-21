@@ -59,7 +59,7 @@ Priority decides *when* something starts and stops. Scheduling decides *where* t
 | Mode | Best for | Tradeoff |
 | :--- | :--- | :--- |
 | `Standard` | Most services and triggers | Uses the host Tokio runtime; this is the default and should be your first choice. |
-| `HighPriority` | Short, cooperative, latency-sensitive work | Uses a framework-owned high-priority runtime lane. It is not an overflow pool for ordinary work. |
+| `HighPriority` | Short, cooperative, latency-sensitive work | Uses framework-owned high-priority runtime shards. The daemon can add conservative capacity, but it is not an overflow pool for ordinary work. |
 | `Isolated` | Blocking adapters, thread-affine integrations, deterministic hot loops | Uses a private OS thread and private Tokio runtime for each generation, so it costs more resources. |
 
 ```rust,ignore
@@ -110,17 +110,28 @@ async fn admin_service() -> anyhow::Result<()> {
 
 ### `HighPriority`
 
-`HighPriority` is for work that should avoid contention with the default body lane but still behaves like normal cooperative async Rust.
+`HighPriority` is for work that should avoid contention with the default body lane but still behaves like normal cooperative async Rust. The daemon starts with capacity derived from declared HighPriority services/triggers and, by default, runs a conservative HighPriority runtime policy that can add shards up to the available-parallelism cap when shard probe drift is sustained.
 
 - Good for watchdogs, latency-sensitive queues, and small coordination tasks.
 - Not a way to make CPU-heavy or blocking code safe.
-- Not an automatic overflow pool; a body enters this lane only when you declare `scheduling = HighPriority`.
+- Not a cross-mode overflow pool; a body enters this lane only when you declare `scheduling = HighPriority`.
+- Existing futures are not migrated. Placement changes happen only when a new generation starts. If the policy requests rollover, the service must observe the reload signal at a safe point and preserve any needed state with normal framework tools such as the Shelf.
 
 ```rust,ignore
 #[service(scheduling = HighPriority)]
 async fn watchdog_service() -> anyhow::Result<()> {
     Ok(())
 }
+```
+
+If you need to turn off automatic HighPriority scale-out and rollover for a daemon, configure the daemon builder rather than adding another macro attribute:
+
+```rust,ignore
+use service_daemon::{HighPriorityRuntimePolicy, ServiceDaemon};
+
+let daemon = ServiceDaemon::builder()
+    .with_high_priority_runtime_policy(HighPriorityRuntimePolicy::disabled())
+    .build();
 ```
 
 ### `Isolated`

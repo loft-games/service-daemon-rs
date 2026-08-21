@@ -58,6 +58,49 @@ impl fmt::Display for DaemonInstanceId {
     }
 }
 
+/// Runtime identity for one framework-owned HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HighPriorityShardId(pub u64);
+
+impl fmt::Display for HighPriorityShardId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "hp#{}", self.0)
+    }
+}
+
+/// Best-effort pressure state for a HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HighPriorityShardPressureState {
+    /// The shard has not collected enough observations for a stronger state.
+    Unknown,
+    /// The shard has enough samples and does not currently show pressure.
+    Nominal,
+    /// The shard is showing scheduling pressure.
+    Pressured,
+    /// The controller observed pressure but suppressed scale-out or rollover.
+    Suppressed,
+}
+
+/// Read-only runtime facts for one HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighPriorityRuntimeShardSnapshot {
+    /// Runtime shard identity.
+    pub shard_id: HighPriorityShardId,
+    /// Tokio worker threads owned by this shard.
+    pub worker_threads: usize,
+    /// Wall-clock creation time.
+    pub created_at: DateTime<Utc>,
+    /// Currently running service generations assigned to this shard.
+    pub active_generations: usize,
+    /// Service instances last assigned to this shard.
+    pub assigned_instances: usize,
+    /// Best-effort pressure state derived from policy observations.
+    pub pressure_state: HighPriorityShardPressureState,
+}
+
 /// Daemon-level runtime facts.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +117,8 @@ pub struct DaemonRuntimeSnapshot {
     pub service_count: usize,
     /// Number of triggers observed by a `TriggerRunner`.
     pub trigger_count: usize,
+    /// Framework-owned HighPriority runtime shards.
+    pub high_priority_shards: Vec<HighPriorityRuntimeShardSnapshot>,
     /// Snapshot generation time.
     pub generated_at: DateTime<Utc>,
 }
@@ -87,6 +132,8 @@ pub struct ServiceRuntimeSnapshot {
     pub service_name: &'static str,
     pub priority: u8,
     pub declared_scheduling: ServiceScheduling,
+    /// HighPriority shard that last ran this service generation, if applicable.
+    pub high_priority_shard_id: Option<HighPriorityShardId>,
     /// Current lifecycle status from the daemon status plane.
     pub status: ServiceStatus,
     /// Latest generation number observed by the supervisor.

@@ -25,20 +25,20 @@ All services share a central **Status Plane** (`DashMap<ServiceInstanceId, Servi
 Service supervisors, dependency watch construction, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
 - `Standard`: host Tokio runtime integration through the runtime that called the daemon handle's `run()`.
-- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count derived from final declared HighPriority entries.
+- `HighPriority`: daemon-owned low-contention high-priority runtime shard pool, created lazily from the final declared HighPriority entries and then managed by the HighPriority runtime policy.
 - `Isolated`: a private OS thread and private Tokio runtime for each generation body.
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
 
 Startup control-plane code is split under `core/service_daemon/`: `provider_graph.rs` validates provider dependency cycles and runs reachable eager providers, `runtime.rs` prepares control/high-priority runtimes and probes, and `startup_pipeline.rs` sequences those steps before handing service startup to `runner/wave.rs`.
 
-HighPriority worker-count selection happens before runtime allocation and only reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the selected worker count. Pressure diagnostics remain advisory and do not rebuild or resize the runtime after creation.
+HighPriority startup capacity selection happens before runtime allocation and reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the initial worker count. After startup, `HighPriorityRuntimePolicy` owns the narrow control loop for this mode: it reads shard probe drift, live generation assignments, and cooldown/capacity state; it can add new HighPriority shards within the configured worker cap; and it can request cooperative generation rollover so future generations are placed on a better shard.
 
 ### Scheduling Advisory and Generation Boundaries
 
-Scheduling analysis is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or request restarts in production. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, or shutdown behavior.
+Scheduling advisory analysis is intentionally limited to internal recommendations. The advisory analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or drive the HighPriority runtime policy. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, shutdown, or HighPriority scale-out behavior.
 
-A running Tokio future cannot be moved between runtimes. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract; if added, they must happen at a generation boundary inside the same declared mode.
+A running Tokio future cannot be moved between runtimes. HighPriority placement changes therefore happen only at generation boundaries. The policy can request rollover through the existing reload signal path; the running generation exits cooperatively at a service-defined safe point, and the next generation receives a fresh placement decision inside the same declared `HighPriority` mode. Rollover is a placement optimization, not a service failure: it does not enter `RestartPolicy` backoff or restart-storm rate limiting.
 
 ### 1.1. Provider Dependency Watch Path
 Provider reload propagation distinguishes value mutation from binding mutation:
@@ -90,10 +90,11 @@ Isolated startup failures are intentionally not fatal. If an isolated OS thread,
 Each service generation is registered in an internal diagnostics store when the supervisor enters `Starting`. The generation records:
 
 - statically declared body scheduling mode (`Standard`, `HighPriority`, or `Isolated`);
+- actual body runtime lane and, for HighPriority generations, the selected shard and placement decision;
 - lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
 - reload requests, restart decisions, last restart decision kind, policy/effective restart delay, rate-limited restart flags, and termination;
 - service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
-- runtime heartbeat probe observations for the control plane and body execution lanes.
+- runtime heartbeat probe observations for the control plane, body execution lanes, and HighPriority shards.
 
 The supervisor includes a compact per-generation summary in the outcome tracing event. The public `DaemonDiagnosticsSnapshot` exposes distilled service, generation, and lane summaries through read-only daemon/handle methods. Generation-detail snapshot retention is bounded to the most recent 1024 generations per service so crash loops do not make snapshot collection and sorting unbounded; service and lane aggregates still accumulate across evicted generation details. Standard service and Standard lane summaries can include interpretation labels, confidence, and investigation hints, but those labels are derived from snapshot facts and do not change generation lifecycle, restart/backoff, reload, shutdown, or body placement. The store, windows, evaluator, recommendation fingerprints, thresholds, and mutation paths remain internal. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
 

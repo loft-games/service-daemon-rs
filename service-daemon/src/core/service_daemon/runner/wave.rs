@@ -123,7 +123,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
         isolated_startup_permits,
         control_runtime,
         standard_runtime,
-        high_priority_runtime,
+        high_priority_pool,
         daemon_token,
     } = parts;
 
@@ -131,7 +131,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
 
     let body_lanes = BodyExecutionLanes {
         standard: standard_runtime,
-        high_priority: high_priority_runtime,
+        high_priority: high_priority_pool,
     };
     let waves = ServiceWave::from_services(&instances);
 

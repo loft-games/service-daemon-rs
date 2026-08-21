@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::models::{ServiceInstanceId, ServiceScheduling};
+use crate::core::service_daemon::high_priority::HighPriorityPlacementDecision;
+use crate::models::{HighPriorityShardId, ServiceInstanceId, ServiceScheduling};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeLane {
@@ -176,6 +177,7 @@ pub(crate) struct SleepObservation {
 const RUNTIME_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 const RETAINED_GENERATIONS_PER_SERVICE: usize = 1024;
 const RETAINED_PROVIDER_FAILURES: usize = 128;
+const RETAINED_HIGH_PRIORITY_PLACEMENT_DECISIONS: usize = 128;
 
 pub(crate) async fn run_lane_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
@@ -196,6 +198,29 @@ pub(crate) async fn run_lane_runtime_probe(
                     lane,
                     runtime_probe_observation(SleepExitReason::ProbeCancelled, start),
                 );
+                break;
+            }
+        }
+    }
+}
+
+pub(crate) async fn run_high_priority_shard_runtime_probe(
+    diagnostics: Arc<DiagnosticsStore>,
+    shard_id: HighPriorityShardId,
+    token: CancellationToken,
+) {
+    loop {
+        let start = Instant::now();
+        tokio::select! {
+            _ = tokio::time::sleep(RUNTIME_PROBE_INTERVAL) => {
+                let observation = runtime_probe_observation(SleepExitReason::Completed, start);
+                diagnostics.record_lane_observation(RuntimeLane::HighPriority, observation);
+                diagnostics.record_high_priority_shard_observation(shard_id, observation);
+            }
+            _ = token.cancelled() => {
+                let observation = runtime_probe_observation(SleepExitReason::ProbeCancelled, start);
+                diagnostics.record_lane_observation(RuntimeLane::HighPriority, observation);
+                diagnostics.record_high_priority_shard_observation(shard_id, observation);
                 break;
             }
         }
@@ -552,7 +577,10 @@ struct ServiceDiagnostics {
     service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     current_generation: AtomicU64,
+    declared_scheduling: ServiceScheduling,
     runtime_lane: Mutex<RuntimeLane>,
+    high_priority_shard_id: Mutex<Option<HighPriorityShardId>>,
+    placement_decision: Mutex<Option<HighPriorityPlacementDecision>>,
     aggregate: DiagnosticsAggregate,
 }
 
@@ -560,20 +588,34 @@ impl ServiceDiagnostics {
     fn new(
         service_instance_id: ServiceInstanceId,
         service_name: &'static str,
+        declared_scheduling: ServiceScheduling,
         lane: RuntimeLane,
+        high_priority_shard_id: Option<HighPriorityShardId>,
+        placement_decision: Option<HighPriorityPlacementDecision>,
     ) -> Self {
         Self {
             service_instance_id,
             service_name,
             current_generation: AtomicU64::new(0),
+            declared_scheduling,
             runtime_lane: Mutex::new(lane),
+            high_priority_shard_id: Mutex::new(high_priority_shard_id),
+            placement_decision: Mutex::new(placement_decision),
             aggregate: DiagnosticsAggregate::default(),
         }
     }
 
-    fn update_generation(&self, generation: u64, lane: RuntimeLane) {
+    fn update_generation(
+        &self,
+        generation: u64,
+        lane: RuntimeLane,
+        high_priority_shard_id: Option<HighPriorityShardId>,
+        placement_decision: Option<HighPriorityPlacementDecision>,
+    ) {
         self.current_generation.store(generation, Ordering::Relaxed);
         *lock_or_recover(&self.runtime_lane) = lane;
+        *lock_or_recover(&self.high_priority_shard_id) = high_priority_shard_id;
+        *lock_or_recover(&self.placement_decision) = placement_decision;
     }
 
     fn snapshot(&self) -> ServiceDiagnosticsSnapshot {
@@ -581,7 +623,10 @@ impl ServiceDiagnostics {
             service_instance_id: self.service_instance_id,
             service_name: self.service_name,
             current_generation: self.current_generation.load(Ordering::Relaxed),
+            declared_scheduling: self.declared_scheduling,
             runtime_lane: *lock_or_recover(&self.runtime_lane),
+            high_priority_shard_id: *lock_or_recover(&self.high_priority_shard_id),
+            placement_decision: *lock_or_recover(&self.placement_decision),
             aggregate: self.aggregate.snapshot(),
         }
     }
@@ -591,7 +636,10 @@ struct GenerationDiagnostics {
     service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     generation: u64,
+    declared_scheduling: ServiceScheduling,
     runtime_lane: RuntimeLane,
+    high_priority_shard_id: Option<HighPriorityShardId>,
+    placement_decision: Option<HighPriorityPlacementDecision>,
     aggregate: DiagnosticsAggregate,
 }
 
@@ -600,13 +648,19 @@ impl GenerationDiagnostics {
         service_instance_id: ServiceInstanceId,
         service_name: &'static str,
         generation: u64,
+        declared_scheduling: ServiceScheduling,
         runtime_lane: RuntimeLane,
+        high_priority_shard_id: Option<HighPriorityShardId>,
+        placement_decision: Option<HighPriorityPlacementDecision>,
     ) -> Self {
         Self {
             service_instance_id,
             service_name,
             generation,
+            declared_scheduling,
             runtime_lane,
+            high_priority_shard_id,
+            placement_decision,
             aggregate: DiagnosticsAggregate::default(),
         }
     }
@@ -616,7 +670,10 @@ impl GenerationDiagnostics {
             service_instance_id: self.service_instance_id,
             service_name: self.service_name,
             generation: self.generation,
+            declared_scheduling: self.declared_scheduling,
             runtime_lane: self.runtime_lane,
+            high_priority_shard_id: self.high_priority_shard_id,
+            placement_decision: self.placement_decision,
             aggregate: self.aggregate.snapshot(),
         }
     }
@@ -625,6 +682,27 @@ impl GenerationDiagnostics {
 struct LaneDiagnostics {
     runtime_lane: RuntimeLane,
     aggregate: DiagnosticsAggregate,
+}
+
+struct HighPriorityShardDiagnostics {
+    shard_id: HighPriorityShardId,
+    aggregate: DiagnosticsAggregate,
+}
+
+impl HighPriorityShardDiagnostics {
+    fn new(shard_id: HighPriorityShardId) -> Self {
+        Self {
+            shard_id,
+            aggregate: DiagnosticsAggregate::default(),
+        }
+    }
+
+    fn snapshot(&self) -> HighPriorityShardDiagnosticsSnapshot {
+        HighPriorityShardDiagnosticsSnapshot {
+            shard_id: self.shard_id,
+            aggregate: self.aggregate.snapshot(),
+        }
+    }
 }
 
 impl LaneDiagnostics {
@@ -648,7 +726,10 @@ pub(crate) struct ServiceDiagnosticsSnapshot {
     pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub current_generation: u64,
+    pub declared_scheduling: ServiceScheduling,
     pub runtime_lane: RuntimeLane,
+    pub high_priority_shard_id: Option<HighPriorityShardId>,
+    pub placement_decision: Option<HighPriorityPlacementDecision>,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
@@ -657,7 +738,10 @@ pub(crate) struct GenerationDiagnosticsSnapshot {
     pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
+    pub declared_scheduling: ServiceScheduling,
     pub runtime_lane: RuntimeLane,
+    pub high_priority_shard_id: Option<HighPriorityShardId>,
+    pub placement_decision: Option<HighPriorityPlacementDecision>,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
@@ -668,11 +752,19 @@ pub(crate) struct RuntimeLaneSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HighPriorityShardDiagnosticsSnapshot {
+    pub shard_id: HighPriorityShardId,
+    pub aggregate: DiagnosticsAggregateSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DiagnosticsSnapshot {
     pub services: Vec<ServiceDiagnosticsSnapshot>,
     pub generations: Vec<GenerationDiagnosticsSnapshot>,
     pub provider_failures: Vec<ProviderFailureSnapshot>,
     pub lanes: Vec<RuntimeLaneSnapshot>,
+    pub high_priority_shards: Vec<HighPriorityShardDiagnosticsSnapshot>,
+    pub high_priority_placement_decisions: Vec<HighPriorityPlacementDecision>,
 }
 
 #[derive(Clone)]
@@ -762,10 +854,22 @@ pub(crate) struct DiagnosticsStore {
     services: DashMap<ServiceInstanceId, Arc<ServiceDiagnostics>>,
     generations: DashMap<(ServiceInstanceId, u64), Arc<GenerationDiagnostics>>,
     provider_failures: Mutex<VecDeque<ProviderFailureSnapshot>>,
+    high_priority_shards: DashMap<HighPriorityShardId, Arc<HighPriorityShardDiagnostics>>,
+    high_priority_placement_decisions: Mutex<VecDeque<HighPriorityPlacementDecision>>,
     control: Arc<LaneDiagnostics>,
     standard: Arc<LaneDiagnostics>,
     high_priority: Arc<LaneDiagnostics>,
     isolated: Arc<LaneDiagnostics>,
+}
+
+pub(crate) struct GenerationRegistration {
+    pub(crate) service_instance_id: ServiceInstanceId,
+    pub(crate) service_name: &'static str,
+    pub(crate) generation: u64,
+    pub(crate) declared_scheduling: ServiceScheduling,
+    pub(crate) lane: RuntimeLane,
+    pub(crate) high_priority_shard_id: Option<HighPriorityShardId>,
+    pub(crate) placement_decision: Option<HighPriorityPlacementDecision>,
 }
 
 impl Default for DiagnosticsStore {
@@ -774,6 +878,8 @@ impl Default for DiagnosticsStore {
             services: DashMap::new(),
             generations: DashMap::new(),
             provider_failures: Mutex::new(VecDeque::new()),
+            high_priority_shards: DashMap::new(),
+            high_priority_placement_decisions: Mutex::new(VecDeque::new()),
             control: Arc::new(LaneDiagnostics::new(RuntimeLane::Control)),
             standard: Arc::new(LaneDiagnostics::new(RuntimeLane::Standard)),
             high_priority: Arc::new(LaneDiagnostics::new(RuntimeLane::HighPriority)),
@@ -787,6 +893,7 @@ impl DiagnosticsStore {
         Self::default()
     }
 
+    #[cfg(test)]
     pub(crate) fn register_generation(
         &self,
         service_instance_id: ServiceInstanceId,
@@ -794,6 +901,35 @@ impl DiagnosticsStore {
         generation: u64,
         lane: RuntimeLane,
     ) -> GenerationDiagnosticsHandle {
+        self.register_generation_with_placement(GenerationRegistration {
+            service_instance_id,
+            service_name,
+            generation,
+            declared_scheduling: scheduling_from_lane(lane).unwrap_or(ServiceScheduling::Standard),
+            lane,
+            high_priority_shard_id: None,
+            placement_decision: None,
+        })
+    }
+
+    pub(crate) fn register_generation_with_placement(
+        &self,
+        registration: GenerationRegistration,
+    ) -> GenerationDiagnosticsHandle {
+        let GenerationRegistration {
+            service_instance_id,
+            service_name,
+            generation,
+            declared_scheduling,
+            lane,
+            high_priority_shard_id,
+            placement_decision,
+        } = registration;
+
+        if let Some(decision) = placement_decision {
+            self.record_high_priority_placement_decision(decision);
+        }
+
         let service = self
             .services
             .entry(service_instance_id)
@@ -801,17 +937,23 @@ impl DiagnosticsStore {
                 Arc::new(ServiceDiagnostics::new(
                     service_instance_id,
                     service_name,
+                    declared_scheduling,
                     lane,
+                    high_priority_shard_id,
+                    placement_decision,
                 ))
             })
             .clone();
-        service.update_generation(generation, lane);
+        service.update_generation(generation, lane, high_priority_shard_id, placement_decision);
 
         let generation_diagnostics = Arc::new(GenerationDiagnostics::new(
             service_instance_id,
             service_name,
             generation,
+            declared_scheduling,
             lane,
+            high_priority_shard_id,
+            placement_decision,
         ));
         self.generations.insert(
             (service_instance_id, generation),
@@ -830,6 +972,29 @@ impl DiagnosticsStore {
         self.lane_diagnostics(lane)
             .aggregate
             .record_observation(observation);
+    }
+
+    pub(crate) fn record_high_priority_shard_observation(
+        &self,
+        shard_id: HighPriorityShardId,
+        observation: SleepObservation,
+    ) {
+        self.high_priority_shards
+            .entry(shard_id)
+            .or_insert_with(|| Arc::new(HighPriorityShardDiagnostics::new(shard_id)))
+            .aggregate
+            .record_observation(observation);
+    }
+
+    pub(crate) fn record_high_priority_placement_decision(
+        &self,
+        decision: HighPriorityPlacementDecision,
+    ) {
+        let mut decisions = lock_or_recover(&self.high_priority_placement_decisions);
+        if decisions.len() == RETAINED_HIGH_PRIORITY_PLACEMENT_DECISIONS {
+            decisions.pop_front();
+        }
+        decisions.push_back(decision);
     }
 
     pub(crate) fn record_provider_failure(&self, failure: ProviderFailureSnapshot) {
@@ -887,6 +1052,13 @@ impl DiagnosticsStore {
             .collect();
         generations.sort_by_key(|snapshot| (snapshot.service_instance_id, snapshot.generation));
 
+        let mut high_priority_shards: Vec<_> = self
+            .high_priority_shards
+            .iter()
+            .map(|shard| shard.value().snapshot())
+            .collect();
+        high_priority_shards.sort_by_key(|snapshot| snapshot.shard_id);
+
         DiagnosticsSnapshot {
             services,
             generations,
@@ -900,6 +1072,13 @@ impl DiagnosticsStore {
                 self.high_priority.snapshot(),
                 self.isolated.snapshot(),
             ],
+            high_priority_shards,
+            high_priority_placement_decisions: lock_or_recover(
+                &self.high_priority_placement_decisions,
+            )
+            .iter()
+            .copied()
+            .collect(),
         }
     }
 
@@ -950,6 +1129,16 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+#[cfg(test)]
+fn scheduling_from_lane(lane: RuntimeLane) -> Option<ServiceScheduling> {
+    match lane {
+        RuntimeLane::Control => None,
+        RuntimeLane::Standard => Some(ServiceScheduling::Standard),
+        RuntimeLane::HighPriority => Some(ServiceScheduling::HighPriority),
+        RuntimeLane::Isolated => Some(ServiceScheduling::Isolated),
     }
 }
 
@@ -1053,6 +1242,68 @@ mod tests {
             1
         );
         assert_eq!(store.snapshot().provider_failures.len(), 1);
+    }
+
+    #[test]
+    fn high_priority_placement_and_shard_diagnostics_are_publicly_projected() {
+        let store = DiagnosticsStore::new();
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(33));
+        let shard_id = HighPriorityShardId(2);
+        let placement = HighPriorityPlacementDecision {
+            shard_id: Some(shard_id),
+            kind: crate::core::service_daemon::high_priority::HighPriorityPlacementDecisionKind::LeastLoaded,
+            reason: crate::core::service_daemon::high_priority::HighPriorityPlacementReason::LeastLoadedShard,
+        };
+
+        let handle = store.register_generation_with_placement(GenerationRegistration {
+            service_instance_id,
+            service_name: "hp-worker",
+            generation: 7,
+            declared_scheduling: ServiceScheduling::HighPriority,
+            lane: RuntimeLane::HighPriority,
+            high_priority_shard_id: Some(shard_id),
+            placement_decision: Some(placement),
+        });
+        handle.record_sleep_observation(SleepObservation {
+            source: SleepObservationSource::ServiceSleep,
+            reason: SleepExitReason::Completed,
+            requested: Duration::from_millis(10),
+            elapsed: Duration::from_millis(12),
+            drift: Duration::from_millis(2),
+        });
+        store.record_high_priority_shard_observation(
+            shard_id,
+            completed_observation(
+                SleepObservationSource::RuntimeProbe,
+                Duration::from_millis(250),
+                Duration::from_millis(260),
+            ),
+        );
+
+        let public: crate::models::DaemonDiagnosticsSnapshot = store.snapshot().into();
+        let service = public
+            .services
+            .iter()
+            .find(|service| service.service_instance_id == service_instance_id)
+            .expect("service diagnostics should exist");
+        assert_eq!(
+            service.declared_scheduling,
+            Some(ServiceScheduling::HighPriority)
+        );
+        assert_eq!(
+            service.runtime_lane,
+            crate::models::DiagnosticRuntimeLane::HighPriority
+        );
+        assert_eq!(service.high_priority_shard_id, Some(shard_id));
+        assert_eq!(
+            service
+                .placement_decision
+                .expect("placement should be projected")
+                .reason,
+            crate::models::DiagnosticHighPriorityPlacementReason::LeastLoadedShard
+        );
+        assert_eq!(public.high_priority_shards[0].shard_id, shard_id);
+        assert_eq!(public.high_priority_placement_decisions.len(), 1);
     }
 
     fn interpretation_labels(

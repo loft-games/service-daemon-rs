@@ -1,5 +1,7 @@
 use crate::core::diagnostics as internal;
+use crate::core::service_daemon::high_priority as internal_high_priority;
 
+use super::runtime::{HighPriorityShardId, HighPriorityShardPressureState};
 use super::service::{ServiceInstanceId, ServiceScheduling};
 
 const DIAGNOSTIC_MINIMUM_COMPLETED_SAMPLES: u64 = 3;
@@ -20,6 +22,132 @@ pub enum DiagnosticRuntimeLane {
     HighPriority,
     /// Per-generation private thread and runtime lane.
     Isolated,
+}
+
+/// HighPriority runtime placement decision category.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticHighPriorityPlacementDecisionKind {
+    /// Initial shard created from the static startup capacity plan.
+    StaticInitial,
+    /// Generation placed on the least-loaded eligible shard.
+    LeastLoaded,
+    /// New shard created by the HighPriority runtime policy.
+    ScaleOut,
+    /// Cooperative generation rollover requested by the HighPriority runtime policy.
+    Rollover,
+    /// A policy action was suppressed.
+    Suppressed,
+}
+
+impl From<internal_high_priority::HighPriorityPlacementDecisionKind>
+    for DiagnosticHighPriorityPlacementDecisionKind
+{
+    fn from(value: internal_high_priority::HighPriorityPlacementDecisionKind) -> Self {
+        match value {
+            internal_high_priority::HighPriorityPlacementDecisionKind::StaticInitial => {
+                Self::StaticInitial
+            }
+            internal_high_priority::HighPriorityPlacementDecisionKind::LeastLoaded => {
+                Self::LeastLoaded
+            }
+            internal_high_priority::HighPriorityPlacementDecisionKind::ScaleOut => Self::ScaleOut,
+            internal_high_priority::HighPriorityPlacementDecisionKind::Rollover => Self::Rollover,
+            internal_high_priority::HighPriorityPlacementDecisionKind::Suppressed => {
+                Self::Suppressed
+            }
+        }
+    }
+}
+
+/// HighPriority placement decision reason.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiagnosticHighPriorityPlacementReason {
+    /// The service declared `ServiceScheduling::HighPriority`.
+    DeclaredHighPriority,
+    /// The selected shard currently had the lowest active generation load.
+    LeastLoadedShard,
+    /// Sustained shard pressure triggered scale-out.
+    PressureScaleOut,
+    /// The policy requested cooperative rollover to improve placement.
+    PolicyRollover,
+    /// The HighPriority runtime policy is disabled.
+    PolicyDisabled,
+    /// The controller did not have enough completed samples.
+    InsufficientSamples,
+    /// A policy cooldown suppressed action.
+    Cooldown,
+    /// The configured worker-thread cap suppressed scale-out.
+    MaxCapacity,
+    /// Broader runtime pressure suppressed HighPriority-specific scale-out.
+    GlobalPressure,
+    /// No better target shard was available for rollover.
+    NoBetterShard,
+    /// No HighPriority runtime shard was available.
+    NoHighPriorityRuntime,
+}
+
+impl From<internal_high_priority::HighPriorityPlacementReason>
+    for DiagnosticHighPriorityPlacementReason
+{
+    fn from(value: internal_high_priority::HighPriorityPlacementReason) -> Self {
+        match value {
+            internal_high_priority::HighPriorityPlacementReason::DeclaredHighPriority => {
+                Self::DeclaredHighPriority
+            }
+            internal_high_priority::HighPriorityPlacementReason::LeastLoadedShard => {
+                Self::LeastLoadedShard
+            }
+            internal_high_priority::HighPriorityPlacementReason::PressureScaleOut => {
+                Self::PressureScaleOut
+            }
+            internal_high_priority::HighPriorityPlacementReason::PolicyRollover => {
+                Self::PolicyRollover
+            }
+            internal_high_priority::HighPriorityPlacementReason::PolicyDisabled => {
+                Self::PolicyDisabled
+            }
+            internal_high_priority::HighPriorityPlacementReason::InsufficientSamples => {
+                Self::InsufficientSamples
+            }
+            internal_high_priority::HighPriorityPlacementReason::Cooldown => Self::Cooldown,
+            internal_high_priority::HighPriorityPlacementReason::MaxCapacity => Self::MaxCapacity,
+            internal_high_priority::HighPriorityPlacementReason::GlobalPressure => {
+                Self::GlobalPressure
+            }
+            internal_high_priority::HighPriorityPlacementReason::NoBetterShard => {
+                Self::NoBetterShard
+            }
+            internal_high_priority::HighPriorityPlacementReason::NoHighPriorityRuntime => {
+                Self::NoHighPriorityRuntime
+            }
+        }
+    }
+}
+
+/// Read-only HighPriority placement decision fact.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiagnosticHighPriorityPlacementDecision {
+    /// Target shard for the decision, when one exists.
+    pub shard_id: Option<HighPriorityShardId>,
+    /// Decision category.
+    pub kind: DiagnosticHighPriorityPlacementDecisionKind,
+    /// Decision reason.
+    pub reason: DiagnosticHighPriorityPlacementReason,
+}
+
+impl From<internal_high_priority::HighPriorityPlacementDecision>
+    for DiagnosticHighPriorityPlacementDecision
+{
+    fn from(value: internal_high_priority::HighPriorityPlacementDecision) -> Self {
+        Self {
+            shard_id: value.shard_id,
+            kind: value.kind.into(),
+            reason: value.reason.into(),
+        }
+    }
 }
 
 impl From<internal::RuntimeLane> for DiagnosticRuntimeLane {
@@ -658,6 +786,12 @@ pub struct ServiceDiagnosticsSnapshot {
     pub current_generation: u64,
     /// Static scheduling declaration for the service body.
     pub declared_scheduling: Option<ServiceScheduling>,
+    /// Actual runtime lane that ran the latest observed generation.
+    pub runtime_lane: DiagnosticRuntimeLane,
+    /// HighPriority shard that ran the latest observed generation, if applicable.
+    pub high_priority_shard_id: Option<HighPriorityShardId>,
+    /// Last placement decision recorded for this service, if applicable.
+    pub placement_decision: Option<DiagnosticHighPriorityPlacementDecision>,
     /// Aggregated diagnostics for the service.
     pub aggregate: DiagnosticAggregateStats,
     /// Best-effort read-only diagnostic interpretations for this service.
@@ -674,7 +808,10 @@ impl ServiceDiagnosticsSnapshot {
             service_instance_id: value.service_instance_id,
             service_name: value.service_name,
             current_generation: value.current_generation,
-            declared_scheduling: scheduling_from_lane(value.runtime_lane),
+            declared_scheduling: Some(value.declared_scheduling),
+            runtime_lane: value.runtime_lane.into(),
+            high_priority_shard_id: value.high_priority_shard_id,
+            placement_decision: value.placement_decision.map(Into::into),
             aggregate: value.aggregate.into(),
             interpretations,
         }
@@ -699,6 +836,12 @@ pub struct GenerationDiagnosticsSnapshot {
     pub generation: u64,
     /// Static scheduling declaration for the generation body.
     pub declared_scheduling: Option<ServiceScheduling>,
+    /// Actual runtime lane that ran this generation.
+    pub runtime_lane: DiagnosticRuntimeLane,
+    /// HighPriority shard that ran this generation, if applicable.
+    pub high_priority_shard_id: Option<HighPriorityShardId>,
+    /// Placement decision recorded for this generation, if applicable.
+    pub placement_decision: Option<DiagnosticHighPriorityPlacementDecision>,
     /// Aggregated diagnostics for the generation.
     pub aggregate: DiagnosticAggregateStats,
 }
@@ -709,10 +852,25 @@ impl From<internal::GenerationDiagnosticsSnapshot> for GenerationDiagnosticsSnap
             service_instance_id: value.service_instance_id,
             service_name: value.service_name,
             generation: value.generation,
-            declared_scheduling: scheduling_from_lane(value.runtime_lane),
+            declared_scheduling: Some(value.declared_scheduling),
+            runtime_lane: value.runtime_lane.into(),
+            high_priority_shard_id: value.high_priority_shard_id,
+            placement_decision: value.placement_decision.map(Into::into),
             aggregate: value.aggregate.into(),
         }
     }
+}
+
+/// Read-only diagnostics for one HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighPriorityShardDiagnosticsSnapshot {
+    /// Runtime shard identity.
+    pub shard_id: HighPriorityShardId,
+    /// Pressure state derived from the shard runtime probe and policy thresholds.
+    pub pressure_state: HighPriorityShardPressureState,
+    /// Aggregated diagnostics for this shard.
+    pub aggregate: DiagnosticAggregateStats,
 }
 
 /// Read-only diagnostics for a logical runtime lane.
@@ -750,6 +908,10 @@ pub struct DaemonDiagnosticsSnapshot {
     pub provider_failures: Vec<DiagnosticProviderFailure>,
     /// Logical runtime lane summaries, including internal `Control` diagnostics.
     pub lanes: Vec<RuntimeLaneDiagnosticsSnapshot>,
+    /// HighPriority runtime shard summaries.
+    pub high_priority_shards: Vec<HighPriorityShardDiagnosticsSnapshot>,
+    /// Recent HighPriority placement and policy decisions.
+    pub high_priority_placement_decisions: Vec<DiagnosticHighPriorityPlacementDecision>,
 }
 
 impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
@@ -770,6 +932,22 @@ impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
                 .map(Into::into)
                 .collect(),
             lanes: value.lanes.into_iter().map(Into::into).collect(),
+            high_priority_shards: value
+                .high_priority_shards
+                .into_iter()
+                .map(|snapshot| HighPriorityShardDiagnosticsSnapshot {
+                    shard_id: snapshot.shard_id,
+                    pressure_state: pressure_state_from_observation(
+                        &snapshot.aggregate.runtime_probe,
+                    ),
+                    aggregate: snapshot.aggregate.into(),
+                })
+                .collect(),
+            high_priority_placement_decisions: value
+                .high_priority_placement_decisions
+                .into_iter()
+                .map(Into::into)
+                .collect(),
         }
     }
 }
@@ -940,11 +1118,14 @@ fn interpretation(
     }
 }
 
-fn scheduling_from_lane(lane: internal::RuntimeLane) -> Option<ServiceScheduling> {
-    match lane {
-        internal::RuntimeLane::Control => None,
-        internal::RuntimeLane::Standard => Some(ServiceScheduling::Standard),
-        internal::RuntimeLane::HighPriority => Some(ServiceScheduling::HighPriority),
-        internal::RuntimeLane::Isolated => Some(ServiceScheduling::Isolated),
+fn pressure_state_from_observation(
+    observation: &internal::ObservationStatsSnapshot,
+) -> HighPriorityShardPressureState {
+    if observation_is_low_sample(observation) {
+        HighPriorityShardPressureState::Unknown
+    } else if observation_has_drift_pressure(observation) {
+        HighPriorityShardPressureState::Pressured
+    } else {
+        HighPriorityShardPressureState::Nominal
     }
 }

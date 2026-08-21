@@ -85,8 +85,12 @@ The supervisor classifies how a generation exits:
 
 - `ServiceError::Fatal(..)` → service is `Terminated`; **no restart**.
 - Ordinary `Err(..)` or a panic → `Recovering`; **restart with backoff**.
-- Clean `Ok(())` → a fresh generation starts **immediately**; recorded as success,
-  not a failure (so it does not accumulate backoff).
+- Clean `Ok(())` without shutdown or reload → `NormalExit`; a fresh generation
+  starts through `RestartPolicy` normal-exit backoff. Services are expected to be
+  long-running, so an unprompted clean return is treated as unexpected lifecycle
+  termination even though the Rust result is `Ok`.
+- Clean `Ok(())` after reload → immediate generation replacement.
+- Clean `Ok(())` after shutdown → terminal shutdown path.
 - A provider-init failure during lazy startup is treated as a daemon-wide boundary
   failure (the daemon shuts down).
 - A service-template input type mismatch at `create(input)`/`start(input)` is a
@@ -101,9 +105,15 @@ converted with `.into()`.
 - `priority` orders startup (high→low, in waves) and shutdown (low→high). Each wave
   waits for its services to report `Healthy`, bounded by `wave_spawn_timeout`.
 - The body runs under a statically declared scheduling mode: `Standard` (host
-  runtime), `HighPriority` (a dedicated low-contention lane), or `Isolated` (a
-  private OS thread + runtime per generation). Default is `Standard`. Pick
-  `Isolated`/`HighPriority` only for genuinely latency- or blocking-sensitive work.
+  runtime), `HighPriority` (framework-owned low-contention runtime shards), or
+  `Isolated` (a private OS thread + runtime per generation). Default is
+  `Standard`. Pick `HighPriority` for short cooperative work with latency needs;
+  pick `Isolated` for genuinely blocking or thread-affine work.
+- HighPriority placement is automatic inside the declared mode. The daemon's
+  `HighPriorityRuntimePolicy` may create additional shards and may request
+  cooperative rollover. Rollover uses the reload signal path: write services so
+  they can reach a reload-safe point and store needed progress in the Shelf or
+  managed providers before exiting.
 
 (Exact builder/attribute wiring for priority and scheduling is covered by the
 `sd-daemon-bootstrap` skill.)

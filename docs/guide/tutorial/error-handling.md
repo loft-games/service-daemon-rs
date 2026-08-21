@@ -38,7 +38,8 @@ async fn main() -> anyhow::Result<()> {
 
 - If a service returns a normal `Err`, the daemon restarts it with backoff.
 - If a service panics, the daemon treats it as recoverable and restarts it with backoff.
-- If a service returns `Ok(())`, the daemon starts a fresh generation immediately.
+- If a service returns `Ok(())` without a shutdown or reload signal, the daemon treats that as unexpected normal termination and restarts it through normal-exit backoff.
+- If a service exits after observing reload, the daemon starts the replacement generation immediately.
 - If a service returns `ServiceError::Fatal`, the daemon stops that service permanently.
 
 The daemon also protects itself from pathological tight restart loops, but most applications only need to tune `RestartPolicy`.
