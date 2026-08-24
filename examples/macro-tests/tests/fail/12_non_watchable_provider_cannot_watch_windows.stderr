@@ -1,0 +1,6 @@
+error[E0277]: Watchable Provider required: `NotWatchable` cannot be used with `Watch(...)` triggers.
+  --> tests/fail/12_non_watchable_provider_cannot_watch_windows.rs:33:1
+   |
+33 | #[trigger(Watch(NotWatchable))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this trigger requires `NotWatchable: WatchableProvided`
+   |

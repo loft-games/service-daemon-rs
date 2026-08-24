@@ -46,10 +46,17 @@ const TRIGGER_PASS_CASES: &[&str] = &["tests/pass/18_trigger_visibility_super.rs
 const TRIGGER_FAIL_CASES: &[&str] = &[
     "tests/fail/08_trigger_multiple_payloads.rs",
     "tests/fail/09_trigger_payload_plus_dependency_hint.rs",
-    "tests/fail/12_non_watchable_provider_cannot_watch.rs",
     "tests/fail/16_trigger_control_scheduling.rs",
     "tests/fail/40_trigger_rejects_input.rs",
 ];
+
+#[cfg(not(windows))]
+const TRIGGER_PLATFORM_FAIL_CASES: &[&str] =
+    &["tests/fail/12_non_watchable_provider_cannot_watch.rs"];
+
+#[cfg(windows)]
+const TRIGGER_PLATFORM_FAIL_CASES: &[&str] =
+    &["tests/fail/12_non_watchable_provider_cannot_watch_windows.rs"];
 
 const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/03_provider_with_defaults.rs",
@@ -132,7 +139,9 @@ fn service_macro_cases() {
 
 #[test]
 fn trigger_macro_cases() {
-    run_cases(TRIGGER_PASS_CASES, TRIGGER_FAIL_CASES);
+    let mut fail_cases = Vec::from(TRIGGER_FAIL_CASES);
+    fail_cases.extend_from_slice(TRIGGER_PLATFORM_FAIL_CASES);
+    run_cases(TRIGGER_PASS_CASES, &fail_cases);
 }
 
 #[test]
