@@ -182,7 +182,7 @@ impl From<ProviderInitSourceKind> for ProviderFailureSourceKind {
 pub struct ProviderInitFailure {
     source: ProviderInitSourceKind,
     error: ProviderInitError,
-    retry_diagnostics: Option<ProviderInitRetryDiagnostics>,
+    retry_diagnostics: Option<Box<ProviderInitRetryDiagnostics>>,
 }
 
 impl ProviderInitFailure {
@@ -234,7 +234,7 @@ impl ProviderInitFailure {
                 timeout,
                 last_error,
             },
-            retry_diagnostics: Some(retry_diagnostics),
+            retry_diagnostics: Some(Box::new(retry_diagnostics)),
         }
     }
 
@@ -256,7 +256,10 @@ impl ProviderInitFailure {
     }
 
     pub const fn retry_diagnostics(&self) -> Option<&ProviderInitRetryDiagnostics> {
-        self.retry_diagnostics.as_ref()
+        match &self.retry_diagnostics {
+            Some(diagnostics) => Some(diagnostics),
+            None => None,
+        }
     }
 
     pub fn into_error(self) -> ProviderInitError {
