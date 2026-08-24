@@ -12,8 +12,6 @@
 //!   via [`ServiceDaemonBuilder::with_trigger_config`](crate::ServiceDaemonBuilder::with_trigger_config).
 //! - [`SchedulingAdvisoryProfile`]: Coarse control for diagnostics advisory
 //!   emission. It does not change service placement or lifecycle behavior.
-//! - [`HighPriorityRuntimePolicy`]: Runtime placement and scale-out policy for
-//!   HighPriority service generations.
 //! - [`BackoffController`]: A **stateful** controller that tracks the current
 //!   backoff delay and attempt count. It wraps a `RestartPolicy` and provides
 //!   interruption-aware waiting via `tokio::select!`.
@@ -26,6 +24,8 @@ use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+pub(crate) const HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES: u64 = 32;
 
 // ---------------------------------------------------------------------------
 // SchedulingAdvisoryProfile -- diagnostics advisory emission
@@ -68,18 +68,11 @@ impl Default for SchedulingAdvisoryProfile {
 }
 
 // ---------------------------------------------------------------------------
-// HighPriorityRuntimePolicy -- runtime placement and scale-out
+// HighPriorityRuntimeControl -- runtime placement and scale-out
 // ---------------------------------------------------------------------------
 
-/// Runtime placement and scale-out policy for `HighPriority` service bodies.
-///
-/// This policy controls framework-owned HighPriority runtime shards. It does
-/// not change a service's declared [`ServiceScheduling`](crate::ServiceScheduling),
-/// and any placement change for an already running service happens only through
-/// a cooperative generation rollover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HighPriorityRuntimePolicy {
-    enabled: bool,
+pub(crate) struct HighPriorityRuntimeControl {
     max_worker_threads: Option<NonZeroUsize>,
     scale_step_worker_threads: NonZeroUsize,
     high_avg_drift_ms: u64,
@@ -88,20 +81,12 @@ pub struct HighPriorityRuntimePolicy {
     scale_cooldown: Duration,
     rollover_cooldown: Duration,
     max_rollovers_per_window: usize,
-    rollover_enabled: bool,
 }
 
-impl HighPriorityRuntimePolicy {
-    /// Create a policy builder.
-    pub fn builder() -> HighPriorityRuntimePolicyBuilder {
-        HighPriorityRuntimePolicyBuilder::default()
-    }
-
-    /// Conservative automatic HighPriority placement policy.
+impl HighPriorityRuntimeControl {
     #[must_use]
-    pub const fn enabled() -> Self {
+    pub(crate) const fn automatic() -> Self {
         Self {
-            enabled: true,
             max_worker_threads: None,
             scale_step_worker_threads: nonzero_one(),
             high_avg_drift_ms: 100,
@@ -110,24 +95,13 @@ impl HighPriorityRuntimePolicy {
             scale_cooldown: Duration::from_secs(30),
             rollover_cooldown: Duration::from_secs(60),
             max_rollovers_per_window: 1,
-            rollover_enabled: true,
         }
     }
 
-    /// Disable automatic HighPriority placement and scale-out.
     #[must_use]
-    pub const fn disabled() -> Self {
+    #[cfg(test)]
+    pub(crate) const fn for_testing() -> Self {
         Self {
-            enabled: false,
-            ..Self::enabled()
-        }
-    }
-
-    /// Create a policy for tests with shorter cooldowns.
-    #[must_use]
-    pub const fn for_testing() -> Self {
-        Self {
-            enabled: true,
             max_worker_threads: Some(nonzero_two()),
             scale_step_worker_threads: nonzero_one(),
             high_avg_drift_ms: 5,
@@ -136,162 +110,46 @@ impl HighPriorityRuntimePolicy {
             scale_cooldown: Duration::from_millis(10),
             rollover_cooldown: Duration::from_millis(10),
             max_rollovers_per_window: 1,
-            rollover_enabled: true,
         }
     }
 
-    /// Whether automatic HighPriority placement and scale-out are enabled.
     #[must_use]
-    pub const fn is_enabled(self) -> bool {
-        self.enabled
-    }
-
-    /// Optional hard cap for total HighPriority worker threads.
-    ///
-    /// `None` means the daemon uses `std::thread::available_parallelism()`.
-    #[must_use]
-    pub const fn max_worker_threads(self) -> Option<NonZeroUsize> {
+    pub(crate) const fn max_worker_threads(self) -> Option<NonZeroUsize> {
         self.max_worker_threads
     }
 
-    /// Worker threads added by each scale-out event.
-    #[must_use]
-    pub const fn scale_step_worker_threads(self) -> NonZeroUsize {
+    pub(crate) const fn scale_step_worker_threads(self) -> NonZeroUsize {
         self.scale_step_worker_threads
     }
 
-    /// Average runtime-probe drift threshold in milliseconds.
-    #[must_use]
-    pub const fn high_avg_drift_ms(self) -> u64 {
+    pub(crate) const fn high_avg_drift_ms(self) -> u64 {
         self.high_avg_drift_ms
     }
 
-    /// Minimum completed probe samples before pressure can be trusted.
-    #[must_use]
-    pub const fn minimum_completed_samples(self) -> u64 {
+    pub(crate) const fn minimum_completed_samples(self) -> u64 {
         self.minimum_completed_samples
     }
 
-    /// Consecutive pressure windows required before scale-out.
-    #[must_use]
-    pub const fn pressure_windows(self) -> u32 {
+    pub(crate) const fn pressure_windows(self) -> u32 {
         self.pressure_windows
     }
 
-    /// Minimum delay between scale-out events.
-    #[must_use]
-    pub const fn scale_cooldown(self) -> Duration {
+    pub(crate) const fn scale_cooldown(self) -> Duration {
         self.scale_cooldown
     }
 
-    /// Minimum delay between policy-triggered generation rollover batches.
-    #[must_use]
-    pub const fn rollover_cooldown(self) -> Duration {
+    pub(crate) const fn rollover_cooldown(self) -> Duration {
         self.rollover_cooldown
     }
 
-    /// Maximum generation rollovers requested per policy window.
-    #[must_use]
-    pub const fn max_rollovers_per_window(self) -> usize {
+    pub(crate) const fn max_rollovers_per_window(self) -> usize {
         self.max_rollovers_per_window
     }
-
-    /// Whether the policy may request cooperative generation rollover.
-    #[must_use]
-    pub const fn rollover_enabled(self) -> bool {
-        self.rollover_enabled
-    }
 }
 
-impl Default for HighPriorityRuntimePolicy {
+impl Default for HighPriorityRuntimeControl {
     fn default() -> Self {
-        Self::enabled()
-    }
-}
-
-/// Builder for [`HighPriorityRuntimePolicy`].
-#[derive(Default)]
-pub struct HighPriorityRuntimePolicyBuilder {
-    policy: HighPriorityRuntimePolicy,
-}
-
-impl HighPriorityRuntimePolicyBuilder {
-    /// Enable or disable automatic HighPriority placement and scale-out.
-    pub fn enabled(mut self, enabled: bool) -> Self {
-        self.policy.enabled = enabled;
-        self
-    }
-
-    /// Set the hard cap for total HighPriority worker threads.
-    pub fn max_worker_threads(mut self, count: usize) -> Self {
-        self.policy.max_worker_threads = NonZeroUsize::new(count.max(1));
-        self
-    }
-
-    /// Use available CPU parallelism as the total worker cap.
-    pub fn max_worker_threads_from_available_parallelism(mut self) -> Self {
-        self.policy.max_worker_threads = None;
-        self
-    }
-
-    /// Set worker threads added by each scale-out event.
-    pub fn scale_step_worker_threads(mut self, count: usize) -> Self {
-        if let Some(worker_threads) = NonZeroUsize::new(count.max(1)) {
-            self.policy.scale_step_worker_threads = worker_threads;
-        }
-        self
-    }
-
-    /// Set the average runtime-probe drift threshold in milliseconds.
-    pub fn high_avg_drift_ms(mut self, millis: u64) -> Self {
-        self.policy.high_avg_drift_ms = millis.max(1);
-        self
-    }
-
-    /// Set minimum completed samples before pressure can trigger scale-out.
-    pub fn minimum_completed_samples(mut self, samples: u64) -> Self {
-        self.policy.minimum_completed_samples = samples.max(1);
-        self
-    }
-
-    /// Set consecutive pressure windows required before scale-out.
-    pub fn pressure_windows(mut self, windows: u32) -> Self {
-        self.policy.pressure_windows = windows.max(1);
-        self
-    }
-
-    /// Set minimum delay between scale-out events.
-    pub fn scale_cooldown(mut self, duration: Duration) -> Self {
-        self.policy.scale_cooldown = duration;
-        self
-    }
-
-    /// Set minimum delay between policy-triggered rollover batches.
-    pub fn rollover_cooldown(mut self, duration: Duration) -> Self {
-        self.policy.rollover_cooldown = duration;
-        self
-    }
-
-    /// Set maximum rollovers requested per policy window.
-    pub fn max_rollovers_per_window(mut self, count: usize) -> Self {
-        self.policy.max_rollovers_per_window = count;
-        self
-    }
-
-    /// Enable or disable policy-triggered cooperative rollover.
-    pub fn rollover_enabled(mut self, enabled: bool) -> Self {
-        self.policy.rollover_enabled = enabled;
-        self
-    }
-
-    /// Build the sanitized policy.
-    #[must_use]
-    pub fn build(self) -> HighPriorityRuntimePolicy {
-        let mut policy = self.policy;
-        policy.high_avg_drift_ms = policy.high_avg_drift_ms.max(1);
-        policy.minimum_completed_samples = policy.minimum_completed_samples.max(1);
-        policy.pressure_windows = policy.pressure_windows.max(1);
-        policy
+        Self::automatic()
     }
 }
 
@@ -302,6 +160,7 @@ const fn nonzero_one() -> NonZeroUsize {
     }
 }
 
+#[cfg(test)]
 const fn nonzero_two() -> NonZeroUsize {
     match NonZeroUsize::new(2) {
         Some(value) => value,
@@ -1296,33 +1155,21 @@ mod tests {
     }
 
     #[test]
-    fn high_priority_runtime_policy_defaults_are_conservative_and_enabled() {
-        let policy = HighPriorityRuntimePolicy::default();
+    fn high_priority_runtime_control_defaults_are_conservative() {
+        let policy = HighPriorityRuntimeControl::default();
 
-        assert!(policy.is_enabled());
-        assert!(policy.rollover_enabled());
         assert_eq!(policy.max_worker_threads(), None);
-        assert_eq!(policy.scale_step_worker_threads().get(), 1);
-        assert_eq!(policy.high_avg_drift_ms(), 100);
         assert_eq!(policy.minimum_completed_samples(), 3);
-        assert_eq!(policy.pressure_windows(), 2);
-        assert_eq!(policy.max_rollovers_per_window(), 1);
+        assert_eq!(policy.high_avg_drift_ms(), 100);
     }
 
     #[test]
-    fn high_priority_runtime_policy_builder_sanitizes_zero_values() {
-        let policy = HighPriorityRuntimePolicy::builder()
-            .max_worker_threads(0)
-            .scale_step_worker_threads(0)
-            .high_avg_drift_ms(0)
-            .minimum_completed_samples(0)
-            .pressure_windows(0)
-            .build();
+    fn high_priority_runtime_control_test_profile_is_short_cycle() {
+        let policy = HighPriorityRuntimeControl::for_testing();
 
-        assert_eq!(policy.max_worker_threads().map(NonZeroUsize::get), Some(1));
-        assert_eq!(policy.scale_step_worker_threads().get(), 1);
-        assert_eq!(policy.high_avg_drift_ms(), 1);
+        assert_eq!(policy.max_worker_threads().map(NonZeroUsize::get), Some(2));
         assert_eq!(policy.minimum_completed_samples(), 1);
+        assert_eq!(policy.high_avg_drift_ms(), 5);
         assert_eq!(policy.pressure_windows(), 1);
     }
 

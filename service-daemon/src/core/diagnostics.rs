@@ -3,10 +3,15 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::service_daemon::high_priority::HighPriorityPlacementDecision;
-use crate::models::{HighPriorityShardId, ServiceInstanceId, ServiceScheduling};
+use crate::models::policy::HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES;
+use crate::models::{
+    HighPriorityShardId, HighPriorityShardPressureState, ServiceInstanceId, ServiceScheduling,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeLane {
@@ -178,6 +183,7 @@ const RUNTIME_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 const RETAINED_GENERATIONS_PER_SERVICE: usize = 1024;
 const RETAINED_PROVIDER_FAILURES: usize = 128;
 const RETAINED_HIGH_PRIORITY_PLACEMENT_DECISIONS: usize = 128;
+const RETAINED_RUNTIME_PROBE_WINDOW: usize = HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES as usize;
 
 pub(crate) async fn run_lane_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
@@ -207,17 +213,27 @@ pub(crate) async fn run_lane_runtime_probe(
 pub(crate) async fn run_high_priority_shard_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
     shard_id: HighPriorityShardId,
+    shard_runtime: Handle,
     token: CancellationToken,
 ) {
+    let mut pending_ping: Option<tokio::task::JoinHandle<()>> = None;
     loop {
-        let start = Instant::now();
         tokio::select! {
             _ = tokio::time::sleep(RUNTIME_PROBE_INTERVAL) => {
-                let observation = runtime_probe_observation(SleepExitReason::Completed, start);
+                let observation = observe_high_priority_shard_ping_once(
+                    &shard_runtime,
+                    &token,
+                    &mut pending_ping,
+                )
+                .await;
                 diagnostics.record_lane_observation(RuntimeLane::HighPriority, observation);
                 diagnostics.record_high_priority_shard_observation(shard_id, observation);
+                if !observation.reason.completed() {
+                    break;
+                }
             }
             _ = token.cancelled() => {
+                let start = Instant::now();
                 let observation = runtime_probe_observation(SleepExitReason::ProbeCancelled, start);
                 diagnostics.record_lane_observation(RuntimeLane::HighPriority, observation);
                 diagnostics.record_high_priority_shard_observation(shard_id, observation);
@@ -225,6 +241,77 @@ pub(crate) async fn run_high_priority_shard_runtime_probe(
             }
         }
     }
+}
+
+async fn observe_high_priority_shard_ping_once(
+    shard_runtime: &Handle,
+    token: &CancellationToken,
+    pending_ping: &mut Option<tokio::task::JoinHandle<()>>,
+) -> SleepObservation {
+    observe_high_priority_shard_ping_once_with_control_delay(
+        shard_runtime,
+        RUNTIME_PROBE_INTERVAL,
+        token,
+        pending_ping,
+        Duration::ZERO,
+    )
+    .await
+}
+
+async fn observe_high_priority_shard_ping_once_with_control_delay(
+    shard_runtime: &Handle,
+    timeout: Duration,
+    token: &CancellationToken,
+    pending_ping: &mut Option<tokio::task::JoinHandle<()>>,
+    control_receiver_delay: Duration,
+) -> SleepObservation {
+    if let Some(ping) = pending_ping.take() {
+        if ping.is_finished() {
+            let _ = ping.await;
+        } else {
+            *pending_ping = Some(ping);
+            return runtime_probe_timeout_observation();
+        }
+    }
+
+    let start = Instant::now();
+    let (sender, receiver) = oneshot::channel();
+    let mut ping = Some(shard_runtime.spawn(async move {
+        let _ = sender.send(start.elapsed());
+    }));
+    let timeout_sleep = tokio::time::sleep(timeout);
+    tokio::pin!(timeout_sleep);
+    if !control_receiver_delay.is_zero() {
+        tokio::time::sleep(control_receiver_delay).await;
+    }
+
+    let (reason, elapsed) = tokio::select! {
+        biased;
+        received = receiver => {
+            if let Some(ping) = ping.take() {
+                let _ = ping.await;
+            }
+            match received {
+                Ok(elapsed) => (SleepExitReason::Completed, elapsed),
+                Err(_) => (SleepExitReason::ProbeCancelled, Duration::ZERO),
+            }
+        }
+        _ = &mut timeout_sleep => {
+            if let Some(ping) = ping.take() {
+                ping.abort();
+                *pending_ping = Some(ping);
+            }
+            (SleepExitReason::Completed, timeout)
+        }
+        _ = token.cancelled() => {
+            if let Some(ping) = ping.take() {
+                ping.abort();
+                *pending_ping = Some(ping);
+            }
+            (SleepExitReason::ProbeCancelled, Duration::ZERO)
+        }
+    };
+    runtime_probe_ping_observation(reason, elapsed)
 }
 
 pub(crate) async fn run_generation_runtime_probe(
@@ -252,14 +339,46 @@ pub(crate) async fn run_generation_runtime_probe(
 }
 
 fn runtime_probe_observation(reason: SleepExitReason, start: Instant) -> SleepObservation {
+    runtime_probe_observation_with_requested(reason, start, RUNTIME_PROBE_INTERVAL)
+}
+
+fn runtime_probe_ping_observation(reason: SleepExitReason, elapsed: Duration) -> SleepObservation {
+    SleepObservation {
+        source: SleepObservationSource::RuntimeProbe,
+        reason,
+        requested: Duration::ZERO,
+        elapsed,
+        drift: if reason.completed() {
+            elapsed
+        } else {
+            Duration::ZERO
+        },
+    }
+}
+
+fn runtime_probe_timeout_observation() -> SleepObservation {
+    SleepObservation {
+        source: SleepObservationSource::RuntimeProbe,
+        reason: SleepExitReason::Completed,
+        requested: Duration::ZERO,
+        elapsed: RUNTIME_PROBE_INTERVAL,
+        drift: RUNTIME_PROBE_INTERVAL,
+    }
+}
+
+fn runtime_probe_observation_with_requested(
+    reason: SleepExitReason,
+    start: Instant,
+    requested: Duration,
+) -> SleepObservation {
     let elapsed = start.elapsed();
     SleepObservation {
         source: SleepObservationSource::RuntimeProbe,
         reason,
-        requested: RUNTIME_PROBE_INTERVAL,
+        requested,
         elapsed,
         drift: if reason.completed() {
-            elapsed.saturating_sub(RUNTIME_PROBE_INTERVAL)
+            elapsed.saturating_sub(requested)
         } else {
             Duration::ZERO
         },
@@ -328,6 +447,46 @@ impl ObservationStats {
             total_drift_ms: nanos_to_millis(total_drift_ns),
             max_drift_ms: nanos_to_millis(self.max_drift_ns.load(Ordering::Relaxed)),
             last_drift_ms: nanos_to_millis(self.last_drift_ns.load(Ordering::Relaxed)),
+            avg_drift_ms: total_drift_ns
+                .checked_div(completed)
+                .map_or(0, nanos_to_millis),
+        }
+    }
+}
+
+impl ObservationStatsSnapshot {
+    fn from_observations(observations: impl IntoIterator<Item = SleepObservation>) -> Self {
+        let mut completed = 0_u64;
+        let mut interrupted = 0_u64;
+        let mut total_requested_ns = 0_u64;
+        let mut total_elapsed_ns = 0_u64;
+        let mut total_drift_ns = 0_u64;
+        let mut max_drift_ns = 0_u64;
+        let mut last_drift_ns = 0_u64;
+
+        for observation in observations {
+            total_requested_ns =
+                total_requested_ns.saturating_add(duration_nanos(observation.requested));
+            total_elapsed_ns = total_elapsed_ns.saturating_add(duration_nanos(observation.elapsed));
+            if observation.reason.completed() {
+                completed = completed.saturating_add(1);
+                let drift_ns = duration_nanos(observation.drift);
+                total_drift_ns = total_drift_ns.saturating_add(drift_ns);
+                max_drift_ns = max_drift_ns.max(drift_ns);
+                last_drift_ns = drift_ns;
+            } else {
+                interrupted = interrupted.saturating_add(1);
+            }
+        }
+
+        Self {
+            completed,
+            interrupted,
+            total_requested_ms: nanos_to_millis(total_requested_ns),
+            total_elapsed_ms: nanos_to_millis(total_elapsed_ns),
+            total_drift_ms: nanos_to_millis(total_drift_ns),
+            max_drift_ms: nanos_to_millis(max_drift_ns),
+            last_drift_ms: nanos_to_millis(last_drift_ns),
             avg_drift_ms: total_drift_ns
                 .checked_div(completed)
                 .map_or(0, nanos_to_millis),
@@ -681,11 +840,14 @@ impl GenerationDiagnostics {
 
 struct LaneDiagnostics {
     runtime_lane: RuntimeLane,
+    recent_runtime_probe: Mutex<VecDeque<SleepObservation>>,
     aggregate: DiagnosticsAggregate,
 }
 
 struct HighPriorityShardDiagnostics {
     shard_id: HighPriorityShardId,
+    pressure_state: Mutex<HighPriorityShardPressureState>,
+    recent_runtime_probe: Mutex<VecDeque<SleepObservation>>,
     aggregate: DiagnosticsAggregate,
 }
 
@@ -693,13 +855,30 @@ impl HighPriorityShardDiagnostics {
     fn new(shard_id: HighPriorityShardId) -> Self {
         Self {
             shard_id,
+            pressure_state: Mutex::new(HighPriorityShardPressureState::Unknown),
+            recent_runtime_probe: Mutex::new(VecDeque::new()),
             aggregate: DiagnosticsAggregate::default(),
         }
+    }
+
+    fn record_observation(&self, observation: SleepObservation) {
+        self.aggregate.record_observation(observation);
+        if matches!(observation.source, SleepObservationSource::RuntimeProbe) {
+            record_recent_observation(&self.recent_runtime_probe, observation);
+        }
+    }
+
+    fn record_pressure_state(&self, pressure_state: HighPriorityShardPressureState) {
+        *lock_or_recover(&self.pressure_state) = pressure_state;
     }
 
     fn snapshot(&self) -> HighPriorityShardDiagnosticsSnapshot {
         HighPriorityShardDiagnosticsSnapshot {
             shard_id: self.shard_id,
+            pressure_state: *lock_or_recover(&self.pressure_state),
+            recent_runtime_probe: ObservationStatsSnapshot::from_observations(
+                lock_or_recover(&self.recent_runtime_probe).iter().copied(),
+            ),
             aggregate: self.aggregate.snapshot(),
         }
     }
@@ -709,16 +888,38 @@ impl LaneDiagnostics {
     fn new(runtime_lane: RuntimeLane) -> Self {
         Self {
             runtime_lane,
+            recent_runtime_probe: Mutex::new(VecDeque::new()),
             aggregate: DiagnosticsAggregate::default(),
+        }
+    }
+
+    fn record_observation(&self, observation: SleepObservation) {
+        self.aggregate.record_observation(observation);
+        if matches!(observation.source, SleepObservationSource::RuntimeProbe) {
+            record_recent_observation(&self.recent_runtime_probe, observation);
         }
     }
 
     fn snapshot(&self) -> RuntimeLaneSnapshot {
         RuntimeLaneSnapshot {
             runtime_lane: self.runtime_lane,
+            recent_runtime_probe: ObservationStatsSnapshot::from_observations(
+                lock_or_recover(&self.recent_runtime_probe).iter().copied(),
+            ),
             aggregate: self.aggregate.snapshot(),
         }
     }
+}
+
+fn record_recent_observation(
+    recent: &Mutex<VecDeque<SleepObservation>>,
+    observation: SleepObservation,
+) {
+    let mut recent = lock_or_recover(recent);
+    if recent.len() == RETAINED_RUNTIME_PROBE_WINDOW {
+        recent.pop_front();
+    }
+    recent.push_back(observation);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -748,12 +949,15 @@ pub(crate) struct GenerationDiagnosticsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeLaneSnapshot {
     pub runtime_lane: RuntimeLane,
+    pub recent_runtime_probe: ObservationStatsSnapshot,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HighPriorityShardDiagnosticsSnapshot {
     pub shard_id: HighPriorityShardId,
+    pub pressure_state: HighPriorityShardPressureState,
+    pub recent_runtime_probe: ObservationStatsSnapshot,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
@@ -969,9 +1173,7 @@ impl DiagnosticsStore {
     }
 
     pub(crate) fn record_lane_observation(&self, lane: RuntimeLane, observation: SleepObservation) {
-        self.lane_diagnostics(lane)
-            .aggregate
-            .record_observation(observation);
+        self.lane_diagnostics(lane).record_observation(observation);
     }
 
     pub(crate) fn record_high_priority_shard_observation(
@@ -982,8 +1184,18 @@ impl DiagnosticsStore {
         self.high_priority_shards
             .entry(shard_id)
             .or_insert_with(|| Arc::new(HighPriorityShardDiagnostics::new(shard_id)))
-            .aggregate
             .record_observation(observation);
+    }
+
+    pub(crate) fn record_high_priority_shard_pressure_state(
+        &self,
+        shard_id: HighPriorityShardId,
+        pressure_state: HighPriorityShardPressureState,
+    ) {
+        self.high_priority_shards
+            .entry(shard_id)
+            .or_insert_with(|| Arc::new(HighPriorityShardDiagnostics::new(shard_id)))
+            .record_pressure_state(pressure_state);
     }
 
     pub(crate) fn record_high_priority_placement_decision(
@@ -1199,6 +1411,114 @@ mod tests {
                 elapsed,
             ),
         );
+    }
+
+    #[test]
+    fn high_priority_shard_ping_observation_measures_ping_latency_only() {
+        let observation =
+            runtime_probe_ping_observation(SleepExitReason::Completed, Duration::from_millis(2));
+
+        assert_eq!(observation.requested, Duration::ZERO);
+        assert_eq!(observation.elapsed, Duration::from_millis(2));
+        assert_eq!(observation.drift, Duration::from_millis(2));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn high_priority_shard_ping_uses_sender_elapsed_when_control_receiver_is_delayed() {
+        let shard_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("test-hp-ping-elapsed")
+            .build()
+            .expect("test shard runtime should build");
+        let token = CancellationToken::new();
+        let mut pending_ping = None;
+
+        let observation = observe_high_priority_shard_ping_once_with_control_delay(
+            shard_runtime.handle(),
+            Duration::from_secs(1),
+            &token,
+            &mut pending_ping,
+            Duration::from_millis(300),
+        )
+        .await;
+
+        assert_eq!(observation.reason, SleepExitReason::Completed);
+        assert!(
+            observation.elapsed < Duration::from_millis(150),
+            "probe elapsed should come from the shard runtime, not delayed control receiver timing"
+        );
+        assert!(pending_ping.is_none());
+        shard_runtime.shutdown_background();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn high_priority_shard_ping_reports_timeout_when_shard_cannot_poll() {
+        let shard_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("test-hp-ping-timeout")
+            .build()
+            .expect("test shard runtime should build");
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+        let blocker = shard_runtime.spawn(async move {
+            let _ = started_sender.send(());
+            let _ = release_receiver.recv();
+        });
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking task should occupy the shard worker");
+        let token = CancellationToken::new();
+        let mut pending_ping = None;
+
+        let observation = observe_high_priority_shard_ping_once_with_control_delay(
+            shard_runtime.handle(),
+            Duration::from_millis(30),
+            &token,
+            &mut pending_ping,
+            Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(observation.reason, SleepExitReason::Completed);
+        assert_eq!(observation.elapsed, Duration::from_millis(30));
+        assert!(pending_ping.is_some());
+        let _ = release_sender.send(());
+        if let Some(ping) = pending_ping.take() {
+            ping.abort();
+        }
+        blocker.abort();
+        shard_runtime.shutdown_background();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn high_priority_shard_ping_prefers_ready_receiver_over_ready_timeout() {
+        let shard_runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(1)
+            .thread_name("test-hp-ping-biased")
+            .build()
+            .expect("test shard runtime should build");
+        let token = CancellationToken::new();
+        let mut pending_ping = None;
+
+        let observation = observe_high_priority_shard_ping_once_with_control_delay(
+            shard_runtime.handle(),
+            Duration::from_millis(10),
+            &token,
+            &mut pending_ping,
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert_eq!(observation.reason, SleepExitReason::Completed);
+        assert!(
+            observation.elapsed < Duration::from_millis(10),
+            "biased select should consume the ready receiver instead of reporting timeout"
+        );
+        assert!(pending_ping.is_none());
+        shard_runtime.shutdown_background();
     }
 
     #[test]

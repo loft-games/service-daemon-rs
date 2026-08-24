@@ -28,8 +28,6 @@ pub enum DiagnosticRuntimeLane {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticHighPriorityPlacementDecisionKind {
-    /// Initial shard created from the static startup capacity plan.
-    StaticInitial,
     /// Generation placed on the least-loaded eligible shard.
     LeastLoaded,
     /// New shard created by the HighPriority runtime policy.
@@ -45,9 +43,6 @@ impl From<internal_high_priority::HighPriorityPlacementDecisionKind>
 {
     fn from(value: internal_high_priority::HighPriorityPlacementDecisionKind) -> Self {
         match value {
-            internal_high_priority::HighPriorityPlacementDecisionKind::StaticInitial => {
-                Self::StaticInitial
-            }
             internal_high_priority::HighPriorityPlacementDecisionKind::LeastLoaded => {
                 Self::LeastLoaded
             }
@@ -64,16 +59,12 @@ impl From<internal_high_priority::HighPriorityPlacementDecisionKind>
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticHighPriorityPlacementReason {
-    /// The service declared `ServiceScheduling::HighPriority`.
-    DeclaredHighPriority,
     /// The selected shard currently had the lowest active generation load.
     LeastLoadedShard,
     /// Sustained shard pressure triggered scale-out.
     PressureScaleOut,
     /// The policy requested cooperative rollover to improve placement.
     PolicyRollover,
-    /// The HighPriority runtime policy is disabled.
-    PolicyDisabled,
     /// The controller did not have enough completed samples.
     InsufficientSamples,
     /// A policy cooldown suppressed action.
@@ -93,9 +84,6 @@ impl From<internal_high_priority::HighPriorityPlacementReason>
 {
     fn from(value: internal_high_priority::HighPriorityPlacementReason) -> Self {
         match value {
-            internal_high_priority::HighPriorityPlacementReason::DeclaredHighPriority => {
-                Self::DeclaredHighPriority
-            }
             internal_high_priority::HighPriorityPlacementReason::LeastLoadedShard => {
                 Self::LeastLoadedShard
             }
@@ -104,9 +92,6 @@ impl From<internal_high_priority::HighPriorityPlacementReason>
             }
             internal_high_priority::HighPriorityPlacementReason::PolicyRollover => {
                 Self::PolicyRollover
-            }
-            internal_high_priority::HighPriorityPlacementReason::PolicyDisabled => {
-                Self::PolicyDisabled
             }
             internal_high_priority::HighPriorityPlacementReason::InsufficientSamples => {
                 Self::InsufficientSamples
@@ -937,9 +922,7 @@ impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
                 .into_iter()
                 .map(|snapshot| HighPriorityShardDiagnosticsSnapshot {
                     shard_id: snapshot.shard_id,
-                    pressure_state: pressure_state_from_observation(
-                        &snapshot.aggregate.runtime_probe,
-                    ),
+                    pressure_state: snapshot.pressure_state,
                     aggregate: snapshot.aggregate.into(),
                 })
                 .collect(),
@@ -1115,17 +1098,5 @@ fn interpretation(
         label,
         confidence,
         recommendations: recommendations.to_vec(),
-    }
-}
-
-fn pressure_state_from_observation(
-    observation: &internal::ObservationStatsSnapshot,
-) -> HighPriorityShardPressureState {
-    if observation_is_low_sample(observation) {
-        HighPriorityShardPressureState::Unknown
-    } else if observation_has_drift_pressure(observation) {
-        HighPriorityShardPressureState::Pressured
-    } else {
-        HighPriorityShardPressureState::Nominal
     }
 }

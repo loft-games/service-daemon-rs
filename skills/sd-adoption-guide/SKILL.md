@@ -79,7 +79,7 @@ runs high→low in waves and shutdown runs low→high. A service signals readine
 `service_daemon::done()` (or implicitly via the first `is_shutdown()`/`sleep()`
 call). State that must survive a restart goes on the daemon's per-service Shelf.
 For cooperative latency-sensitive workers, declare `scheduling = HighPriority`
-and let `HighPriorityRuntimePolicy` manage shard placement/scale-out. Do not use
+and let the daemon manage shard placement/scale-out internally. Do not use
 HighPriority for blocking loops; use `Isolated` when a body needs a private
 thread/runtime boundary.
 

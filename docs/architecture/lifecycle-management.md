@@ -32,7 +32,7 @@ The supervisor awaits body outcomes through the body-lane bridge, so reload, res
 
 Startup control-plane code is split under `core/service_daemon/`: `provider_graph.rs` validates provider dependency cycles and runs reachable eager providers, `runtime.rs` prepares control/high-priority runtimes and probes, and `startup_pipeline.rs` sequences those steps before handing service startup to `runner/wave.rs`.
 
-HighPriority startup capacity selection happens before runtime allocation and reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the initial worker count. After startup, `HighPriorityRuntimePolicy` owns the narrow control loop for this mode: it reads shard probe drift, live generation assignments, and cooldown/capacity state; it can add new HighPriority shards within the configured worker cap; and it can request cooperative generation rollover so future generations are placed on a better shard.
+HighPriority startup capacity selection happens before runtime allocation and reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the initial worker count. After startup, an internal HighPriority runtime control loop owns this mode's narrow placement decisions: it reads shard probe drift, live generation assignments, and cooldown/capacity state; it can add new HighPriority shards within the framework's worker cap; and it can request cooperative generation rollover so future generations are placed on a better shard.
 
 ### Scheduling Advisory and Generation Boundaries
 

@@ -137,7 +137,7 @@ Two low-level signals feed this baseline:
 
 The logical lanes are reported separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics/control-plane lane, not a user-facing `ServiceScheduling` option. `Standard` represents the host runtime body lane rather than the supervisor/control runtime.
 
-HighPriority startup capacity is derived from the daemon's final declared `HighPriority` service/trigger entries before the initial shard is lazily created. After startup, `HighPriorityRuntimePolicy` can use shard probe pressure to create additional HighPriority shards within its worker cap and can request cooperative generation rollover. This is separate from advisory recommendations: disabling `SchedulingAdvisoryProfile` stops advisory log emission but does not disable HighPriority scale-out or placement decisions.
+HighPriority startup capacity is derived from the daemon's final declared `HighPriority` service/trigger entries before the initial shard is lazily created. After startup, internal HighPriority runtime control can use shard probe pressure to create additional HighPriority shards within the framework's worker cap and can request cooperative generation rollover. This is separate from advisory recommendations: disabling `SchedulingAdvisoryProfile` stops advisory log emission but does not disable HighPriority scale-out or placement decisions.
 
 Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger cross-mode migration.
 
@@ -249,7 +249,7 @@ These recommendations are advisory. They can report:
 - Isolated resource pressure when isolated startup failures or rate-limited restarts appear.
 - Lifecycle instability when restart/backoff signals are high, which suppresses placement-like advice.
 
-The analyzer does not expose a public metrics schema, does not change the declared service scheduling mode, and does not drive HighPriority runtime policy decisions. HighPriority scale-out and rollover are handled by `HighPriorityRuntimePolicy`, not by the advisory analyzer.
+The analyzer does not expose a public metrics schema, does not change the declared service scheduling mode, and does not drive HighPriority runtime control decisions. HighPriority scale-out and rollover are handled by the internal HighPriority control loop, not by the advisory analyzer.
 
 The default `SchedulingAdvisoryProfile` keeps this advisory loop enabled. To suppress advisory emission without changing lifecycle or body placement, configure the daemon explicitly:
 

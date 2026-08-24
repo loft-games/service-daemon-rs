@@ -79,8 +79,6 @@ pub enum HighPriorityShardPressureState {
     Nominal,
     /// The shard is showing scheduling pressure.
     Pressured,
-    /// The controller observed pressure but suppressed scale-out or rollover.
-    Suppressed,
 }
 
 /// Read-only runtime facts for one HighPriority runtime shard.

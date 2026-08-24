@@ -20,6 +20,9 @@ static ON_DEMAND_INTERNAL_PROGRESS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static ON_DEMAND_WORKER_INPUT_SUM: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+static HIGH_PRIORITY_CLEANUP_HANDLE_READY: AtomicBool = AtomicBool::new(false);
+static HIGH_PRIORITY_CLEANUP_WORKER_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+static HIGH_PRIORITY_CLEANUP_STARTS: AtomicUsize = AtomicUsize::new(0);
 static REMOVE_HANDLES_READY: AtomicBool = AtomicBool::new(false);
 static STUBBORN_REMOVE_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
 static PEER_REMOVE_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
@@ -71,6 +74,9 @@ struct OnDemandWorkerHandle(ServiceHandle);
 
 #[derive(Clone)]
 struct InternalWorkerHandle(ServiceHandle);
+
+#[derive(Clone)]
+struct HighPriorityCleanupWorkerHandle(ServiceHandle);
 
 #[derive(Clone)]
 struct StubbornRemoveHandle(ServiceHandle);
@@ -264,6 +270,36 @@ async fn internal_on_demand_controller(
     Ok(())
 }
 
+#[service(
+    tags = ["__service_handle_high_priority_cleanup__"],
+    scheduling = HighPriority
+)]
+async fn high_priority_cleanup_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
+    HIGH_PRIORITY_CLEANUP_STARTS.fetch_add(1, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[provider]
+fn high_priority_cleanup_worker_handle() -> Result<HighPriorityCleanupWorkerHandle, ProviderError> {
+    service_handle!(high_priority_cleanup_worker).map(HighPriorityCleanupWorkerHandle)
+}
+
+#[service(tags = ["__service_handle_high_priority_cleanup__"])]
+async fn high_priority_cleanup_handle_consumer(
+    handle: std::sync::Arc<HighPriorityCleanupWorkerHandle>,
+) -> anyhow::Result<()> {
+    *HIGH_PRIORITY_CLEANUP_WORKER_HANDLE
+        .lock()
+        .expect("HighPriority cleanup worker handle mutex should not be poisoned") =
+        Some(handle.0.clone());
+    HIGH_PRIORITY_CLEANUP_HANDLE_READY.store(true, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
 #[service(tags = ["__service_handle_graceful_remove__"])]
 async fn stubborn_remove_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
     STUBBORN_REMOVE_STARTS.fetch_add(1, Ordering::SeqCst);
@@ -334,7 +370,7 @@ async fn cancel_remove_handle_catalog(
     Ok(())
 }
 
-#[service(tags = ["__service_handle_graceful_stop__"])]
+#[service(tags = ["__service_handle_graceful_stop__"], scheduling = HighPriority)]
 async fn stubborn_stop_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
     STUBBORN_STOP_STARTS.fetch_add(1, Ordering::SeqCst);
     done();
@@ -540,6 +576,16 @@ async fn wait_for_lifecycle_handles() {
     })
     .await
     .expect("lifecycle handle catalog should publish service handles");
+}
+
+async fn wait_for_high_priority_cleanup_handle() {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !HIGH_PRIORITY_CLEANUP_HANDLE_READY.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HighPriority cleanup handle catalog should publish service handle");
 }
 
 async fn wait_for_remove_handles() {
@@ -1119,6 +1165,133 @@ async fn on_demand_service_handle_creates_starts_stops_removes_and_force_removes
 }
 
 #[tokio::test]
+async fn high_priority_dynamic_remove_and_force_remove_clear_runtime_accounting() {
+    HIGH_PRIORITY_CLEANUP_HANDLE_READY.store(false, Ordering::SeqCst);
+    HIGH_PRIORITY_CLEANUP_STARTS.store(0, Ordering::SeqCst);
+    reset_handle(&HIGH_PRIORITY_CLEANUP_WORKER_HANDLE);
+
+    let registry = Registry::builder()
+        .with_tag("__service_handle_high_priority_cleanup__")
+        .build();
+    let daemon = ServiceDaemon::builder().with_registry(registry).build();
+
+    daemon.run().await;
+    wait_for_high_priority_cleanup_handle().await;
+    let handle = clone_handle(&HIGH_PRIORITY_CLEANUP_WORKER_HANDLE, "HighPriority cleanup");
+
+    let removed = handle
+        .start(WorkerJob { value: 1 })
+        .await
+        .expect("HighPriority worker should start");
+    wait_for_counter(
+        &HIGH_PRIORITY_CLEANUP_STARTS,
+        1,
+        "HighPriority worker should enter first generation",
+    )
+    .await;
+    let runtime = daemon.runtime();
+    assert_eq!(
+        runtime.high_priority_shards[0].active_generations, 1,
+        "started HighPriority instance should be counted as active"
+    );
+    assert_eq!(
+        runtime.high_priority_shards[0].assigned_instances, 1,
+        "started HighPriority instance should be counted as assigned"
+    );
+    assert!(
+        daemon
+            .diagnostics_snapshot()
+            .services
+            .iter()
+            .any(|service| service.service_instance_id == removed.instance_id()),
+        "started HighPriority instance should have diagnostics before remove"
+    );
+
+    assert!(removed.remove().await.expect("remove should complete"));
+    assert!(removed.runtime().is_none());
+    assert!(
+        handle
+            .instances()
+            .iter()
+            .all(|instance| instance.instance_id() != removed.instance_id()),
+        "remove should drop the HighPriority instance registry entry"
+    );
+    let runtime = daemon.runtime();
+    assert_eq!(
+        runtime.high_priority_shards[0].active_generations, 0,
+        "remove should clear HighPriority active generation accounting"
+    );
+    assert_eq!(
+        runtime.high_priority_shards[0].assigned_instances, 0,
+        "remove should clear HighPriority assignment accounting"
+    );
+    let diagnostics = daemon.diagnostics_snapshot();
+    assert!(
+        diagnostics
+            .services
+            .iter()
+            .all(|service| service.service_instance_id != removed.instance_id()),
+        "remove should drop HighPriority service diagnostics"
+    );
+    assert!(
+        diagnostics
+            .generations
+            .iter()
+            .all(|generation| generation.service_instance_id != removed.instance_id()),
+        "remove should drop HighPriority generation diagnostics"
+    );
+
+    let force_removed = handle
+        .start(WorkerJob { value: 2 })
+        .await
+        .expect("second HighPriority worker should start");
+    wait_for_counter(
+        &HIGH_PRIORITY_CLEANUP_STARTS,
+        2,
+        "second HighPriority worker should enter first generation",
+    )
+    .await;
+    assert!(
+        force_removed
+            .force_remove()
+            .await
+            .expect("force_remove should complete")
+    );
+    assert!(force_removed.runtime().is_none());
+    assert!(handle.instances().is_empty());
+    let runtime = daemon.runtime();
+    assert_eq!(
+        runtime.high_priority_shards[0].active_generations, 0,
+        "force_remove should clear HighPriority active generation accounting"
+    );
+    assert_eq!(
+        runtime.high_priority_shards[0].assigned_instances, 0,
+        "force_remove should clear HighPriority assignment accounting"
+    );
+    let diagnostics = daemon.diagnostics_snapshot();
+    assert!(
+        diagnostics
+            .services
+            .iter()
+            .all(|service| service.service_instance_id != force_removed.instance_id()),
+        "force_remove should drop HighPriority service diagnostics"
+    );
+    assert!(
+        diagnostics
+            .generations
+            .iter()
+            .all(|generation| generation.service_instance_id != force_removed.instance_id()),
+        "force_remove should drop HighPriority generation diagnostics"
+    );
+
+    daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
+}
+
+#[tokio::test]
 async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
     STOP_HANDLES_READY.store(false, Ordering::SeqCst);
     STUBBORN_STOP_STARTS.store(0, Ordering::SeqCst);
@@ -1153,6 +1326,16 @@ async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
         "stubborn worker should enter first generation",
     )
     .await;
+    assert_eq!(
+        daemon
+            .runtime()
+            .high_priority_shards
+            .iter()
+            .map(|shard| shard.active_generations)
+            .sum::<usize>(),
+        1,
+        "HighPriority stop target should be counted as an active generation before stop"
+    );
 
     let stopping = tokio::spawn({
         let stubborn = stubborn.clone();
@@ -1225,6 +1408,23 @@ async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
         .expect("stubborn stop should complete");
     assert!(stopped);
     assert_eq!(stubborn.status().await, ServiceStatus::Terminated);
+    let high_priority_shard_counts = daemon.runtime().high_priority_shards;
+    assert_eq!(
+        high_priority_shard_counts
+            .iter()
+            .map(|shard| shard.active_generations)
+            .sum::<usize>(),
+        0,
+        "stop timeout abort should clear HighPriority active generation accounting"
+    );
+    assert_eq!(
+        high_priority_shard_counts
+            .iter()
+            .map(|shard| shard.assigned_instances)
+            .sum::<usize>(),
+        1,
+        "stop should keep the still-registered instance assignment until remove"
+    );
     assert!(
         stubborn.runtime().is_some(),
         "stop should leave runtime facts registered until remove"

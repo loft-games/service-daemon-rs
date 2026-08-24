@@ -1,7 +1,7 @@
 use service_daemon::{
-    DiagnosticHighPriorityPlacementDecisionKind, HighPriorityRuntimePolicy, Registry,
-    SchedulingAdvisoryProfile, ServiceDaemon, ServiceHandle, ServiceStatus, done, provider,
-    service, service_handle, wait_shutdown,
+    DiagnosticHighPriorityPlacementDecisionKind, Registry, SchedulingAdvisoryProfile,
+    ServiceDaemon, ServiceHandle, ServiceStatus, done, provider, service, service_handle,
+    wait_shutdown,
 };
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -66,20 +66,6 @@ fn policy_worker_service_handle() -> ServiceHandle {
         .expect("policy worker handle should be ready")
 }
 
-fn testing_policy(rollover_enabled: bool) -> HighPriorityRuntimePolicy {
-    HighPriorityRuntimePolicy::builder()
-        .max_worker_threads(2)
-        .scale_step_worker_threads(1)
-        .high_avg_drift_ms(5)
-        .minimum_completed_samples(1)
-        .pressure_windows(1)
-        .scale_cooldown(Duration::from_millis(10))
-        .rollover_cooldown(Duration::from_millis(10))
-        .max_rollovers_per_window(1)
-        .rollover_enabled(rollover_enabled)
-        .build()
-}
-
 async fn wait_until(mut predicate: impl FnMut() -> bool, label: &'static str, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -104,7 +90,6 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
                 .with_tag("__high_priority_runtime_policy__")
                 .build(),
         )
-        .with_high_priority_runtime_policy(testing_policy(false))
         .build();
 
     daemon.run().await;
@@ -119,7 +104,7 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
     let handle = policy_worker_service_handle();
     let pressured = handle
         .start(PolicyWorkerJob {
-            block_for: Duration::from_millis(900),
+            block_for: Duration::from_secs(3),
         })
         .await
         .expect("pressured worker should start");
@@ -127,7 +112,7 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
     wait_until(
         || daemon.runtime().high_priority_shards.len() >= 2,
         "HighPriority policy scale-out",
-        Duration::from_secs(4),
+        Duration::from_secs(5),
     )
     .await;
 
@@ -179,7 +164,7 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn advisory_disabled_does_not_disable_high_priority_policy() {
+async fn high_priority_policy_scales_out_while_single_worker_shard_is_blocked() {
     let _guard = TEST_LOCK.lock().await;
     reset_policy_test_state();
     let daemon = ServiceDaemon::builder()
@@ -188,8 +173,6 @@ async fn advisory_disabled_does_not_disable_high_priority_policy() {
                 .with_tag("__high_priority_runtime_policy__")
                 .build(),
         )
-        .with_scheduling_advisory_profile(SchedulingAdvisoryProfile::disabled())
-        .with_high_priority_runtime_policy(testing_policy(true))
         .build();
 
     daemon.run().await;
@@ -202,7 +185,45 @@ async fn advisory_disabled_does_not_disable_high_priority_policy() {
 
     policy_worker_service_handle()
         .start(PolicyWorkerJob {
-            block_for: Duration::from_millis(900),
+            block_for: Duration::from_secs(3),
+        })
+        .await
+        .expect("pressured worker should start");
+
+    wait_until(
+        || daemon.runtime().high_priority_shards.len() >= 2,
+        "HighPriority scale-out while target shard is blocked",
+        Duration::from_secs(5),
+    )
+    .await;
+
+    daemon.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn advisory_disabled_does_not_disable_high_priority_policy() {
+    let _guard = TEST_LOCK.lock().await;
+    reset_policy_test_state();
+    let daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__high_priority_runtime_policy__")
+                .build(),
+        )
+        .with_scheduling_advisory_profile(SchedulingAdvisoryProfile::disabled())
+        .build();
+
+    daemon.run().await;
+    wait_until(
+        || HANDLE_READY.load(Ordering::SeqCst),
+        "policy worker handle",
+        Duration::from_secs(2),
+    )
+    .await;
+
+    policy_worker_service_handle()
+        .start(PolicyWorkerJob {
+            block_for: Duration::from_secs(3),
         })
         .await
         .expect("pressured worker should start");
@@ -210,7 +231,7 @@ async fn advisory_disabled_does_not_disable_high_priority_policy() {
     wait_until(
         || daemon.runtime().high_priority_shards.len() >= 2,
         "HighPriority policy scale-out with advisory disabled",
-        Duration::from_secs(4),
+        Duration::from_secs(5),
     )
     .await;
 
@@ -227,7 +248,6 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
                 .with_tag("__high_priority_runtime_policy__")
                 .build(),
         )
-        .with_high_priority_runtime_policy(testing_policy(true))
         .build();
 
     daemon.run().await;
@@ -240,7 +260,7 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
 
     let instance = policy_worker_service_handle()
         .start(PolicyWorkerJob {
-            block_for: Duration::from_millis(900),
+            block_for: Duration::from_secs(3),
         })
         .await
         .expect("pressured worker should start");
@@ -256,7 +276,18 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
                 })
         },
         "HighPriority policy rollover decision",
-        Duration::from_secs(5),
+        Duration::from_secs(6),
+    )
+    .await;
+
+    wait_until(
+        || {
+            instance
+                .runtime()
+                .is_some_and(|runtime| runtime.generation >= 2)
+        },
+        "HighPriority policy rollover generation replacement",
+        Duration::from_secs(2),
     )
     .await;
 
@@ -288,44 +319,6 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
     assert_eq!(
         service.aggregate.lifecycle.rate_limited_restart, 0,
         "rollover should not enter restart storm rate limiting"
-    );
-
-    daemon.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn high_priority_policy_disabled_keeps_static_single_shard_behavior() {
-    let _guard = TEST_LOCK.lock().await;
-    reset_policy_test_state();
-    let daemon = ServiceDaemon::builder()
-        .with_registry(
-            Registry::builder()
-                .with_tag("__high_priority_runtime_policy__")
-                .build(),
-        )
-        .with_high_priority_runtime_policy(HighPriorityRuntimePolicy::disabled())
-        .build();
-
-    daemon.run().await;
-    wait_until(
-        || HANDLE_READY.load(Ordering::SeqCst),
-        "policy worker handle",
-        Duration::from_secs(2),
-    )
-    .await;
-
-    policy_worker_service_handle()
-        .start(PolicyWorkerJob {
-            block_for: Duration::from_millis(900),
-        })
-        .await
-        .expect("pressured worker should start");
-    tokio::time::sleep(Duration::from_millis(1200)).await;
-
-    assert_eq!(
-        daemon.runtime().high_priority_shards.len(),
-        1,
-        "disabled policy should keep the static HighPriority runtime shape"
     );
 
     daemon.shutdown();

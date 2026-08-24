@@ -51,7 +51,7 @@ use crate::models::{
     ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
 };
 use dashmap::{DashMap, DashSet};
-use high_priority::HighPriorityRuntimePool;
+use high_priority::{HighPriorityRuntimePool, HighPriorityRuntimePoolState};
 
 pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
@@ -88,6 +88,7 @@ struct DaemonInstanceControl {
 struct ServiceInstanceCleanupParts {
     instance_registry: Arc<ServiceInstanceRegistry>,
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
+    high_priority_pool: Option<Arc<HighPriorityRuntimePoolState>>,
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
     removing_instances: Arc<DashSet<ServiceInstanceId>>,
@@ -99,6 +100,7 @@ struct PreparedServiceStop {
     task: Option<JoinHandle<()>>,
     grace_period: Duration,
     control_runtime: Option<Handle>,
+    high_priority_pool: Option<Arc<HighPriorityRuntimePoolState>>,
     resources: Arc<DaemonResources>,
     stopping_instances: Arc<DashSet<ServiceInstanceId>>,
 }
@@ -1201,6 +1203,8 @@ impl DaemonInstanceInner {
                 .control_runtime
                 .as_ref()
                 .map(|runtime| runtime.handle().clone()),
+            high_priority_pool: (!self.high_priority_runtime_pool.is_empty())
+                .then(|| self.high_priority_runtime_pool.state()),
             resources: self.resources.clone(),
             stopping_instances: self.stopping_instances.clone(),
         }))
@@ -1292,6 +1296,8 @@ impl DaemonInstanceInner {
         ServiceInstanceCleanupParts {
             instance_registry: self.instance_registry.clone(),
             running_tasks: self.running_tasks.clone(),
+            high_priority_pool: (!self.high_priority_runtime_pool.is_empty())
+                .then(|| self.high_priority_runtime_pool.state()),
             resources: self.resources.clone(),
             diagnostics: self.diagnostics.clone(),
             removing_instances: self.removing_instances.clone(),
@@ -1339,6 +1345,13 @@ async fn finish_graceful_service_stop(prepared: PreparedServiceStop) -> ServiceR
     }
 
     let terminated = ServiceStatus::Terminated;
+    if let Some(high_priority_pool) = &prepared.high_priority_pool {
+        high_priority_pool.remove_service_instance_generations(prepared.record.instance_id());
+        prepared
+            .resources
+            .runtime_facts
+            .record_high_priority_shards(high_priority_pool.snapshot());
+    }
     prepared
         .resources
         .status_plane
@@ -1391,6 +1404,13 @@ async fn cleanup_service_instance(
 ) {
     cleanup.instance_registry.remove(instance_id);
     cleanup.running_tasks.lock().await.remove(&instance_id);
+    if let Some(high_priority_pool) = &cleanup.high_priority_pool {
+        high_priority_pool.remove_service_instance(instance_id);
+        cleanup
+            .resources
+            .runtime_facts
+            .record_high_priority_shards(high_priority_pool.snapshot());
+    }
     cleanup.resources.status_plane.remove(&instance_id);
     cleanup.resources.shelf.remove(&instance_id);
     cleanup.resources.reload_signals.remove(&instance_id);
@@ -1424,10 +1444,11 @@ fn record_matches_handle(record: &ServiceInstanceRecord, handle: &ServiceInstanc
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::policy::HighPriorityRuntimeControl;
     use crate::models::{
-        HighPriorityRuntimePolicy, HighPriorityShardId, ProviderEntry, ProviderInitError, Registry,
-        ServiceEntry, ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord,
-        ServiceInstanceRegistry, ServiceParam, ServiceScheduling,
+        HighPriorityShardId, ProviderEntry, ProviderInitError, Registry, ServiceEntry,
+        ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry,
+        ServiceParam, ServiceScheduling,
     };
     use crate::{TT::*, provider, service, trigger};
     use std::any::TypeId;
@@ -2135,7 +2156,7 @@ mod tests {
                     .with_tag("__unit_high_priority_capacity_primary__")
                     .build(),
             )
-            .with_high_priority_runtime_policy(HighPriorityRuntimePolicy::for_testing())
+            .with_test_high_priority_runtime_control(HighPriorityRuntimeControl::for_testing())
             .build_inner();
         daemon
             .ensure_high_priority_runtime()
@@ -2162,11 +2183,195 @@ mod tests {
         let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
             daemon.diagnostics.snapshot().into();
         assert!(
+            diagnostics.high_priority_shards.iter().any(|shard| {
+                shard.shard_id == HighPriorityShardId(0)
+                    && shard.pressure_state
+                        == crate::models::HighPriorityShardPressureState::Pressured
+            }),
+            "public diagnostics should use the same pressure state as the active policy"
+        );
+        assert!(
             diagnostics
                 .high_priority_placement_decisions
                 .iter()
                 .any(|decision| decision.kind
                     == crate::models::DiagnosticHighPriorityPlacementDecisionKind::ScaleOut)
+        );
+
+        daemon.shutdown_high_priority_runtime();
+    }
+
+    #[test]
+    fn high_priority_policy_uses_recent_probe_window_not_lifetime_average() {
+        let mut daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_test_high_priority_runtime_control(HighPriorityRuntimeControl::for_testing())
+            .build_inner();
+        daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime should build");
+        for _ in 0..200 {
+            daemon.diagnostics.record_high_priority_shard_observation(
+                HighPriorityShardId(0),
+                crate::core::diagnostics::SleepObservation {
+                    source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                    reason: crate::core::diagnostics::SleepExitReason::Completed,
+                    requested: Duration::from_millis(250),
+                    elapsed: Duration::from_millis(250),
+                    drift: Duration::ZERO,
+                },
+            );
+        }
+        daemon.diagnostics.record_high_priority_shard_observation(
+            HighPriorityShardId(0),
+            crate::core::diagnostics::SleepObservation {
+                source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                reason: crate::core::diagnostics::SleepExitReason::Completed,
+                requested: Duration::from_millis(250),
+                elapsed: Duration::from_millis(500),
+                drift: Duration::from_millis(250),
+            },
+        );
+
+        daemon.evaluate_high_priority_runtime_policy(Instant::now());
+
+        let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
+        assert_eq!(
+            runtime.high_priority_shards.len(),
+            2,
+            "recent pressure should not be diluted by lifetime-normal samples"
+        );
+
+        daemon.shutdown_high_priority_runtime();
+    }
+
+    #[test]
+    fn high_priority_global_pressure_guard_uses_recent_lane_probe_window() {
+        let mut daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_test_high_priority_runtime_control(HighPriorityRuntimeControl::for_testing())
+            .build_inner();
+        daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime should build");
+
+        let normal = crate::core::diagnostics::SleepObservation {
+            source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+            reason: crate::core::diagnostics::SleepExitReason::Completed,
+            requested: Duration::from_millis(250),
+            elapsed: Duration::from_millis(250),
+            drift: Duration::ZERO,
+        };
+        let pressured = crate::core::diagnostics::SleepObservation {
+            source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+            reason: crate::core::diagnostics::SleepExitReason::Completed,
+            requested: Duration::from_millis(250),
+            elapsed: Duration::from_millis(500),
+            drift: Duration::from_millis(250),
+        };
+        for _ in 0..200 {
+            daemon
+                .diagnostics
+                .record_lane_observation(crate::core::diagnostics::RuntimeLane::Control, normal);
+            daemon
+                .diagnostics
+                .record_lane_observation(crate::core::diagnostics::RuntimeLane::Standard, normal);
+        }
+        daemon
+            .diagnostics
+            .record_lane_observation(crate::core::diagnostics::RuntimeLane::Control, pressured);
+        daemon
+            .diagnostics
+            .record_lane_observation(crate::core::diagnostics::RuntimeLane::Standard, pressured);
+        daemon
+            .diagnostics
+            .record_high_priority_shard_observation(HighPriorityShardId(0), pressured);
+
+        daemon.evaluate_high_priority_runtime_policy(Instant::now());
+
+        let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
+        assert_eq!(
+            runtime.high_priority_shards.len(),
+            1,
+            "recent Control+Standard pressure should suppress HighPriority scale-out"
+        );
+
+        daemon.shutdown_high_priority_runtime();
+    }
+
+    #[test]
+    fn lifecycle_pending_generation_does_not_consume_rollover_budget() {
+        let now = Instant::now();
+        let mut daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .with_test_high_priority_runtime_control(HighPriorityRuntimeControl::for_testing())
+            .build_inner();
+        daemon
+            .ensure_high_priority_runtime()
+            .expect("runtime should build");
+        daemon
+            .high_priority_runtime_pool
+            .scale_out(now + Duration::from_millis(20))
+            .expect("second shard should build");
+        let service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(9001));
+        daemon
+            .high_priority_runtime_pool
+            .state()
+            .select_generation(service_id, 1)
+            .expect("generation should be assigned to the first shard");
+        daemon
+            .resources
+            .reload_signals
+            .insert(service_id, Arc::new(tokio::sync::Notify::new()));
+        daemon.stopping_instances.insert(service_id);
+        daemon.diagnostics.record_high_priority_shard_observation(
+            HighPriorityShardId(0),
+            crate::core::diagnostics::SleepObservation {
+                source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                reason: crate::core::diagnostics::SleepExitReason::Completed,
+                requested: Duration::ZERO,
+                elapsed: Duration::from_millis(250),
+                drift: Duration::from_millis(250),
+            },
+        );
+
+        daemon.evaluate_high_priority_runtime_policy(now + Duration::from_millis(21));
+
+        let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
+            daemon.diagnostics.snapshot().into();
+        assert!(
+            diagnostics
+                .high_priority_placement_decisions
+                .iter()
+                .all(|decision| decision.kind
+                    != crate::models::DiagnosticHighPriorityPlacementDecisionKind::Rollover),
+            "pending lifecycle target should not receive a rollover request"
+        );
+
+        daemon.stopping_instances.remove(&service_id);
+        daemon.evaluate_high_priority_runtime_policy(now + Duration::from_millis(22));
+
+        let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
+            daemon.diagnostics.snapshot().into();
+        assert!(
+            diagnostics
+                .high_priority_placement_decisions
+                .iter()
+                .any(|decision| decision.kind
+                    == crate::models::DiagnosticHighPriorityPlacementDecisionKind::Rollover),
+            "first skipped pending target must not consume rollover cooldown"
         );
 
         daemon.shutdown_high_priority_runtime();

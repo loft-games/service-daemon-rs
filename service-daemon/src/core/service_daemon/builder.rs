@@ -8,10 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::context::{DaemonResources, process_token};
 use crate::core::diagnostics::DiagnosticsStore;
-use crate::models::{
-    DaemonInstanceId, HighPriorityRuntimePolicy, Registry, SchedulingAdvisoryProfile,
-    ServiceDescription,
-};
+use crate::models::policy::HighPriorityRuntimeControl;
+use crate::models::{DaemonInstanceId, Registry, SchedulingAdvisoryProfile, ServiceDescription};
 
 use super::high_priority::HighPriorityRuntimePool;
 use super::policy::RestartPolicy;
@@ -29,7 +27,7 @@ pub struct ServiceDaemonBuilder {
     /// Type-erased trigger configuration overrides.
     trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
     scheduling_advisory_profile: SchedulingAdvisoryProfile,
-    high_priority_runtime_policy: HighPriorityRuntimePolicy,
+    high_priority_runtime_control: HighPriorityRuntimeControl,
     isolated_startup_concurrency_limit: usize,
     /// Infrastructure tags whose services are always included in the final
     /// registry, regardless of the user-provided tag filters. Used by
@@ -48,7 +46,7 @@ impl ServiceDaemonBuilder {
             external_cancel_token: None,
             trigger_configs: DashMap::new(),
             scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
-            high_priority_runtime_policy: HighPriorityRuntimePolicy::default(),
+            high_priority_runtime_control: HighPriorityRuntimeControl::default(),
             isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
             infra_tags: Vec::new(),
             #[cfg(feature = "simulation")]
@@ -72,7 +70,7 @@ impl ServiceDaemonBuilder {
             external_cancel_token: None,
             trigger_configs: DashMap::new(),
             scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
-            high_priority_runtime_policy: HighPriorityRuntimePolicy::default(),
+            high_priority_runtime_control: HighPriorityRuntimeControl::default(),
             isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
             infra_tags: Vec::new(),
             resources: None,
@@ -106,14 +104,12 @@ impl ServiceDaemonBuilder {
         self
     }
 
-    /// Set the HighPriority runtime placement and scale-out policy.
-    ///
-    /// This controls framework-owned HighPriority runtime shards. It is
-    /// independent from [`SchedulingAdvisoryProfile`], which only controls
-    /// advisory diagnostics emission.
-    #[must_use]
-    pub fn with_high_priority_runtime_policy(mut self, policy: HighPriorityRuntimePolicy) -> Self {
-        self.high_priority_runtime_policy = policy;
+    #[cfg(test)]
+    pub(crate) fn with_test_high_priority_runtime_control(
+        mut self,
+        control: HighPriorityRuntimeControl,
+    ) -> Self {
+        self.high_priority_runtime_control = control;
         self
     }
 
@@ -241,8 +237,10 @@ impl ServiceDaemonBuilder {
         }
 
         let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
-        let high_priority_runtime_pool =
-            HighPriorityRuntimePool::new(self.high_priority_runtime_policy, high_priority_capacity);
+        let high_priority_runtime_pool = HighPriorityRuntimePool::new(
+            self.high_priority_runtime_control,
+            high_priority_capacity,
+        );
 
         let daemon_id = DaemonInstanceId::new_v7();
         #[cfg(feature = "simulation")]

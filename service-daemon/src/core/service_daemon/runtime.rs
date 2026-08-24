@@ -166,10 +166,18 @@ impl DaemonInstanceInner {
     }
 
     pub(super) fn spawn_high_priority_runtime_probes(&mut self) {
+        let Some(probe_runtime) = self
+            .control_runtime
+            .as_ref()
+            .map(|runtime| runtime.handle().clone())
+        else {
+            return;
+        };
         let diagnostics = self.diagnostics.clone();
         let token = self.cancellation_token.clone();
         for shard in self.high_priority_runtime_pool.shard_handles() {
             self.spawn_high_priority_runtime_probe(
+                probe_runtime.clone(),
                 shard.handle.clone(),
                 shard.shard_id,
                 diagnostics.clone(),
@@ -180,15 +188,17 @@ impl DaemonInstanceInner {
 
     fn spawn_high_priority_runtime_probe(
         &mut self,
-        handle: Handle,
+        probe_runtime: Handle,
+        shard_runtime: Handle,
         shard_id: HighPriorityShardId,
         diagnostics: std::sync::Arc<crate::core::diagnostics::DiagnosticsStore>,
         token: CancellationToken,
     ) {
         self.runtime_probe_tasks
-            .push(handle.spawn(run_high_priority_shard_runtime_probe(
+            .push(probe_runtime.spawn(run_high_priority_shard_runtime_probe(
                 diagnostics,
                 shard_id,
+                shard_runtime,
                 token,
             )));
     }
@@ -211,10 +221,7 @@ impl DaemonInstanceInner {
         handle: &Handle,
         inner: Arc<Mutex<DaemonInstanceInner>>,
     ) {
-        if self.high_priority_policy_task.is_some()
-            || self.high_priority_runtime_pool.is_empty()
-            || !self.high_priority_runtime_pool.policy().is_enabled()
-        {
+        if self.high_priority_policy_task.is_some() || self.high_priority_runtime_pool.is_empty() {
             return;
         }
 
@@ -318,13 +325,6 @@ impl DaemonInstanceInner {
         }
 
         let policy = self.high_priority_runtime_pool.policy();
-        if !policy.is_enabled() {
-            self.record_high_priority_policy_suppressed(
-                HighPriorityPlacementReason::PolicyDisabled,
-            );
-            return;
-        }
-
         let snapshot = self.diagnostics.snapshot();
         let mut pressured_shards = Vec::new();
         let mut enough_samples = false;
@@ -333,7 +333,7 @@ impl DaemonInstanceInner {
                 .high_priority_shards
                 .iter()
                 .find(|observed| observed.shard_id == shard.shard_id)
-                .map(|observed| &observed.aggregate.runtime_probe);
+                .map(|observed| &observed.recent_runtime_probe);
             let pressure_state = match observation {
                 Some(observation)
                     if observation.completed >= policy.minimum_completed_samples()
@@ -358,6 +358,8 @@ impl DaemonInstanceInner {
             self.high_priority_runtime_pool
                 .state()
                 .record_pressure(shard.shard_id, pressure_state);
+            self.diagnostics
+                .record_high_priority_shard_pressure_state(shard.shard_id, pressure_state);
         }
 
         if !enough_samples {
@@ -389,9 +391,7 @@ impl DaemonInstanceInner {
             return;
         }
 
-        let scale_out = self
-            .high_priority_runtime_pool
-            .scale_out(now, HighPriorityPlacementReason::PressureScaleOut);
+        let scale_out = self.high_priority_runtime_pool.scale_out(now);
         let new_shard_id = match scale_out {
             Ok(shard_id) => shard_id,
             Err(err) => {
@@ -409,8 +409,14 @@ impl DaemonInstanceInner {
                 kind: HighPriorityPlacementDecisionKind::ScaleOut,
                 reason: HighPriorityPlacementReason::PressureScaleOut,
             });
-            if let Some(shard) = self.high_priority_runtime_pool.shard_handle(shard_id) {
+            if let Some(shard) = self.high_priority_runtime_pool.shard_handle(shard_id)
+                && let Some(probe_runtime) = self
+                    .control_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.handle().clone())
+            {
                 self.spawn_high_priority_runtime_probe(
+                    probe_runtime,
                     shard.handle,
                     shard.shard_id,
                     self.diagnostics.clone(),
@@ -448,10 +454,8 @@ impl DaemonInstanceInner {
         };
 
         let policy = self.high_priority_runtime_pool.policy();
-        if !policy.rollover_enabled() || policy.max_rollovers_per_window() == 0 {
-            self.record_high_priority_policy_suppressed(
-                HighPriorityPlacementReason::PolicyDisabled,
-            );
+        if policy.max_rollovers_per_window() == 0 {
+            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::NoBetterShard);
             return;
         }
         if !self.high_priority_runtime_pool.rollover_allowed(now) {
@@ -463,6 +467,7 @@ impl DaemonInstanceInner {
             .high_priority_runtime_pool
             .policy()
             .max_rollovers_per_window();
+        let mut requested = 0usize;
         for shard_id in pressured_shards {
             for (service_instance_id, generation) in self
                 .high_priority_runtime_pool
@@ -470,9 +475,19 @@ impl DaemonInstanceInner {
                 .active_on_shard(*shard_id)
             {
                 if remaining == 0 {
-                    return;
+                    break;
+                }
+                if self.is_lifecycle_operation_pending(service_instance_id) {
+                    continue;
                 }
                 if let Some(signal) = self.resources.reload_signals.get(&service_instance_id) {
+                    if !self.high_priority_runtime_pool.state().request_rollover(
+                        service_instance_id,
+                        generation,
+                        target_shard_id,
+                    ) {
+                        continue;
+                    }
                     signal.notify_one();
                     let decision = HighPriorityPlacementDecision {
                         shard_id: Some(target_shard_id),
@@ -488,8 +503,14 @@ impl DaemonInstanceInner {
                         "HighPriority runtime policy requested cooperative generation rollover"
                     );
                     remaining -= 1;
+                    requested += 1;
                 }
             }
+        }
+        if requested > 0 {
+            self.high_priority_runtime_pool.record_rollover_batch(now);
+        } else {
+            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::NoBetterShard);
         }
     }
 
@@ -532,7 +553,7 @@ impl DaemonInstanceInner {
 
 fn global_runtime_pressure(
     snapshot: &DiagnosticsSnapshot,
-    policy: crate::models::HighPriorityRuntimePolicy,
+    policy: crate::models::policy::HighPriorityRuntimeControl,
 ) -> bool {
     lane_runtime_probe_pressure(snapshot, RuntimeLane::Control, policy)
         && lane_runtime_probe_pressure(snapshot, RuntimeLane::Standard, policy)
@@ -541,18 +562,18 @@ fn global_runtime_pressure(
 fn lane_runtime_probe_pressure(
     snapshot: &DiagnosticsSnapshot,
     lane: RuntimeLane,
-    policy: crate::models::HighPriorityRuntimePolicy,
+    policy: crate::models::policy::HighPriorityRuntimeControl,
 ) -> bool {
     snapshot
         .lanes
         .iter()
         .find(|snapshot| snapshot.runtime_lane == lane)
-        .is_some_and(|snapshot| observation_pressure(&snapshot.aggregate.runtime_probe, policy))
+        .is_some_and(|snapshot| observation_pressure(&snapshot.recent_runtime_probe, policy))
 }
 
 fn observation_pressure(
     observation: &ObservationStatsSnapshot,
-    policy: crate::models::HighPriorityRuntimePolicy,
+    policy: crate::models::policy::HighPriorityRuntimeControl,
 ) -> bool {
     observation_has_pressure(observation.completed, observation.avg_drift_ms, policy)
 }

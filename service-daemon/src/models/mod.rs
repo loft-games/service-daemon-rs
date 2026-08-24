@@ -23,9 +23,9 @@ pub use diagnostics::{
 };
 pub use error::{ProviderInitError, Result, ServiceError};
 pub use policy::{
-    BackoffController, HighPriorityRuntimePolicy, HighPriorityRuntimePolicyBuilder, RestartPolicy,
-    ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
-    TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
+    BackoffController, RestartPolicy, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
+    SchedulingAdvisoryProfile, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
+    TriggerPolicyOverlayError,
 };
 pub use provider_error::ProviderError;
 pub use runtime::{

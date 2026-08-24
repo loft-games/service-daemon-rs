@@ -526,6 +526,12 @@ impl ServiceSupervisor {
             self.generation,
             resolved_scheduling,
         );
+        if let Some(BodyExecutionLane::HighPriority { accounting, .. }) = &self.generation_body_lane
+        {
+            self.resources
+                .runtime_facts
+                .record_high_priority_shards(accounting.snapshot());
+        }
         let (high_priority_shard_id, placement_decision) = self
             .generation_body_lane
             .as_ref()

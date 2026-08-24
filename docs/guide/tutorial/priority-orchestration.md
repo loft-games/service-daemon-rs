@@ -124,15 +124,11 @@ async fn watchdog_service() -> anyhow::Result<()> {
 }
 ```
 
-If you need to turn off automatic HighPriority scale-out and rollover for a daemon, configure the daemon builder rather than adding another macro attribute:
-
-```rust,ignore
-use service_daemon::{HighPriorityRuntimePolicy, ServiceDaemon};
-
-let daemon = ServiceDaemon::builder()
-    .with_high_priority_runtime_policy(HighPriorityRuntimePolicy::disabled())
-    .build();
-```
+There is no macro attribute or daemon builder knob for tuning the automatic
+HighPriority placement loop. Treat `HighPriority` as a framework-managed
+cooperative lane: if a service cannot tolerate cooperative rollover, keep its
+work restart-safe with normal lifecycle tools or choose a different scheduling
+mode.
 
 ### `Isolated`
 

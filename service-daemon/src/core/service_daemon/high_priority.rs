@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -7,16 +6,16 @@ use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use tokio::runtime::{Handle, Runtime};
 
+use crate::models::policy::HighPriorityRuntimeControl;
 use crate::models::{
-    HighPriorityRuntimePolicy, HighPriorityRuntimeShardSnapshot, HighPriorityShardId,
-    HighPriorityShardPressureState, ServiceInstanceId,
+    HighPriorityRuntimeShardSnapshot, HighPriorityShardId, HighPriorityShardPressureState,
+    ServiceInstanceId,
 };
 
 use super::runtime::HighPriorityCapacityPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HighPriorityPlacementDecisionKind {
-    StaticInitial,
     LeastLoaded,
     ScaleOut,
     Rollover,
@@ -25,11 +24,9 @@ pub(crate) enum HighPriorityPlacementDecisionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HighPriorityPlacementReason {
-    DeclaredHighPriority,
     LeastLoadedShard,
     PressureScaleOut,
     PolicyRollover,
-    PolicyDisabled,
     InsufficientSamples,
     Cooldown,
     MaxCapacity,
@@ -56,7 +53,6 @@ pub(super) struct HighPriorityShardHandle {
 #[derive(Default)]
 struct HighPriorityRuntimePoolStateInner {
     pressure_state: DashMap<HighPriorityShardId, HighPriorityShardPressureState>,
-    placement_decisions: std::sync::Mutex<VecDeque<HighPriorityPlacementDecision>>,
 }
 
 #[derive(Default)]
@@ -64,6 +60,7 @@ pub(super) struct HighPriorityRuntimePoolState {
     shards: RwLock<Vec<HighPriorityShardHandle>>,
     assignments: DashMap<ServiceInstanceId, HighPriorityShardId>,
     active_generations: DashMap<(ServiceInstanceId, u64), HighPriorityShardId>,
+    pending_rollovers: DashMap<(ServiceInstanceId, u64), HighPriorityShardId>,
     inner: HighPriorityRuntimePoolStateInner,
 }
 
@@ -153,7 +150,6 @@ impl HighPriorityRuntimePoolState {
             kind: HighPriorityPlacementDecisionKind::LeastLoaded,
             reason: HighPriorityPlacementReason::LeastLoadedShard,
         };
-        self.record_decision(decision);
         Some((shard, decision))
     }
 
@@ -164,6 +160,38 @@ impl HighPriorityRuntimePoolState {
     ) {
         self.active_generations
             .remove(&(service_instance_id, generation));
+        self.pending_rollovers
+            .remove(&(service_instance_id, generation));
+    }
+
+    pub(super) fn remove_service_instance(&self, service_instance_id: ServiceInstanceId) {
+        self.assignments.remove(&service_instance_id);
+        self.remove_service_instance_generations(service_instance_id);
+    }
+
+    pub(super) fn remove_service_instance_generations(
+        &self,
+        service_instance_id: ServiceInstanceId,
+    ) {
+        self.active_generations
+            .retain(|(active_service_instance_id, _), _| {
+                *active_service_instance_id != service_instance_id
+            });
+        self.pending_rollovers
+            .retain(|(pending_service_instance_id, _), _| {
+                *pending_service_instance_id != service_instance_id
+            });
+    }
+
+    pub(super) fn request_rollover(
+        &self,
+        service_instance_id: ServiceInstanceId,
+        generation: u64,
+        target_shard_id: HighPriorityShardId,
+    ) -> bool {
+        self.pending_rollovers
+            .insert((service_instance_id, generation), target_shard_id)
+            .is_none()
     }
 
     pub(super) fn active_on_shard(
@@ -186,22 +214,10 @@ impl HighPriorityRuntimePoolState {
     ) {
         self.inner.pressure_state.insert(shard_id, pressure);
     }
-
-    pub(super) fn record_decision(&self, decision: HighPriorityPlacementDecision) {
-        let mut decisions = self
-            .inner
-            .placement_decisions
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if decisions.len() == 128 {
-            decisions.pop_front();
-        }
-        decisions.push_back(decision);
-    }
 }
 
 pub(super) struct HighPriorityRuntimePool {
-    policy: HighPriorityRuntimePolicy,
+    policy: HighPriorityRuntimeControl,
     capacity_plan: HighPriorityCapacityPlan,
     available_parallelism: Option<NonZeroUsize>,
     state: Arc<HighPriorityRuntimePoolState>,
@@ -215,7 +231,7 @@ pub(super) struct HighPriorityRuntimePool {
 
 impl HighPriorityRuntimePool {
     pub(super) fn new(
-        policy: HighPriorityRuntimePolicy,
+        policy: HighPriorityRuntimeControl,
         capacity_plan: HighPriorityCapacityPlan,
     ) -> Self {
         Self::new_with_parallelism(
@@ -226,7 +242,7 @@ impl HighPriorityRuntimePool {
     }
 
     pub(super) fn new_with_parallelism(
-        policy: HighPriorityRuntimePolicy,
+        policy: HighPriorityRuntimeControl,
         capacity_plan: HighPriorityCapacityPlan,
         available_parallelism: Option<NonZeroUsize>,
     ) -> Self {
@@ -269,7 +285,7 @@ impl HighPriorityRuntimePool {
             .cloned()
     }
 
-    pub(super) fn policy(&self) -> HighPriorityRuntimePolicy {
+    pub(super) fn policy(&self) -> HighPriorityRuntimeControl {
         self.policy
     }
 
@@ -295,11 +311,7 @@ impl HighPriorityRuntimePool {
         };
         if self.is_empty() {
             let capped = worker_count.get().min(self.max_worker_threads()).max(1);
-            self.create_shard(
-                capped,
-                HighPriorityPlacementDecisionKind::StaticInitial,
-                HighPriorityPlacementReason::DeclaredHighPriority,
-            )?;
+            self.create_shard(capped)?;
         }
         Ok(self
             .state
@@ -313,25 +325,18 @@ impl HighPriorityRuntimePool {
     pub(super) fn scale_out(
         &mut self,
         now: Instant,
-        reason: HighPriorityPlacementReason,
     ) -> std::io::Result<Option<HighPriorityShardId>> {
-        if !self.policy.is_enabled() {
-            self.record_suppressed(HighPriorityPlacementReason::PolicyDisabled);
-            return Ok(None);
-        }
         if self
             .last_scale_at
             .and_then(|last| now.checked_duration_since(last))
             .is_some_and(|elapsed| elapsed < self.policy.scale_cooldown())
         {
-            self.record_suppressed(HighPriorityPlacementReason::Cooldown);
             return Ok(None);
         }
         let remaining = self
             .max_worker_threads()
             .saturating_sub(self.total_worker_threads);
         if remaining == 0 {
-            self.record_suppressed(HighPriorityPlacementReason::MaxCapacity);
             return Ok(None);
         }
         let worker_threads = self
@@ -340,11 +345,7 @@ impl HighPriorityRuntimePool {
             .get()
             .min(remaining)
             .max(1);
-        let shard_id = self.create_shard(
-            worker_threads,
-            HighPriorityPlacementDecisionKind::ScaleOut,
-            reason,
-        )?;
+        let shard_id = self.create_shard(worker_threads)?;
         self.last_scale_at = Some(now);
         Ok(Some(shard_id))
     }
@@ -359,8 +360,7 @@ impl HighPriorityRuntimePool {
     }
 
     pub(super) fn rollover_allowed(&mut self, now: Instant) -> bool {
-        if !self.policy.rollover_enabled() || self.policy.max_rollovers_per_window() == 0 {
-            self.record_suppressed(HighPriorityPlacementReason::PolicyDisabled);
+        if self.policy.max_rollovers_per_window() == 0 {
             return false;
         }
         if self
@@ -368,23 +368,20 @@ impl HighPriorityRuntimePool {
             .and_then(|last| now.checked_duration_since(last))
             .is_some_and(|elapsed| elapsed < self.policy.rollover_cooldown())
         {
-            self.record_suppressed(HighPriorityPlacementReason::Cooldown);
             return false;
         }
-        self.last_rollover_at = Some(now);
         true
+    }
+
+    pub(super) fn record_rollover_batch(&mut self, now: Instant) {
+        self.last_rollover_at = Some(now);
     }
 
     pub(super) fn snapshot(&self) -> Vec<HighPriorityRuntimeShardSnapshot> {
         self.state.snapshot()
     }
 
-    fn create_shard(
-        &mut self,
-        worker_threads: usize,
-        kind: HighPriorityPlacementDecisionKind,
-        reason: HighPriorityPlacementReason,
-    ) -> std::io::Result<HighPriorityShardId> {
+    fn create_shard(&mut self, worker_threads: usize) -> std::io::Result<HighPriorityShardId> {
         let shard_id = HighPriorityShardId(self.next_shard_id);
         self.next_shard_id = self.next_shard_id.saturating_add(1);
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -407,20 +404,7 @@ impl HighPriorityRuntimePool {
                 created_at: Utc::now(),
                 handle,
             });
-        self.state.record_decision(HighPriorityPlacementDecision {
-            shard_id: Some(shard_id),
-            kind,
-            reason,
-        });
         Ok(shard_id)
-    }
-
-    pub(super) fn record_suppressed(&self, reason: HighPriorityPlacementReason) {
-        self.state.record_decision(HighPriorityPlacementDecision {
-            shard_id: None,
-            kind: HighPriorityPlacementDecisionKind::Suppressed,
-            reason,
-        });
     }
 
     pub(super) fn shutdown(&mut self) {
@@ -458,7 +442,7 @@ impl HighPriorityRuntimePool {
 pub(super) fn observation_has_pressure(
     completed: u64,
     avg_drift_ms: u64,
-    policy: HighPriorityRuntimePolicy,
+    policy: HighPriorityRuntimeControl,
 ) -> bool {
     completed >= policy.minimum_completed_samples() && avg_drift_ms >= policy.high_avg_drift_ms()
 }
@@ -475,7 +459,7 @@ mod tests {
     #[test]
     fn initial_pool_creates_static_capacity_shard() {
         let mut pool = HighPriorityRuntimePool::new_with_parallelism(
-            HighPriorityRuntimePolicy::for_testing(),
+            HighPriorityRuntimeControl::for_testing(),
             plan(2),
             NonZeroUsize::new(8),
         );
@@ -494,7 +478,7 @@ mod tests {
     #[test]
     fn scale_out_respects_max_capacity() {
         let mut pool = HighPriorityRuntimePool::new_with_parallelism(
-            HighPriorityRuntimePolicy::for_testing(),
+            HighPriorityRuntimeControl::for_testing(),
             plan(1),
             NonZeroUsize::new(2),
         );
@@ -502,19 +486,13 @@ mod tests {
             .expect("runtime should build");
 
         assert_eq!(
-            pool.scale_out(
-                Instant::now(),
-                HighPriorityPlacementReason::PressureScaleOut
-            )
-            .expect("scale should not fail"),
+            pool.scale_out(Instant::now())
+                .expect("scale should not fail"),
             Some(HighPriorityShardId(1))
         );
         assert_eq!(
-            pool.scale_out(
-                Instant::now() + Duration::from_secs(10),
-                HighPriorityPlacementReason::PressureScaleOut
-            )
-            .expect("scale should not fail"),
+            pool.scale_out(Instant::now() + Duration::from_secs(10))
+                .expect("scale should not fail"),
             None
         );
         assert_eq!(pool.snapshot().len(), 2);
@@ -525,17 +503,14 @@ mod tests {
     #[test]
     fn placement_uses_least_loaded_non_pressured_shard() {
         let mut pool = HighPriorityRuntimePool::new_with_parallelism(
-            HighPriorityRuntimePolicy::for_testing(),
+            HighPriorityRuntimeControl::for_testing(),
             plan(1),
             NonZeroUsize::new(4),
         );
         pool.prepare_initial_runtime()
             .expect("runtime should build");
-        pool.scale_out(
-            Instant::now() + Duration::from_secs(10),
-            HighPriorityPlacementReason::PressureScaleOut,
-        )
-        .expect("scale should not fail");
+        pool.scale_out(Instant::now() + Duration::from_secs(10))
+            .expect("scale should not fail");
         pool.state.record_pressure(
             HighPriorityShardId(0),
             HighPriorityShardPressureState::Pressured,
@@ -553,11 +528,9 @@ mod tests {
     }
 
     #[test]
-    fn pressure_windows_require_configured_hysteresis() {
+    fn pressure_windows_require_default_hysteresis() {
         let mut pool = HighPriorityRuntimePool::new_with_parallelism(
-            HighPriorityRuntimePolicy::builder()
-                .pressure_windows(2)
-                .build(),
+            HighPriorityRuntimeControl::automatic(),
             plan(1),
             NonZeroUsize::new(4),
         );
@@ -565,5 +538,38 @@ mod tests {
         assert!(!pool.record_pressure_window(true));
         assert!(pool.record_pressure_window(true));
         assert!(!pool.record_pressure_window(false));
+    }
+
+    #[tokio::test]
+    async fn state_removes_instance_assignments_active_generations_and_pending_rollovers() {
+        let state = HighPriorityRuntimePoolState::for_test_current_runtime();
+        let service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(44));
+
+        state
+            .select_generation(service_id, 1)
+            .expect("generation should be placed");
+        assert!(state.request_rollover(service_id, 1, HighPriorityShardId(0)));
+
+        state.remove_service_instance(service_id);
+
+        let snapshot = state.snapshot();
+        assert_eq!(snapshot[0].assigned_instances, 0);
+        assert_eq!(snapshot[0].active_generations, 0);
+        assert!(state.request_rollover(service_id, 1, HighPriorityShardId(0)));
+    }
+
+    #[tokio::test]
+    async fn state_deduplicates_rollover_requests_until_generation_releases() {
+        let state = HighPriorityRuntimePoolState::for_test_current_runtime();
+        let service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(45));
+
+        state
+            .select_generation(service_id, 1)
+            .expect("generation should be placed");
+
+        assert!(state.request_rollover(service_id, 1, HighPriorityShardId(0)));
+        assert!(!state.request_rollover(service_id, 1, HighPriorityShardId(0)));
+        state.release_generation(service_id, 1);
+        assert!(state.request_rollover(service_id, 1, HighPriorityShardId(0)));
     }
 }

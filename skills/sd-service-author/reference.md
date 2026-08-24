@@ -110,7 +110,7 @@ converted with `.into()`.
   `Standard`. Pick `HighPriority` for short cooperative work with latency needs;
   pick `Isolated` for genuinely blocking or thread-affine work.
 - HighPriority placement is automatic inside the declared mode. The daemon's
-  `HighPriorityRuntimePolicy` may create additional shards and may request
+  internal HighPriority control loop may create additional shards and may request
   cooperative rollover. Rollover uses the reload signal path: write services so
   they can reach a reload-safe point and store needed progress in the Shelf or
   managed providers before exiting.
