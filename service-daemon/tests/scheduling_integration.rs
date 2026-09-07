@@ -1,7 +1,6 @@
-use service_daemon::{
-    Registry, RestartPolicy, SchedulingAdvisoryProfile, ServiceDaemon, TT::*, provider, service,
-    trigger,
-};
+#[cfg(feature = "high-priority")]
+use service_daemon::SchedulingAdvisoryProfile;
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, TT::*, provider, service, trigger};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock};
@@ -14,6 +13,7 @@ static ISOLATED_RESTART_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 static ISOLATED_PANIC_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
+#[cfg(feature = "high-priority")]
 static ADVISORY_DISABLED_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 static TRIGGER_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
@@ -22,7 +22,9 @@ static MULTI_ISOLATED_THREAD_NAMES: LazyLock<Arc<Mutex<HashSet<String>>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HashSet::new())));
 static STANDARD_STARTED: AtomicBool = AtomicBool::new(false);
 static STANDARD_STOPPED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_STOPPED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_STARTED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_STOPPED: AtomicBool = AtomicBool::new(false);
@@ -30,7 +32,9 @@ static ISOLATED_RESTART_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static ISOLATED_RESTART_STOPPED: AtomicBool = AtomicBool::new(false);
 static ISOLATED_PANIC_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static ISOLATED_PANIC_STOPPED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "high-priority")]
 static ADVISORY_DISABLED_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "high-priority")]
 static ADVISORY_DISABLED_STOPPED: AtomicBool = AtomicBool::new(false);
 static TRIGGER_DISPATCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 static MULTI_ISOLATED_STARTED: AtomicUsize = AtomicUsize::new(0);
@@ -68,6 +72,7 @@ async fn record_isolated_panic_thread_name() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 async fn record_advisory_disabled_thread_name() -> anyhow::Result<()> {
     let thread_name = std::thread::current()
         .name()
@@ -118,6 +123,7 @@ async fn standard_scheduled_trigger() -> anyhow::Result<()> {
     record_trigger_thread_name("standard_trigger").await
 }
 
+#[cfg(feature = "high-priority")]
 #[trigger(
     Event(SchedulingSignal),
     tags = ["__test_trigger_scheduling_lanes__"],
@@ -160,6 +166,7 @@ async fn standard_service() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[service(tags = ["__test_scheduling_threads__"], scheduling = HighPriority)]
 async fn high_priority_service() -> anyhow::Result<()> {
     record_thread_name("high_priority").await?;
@@ -221,8 +228,10 @@ async fn standard_lifecycle_service() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[service(tags = ["__test_scheduling_lifecycle__"], scheduling = HighPriority)]
 async fn high_priority_lifecycle_service() -> anyhow::Result<()> {
+    #[cfg(feature = "high-priority")]
     HIGH_PRIORITY_STARTED.store(true, Ordering::SeqCst);
     service_daemon::done();
 
@@ -230,6 +239,7 @@ async fn high_priority_lifecycle_service() -> anyhow::Result<()> {
         service_daemon::sleep(Duration::from_millis(10)).await;
     }
 
+    #[cfg(feature = "high-priority")]
     HIGH_PRIORITY_STOPPED.store(true, Ordering::SeqCst);
     Ok(())
 }
@@ -283,6 +293,7 @@ async fn isolated_panic_service() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[service(
     tags = ["__test_scheduling_advisory_profile_disabled__"],
     scheduling = HighPriority
@@ -340,6 +351,7 @@ async fn test_scheduling_isolation() -> anyhow::Result<()> {
         names
     );
 
+    #[cfg(feature = "high-priority")]
     assert!(
         names
             .iter()
@@ -348,6 +360,7 @@ async fn test_scheduling_isolation() -> anyhow::Result<()> {
         names
     );
 
+    #[cfg(feature = "high-priority")]
     assert!(
         !names
             .iter()
@@ -361,11 +374,13 @@ async fn test_scheduling_isolation() -> anyhow::Result<()> {
         "Standard service should not run in isolated thread"
     );
 
+    #[cfg(feature = "high-priority")]
     assert!(
         !names.contains("high_priority:svc-isolated_service"),
         "HighPriority service should not run in isolated thread"
     );
 
+    #[cfg(feature = "high-priority")]
     assert!(
         !names
             .iter()
@@ -454,7 +469,9 @@ async fn test_multiple_isolated_services_get_distinct_private_runtimes() -> anyh
 async fn test_scheduling_variants_participate_in_startup_and_shutdown() -> anyhow::Result<()> {
     STANDARD_STARTED.store(false, Ordering::SeqCst);
     STANDARD_STOPPED.store(false, Ordering::SeqCst);
+    #[cfg(feature = "high-priority")]
     HIGH_PRIORITY_STARTED.store(false, Ordering::SeqCst);
+    #[cfg(feature = "high-priority")]
     HIGH_PRIORITY_STOPPED.store(false, Ordering::SeqCst);
     ISOLATED_STARTED.store(false, Ordering::SeqCst);
     ISOLATED_STOPPED.store(false, Ordering::SeqCst);
@@ -472,6 +489,7 @@ async fn test_scheduling_variants_participate_in_startup_and_shutdown() -> anyho
 
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(STANDARD_STARTED.load(Ordering::SeqCst));
+    #[cfg(feature = "high-priority")]
     assert!(HIGH_PRIORITY_STARTED.load(Ordering::SeqCst));
     assert!(ISOLATED_STARTED.load(Ordering::SeqCst));
 
@@ -479,6 +497,7 @@ async fn test_scheduling_variants_participate_in_startup_and_shutdown() -> anyho
     daemon.wait().await?;
 
     assert!(STANDARD_STOPPED.load(Ordering::SeqCst));
+    #[cfg(feature = "high-priority")]
     assert!(HIGH_PRIORITY_STOPPED.load(Ordering::SeqCst));
     assert!(ISOLATED_STOPPED.load(Ordering::SeqCst));
 
@@ -504,8 +523,9 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
     tokio::time::sleep(Duration::from_millis(200)).await;
     SchedulingSignal::resolve().await.notify();
 
+    let expected_dispatches = 2 + usize::from(cfg!(feature = "high-priority"));
     let dispatch_result = tokio::time::timeout(Duration::from_secs(2), async {
-        while TRIGGER_DISPATCH_COUNT.load(Ordering::SeqCst) < 3 {
+        while TRIGGER_DISPATCH_COUNT.load(Ordering::SeqCst) < expected_dispatches {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
@@ -543,6 +563,7 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
         names
     );
 
+    #[cfg(feature = "high-priority")]
     assert!(
         names
             .iter()
@@ -550,6 +571,7 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
         "HighPriority trigger did not execute on the high-priority runtime, found: {:?}",
         names
     );
+    #[cfg(feature = "high-priority")]
     assert!(
         !names
             .iter()
@@ -557,6 +579,7 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
         "HighPriority trigger body should not execute on the control runtime, found: {:?}",
         names
     );
+    #[cfg(feature = "high-priority")]
     assert!(
         !names.contains("high_priority_trigger:svc-isolated_scheduled_trigger"),
         "HighPriority trigger body should not execute on the isolated trigger runtime, found: {:?}",
@@ -587,6 +610,7 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
 }
 
 #[tokio::test]
+#[cfg(feature = "high-priority")]
 async fn test_scheduling_advisory_disable_preserves_lifecycle_and_lane() -> anyhow::Result<()> {
     ADVISORY_DISABLED_STARTED.store(false, Ordering::SeqCst);
     ADVISORY_DISABLED_STOPPED.store(false, Ordering::SeqCst);

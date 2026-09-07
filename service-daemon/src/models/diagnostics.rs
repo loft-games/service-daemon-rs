@@ -1,6 +1,8 @@
 use crate::core::diagnostics as internal;
+#[cfg(feature = "high-priority")]
 use crate::core::service_daemon::high_priority as internal_high_priority;
 
+#[cfg(feature = "high-priority")]
 use super::runtime::{HighPriorityShardId, HighPriorityShardPressureState};
 use super::service::{ServiceInstanceId, ServiceScheduling};
 
@@ -19,6 +21,7 @@ pub enum DiagnosticRuntimeLane {
     /// Host runtime lane for `Standard` service and trigger bodies.
     Standard,
     /// Daemon-owned high-priority runtime lane.
+    #[cfg(feature = "high-priority")]
     HighPriority,
     /// Per-generation private thread and runtime lane.
     Isolated,
@@ -27,6 +30,7 @@ pub enum DiagnosticRuntimeLane {
 /// HighPriority runtime placement decision category.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(feature = "high-priority")]
 pub enum DiagnosticHighPriorityPlacementDecisionKind {
     /// Generation placed on the least-loaded eligible shard.
     LeastLoaded,
@@ -38,6 +42,7 @@ pub enum DiagnosticHighPriorityPlacementDecisionKind {
     Suppressed,
 }
 
+#[cfg(feature = "high-priority")]
 impl From<internal_high_priority::HighPriorityPlacementDecisionKind>
     for DiagnosticHighPriorityPlacementDecisionKind
 {
@@ -58,6 +63,7 @@ impl From<internal_high_priority::HighPriorityPlacementDecisionKind>
 /// HighPriority placement decision reason.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(feature = "high-priority")]
 pub enum DiagnosticHighPriorityPlacementReason {
     /// The selected shard currently had the lowest active generation load.
     LeastLoadedShard,
@@ -79,6 +85,7 @@ pub enum DiagnosticHighPriorityPlacementReason {
     NoHighPriorityRuntime,
 }
 
+#[cfg(feature = "high-priority")]
 impl From<internal_high_priority::HighPriorityPlacementReason>
     for DiagnosticHighPriorityPlacementReason
 {
@@ -114,6 +121,7 @@ impl From<internal_high_priority::HighPriorityPlacementReason>
 /// Read-only HighPriority placement decision fact.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(feature = "high-priority")]
 pub struct DiagnosticHighPriorityPlacementDecision {
     /// Target shard for the decision, when one exists.
     pub shard_id: Option<HighPriorityShardId>,
@@ -123,6 +131,7 @@ pub struct DiagnosticHighPriorityPlacementDecision {
     pub reason: DiagnosticHighPriorityPlacementReason,
 }
 
+#[cfg(feature = "high-priority")]
 impl From<internal_high_priority::HighPriorityPlacementDecision>
     for DiagnosticHighPriorityPlacementDecision
 {
@@ -140,6 +149,7 @@ impl From<internal::RuntimeLane> for DiagnosticRuntimeLane {
         match value {
             internal::RuntimeLane::Control => Self::Control,
             internal::RuntimeLane::Standard => Self::Standard,
+            #[cfg(feature = "high-priority")]
             internal::RuntimeLane::HighPriority => Self::HighPriority,
             internal::RuntimeLane::Isolated => Self::Isolated,
         }
@@ -774,8 +784,10 @@ pub struct ServiceDiagnosticsSnapshot {
     /// Actual runtime lane that ran the latest observed generation.
     pub runtime_lane: DiagnosticRuntimeLane,
     /// HighPriority shard that ran the latest observed generation, if applicable.
+    #[cfg(feature = "high-priority")]
     pub high_priority_shard_id: Option<HighPriorityShardId>,
     /// Last placement decision recorded for this service, if applicable.
+    #[cfg(feature = "high-priority")]
     pub placement_decision: Option<DiagnosticHighPriorityPlacementDecision>,
     /// Aggregated diagnostics for the service.
     pub aggregate: DiagnosticAggregateStats,
@@ -795,7 +807,9 @@ impl ServiceDiagnosticsSnapshot {
             current_generation: value.current_generation,
             declared_scheduling: Some(value.declared_scheduling),
             runtime_lane: value.runtime_lane.into(),
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: value.high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
             placement_decision: value.placement_decision.map(Into::into),
             aggregate: value.aggregate.into(),
             interpretations,
@@ -824,8 +838,10 @@ pub struct GenerationDiagnosticsSnapshot {
     /// Actual runtime lane that ran this generation.
     pub runtime_lane: DiagnosticRuntimeLane,
     /// HighPriority shard that ran this generation, if applicable.
+    #[cfg(feature = "high-priority")]
     pub high_priority_shard_id: Option<HighPriorityShardId>,
     /// Placement decision recorded for this generation, if applicable.
+    #[cfg(feature = "high-priority")]
     pub placement_decision: Option<DiagnosticHighPriorityPlacementDecision>,
     /// Aggregated diagnostics for the generation.
     pub aggregate: DiagnosticAggregateStats,
@@ -839,7 +855,9 @@ impl From<internal::GenerationDiagnosticsSnapshot> for GenerationDiagnosticsSnap
             generation: value.generation,
             declared_scheduling: Some(value.declared_scheduling),
             runtime_lane: value.runtime_lane.into(),
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: value.high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
             placement_decision: value.placement_decision.map(Into::into),
             aggregate: value.aggregate.into(),
         }
@@ -849,6 +867,7 @@ impl From<internal::GenerationDiagnosticsSnapshot> for GenerationDiagnosticsSnap
 /// Read-only diagnostics for one HighPriority runtime shard.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
 pub struct HighPriorityShardDiagnosticsSnapshot {
     /// Runtime shard identity.
     pub shard_id: HighPriorityShardId,
@@ -894,8 +913,10 @@ pub struct DaemonDiagnosticsSnapshot {
     /// Logical runtime lane summaries, including internal `Control` diagnostics.
     pub lanes: Vec<RuntimeLaneDiagnosticsSnapshot>,
     /// HighPriority runtime shard summaries.
+    #[cfg(feature = "high-priority")]
     pub high_priority_shards: Vec<HighPriorityShardDiagnosticsSnapshot>,
     /// Recent HighPriority placement and policy decisions.
+    #[cfg(feature = "high-priority")]
     pub high_priority_placement_decisions: Vec<DiagnosticHighPriorityPlacementDecision>,
 }
 
@@ -917,6 +938,7 @@ impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
                 .map(Into::into)
                 .collect(),
             lanes: value.lanes.into_iter().map(Into::into).collect(),
+            #[cfg(feature = "high-priority")]
             high_priority_shards: value
                 .high_priority_shards
                 .into_iter()
@@ -926,6 +948,7 @@ impl From<internal::DiagnosticsSnapshot> for DaemonDiagnosticsSnapshot {
                     aggregate: snapshot.aggregate.into(),
                 })
                 .collect(),
+            #[cfg(feature = "high-priority")]
             high_priority_placement_decisions: value
                 .high_priority_placement_decisions
                 .into_iter()

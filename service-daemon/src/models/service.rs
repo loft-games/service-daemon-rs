@@ -342,6 +342,7 @@ pub enum ServiceScheduling {
     /// The runtime is created lazily by the daemon handle's `run()` only when the
     /// final registry contains at least one high-priority service or trigger.
     /// This is an explicit declaration, not an overflow target for `Standard`.
+    #[cfg(feature = "high-priority")]
     HighPriority,
     /// Runs each generation body in a dedicated OS thread with a private Tokio runtime.
     ///

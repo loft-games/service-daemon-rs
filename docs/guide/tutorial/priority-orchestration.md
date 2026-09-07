@@ -110,7 +110,7 @@ async fn admin_service() -> anyhow::Result<()> {
 
 ### `HighPriority`
 
-`HighPriority` is for work that should avoid contention with the default body lane but still behaves like normal cooperative async Rust. The daemon starts with capacity derived from declared HighPriority services/triggers and, by default, runs a conservative HighPriority runtime policy that can add shards up to the available-parallelism cap when shard probe drift is sustained.
+`HighPriority` requires the opt-in `high-priority` Cargo feature. It is for work that should avoid contention with the default body lane while remaining cooperative async Rust. The daemon can adjust its resources when a service's observed sleep latency degrades, and stops repeated interventions that provide little benefit. See [Diagnostics](../diagnostics.md) for the feature and observation boundaries; this is not a hard-real-time guarantee.
 
 - Good for watchdogs, latency-sensitive queues, and small coordination tasks.
 - Not a way to make CPU-heavy or blocking code safe.
@@ -126,9 +126,8 @@ async fn watchdog_service() -> anyhow::Result<()> {
 
 There is no macro attribute or daemon builder knob for tuning the automatic
 HighPriority placement loop. Treat `HighPriority` as a framework-managed
-cooperative lane: if a service cannot tolerate cooperative rollover, keep its
-work restart-safe with normal lifecycle tools or choose a different scheduling
-mode.
+cooperative lane. Services are reloadable by default; keep business state and
+in-flight work restart-safe using the normal lifecycle tools.
 
 ### `Isolated`
 

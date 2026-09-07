@@ -75,25 +75,29 @@ pub use models::trigger::TriggerTransition;
 pub use models::{
     BackoffController, DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot,
     DiagnosticAggregateStats, DiagnosticConfidence, DiagnosticGenerationExitKind,
-    DiagnosticHighPriorityPlacementDecision, DiagnosticHighPriorityPlacementDecisionKind,
-    DiagnosticHighPriorityPlacementReason, DiagnosticInterpretation, DiagnosticInterpretationLabel,
-    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
-    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
-    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
-    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
-    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
-    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticInterpretation, DiagnosticInterpretationLabel, DiagnosticLifecycleStats,
+    DiagnosticObservationStats, DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
+    DiagnosticProviderFailureKind, DiagnosticProviderFailureRetry,
+    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
+    DiagnosticProviderFailureStats, DiagnosticRecommendationHint, DiagnosticRestartDecisionKind,
+    DiagnosticRuntimeLane, DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
     DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
-    DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot,
-    HighPriorityRuntimeShardSnapshot, HighPriorityShardDiagnosticsSnapshot, HighPriorityShardId,
-    HighPriorityShardPressureState, ProviderError, ProviderInitError, ReadinessServiceError,
-    ReadinessSnapshot, Registry, RegistryBuilder, Result, RuntimeLaneDiagnosticsSnapshot,
-    ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError, SchedulingAdvisoryProfile,
+    DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot, ProviderError,
+    ProviderInitError, ReadinessServiceError, ReadinessSnapshot, Registry, RegistryBuilder, Result,
+    RuntimeLaneDiagnosticsSnapshot, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
     ServiceDiagnosticsSnapshot, ServiceEntryId, ServiceError, ServiceHandle,
     ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId, ServiceInvocationContext,
     ServiceRuntimeSnapshot, ServiceStatus, TT, TriggerContext, TriggerHandler, TriggerHost,
     TriggerMessage, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
     TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+};
+
+#[cfg(feature = "high-priority")]
+pub use models::{
+    DiagnosticHighPriorityPlacementDecision, DiagnosticHighPriorityPlacementDecisionKind,
+    DiagnosticHighPriorityPlacementReason, HighPriorityRuntimeShardSnapshot,
+    HighPriorityShardDiagnosticsSnapshot, HighPriorityShardId, HighPriorityShardPressureState,
+    SchedulingAdvisoryProfile,
 };
 
 // Re-export simulation utilities (feature-gated toolbox)
@@ -157,16 +161,19 @@ pub mod prelude {
     pub use crate::TT::*;
     pub use crate::{
         DaemonDiagnosticsSnapshot, DaemonInstanceHandle, DaemonInstanceId, DaemonRuntimeSnapshot,
+        DiagnosticRuntimeLane, IpcStream, ManagedProvided, Provided, ReadinessSnapshot,
+        ServiceDaemon, ServiceError, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle,
+        ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
+        TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
+        TriggerRuntimeSnapshot, WatchableProvided, current_service_instance_id, done, is_shutdown,
+        provider, service, service_handle, shelve, shelve_clone, sleep, spawn_with_context, state,
+        trigger, trigger_config, unshelve, wait_shutdown,
+    };
+    #[cfg(feature = "high-priority")]
+    pub use crate::{
         DiagnosticHighPriorityPlacementDecision, DiagnosticHighPriorityPlacementDecisionKind,
-        DiagnosticHighPriorityPlacementReason, DiagnosticRuntimeLane,
-        HighPriorityRuntimeShardSnapshot, HighPriorityShardDiagnosticsSnapshot,
-        HighPriorityShardId, HighPriorityShardPressureState, IpcStream, ManagedProvided, Provided,
-        ReadinessSnapshot, SchedulingAdvisoryProfile, ServiceDaemon, ServiceError, ServiceHandle,
-        ServiceInputDescriptor, ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot,
-        ServiceScheduling, ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,
-        TriggerPressureSnapshot, TriggerRuntimeSnapshot, WatchableProvided,
-        current_service_instance_id, done, is_shutdown, provider, service, service_handle, shelve,
-        shelve_clone, sleep, spawn_with_context, state, trigger, trigger_config, unshelve,
-        wait_shutdown,
+        DiagnosticHighPriorityPlacementReason, HighPriorityRuntimeShardSnapshot,
+        HighPriorityShardDiagnosticsSnapshot, HighPriorityShardId, HighPriorityShardPressureState,
+        SchedulingAdvisoryProfile,
     };
 }

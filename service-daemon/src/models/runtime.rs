@@ -61,8 +61,10 @@ impl fmt::Display for DaemonInstanceId {
 /// Runtime identity for one framework-owned HighPriority runtime shard.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(feature = "high-priority")]
 pub struct HighPriorityShardId(pub u64);
 
+#[cfg(feature = "high-priority")]
 impl fmt::Display for HighPriorityShardId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "hp#{}", self.0)
@@ -72,6 +74,7 @@ impl fmt::Display for HighPriorityShardId {
 /// Best-effort pressure state for a HighPriority runtime shard.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(feature = "high-priority")]
 pub enum HighPriorityShardPressureState {
     /// The shard has not collected enough observations for a stronger state.
     Unknown,
@@ -84,6 +87,7 @@ pub enum HighPriorityShardPressureState {
 /// Read-only runtime facts for one HighPriority runtime shard.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
 pub struct HighPriorityRuntimeShardSnapshot {
     /// Runtime shard identity.
     pub shard_id: HighPriorityShardId,
@@ -116,6 +120,7 @@ pub struct DaemonRuntimeSnapshot {
     /// Number of triggers observed by a `TriggerRunner`.
     pub trigger_count: usize,
     /// Framework-owned HighPriority runtime shards.
+    #[cfg(feature = "high-priority")]
     pub high_priority_shards: Vec<HighPriorityRuntimeShardSnapshot>,
     /// Snapshot generation time.
     pub generated_at: DateTime<Utc>,
@@ -131,6 +136,7 @@ pub struct ServiceRuntimeSnapshot {
     pub priority: u8,
     pub declared_scheduling: ServiceScheduling,
     /// HighPriority shard that last ran this service generation, if applicable.
+    #[cfg(feature = "high-priority")]
     pub high_priority_shard_id: Option<HighPriorityShardId>,
     /// Current lifecycle status from the daemon status plane.
     pub status: ServiceStatus,

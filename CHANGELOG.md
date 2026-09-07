@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Service Instance Control**: `ServiceInstanceHandle` can now request stop, stop and wait, or remove an instance. Remove cleans daemon-local instance registry entries and associated status, shelf, reload, and runtime facts.
 - **Service Handle Model**: `ServiceHandle` is now daemon-created and carries daemon identity plus a weak daemon-local control reference. It can list, create, and start instances for its selected service definition while the daemon is alive, while `ServiceDescription` remains the daemon-owned definition and instance-tracking view.
 - **Service Handle Resolution**: Provider-time service handle lookup is scoped to the current daemon projection. Linked services outside the projection and unlinked targets fail with provider initialization errors instead of falling back to a global runtime instance.
-- **HighPriority Scheduling Runtime**: HighPriority now uses a shard pool managed by a narrow runtime policy loop. Initial capacity still comes from declared HighPriority services/triggers, while sustained shard pressure can add capacity and rollover existing cooperative generations without changing their declared scheduling mode.
+- **HighPriority Scheduling Runtime**: HighPriority is now an opt-in `high-priority` feature, disabled by default. Its controller uses per-instance sleep drift with supporting shard pressure, requests reload onto new resources, and evaluates the same metric after placement. Repeated low-benefit interventions pause expansion with structured warnings. Without the feature, HighPriority declarations fail at compile time; Standard and Isolated remain available.
 - **Simulation API**: `MockContextBuilder::build()` now returns a `SimulationHandle` that owns the simulation daemon control flow. Registry selection moves to `MockContextBuilder::with_registry(...)`, bounded simulation runs are driven through `SimulationHandle::run_for_duration(...)`, and runtime shelf/status/reload operations use `ServiceInstanceHandle`.
 - **Provider Attribute Parser**: Shared named-tail parsing across service, trigger, and provider macros while keeping provider default/template heads as a macro-specific syntax boundary.
 - **Proc-macro Diagnostics**: Removed the `proc-macro-error2` dependency and routed macro errors through the repository-owned diagnostics facade while preserving stable compile-error output.
@@ -44,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
 
 ### Fixed
+
+- **HighPriority Generation Placement**: Requested shard placement now survives old-generation release and is consumed by the next generation instead of being discarded before selection.
 
 - **Memory Analysis Example**: Updated the supervisor layout model to match the current service instance identity and runtime bookkeeping structures.
 - **Dynamic Service Lifecycle Cleanup**: Dynamic instance removal now clears per-instance service and generation diagnostics while preserving daemon-level lane and provider failure history.

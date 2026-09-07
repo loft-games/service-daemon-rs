@@ -10,6 +10,7 @@
 //! - `startup_pipeline`: Production startup orchestration after shared preflight.
 
 mod builder;
+#[cfg(feature = "high-priority")]
 pub(crate) mod high_priority;
 mod parts;
 mod policy;
@@ -45,16 +46,20 @@ use crate::core::diagnostics::DiagnosticsStore;
 use crate::models::ServiceError;
 use crate::models::{
     DaemonDiagnosticsSnapshot, DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessSnapshot,
-    Result as ServiceResult, SchedulingAdvisoryProfile, ServiceControl, ServiceDescription,
-    ServiceEntry, ServiceEntryId, ServiceHandle, ServiceInputPayload, ServiceInstanceHandle,
-    ServiceInstanceId, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceRuntimeSnapshot,
-    ServiceScheduling, ServiceStatus, TriggerRuntimeSnapshot,
+    Result as ServiceResult, ServiceControl, ServiceDescription, ServiceEntry, ServiceEntryId,
+    ServiceHandle, ServiceInputPayload, ServiceInstanceHandle, ServiceInstanceId,
+    ServiceInstanceRecord, ServiceInstanceRegistry, ServiceRuntimeSnapshot, ServiceStatus,
+    TriggerRuntimeSnapshot,
 };
 use dashmap::{DashMap, DashSet};
+#[cfg(feature = "high-priority")]
 use high_priority::{HighPriorityRuntimePool, HighPriorityRuntimePoolState};
 
+#[cfg(feature = "high-priority")]
+use crate::models::{SchedulingAdvisoryProfile, ServiceScheduling};
 pub use builder::ServiceDaemonBuilder;
 pub use policy::{RestartPolicy, RestartPolicyBuilder};
+#[cfg(feature = "high-priority")]
 use runtime::HighPriorityCapacityPlan;
 use startup_pipeline::StartupError;
 
@@ -88,6 +93,7 @@ struct DaemonInstanceControl {
 struct ServiceInstanceCleanupParts {
     instance_registry: Arc<ServiceInstanceRegistry>,
     running_tasks: Arc<Mutex<HashMap<ServiceInstanceId, JoinHandle<()>>>>,
+    #[cfg(feature = "high-priority")]
     high_priority_pool: Option<Arc<HighPriorityRuntimePoolState>>,
     resources: Arc<DaemonResources>,
     diagnostics: Arc<DiagnosticsStore>,
@@ -100,6 +106,7 @@ struct PreparedServiceStop {
     task: Option<JoinHandle<()>>,
     grace_period: Duration,
     control_runtime: Option<Handle>,
+    #[cfg(feature = "high-priority")]
     high_priority_pool: Option<Arc<HighPriorityRuntimePoolState>>,
     resources: Arc<DaemonResources>,
     stopping_instances: Arc<DashSet<ServiceInstanceId>>,
@@ -228,6 +235,9 @@ impl DaemonInstanceHandle {
                 .as_ref()
                 .map(|runtime| runtime.handle().clone())
         };
+        #[cfg(not(feature = "high-priority"))]
+        let _ = control_runtime;
+        #[cfg(feature = "high-priority")]
         if let Some(control_runtime) = control_runtime {
             self.inner
                 .lock()
@@ -860,12 +870,18 @@ pub(crate) struct DaemonInstanceInner {
     control_runtime: Option<Runtime>,
     /// Handle for the runtime that hosts standard service bodies.
     standard_runtime: Option<Handle>,
+    #[cfg(feature = "high-priority")]
     high_priority_capacity: HighPriorityCapacityPlan,
     /// Framework-owned runtime shards for HighPriority service bodies.
+    #[cfg(feature = "high-priority")]
     high_priority_runtime_pool: HighPriorityRuntimePool,
+    #[cfg(feature = "high-priority")]
     runtime_probe_tasks: Vec<JoinHandle<()>>,
+    #[cfg(feature = "high-priority")]
     adaptive_recommendation_task: Option<JoinHandle<()>>,
+    #[cfg(feature = "high-priority")]
     high_priority_policy_task: Option<JoinHandle<()>>,
+    #[cfg(feature = "high-priority")]
     scheduling_advisory_profile: SchedulingAdvisoryProfile,
     /// Optional external token for hierarchical lifecycle management.
     /// When cancelled, the daemon treats it as a shutdown signal.
@@ -879,8 +895,11 @@ pub(crate) struct DaemonInstanceInner {
 
 impl Drop for DaemonInstanceInner {
     fn drop(&mut self) {
+        #[cfg(feature = "high-priority")]
         self.abort_adaptive_recommendation_loop();
+        #[cfg(feature = "high-priority")]
         self.abort_high_priority_policy_loop();
+        #[cfg(feature = "high-priority")]
         self.shutdown_high_priority_runtime_detached();
         self.shutdown_control_runtime_detached();
     }
@@ -912,6 +931,7 @@ impl DaemonInstanceInner {
                 StartupError::ControlRuntime(err) => {
                     tracing::error!(error = %err, "ServiceDaemon control runtime creation failed");
                 }
+                #[cfg(feature = "high-priority")]
                 StartupError::HighPriorityRuntime(err) => {
                     tracing::error!(error = %err, "ServiceDaemon high-priority runtime creation failed");
                 }
@@ -982,10 +1002,14 @@ impl DaemonInstanceInner {
             .await;
         }
 
+        #[cfg(feature = "high-priority")]
         self.stop_adaptive_recommendation_loop().await;
+        #[cfg(feature = "high-priority")]
         self.stop_high_priority_policy_loop().await;
+        #[cfg(feature = "high-priority")]
         self.stop_runtime_probes().await;
         self.standard_runtime = None;
+        #[cfg(feature = "high-priority")]
         self.shutdown_high_priority_runtime();
         self.shutdown_control_runtime();
 
@@ -1018,10 +1042,14 @@ impl DaemonInstanceInner {
         )
         .await;
 
+        #[cfg(feature = "high-priority")]
         self.stop_adaptive_recommendation_loop().await;
+        #[cfg(feature = "high-priority")]
         self.stop_high_priority_policy_loop().await;
+        #[cfg(feature = "high-priority")]
         self.stop_runtime_probes().await;
         self.standard_runtime = None;
+        #[cfg(feature = "high-priority")]
         self.shutdown_high_priority_runtime_detached();
         self.shutdown_control_runtime_detached();
 
@@ -1126,8 +1154,10 @@ impl DaemonInstanceInner {
                 "cannot start service instance before standard runtime is available".to_owned(),
             )
         })?;
+        #[cfg(feature = "high-priority")]
         let high_priority_pool = (!self.high_priority_runtime_pool.is_empty())
             .then(|| self.high_priority_runtime_pool.state());
+        #[cfg(feature = "high-priority")]
         if matches!(record.scheduling(), ServiceScheduling::HighPriority)
             && high_priority_pool.is_none()
         {
@@ -1148,6 +1178,7 @@ impl DaemonInstanceInner {
             supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime),
             body_lanes: parts::BodyExecutionLanes {
                 standard: standard_runtime,
+                #[cfg(feature = "high-priority")]
                 high_priority: high_priority_pool,
             },
             body_lane_resolver: parts::BodyLaneResolver::default(),
@@ -1203,6 +1234,7 @@ impl DaemonInstanceInner {
                 .control_runtime
                 .as_ref()
                 .map(|runtime| runtime.handle().clone()),
+            #[cfg(feature = "high-priority")]
             high_priority_pool: (!self.high_priority_runtime_pool.is_empty())
                 .then(|| self.high_priority_runtime_pool.state()),
             resources: self.resources.clone(),
@@ -1296,6 +1328,7 @@ impl DaemonInstanceInner {
         ServiceInstanceCleanupParts {
             instance_registry: self.instance_registry.clone(),
             running_tasks: self.running_tasks.clone(),
+            #[cfg(feature = "high-priority")]
             high_priority_pool: (!self.high_priority_runtime_pool.is_empty())
                 .then(|| self.high_priority_runtime_pool.state()),
             resources: self.resources.clone(),
@@ -1345,6 +1378,7 @@ async fn finish_graceful_service_stop(prepared: PreparedServiceStop) -> ServiceR
     }
 
     let terminated = ServiceStatus::Terminated;
+    #[cfg(feature = "high-priority")]
     if let Some(high_priority_pool) = &prepared.high_priority_pool {
         high_priority_pool.remove_service_instance_generations(prepared.record.instance_id());
         prepared
@@ -1404,6 +1438,7 @@ async fn cleanup_service_instance(
 ) {
     cleanup.instance_registry.remove(instance_id);
     cleanup.running_tasks.lock().await.remove(&instance_id);
+    #[cfg(feature = "high-priority")]
     if let Some(high_priority_pool) = &cleanup.high_priority_pool {
         high_priority_pool.remove_service_instance(instance_id);
         cleanup
@@ -1444,13 +1479,18 @@ fn record_matches_handle(record: &ServiceInstanceRecord, handle: &ServiceInstanc
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "high-priority")]
+    use crate::models::HighPriorityShardId;
+    #[cfg(feature = "high-priority")]
     use crate::models::policy::HighPriorityRuntimeControl;
     use crate::models::{
-        HighPriorityShardId, ProviderEntry, ProviderInitError, Registry, ServiceEntry,
-        ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry,
-        ServiceParam, ServiceScheduling,
+        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId,
+        ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceParam,
+        ServiceScheduling,
     };
-    use crate::{TT::*, provider, service, trigger};
+    #[cfg(feature = "high-priority")]
+    use crate::{TT::*, trigger};
+    use crate::{provider, service};
     use std::any::TypeId;
     #[cfg(feature = "diagnostics")]
     use std::collections::BTreeMap;
@@ -1459,7 +1499,9 @@ mod tests {
     #[cfg(feature = "diagnostics")]
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(feature = "high-priority")]
+    use std::time::Instant;
     use tracing::debug;
     #[cfg(feature = "diagnostics")]
     use tracing::field::{Field, Visit};
@@ -1496,6 +1538,7 @@ mod tests {
         tags: &["__unit_runtime_standard__"],
     };
 
+    #[cfg(feature = "high-priority")]
     static HIGH_PRIORITY_TEST_ENTRY: ServiceEntry = ServiceEntry {
         name: "high_priority_test_service",
         module: "test",
@@ -1590,10 +1633,12 @@ mod tests {
         Box::leak(params.into_boxed_slice())
     }
 
+    #[cfg(feature = "high-priority")]
     fn non_zero(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).expect("test worker count should be non-zero")
     }
 
+    #[cfg(feature = "high-priority")]
     #[service(tags = ["__unit_high_priority_capacity_primary__"], scheduling = HighPriority)]
     async fn capacity_primary_high_priority_service() -> anyhow::Result<()> {
         Ok(())
@@ -1604,6 +1649,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "high-priority")]
     #[service(tags = ["__unit_high_priority_capacity_infra__"], scheduling = HighPriority)]
     async fn capacity_infra_high_priority_service() -> anyhow::Result<()> {
         Ok(())
@@ -1612,11 +1658,13 @@ mod tests {
     #[provider(Notify)]
     pub struct CapacitySignal;
 
+    #[cfg(feature = "high-priority")]
     #[service(tags = ["__unit_high_priority_capacity_parity__"], scheduling = HighPriority)]
     async fn capacity_parity_high_priority_service() -> anyhow::Result<()> {
         Ok(())
     }
 
+    #[cfg(feature = "high-priority")]
     #[trigger(
         Event(CapacitySignal),
         tags = ["__unit_high_priority_capacity_parity__"],
@@ -1627,6 +1675,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_capacity_plan_skips_runtime_for_zero_entries() {
         let plan = HighPriorityCapacityPlan::from_entry_count(0, Some(non_zero(4)));
 
@@ -1635,6 +1684,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_capacity_plan_uses_one_worker_for_one_entry() {
         let plan = HighPriorityCapacityPlan::from_entry_count(1, Some(non_zero(8)));
 
@@ -1643,6 +1693,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_capacity_plan_uses_entry_count_within_parallelism() {
         let plan = HighPriorityCapacityPlan::from_entry_count(3, Some(non_zero(8)));
 
@@ -1651,6 +1702,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_capacity_plan_caps_workers_by_parallelism() {
         let plan = HighPriorityCapacityPlan::from_entry_count(8, Some(non_zero(2)));
 
@@ -1659,6 +1711,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_capacity_plan_falls_back_to_one_worker_without_parallelism() {
         let plan = HighPriorityCapacityPlan::from_entry_count(4, None);
 
@@ -1667,6 +1720,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_capacity_plan_counts_only_declared_high_priority_entries() {
         let services = vec![
             test_service(1, &STANDARD_TEST_ENTRY),
@@ -1682,6 +1736,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn builder_capacity_plan_uses_filtered_final_registry() {
         let daemon = test_inner_builder()
             .with_registry(
@@ -1696,6 +1751,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn builder_capacity_plan_merges_infra_tags_without_double_counting() {
         let daemon = test_inner_builder()
             .with_registry(
@@ -1736,6 +1792,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn builder_capacity_plan_counts_high_priority_triggers_and_services_equally() {
         let daemon = test_inner_builder()
             .with_registry(
@@ -2076,6 +2133,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn build_does_not_create_high_priority_runtime() {
         let daemon = test_inner_builder()
             .with_registry(isolated_registry())
@@ -2085,6 +2143,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn ensure_high_priority_runtime_skips_standard_only_services() {
         let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
@@ -2105,6 +2164,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn ensure_high_priority_runtime_creates_for_high_priority_services() {
         let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
@@ -2127,6 +2187,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "high-priority")]
     async fn run_keeps_high_priority_runtime_absent_for_empty_registry() {
         let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
@@ -2138,6 +2199,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn shutdown_high_priority_runtime_is_noop_when_never_created() {
         let mut daemon = test_inner_builder()
             .with_registry(isolated_registry())
@@ -2148,7 +2210,225 @@ mod tests {
         assert!(daemon.high_priority_runtime_pool.is_empty());
     }
 
+    #[cfg(feature = "high-priority")]
+    fn seed_policy_service(
+        daemon: &DaemonInstanceInner,
+        instance: ServiceInstanceId,
+        generation: u64,
+        now: Instant,
+        drift: Duration,
+    ) {
+        let state = daemon.high_priority_runtime_pool.state();
+        let existing = state.snapshot().into_iter().find(|shard| {
+            state
+                .active_on_shard(shard.shard_id)
+                .contains(&(instance, generation))
+        });
+        let shard_id = existing.map(|shard| shard.shard_id).unwrap_or_else(|| {
+            state
+                .select_generation(instance, generation)
+                .unwrap()
+                .0
+                .shard_id
+        });
+        daemon
+            .resources
+            .reload_signals
+            .entry(instance)
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()));
+        daemon.diagnostics.register_generation_with_placement(
+            crate::core::diagnostics::GenerationRegistration {
+                service_instance_id: instance,
+                service_name: "policy_service",
+                generation,
+                declared_scheduling: ServiceScheduling::HighPriority,
+                lane: crate::core::diagnostics::RuntimeLane::HighPriority,
+                high_priority_shard_id: Some(shard_id),
+                placement_decision: None,
+            },
+        );
+        daemon
+            .diagnostics
+            .record_high_priority_sleep_for_test(instance, generation, now, drift);
+    }
+
     #[test]
+    #[cfg(feature = "high-priority")]
+    fn high_priority_timeout_stays_paused_until_external_reload_generation() {
+        let mut daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .build_inner();
+        daemon.high_priority_runtime_pool = HighPriorityRuntimePool::new_with_parallelism(
+            HighPriorityRuntimeControl::automatic(),
+            daemon.high_priority_capacity,
+            NonZeroUsize::new(4),
+        );
+        daemon.ensure_high_priority_runtime().unwrap();
+        let instance = ServiceInstanceId::new(uuid::Uuid::from_u128(9003));
+        let state = daemon.high_priority_runtime_pool.state();
+        let base = Instant::now() + Duration::from_secs(3);
+        let feed = |daemon: &mut DaemonInstanceInner, generation, at| {
+            for shard in state.snapshot() {
+                for _ in 0..3 {
+                    daemon.diagnostics.record_high_priority_shard_observation(
+                        shard.shard_id,
+                        crate::core::diagnostics::SleepObservation {
+                            source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                            reason: crate::core::diagnostics::SleepExitReason::Completed,
+                            requested: Duration::from_millis(250),
+                            elapsed: Duration::from_millis(500),
+                            drift: Duration::from_millis(250),
+                        },
+                    );
+                }
+            }
+            for _ in 0..3 {
+                daemon.diagnostics.record_high_priority_sleep_for_test(
+                    instance,
+                    generation,
+                    at,
+                    Duration::from_millis(200),
+                );
+            }
+            daemon.evaluate_high_priority_runtime_policy(at);
+        };
+        seed_policy_service(&daemon, instance, 1, base, Duration::from_millis(200));
+        feed(&mut daemon, 1, base);
+        feed(&mut daemon, 1, base + Duration::from_secs(1));
+        assert_eq!(daemon.high_priority_runtime_pool.total_worker_threads(), 2);
+        daemon.evaluate_high_priority_runtime_policy(base + Duration::from_secs(122));
+        state.record_reload_signal(instance, 1);
+        state.release_generation(instance, 1);
+        seed_policy_service(
+            &daemon,
+            instance,
+            2,
+            base + Duration::from_secs(123),
+            Duration::from_millis(200),
+        );
+        for second in 123..126 {
+            feed(&mut daemon, 2, base + Duration::from_secs(second));
+            assert_eq!(daemon.high_priority_runtime_pool.total_worker_threads(), 2);
+        }
+        state.record_reload_signal(instance, 2);
+        feed(&mut daemon, 2, base + Duration::from_secs(126));
+        assert_eq!(daemon.high_priority_runtime_pool.total_worker_threads(), 2);
+        state.release_generation(instance, 2);
+        seed_policy_service(
+            &daemon,
+            instance,
+            3,
+            base + Duration::from_secs(127),
+            Duration::from_millis(200),
+        );
+        for second in 127..129 {
+            feed(&mut daemon, 3, base + Duration::from_secs(second));
+        }
+        assert_eq!(daemon.high_priority_runtime_pool.total_worker_threads(), 3);
+        daemon.shutdown_high_priority_runtime();
+    }
+
+    #[test]
+    #[cfg(feature = "high-priority")]
+    fn high_priority_feedback_stops_low_benefit_before_worker_cap() {
+        let mut daemon = test_inner_builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .build_inner();
+        daemon.high_priority_runtime_pool = HighPriorityRuntimePool::new_with_parallelism(
+            HighPriorityRuntimeControl::automatic(),
+            daemon.high_priority_capacity,
+            NonZeroUsize::new(4),
+        );
+        daemon.ensure_high_priority_runtime().unwrap();
+        let instance = ServiceInstanceId::new(uuid::Uuid::from_u128(9002));
+        let base = Instant::now() + Duration::from_secs(3);
+        let mut previous = None;
+        for (generation, start, drift, offsets) in [
+            (1, 0, 200, &[1][..]),
+            (2, 2, 195, &[60, 61][..]),
+            (3, 64, 190, &[61, 62][..]),
+        ] {
+            if let Some(previous) = previous {
+                daemon
+                    .high_priority_runtime_pool
+                    .state()
+                    .release_generation(instance, previous);
+            }
+            let at = base + Duration::from_secs(start);
+            seed_policy_service(
+                &daemon,
+                instance,
+                generation,
+                at,
+                Duration::from_millis(drift),
+            );
+            let source = daemon
+                .high_priority_runtime_pool
+                .snapshot()
+                .into_iter()
+                .find(|shard| {
+                    daemon
+                        .high_priority_runtime_pool
+                        .state()
+                        .active_on_shard(shard.shard_id)
+                        .contains(&(instance, generation))
+                })
+                .unwrap()
+                .shard_id;
+            for _ in 0..3 {
+                daemon.diagnostics.record_high_priority_shard_observation(
+                    source,
+                    crate::core::diagnostics::SleepObservation {
+                        source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                        reason: crate::core::diagnostics::SleepExitReason::Completed,
+                        requested: Duration::from_millis(250),
+                        elapsed: Duration::from_millis(500),
+                        drift: Duration::from_millis(250),
+                    },
+                );
+            }
+            for _ in 0..2 {
+                daemon.diagnostics.record_high_priority_sleep_for_test(
+                    instance,
+                    generation,
+                    at,
+                    Duration::from_millis(drift),
+                );
+            }
+            daemon.evaluate_high_priority_runtime_policy(at);
+            for offset in offsets {
+                let at = at + Duration::from_secs(*offset);
+                for _ in 0..3 {
+                    daemon.diagnostics.record_high_priority_sleep_for_test(
+                        instance,
+                        generation,
+                        at,
+                        Duration::from_millis(drift),
+                    );
+                }
+                daemon.evaluate_high_priority_runtime_policy(at);
+            }
+            previous = Some(generation);
+        }
+        assert_eq!(
+            daemon.high_priority_runtime_pool.total_worker_threads(),
+            3,
+            "two low-benefit interventions must pause before the four-worker cap"
+        );
+        assert_eq!(daemon.high_priority_runtime_pool.max_worker_threads(), 4);
+        daemon.shutdown_high_priority_runtime();
+    }
+
+    #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_policy_tick_scales_out_after_sustained_shard_pressure() {
         let mut daemon = test_inner_builder()
             .with_registry(
@@ -2172,7 +2452,15 @@ mod tests {
             },
         );
 
-        daemon.evaluate_high_priority_runtime_policy(Instant::now());
+        let now = Instant::now() + Duration::from_secs(1);
+        seed_policy_service(
+            &daemon,
+            ServiceInstanceId::new(uuid::Uuid::from_u128(9000)),
+            1,
+            now,
+            Duration::from_millis(20),
+        );
+        daemon.evaluate_high_priority_runtime_policy(now);
 
         let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
         assert_eq!(runtime.high_priority_shards.len(), 2);
@@ -2202,6 +2490,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_policy_uses_recent_probe_window_not_lifetime_average() {
         let mut daemon = test_inner_builder()
             .with_registry(
@@ -2237,7 +2526,15 @@ mod tests {
             },
         );
 
-        daemon.evaluate_high_priority_runtime_policy(Instant::now());
+        let now = Instant::now() + Duration::from_secs(1);
+        seed_policy_service(
+            &daemon,
+            ServiceInstanceId::new(uuid::Uuid::from_u128(9000)),
+            1,
+            now,
+            Duration::from_millis(20),
+        );
+        daemon.evaluate_high_priority_runtime_policy(now);
 
         let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
         assert_eq!(
@@ -2250,6 +2547,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_global_pressure_guard_uses_recent_lane_probe_window() {
         let mut daemon = test_inner_builder()
             .with_registry(
@@ -2295,7 +2593,15 @@ mod tests {
             .diagnostics
             .record_high_priority_shard_observation(HighPriorityShardId(0), pressured);
 
-        daemon.evaluate_high_priority_runtime_policy(Instant::now());
+        let now = Instant::now() + Duration::from_secs(1);
+        seed_policy_service(
+            &daemon,
+            ServiceInstanceId::new(uuid::Uuid::from_u128(9000)),
+            1,
+            now,
+            Duration::from_millis(20),
+        );
+        daemon.evaluate_high_priority_runtime_policy(now);
 
         let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
         assert_eq!(
@@ -2308,6 +2614,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn lifecycle_pending_generation_does_not_consume_rollover_budget() {
         let now = Instant::now();
         let mut daemon = test_inner_builder()
@@ -2347,6 +2654,18 @@ mod tests {
             },
         );
 
+        let now = now + Duration::from_secs(1);
+        seed_policy_service(&daemon, service_id, 1, now, Duration::from_millis(20));
+        daemon.diagnostics.record_high_priority_shard_observation(
+            HighPriorityShardId(1),
+            crate::core::diagnostics::SleepObservation {
+                source: crate::core::diagnostics::SleepObservationSource::RuntimeProbe,
+                reason: crate::core::diagnostics::SleepExitReason::Completed,
+                requested: Duration::from_millis(250),
+                elapsed: Duration::from_millis(250),
+                drift: Duration::ZERO,
+            },
+        );
         daemon.evaluate_high_priority_runtime_policy(now + Duration::from_millis(21));
 
         let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
@@ -2378,6 +2697,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "high-priority")]
     async fn do_shutdown_drops_high_priority_runtime_before_control_runtime() {
         let drop_order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let control_drop_order = drop_order.clone();
@@ -2477,7 +2797,7 @@ mod tests {
             .with_registry(isolated_registry())
             .build_inner();
         daemon.services = vec![
-            test_service(2, &HIGH_PRIORITY_TEST_ENTRY),
+            test_service(2, &ISOLATED_TEST_ENTRY),
             test_service(1, &STANDARD_TEST_ENTRY),
         ];
         let instance_records = daemon
@@ -2616,6 +2936,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn default_advisory_profile_spawns_recommendation_loop() {
         setup_tracing();
         let mut daemon = test_inner_builder()
@@ -2632,6 +2953,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn disabled_advisory_profile_skips_recommendation_loop() {
         setup_tracing();
         let mut daemon = test_inner_builder()

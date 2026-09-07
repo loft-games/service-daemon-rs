@@ -20,11 +20,13 @@ use rand::RngExt;
 use std::collections::VecDeque;
 use std::error::Error as StdError;
 use std::fmt;
+#[cfg(feature = "high-priority")]
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+#[cfg(feature = "high-priority")]
 pub(crate) const HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES: u64 = 32;
 
 // ---------------------------------------------------------------------------
@@ -37,10 +39,12 @@ pub(crate) const HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES: u64 = 32;
 /// profile only stops advisory emission; it does not change service lifecycle,
 /// declared scheduling modes, body placement, reload, or restart behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
 pub struct SchedulingAdvisoryProfile {
     enabled: bool,
 }
 
+#[cfg(feature = "high-priority")]
 impl SchedulingAdvisoryProfile {
     /// Enable scheduling advisory diagnostics.
     #[must_use]
@@ -61,6 +65,7 @@ impl SchedulingAdvisoryProfile {
     }
 }
 
+#[cfg(feature = "high-priority")]
 impl Default for SchedulingAdvisoryProfile {
     fn default() -> Self {
         Self::enabled()
@@ -72,6 +77,7 @@ impl Default for SchedulingAdvisoryProfile {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
 pub(crate) struct HighPriorityRuntimeControl {
     max_worker_threads: Option<NonZeroUsize>,
     scale_step_worker_threads: NonZeroUsize,
@@ -83,6 +89,7 @@ pub(crate) struct HighPriorityRuntimeControl {
     max_rollovers_per_window: usize,
 }
 
+#[cfg(feature = "high-priority")]
 impl HighPriorityRuntimeControl {
     #[must_use]
     pub(crate) const fn automatic() -> Self {
@@ -147,12 +154,14 @@ impl HighPriorityRuntimeControl {
     }
 }
 
+#[cfg(feature = "high-priority")]
 impl Default for HighPriorityRuntimeControl {
     fn default() -> Self {
         Self::automatic()
     }
 }
 
+#[cfg(feature = "high-priority")]
 const fn nonzero_one() -> NonZeroUsize {
     match NonZeroUsize::new(1) {
         Some(value) => value,
@@ -161,6 +170,7 @@ const fn nonzero_one() -> NonZeroUsize {
 }
 
 #[cfg(test)]
+#[cfg(feature = "high-priority")]
 const fn nonzero_two() -> NonZeroUsize {
     match NonZeroUsize::new(2) {
         Some(value) => value,
@@ -1155,6 +1165,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_runtime_control_defaults_are_conservative() {
         let policy = HighPriorityRuntimeControl::default();
 
@@ -1164,6 +1175,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_runtime_control_test_profile_is_short_cycle() {
         let policy = HighPriorityRuntimeControl::for_testing();
 

@@ -2,21 +2,29 @@ use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(feature = "high-priority")]
+use std::time::Instant;
+#[cfg(feature = "high-priority")]
 use tokio::runtime::Handle;
+#[cfg(feature = "high-priority")]
 use tokio::sync::oneshot;
+#[cfg(feature = "high-priority")]
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "high-priority")]
 use crate::core::service_daemon::high_priority::HighPriorityPlacementDecision;
+#[cfg(feature = "high-priority")]
 use crate::models::policy::HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES;
-use crate::models::{
-    HighPriorityShardId, HighPriorityShardPressureState, ServiceInstanceId, ServiceScheduling,
-};
+#[cfg(feature = "high-priority")]
+use crate::models::{HighPriorityShardId, HighPriorityShardPressureState};
+use crate::models::{ServiceInstanceId, ServiceScheduling};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum RuntimeLane {
     Control,
     Standard,
+    #[cfg(feature = "high-priority")]
     HighPriority,
     Isolated,
 }
@@ -25,6 +33,7 @@ impl From<ServiceScheduling> for RuntimeLane {
     fn from(value: ServiceScheduling) -> Self {
         match value {
             ServiceScheduling::Standard => Self::Standard,
+            #[cfg(feature = "high-priority")]
             ServiceScheduling::HighPriority => Self::HighPriority,
             ServiceScheduling::Isolated => Self::Isolated,
         }
@@ -34,6 +43,7 @@ impl From<ServiceScheduling> for RuntimeLane {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SleepObservationSource {
     ServiceSleep,
+    #[cfg(any(test, feature = "high-priority"))]
     RuntimeProbe,
 }
 
@@ -42,6 +52,7 @@ pub(crate) enum SleepExitReason {
     Completed,
     Reload,
     Shutdown,
+    #[cfg(feature = "high-priority")]
     ProbeCancelled,
 }
 
@@ -179,12 +190,16 @@ pub(crate) struct SleepObservation {
     pub drift: Duration,
 }
 
+#[cfg(feature = "high-priority")]
 const RUNTIME_PROBE_INTERVAL: Duration = Duration::from_millis(250);
 const RETAINED_GENERATIONS_PER_SERVICE: usize = 1024;
 const RETAINED_PROVIDER_FAILURES: usize = 128;
+#[cfg(feature = "high-priority")]
 const RETAINED_HIGH_PRIORITY_PLACEMENT_DECISIONS: usize = 128;
+#[cfg(feature = "high-priority")]
 const RETAINED_RUNTIME_PROBE_WINDOW: usize = HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES as usize;
 
+#[cfg(feature = "high-priority")]
 pub(crate) async fn run_lane_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
     lane: RuntimeLane,
@@ -210,6 +225,7 @@ pub(crate) async fn run_lane_runtime_probe(
     }
 }
 
+#[cfg(feature = "high-priority")]
 pub(crate) async fn run_high_priority_shard_runtime_probe(
     diagnostics: Arc<DiagnosticsStore>,
     shard_id: HighPriorityShardId,
@@ -243,6 +259,7 @@ pub(crate) async fn run_high_priority_shard_runtime_probe(
     }
 }
 
+#[cfg(feature = "high-priority")]
 async fn observe_high_priority_shard_ping_once(
     shard_runtime: &Handle,
     token: &CancellationToken,
@@ -258,6 +275,7 @@ async fn observe_high_priority_shard_ping_once(
     .await
 }
 
+#[cfg(feature = "high-priority")]
 async fn observe_high_priority_shard_ping_once_with_control_delay(
     shard_runtime: &Handle,
     timeout: Duration,
@@ -314,6 +332,7 @@ async fn observe_high_priority_shard_ping_once_with_control_delay(
     runtime_probe_ping_observation(reason, elapsed)
 }
 
+#[cfg(feature = "high-priority")]
 pub(crate) async fn run_generation_runtime_probe(
     diagnostics: GenerationDiagnosticsHandle,
     token: CancellationToken,
@@ -338,10 +357,12 @@ pub(crate) async fn run_generation_runtime_probe(
     }
 }
 
+#[cfg(feature = "high-priority")]
 fn runtime_probe_observation(reason: SleepExitReason, start: Instant) -> SleepObservation {
     runtime_probe_observation_with_requested(reason, start, RUNTIME_PROBE_INTERVAL)
 }
 
+#[cfg(feature = "high-priority")]
 fn runtime_probe_ping_observation(reason: SleepExitReason, elapsed: Duration) -> SleepObservation {
     SleepObservation {
         source: SleepObservationSource::RuntimeProbe,
@@ -356,6 +377,7 @@ fn runtime_probe_ping_observation(reason: SleepExitReason, elapsed: Duration) ->
     }
 }
 
+#[cfg(feature = "high-priority")]
 fn runtime_probe_timeout_observation() -> SleepObservation {
     SleepObservation {
         source: SleepObservationSource::RuntimeProbe,
@@ -366,6 +388,7 @@ fn runtime_probe_timeout_observation() -> SleepObservation {
     }
 }
 
+#[cfg(feature = "high-priority")]
 fn runtime_probe_observation_with_requested(
     reason: SleepExitReason,
     start: Instant,
@@ -385,7 +408,7 @@ fn runtime_probe_observation_with_requested(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ObservationStatsSnapshot {
     pub completed: u64,
     pub interrupted: u64,
@@ -455,6 +478,7 @@ impl ObservationStats {
 }
 
 impl ObservationStatsSnapshot {
+    #[cfg(feature = "high-priority")]
     fn from_observations(observations: impl IntoIterator<Item = SleepObservation>) -> Self {
         let mut completed = 0_u64;
         let mut interrupted = 0_u64;
@@ -619,6 +643,7 @@ pub(crate) struct DiagnosticsAggregateSnapshot {
 #[derive(Default)]
 struct DiagnosticsAggregate {
     service_sleep: ObservationStats,
+    #[cfg(any(test, feature = "high-priority"))]
     runtime_probe: ObservationStats,
     lifecycle: LifecycleStats,
     shutdown_boundary: ShutdownBoundaryStats,
@@ -629,6 +654,7 @@ impl DiagnosticsAggregate {
     fn record_observation(&self, observation: SleepObservation) {
         match observation.source {
             SleepObservationSource::ServiceSleep => &self.service_sleep,
+            #[cfg(any(test, feature = "high-priority"))]
             SleepObservationSource::RuntimeProbe => &self.runtime_probe,
         }
         .record(
@@ -642,7 +668,10 @@ impl DiagnosticsAggregate {
     fn snapshot(&self) -> DiagnosticsAggregateSnapshot {
         DiagnosticsAggregateSnapshot {
             service_sleep: self.service_sleep.snapshot(),
+            #[cfg(any(test, feature = "high-priority"))]
             runtime_probe: self.runtime_probe.snapshot(),
+            #[cfg(not(any(test, feature = "high-priority")))]
+            runtime_probe: ObservationStatsSnapshot::default(),
             lifecycle: self.lifecycle.snapshot(),
             shutdown_boundary: self.shutdown_boundary.snapshot(),
             provider_failure: self.provider_failure.snapshot(),
@@ -738,7 +767,9 @@ struct ServiceDiagnostics {
     current_generation: AtomicU64,
     declared_scheduling: ServiceScheduling,
     runtime_lane: Mutex<RuntimeLane>,
+    #[cfg(feature = "high-priority")]
     high_priority_shard_id: Mutex<Option<HighPriorityShardId>>,
+    #[cfg(feature = "high-priority")]
     placement_decision: Mutex<Option<HighPriorityPlacementDecision>>,
     aggregate: DiagnosticsAggregate,
 }
@@ -749,8 +780,8 @@ impl ServiceDiagnostics {
         service_name: &'static str,
         declared_scheduling: ServiceScheduling,
         lane: RuntimeLane,
-        high_priority_shard_id: Option<HighPriorityShardId>,
-        placement_decision: Option<HighPriorityPlacementDecision>,
+        #[cfg(feature = "high-priority")] high_priority_shard_id: Option<HighPriorityShardId>,
+        #[cfg(feature = "high-priority")] placement_decision: Option<HighPriorityPlacementDecision>,
     ) -> Self {
         Self {
             service_instance_id,
@@ -758,7 +789,9 @@ impl ServiceDiagnostics {
             current_generation: AtomicU64::new(0),
             declared_scheduling,
             runtime_lane: Mutex::new(lane),
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: Mutex::new(high_priority_shard_id),
+            #[cfg(feature = "high-priority")]
             placement_decision: Mutex::new(placement_decision),
             aggregate: DiagnosticsAggregate::default(),
         }
@@ -768,13 +801,16 @@ impl ServiceDiagnostics {
         &self,
         generation: u64,
         lane: RuntimeLane,
-        high_priority_shard_id: Option<HighPriorityShardId>,
-        placement_decision: Option<HighPriorityPlacementDecision>,
+        #[cfg(feature = "high-priority")] high_priority_shard_id: Option<HighPriorityShardId>,
+        #[cfg(feature = "high-priority")] placement_decision: Option<HighPriorityPlacementDecision>,
     ) {
         self.current_generation.store(generation, Ordering::Relaxed);
         *lock_or_recover(&self.runtime_lane) = lane;
-        *lock_or_recover(&self.high_priority_shard_id) = high_priority_shard_id;
-        *lock_or_recover(&self.placement_decision) = placement_decision;
+        #[cfg(feature = "high-priority")]
+        {
+            *lock_or_recover(&self.high_priority_shard_id) = high_priority_shard_id;
+            *lock_or_recover(&self.placement_decision) = placement_decision;
+        }
     }
 
     fn snapshot(&self) -> ServiceDiagnosticsSnapshot {
@@ -784,7 +820,9 @@ impl ServiceDiagnostics {
             current_generation: self.current_generation.load(Ordering::Relaxed),
             declared_scheduling: self.declared_scheduling,
             runtime_lane: *lock_or_recover(&self.runtime_lane),
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: *lock_or_recover(&self.high_priority_shard_id),
+            #[cfg(feature = "high-priority")]
             placement_decision: *lock_or_recover(&self.placement_decision),
             aggregate: self.aggregate.snapshot(),
         }
@@ -792,12 +830,19 @@ impl ServiceDiagnostics {
 }
 
 struct GenerationDiagnostics {
+    #[cfg(feature = "high-priority")]
+    started_at: Instant,
+    #[cfg(feature = "high-priority")]
+    service_sleep_window:
+        Option<Mutex<crate::core::service_daemon::high_priority::observation::SleepWindow>>,
     service_instance_id: ServiceInstanceId,
     service_name: &'static str,
     generation: u64,
     declared_scheduling: ServiceScheduling,
     runtime_lane: RuntimeLane,
+    #[cfg(feature = "high-priority")]
     high_priority_shard_id: Option<HighPriorityShardId>,
+    #[cfg(feature = "high-priority")]
     placement_decision: Option<HighPriorityPlacementDecision>,
     aggregate: DiagnosticsAggregate,
 }
@@ -809,16 +854,22 @@ impl GenerationDiagnostics {
         generation: u64,
         declared_scheduling: ServiceScheduling,
         runtime_lane: RuntimeLane,
-        high_priority_shard_id: Option<HighPriorityShardId>,
-        placement_decision: Option<HighPriorityPlacementDecision>,
+        #[cfg(feature = "high-priority")] high_priority_shard_id: Option<HighPriorityShardId>,
+        #[cfg(feature = "high-priority")] placement_decision: Option<HighPriorityPlacementDecision>,
     ) -> Self {
         Self {
+            #[cfg(feature = "high-priority")]
+            started_at: Instant::now(),
+            #[cfg(feature = "high-priority")]
+            service_sleep_window: (runtime_lane == RuntimeLane::HighPriority).then(Mutex::default),
             service_instance_id,
             service_name,
             generation,
             declared_scheduling,
             runtime_lane,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
             placement_decision,
             aggregate: DiagnosticsAggregate::default(),
         }
@@ -831,7 +882,9 @@ impl GenerationDiagnostics {
             generation: self.generation,
             declared_scheduling: self.declared_scheduling,
             runtime_lane: self.runtime_lane,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: self.high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
             placement_decision: self.placement_decision,
             aggregate: self.aggregate.snapshot(),
         }
@@ -840,10 +893,12 @@ impl GenerationDiagnostics {
 
 struct LaneDiagnostics {
     runtime_lane: RuntimeLane,
+    #[cfg(feature = "high-priority")]
     recent_runtime_probe: Mutex<VecDeque<SleepObservation>>,
     aggregate: DiagnosticsAggregate,
 }
 
+#[cfg(feature = "high-priority")]
 struct HighPriorityShardDiagnostics {
     shard_id: HighPriorityShardId,
     pressure_state: Mutex<HighPriorityShardPressureState>,
@@ -851,6 +906,7 @@ struct HighPriorityShardDiagnostics {
     aggregate: DiagnosticsAggregate,
 }
 
+#[cfg(feature = "high-priority")]
 impl HighPriorityShardDiagnostics {
     fn new(shard_id: HighPriorityShardId) -> Self {
         Self {
@@ -888,13 +944,16 @@ impl LaneDiagnostics {
     fn new(runtime_lane: RuntimeLane) -> Self {
         Self {
             runtime_lane,
+            #[cfg(feature = "high-priority")]
             recent_runtime_probe: Mutex::new(VecDeque::new()),
             aggregate: DiagnosticsAggregate::default(),
         }
     }
 
+    #[cfg(any(test, feature = "high-priority"))]
     fn record_observation(&self, observation: SleepObservation) {
         self.aggregate.record_observation(observation);
+        #[cfg(feature = "high-priority")]
         if matches!(observation.source, SleepObservationSource::RuntimeProbe) {
             record_recent_observation(&self.recent_runtime_probe, observation);
         }
@@ -903,6 +962,7 @@ impl LaneDiagnostics {
     fn snapshot(&self) -> RuntimeLaneSnapshot {
         RuntimeLaneSnapshot {
             runtime_lane: self.runtime_lane,
+            #[cfg(feature = "high-priority")]
             recent_runtime_probe: ObservationStatsSnapshot::from_observations(
                 lock_or_recover(&self.recent_runtime_probe).iter().copied(),
             ),
@@ -911,6 +971,7 @@ impl LaneDiagnostics {
     }
 }
 
+#[cfg(feature = "high-priority")]
 fn record_recent_observation(
     recent: &Mutex<VecDeque<SleepObservation>>,
     observation: SleepObservation,
@@ -929,7 +990,9 @@ pub(crate) struct ServiceDiagnosticsSnapshot {
     pub current_generation: u64,
     pub declared_scheduling: ServiceScheduling,
     pub runtime_lane: RuntimeLane,
+    #[cfg(feature = "high-priority")]
     pub high_priority_shard_id: Option<HighPriorityShardId>,
+    #[cfg(feature = "high-priority")]
     pub placement_decision: Option<HighPriorityPlacementDecision>,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
@@ -941,7 +1004,9 @@ pub(crate) struct GenerationDiagnosticsSnapshot {
     pub generation: u64,
     pub declared_scheduling: ServiceScheduling,
     pub runtime_lane: RuntimeLane,
+    #[cfg(feature = "high-priority")]
     pub high_priority_shard_id: Option<HighPriorityShardId>,
+    #[cfg(feature = "high-priority")]
     pub placement_decision: Option<HighPriorityPlacementDecision>,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
@@ -949,11 +1014,13 @@ pub(crate) struct GenerationDiagnosticsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeLaneSnapshot {
     pub runtime_lane: RuntimeLane,
+    #[cfg(feature = "high-priority")]
     pub recent_runtime_probe: ObservationStatsSnapshot,
     pub aggregate: DiagnosticsAggregateSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
 pub(crate) struct HighPriorityShardDiagnosticsSnapshot {
     pub shard_id: HighPriorityShardId,
     pub pressure_state: HighPriorityShardPressureState,
@@ -967,7 +1034,9 @@ pub(crate) struct DiagnosticsSnapshot {
     pub generations: Vec<GenerationDiagnosticsSnapshot>,
     pub provider_failures: Vec<ProviderFailureSnapshot>,
     pub lanes: Vec<RuntimeLaneSnapshot>,
+    #[cfg(feature = "high-priority")]
     pub high_priority_shards: Vec<HighPriorityShardDiagnosticsSnapshot>,
+    #[cfg(feature = "high-priority")]
     pub high_priority_placement_decisions: Vec<HighPriorityPlacementDecision>,
 }
 
@@ -984,12 +1053,27 @@ impl GenerationDiagnosticsHandle {
     }
 
     pub(crate) fn record_sleep_observation(&self, observation: SleepObservation) {
+        #[cfg(feature = "high-priority")]
+        if observation.source == SleepObservationSource::ServiceSleep
+            && let Some(window) = self.generation.service_sleep_window.as_ref()
+        {
+            lock_or_recover(window).record(
+                Instant::now(),
+                observation.requested,
+                observation.elapsed,
+                observation.reason.completed(),
+            );
+        }
         self.generation.aggregate.record_observation(observation);
         self.service.aggregate.record_observation(observation);
         self.lane.aggregate.record_observation(observation);
     }
 
     pub(crate) fn record_exit(&self, kind: GenerationExitKind) {
+        #[cfg(feature = "high-priority")]
+        if let Some(window) = self.generation.service_sleep_window.as_ref() {
+            *lock_or_recover(window) = Default::default();
+        }
         self.generation.aggregate.lifecycle.record_exit(kind);
         self.service.aggregate.lifecycle.record_exit(kind);
         self.lane.aggregate.lifecycle.record_exit(kind);
@@ -1058,10 +1142,13 @@ pub(crate) struct DiagnosticsStore {
     services: DashMap<ServiceInstanceId, Arc<ServiceDiagnostics>>,
     generations: DashMap<(ServiceInstanceId, u64), Arc<GenerationDiagnostics>>,
     provider_failures: Mutex<VecDeque<ProviderFailureSnapshot>>,
+    #[cfg(feature = "high-priority")]
     high_priority_shards: DashMap<HighPriorityShardId, Arc<HighPriorityShardDiagnostics>>,
+    #[cfg(feature = "high-priority")]
     high_priority_placement_decisions: Mutex<VecDeque<HighPriorityPlacementDecision>>,
     control: Arc<LaneDiagnostics>,
     standard: Arc<LaneDiagnostics>,
+    #[cfg(feature = "high-priority")]
     high_priority: Arc<LaneDiagnostics>,
     isolated: Arc<LaneDiagnostics>,
 }
@@ -1072,7 +1159,9 @@ pub(crate) struct GenerationRegistration {
     pub(crate) generation: u64,
     pub(crate) declared_scheduling: ServiceScheduling,
     pub(crate) lane: RuntimeLane,
+    #[cfg(feature = "high-priority")]
     pub(crate) high_priority_shard_id: Option<HighPriorityShardId>,
+    #[cfg(feature = "high-priority")]
     pub(crate) placement_decision: Option<HighPriorityPlacementDecision>,
 }
 
@@ -1082,10 +1171,13 @@ impl Default for DiagnosticsStore {
             services: DashMap::new(),
             generations: DashMap::new(),
             provider_failures: Mutex::new(VecDeque::new()),
+            #[cfg(feature = "high-priority")]
             high_priority_shards: DashMap::new(),
+            #[cfg(feature = "high-priority")]
             high_priority_placement_decisions: Mutex::new(VecDeque::new()),
             control: Arc::new(LaneDiagnostics::new(RuntimeLane::Control)),
             standard: Arc::new(LaneDiagnostics::new(RuntimeLane::Standard)),
+            #[cfg(feature = "high-priority")]
             high_priority: Arc::new(LaneDiagnostics::new(RuntimeLane::HighPriority)),
             isolated: Arc::new(LaneDiagnostics::new(RuntimeLane::Isolated)),
         }
@@ -1093,6 +1185,52 @@ impl Default for DiagnosticsStore {
 }
 
 impl DiagnosticsStore {
+    #[cfg(all(test, feature = "high-priority"))]
+    pub(crate) fn record_high_priority_sleep_for_test(
+        &self,
+        instance: ServiceInstanceId,
+        generation: u64,
+        at: Instant,
+        drift: Duration,
+    ) {
+        let record = self
+            .generations
+            .get(&(instance, generation))
+            .expect("registered generation");
+        let window = record
+            .service_sleep_window
+            .as_ref()
+            .expect("HighPriority sleep window");
+        lock_or_recover(window).record(
+            at,
+            Duration::from_millis(1),
+            Duration::from_millis(1) + drift,
+            true,
+        );
+    }
+    #[cfg(feature = "high-priority")]
+    pub(crate) fn high_priority_sleep_sample(
+        &self,
+        instance: ServiceInstanceId,
+        generation: u64,
+        now: Instant,
+        since: Option<Instant>,
+        settle_time: Duration,
+    ) -> Option<crate::core::service_daemon::high_priority::feedback::ServiceSample> {
+        let record = self.generations.get(&(instance, generation))?;
+        let window = record.service_sleep_window.as_ref()?;
+        let stable_at = record.started_at + settle_time;
+        let since = since.map_or(stable_at, |since| since.max(stable_at));
+        Some(
+            crate::core::service_daemon::high_priority::feedback::ServiceSample {
+                instance,
+                generation,
+                shard: record.high_priority_shard_id?,
+                window: lock_or_recover(window).snapshot(now, since),
+                at: now,
+            },
+        )
+    }
     pub(crate) fn new() -> Self {
         Self::default()
     }
@@ -1111,7 +1249,9 @@ impl DiagnosticsStore {
             generation,
             declared_scheduling: scheduling_from_lane(lane).unwrap_or(ServiceScheduling::Standard),
             lane,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: None,
+            #[cfg(feature = "high-priority")]
             placement_decision: None,
         })
     }
@@ -1126,10 +1266,13 @@ impl DiagnosticsStore {
             generation,
             declared_scheduling,
             lane,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
             placement_decision,
         } = registration;
 
+        #[cfg(feature = "high-priority")]
         if let Some(decision) = placement_decision {
             self.record_high_priority_placement_decision(decision);
         }
@@ -1143,12 +1286,21 @@ impl DiagnosticsStore {
                     service_name,
                     declared_scheduling,
                     lane,
+                    #[cfg(feature = "high-priority")]
                     high_priority_shard_id,
+                    #[cfg(feature = "high-priority")]
                     placement_decision,
                 ))
             })
             .clone();
-        service.update_generation(generation, lane, high_priority_shard_id, placement_decision);
+        service.update_generation(
+            generation,
+            lane,
+            #[cfg(feature = "high-priority")]
+            high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
+            placement_decision,
+        );
 
         let generation_diagnostics = Arc::new(GenerationDiagnostics::new(
             service_instance_id,
@@ -1156,7 +1308,9 @@ impl DiagnosticsStore {
             generation,
             declared_scheduling,
             lane,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id,
+            #[cfg(feature = "high-priority")]
             placement_decision,
         ));
         self.generations.insert(
@@ -1172,10 +1326,12 @@ impl DiagnosticsStore {
         }
     }
 
+    #[cfg(any(test, feature = "high-priority"))]
     pub(crate) fn record_lane_observation(&self, lane: RuntimeLane, observation: SleepObservation) {
         self.lane_diagnostics(lane).record_observation(observation);
     }
 
+    #[cfg(feature = "high-priority")]
     pub(crate) fn record_high_priority_shard_observation(
         &self,
         shard_id: HighPriorityShardId,
@@ -1187,6 +1343,7 @@ impl DiagnosticsStore {
             .record_observation(observation);
     }
 
+    #[cfg(feature = "high-priority")]
     pub(crate) fn record_high_priority_shard_pressure_state(
         &self,
         shard_id: HighPriorityShardId,
@@ -1198,6 +1355,7 @@ impl DiagnosticsStore {
             .record_pressure_state(pressure_state);
     }
 
+    #[cfg(feature = "high-priority")]
     pub(crate) fn record_high_priority_placement_decision(
         &self,
         decision: HighPriorityPlacementDecision,
@@ -1264,11 +1422,13 @@ impl DiagnosticsStore {
             .collect();
         generations.sort_by_key(|snapshot| (snapshot.service_instance_id, snapshot.generation));
 
+        #[cfg(feature = "high-priority")]
         let mut high_priority_shards: Vec<_> = self
             .high_priority_shards
             .iter()
             .map(|shard| shard.value().snapshot())
             .collect();
+        #[cfg(feature = "high-priority")]
         high_priority_shards.sort_by_key(|snapshot| snapshot.shard_id);
 
         DiagnosticsSnapshot {
@@ -1281,10 +1441,13 @@ impl DiagnosticsStore {
             lanes: vec![
                 self.control.snapshot(),
                 self.standard.snapshot(),
+                #[cfg(feature = "high-priority")]
                 self.high_priority.snapshot(),
                 self.isolated.snapshot(),
             ],
+            #[cfg(feature = "high-priority")]
             high_priority_shards,
+            #[cfg(feature = "high-priority")]
             high_priority_placement_decisions: lock_or_recover(
                 &self.high_priority_placement_decisions,
             )
@@ -1298,6 +1461,7 @@ impl DiagnosticsStore {
         match lane {
             RuntimeLane::Control => self.control.clone(),
             RuntimeLane::Standard => self.standard.clone(),
+            #[cfg(feature = "high-priority")]
             RuntimeLane::HighPriority => self.high_priority.clone(),
             RuntimeLane::Isolated => self.isolated.clone(),
         }
@@ -1349,6 +1513,7 @@ fn scheduling_from_lane(lane: RuntimeLane) -> Option<ServiceScheduling> {
     match lane {
         RuntimeLane::Control => None,
         RuntimeLane::Standard => Some(ServiceScheduling::Standard),
+        #[cfg(feature = "high-priority")]
         RuntimeLane::HighPriority => Some(ServiceScheduling::HighPriority),
         RuntimeLane::Isolated => Some(ServiceScheduling::Isolated),
     }
@@ -1369,11 +1534,67 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "high-priority")]
+    fn feedback_sampling_honors_nonzero_settle_time_and_releases_finished_windows() {
+        let store = DiagnosticsStore::new();
+        let instance = ServiceInstanceId::new(uuid::Uuid::from_u128(8801));
+        let handle = store.register_generation_with_placement(GenerationRegistration {
+            service_instance_id: instance,
+            service_name: "settling",
+            generation: 1,
+            declared_scheduling: ServiceScheduling::HighPriority,
+            lane: RuntimeLane::HighPriority,
+            high_priority_shard_id: Some(HighPriorityShardId(0)),
+            placement_decision: None,
+        });
+        let now = Instant::now();
+        store.record_high_priority_sleep_for_test(
+            instance,
+            1,
+            now + Duration::from_secs(1),
+            Duration::from_millis(20),
+        );
+        store.record_high_priority_sleep_for_test(
+            instance,
+            1,
+            now + Duration::from_secs(3),
+            Duration::from_millis(20),
+        );
+        let sample = store
+            .high_priority_sleep_sample(
+                instance,
+                1,
+                now + Duration::from_secs(3),
+                None,
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(sample.window.completed, 1);
+        assert_eq!(sample.window.mean_drift_ns, 20_000_000);
+        handle.record_exit(GenerationExitKind::Reload);
+        assert_eq!(
+            store
+                .high_priority_sleep_sample(
+                    instance,
+                    1,
+                    now + Duration::from_secs(3),
+                    None,
+                    Duration::from_secs(2)
+                )
+                .unwrap()
+                .window
+                .completed,
+            0
+        );
+    }
+
+    #[test]
     fn runtime_lane_maps_from_service_scheduling() {
         assert_eq!(
             RuntimeLane::from(ServiceScheduling::Standard),
             RuntimeLane::Standard
         );
+        #[cfg(feature = "high-priority")]
         assert_eq!(
             RuntimeLane::from(ServiceScheduling::HighPriority),
             RuntimeLane::HighPriority
@@ -1414,6 +1635,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_shard_ping_observation_measures_ping_latency_only() {
         let observation =
             runtime_probe_ping_observation(SleepExitReason::Completed, Duration::from_millis(2));
@@ -1424,6 +1646,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[cfg(feature = "high-priority")]
     async fn high_priority_shard_ping_uses_sender_elapsed_when_control_receiver_is_delayed() {
         let shard_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1453,6 +1676,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[cfg(feature = "high-priority")]
     async fn high_priority_shard_ping_reports_timeout_when_shard_cannot_poll() {
         let shard_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1493,6 +1717,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[cfg(feature = "high-priority")]
     async fn high_priority_shard_ping_prefers_ready_receiver_over_ready_timeout() {
         let shard_runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -1522,6 +1747,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn remove_service_instance_drops_service_and_generation_diagnostics_only() {
         let store = DiagnosticsStore::new();
         let removed_id = ServiceInstanceId::new(uuid::Uuid::from_u128(31));
@@ -1565,6 +1791,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn high_priority_placement_and_shard_diagnostics_are_publicly_projected() {
         let store = DiagnosticsStore::new();
         let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(33));
@@ -1581,7 +1808,9 @@ mod tests {
             generation: 7,
             declared_scheduling: ServiceScheduling::HighPriority,
             lane: RuntimeLane::HighPriority,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: Some(shard_id),
+            #[cfg(feature = "high-priority")]
             placement_decision: Some(placement),
         });
         handle.record_sleep_observation(SleepObservation {
@@ -1636,6 +1865,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn service_sleep_observation_updates_generation_service_and_lane() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
@@ -1836,6 +2066,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn immediate_restart_decision_updates_aggregates_without_backoff() {
         let store = DiagnosticsStore::new();
         let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(24));
@@ -1919,6 +2150,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn diagnostics_generation_retention_is_service_scoped_and_keeps_aggregates() {
         let store = DiagnosticsStore::new();
 
@@ -2051,6 +2283,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
     fn public_snapshot_distills_internal_diagnostics() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
@@ -2303,6 +2536,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "high-priority")]
+    #[cfg(feature = "high-priority")]
     fn public_snapshot_does_not_apply_standard_labels_to_high_priority_service() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(
@@ -2350,6 +2585,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "high-priority")]
     async fn lane_runtime_probe_records_cancellation() {
         let store = Arc::new(DiagnosticsStore::new());
         let token = CancellationToken::new();
@@ -2364,6 +2600,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "high-priority")]
     async fn generation_runtime_probe_records_cancellation() {
         let store = DiagnosticsStore::new();
         let handle = store.register_generation(

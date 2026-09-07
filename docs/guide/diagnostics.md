@@ -4,6 +4,15 @@
 
 ## 1. `DaemonLayer` pipeline
 
+HighPriority execution and its performance controller require the separate
+`high-priority` Cargo feature (disabled by default). Enable it on the dependency
+before using `#[service(scheduling = HighPriority)]` or the equivalent trigger.
+It observes framework-aware `sleep()` calls and can reload an instance onto
+different execution resources, stopping repeated low-benefit interventions.
+Service authors handle business continuity across reload; the framework does
+not promise an absolute latency SLA. Core lifecycle snapshots and the
+`diagnostics` topology feature do not require HighPriority.
+
 `DaemonLayer` is a `tracing::Layer` that captures tracing events, extracts service and trigger IDs from the current span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.

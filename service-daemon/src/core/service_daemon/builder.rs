@@ -8,12 +8,18 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::context::{DaemonResources, process_token};
 use crate::core::diagnostics::DiagnosticsStore;
+#[cfg(feature = "high-priority")]
+use crate::models::SchedulingAdvisoryProfile;
+#[cfg(feature = "high-priority")]
 use crate::models::policy::HighPriorityRuntimeControl;
-use crate::models::{DaemonInstanceId, Registry, SchedulingAdvisoryProfile, ServiceDescription};
+use crate::models::{DaemonInstanceId, Registry, ServiceDescription};
 
+#[cfg(feature = "high-priority")]
 use super::high_priority::HighPriorityRuntimePool;
 use super::policy::RestartPolicy;
-use super::runtime::{HighPriorityCapacityPlan, ISOLATED_STARTUP_CONCURRENCY_LIMIT};
+#[cfg(feature = "high-priority")]
+use super::runtime::HighPriorityCapacityPlan;
+use super::runtime::ISOLATED_STARTUP_CONCURRENCY_LIMIT;
 use super::{DaemonInstanceHandle, DaemonInstanceInner, daemon_registry};
 
 /// Builder for constructing a daemon instance.
@@ -26,7 +32,9 @@ pub struct ServiceDaemonBuilder {
     external_cancel_token: Option<CancellationToken>,
     /// Type-erased trigger configuration overrides.
     trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    #[cfg(feature = "high-priority")]
     scheduling_advisory_profile: SchedulingAdvisoryProfile,
+    #[cfg(feature = "high-priority")]
     high_priority_runtime_control: HighPriorityRuntimeControl,
     isolated_startup_concurrency_limit: usize,
     /// Infrastructure tags whose services are always included in the final
@@ -45,7 +53,9 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
             trigger_configs: DashMap::new(),
+            #[cfg(feature = "high-priority")]
             scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
+            #[cfg(feature = "high-priority")]
             high_priority_runtime_control: HighPriorityRuntimeControl::default(),
             isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
             infra_tags: Vec::new(),
@@ -69,7 +79,9 @@ impl ServiceDaemonBuilder {
             restart_policy: RestartPolicy::default(),
             external_cancel_token: None,
             trigger_configs: DashMap::new(),
+            #[cfg(feature = "high-priority")]
             scheduling_advisory_profile: SchedulingAdvisoryProfile::default(),
+            #[cfg(feature = "high-priority")]
             high_priority_runtime_control: HighPriorityRuntimeControl::default(),
             isolated_startup_concurrency_limit: ISOLATED_STARTUP_CONCURRENCY_LIMIT,
             infra_tags: Vec::new(),
@@ -99,12 +111,13 @@ impl ServiceDaemonBuilder {
     /// This controls advisory diagnostics emission only. It does not change
     /// service lifecycle, declared scheduling modes, or body placement.
     #[must_use]
+    #[cfg(feature = "high-priority")]
     pub fn with_scheduling_advisory_profile(mut self, profile: SchedulingAdvisoryProfile) -> Self {
         self.scheduling_advisory_profile = profile;
         self
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "high-priority"))]
     pub(crate) fn with_test_high_priority_runtime_control(
         mut self,
         control: HighPriorityRuntimeControl,
@@ -236,9 +249,12 @@ impl ServiceDaemonBuilder {
             services.sort_by_key(|service| service.entry_id);
         }
 
+        #[cfg(feature = "high-priority")]
         let high_priority_capacity = HighPriorityCapacityPlan::from_services(&services);
+        #[cfg(feature = "high-priority")]
         let high_priority_runtime_pool = HighPriorityRuntimePool::new(
             self.high_priority_runtime_control,
+            #[cfg(feature = "high-priority")]
             high_priority_capacity,
         );
 
@@ -279,11 +295,17 @@ impl ServiceDaemonBuilder {
             cancellation_token: process_token().child_token(),
             control_runtime: None,
             standard_runtime: None,
+            #[cfg(feature = "high-priority")]
             high_priority_capacity,
+            #[cfg(feature = "high-priority")]
             high_priority_runtime_pool,
+            #[cfg(feature = "high-priority")]
             runtime_probe_tasks: Vec::new(),
+            #[cfg(feature = "high-priority")]
             adaptive_recommendation_task: None,
+            #[cfg(feature = "high-priority")]
             high_priority_policy_task: None,
+            #[cfg(feature = "high-priority")]
             scheduling_advisory_profile: self.scheduling_advisory_profile,
             external_cancel_token: self.external_cancel_token,
             resources,

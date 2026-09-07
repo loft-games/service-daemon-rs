@@ -3,11 +3,12 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::models::{
-    DaemonInstanceId, DaemonRuntimeSnapshot, HighPriorityRuntimeShardSnapshot, HighPriorityShardId,
-    ReadinessServiceError, ReadinessSnapshot, ServiceInstanceId, ServiceInstanceRecord,
-    ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TriggerPressureSnapshot,
-    TriggerRuntimeSnapshot,
+    DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot,
+    ServiceInstanceId, ServiceInstanceRecord, ServiceRuntimeSnapshot, ServiceScheduling,
+    ServiceStatus, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
 };
+#[cfg(feature = "high-priority")]
+use crate::models::{HighPriorityRuntimeShardSnapshot, HighPriorityShardId};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -41,6 +42,7 @@ struct ServiceRuntimeState {
     last_error: Option<String>,
     current_backoff: Option<Duration>,
     healthy_since: Option<DateTime<Utc>>,
+    #[cfg(feature = "high-priority")]
     high_priority_shard_id: Option<HighPriorityShardId>,
 }
 
@@ -64,6 +66,7 @@ impl ServiceRuntimeRecord {
             service_name: self.metadata.service_name,
             priority: self.metadata.priority,
             declared_scheduling: self.metadata.declared_scheduling,
+            #[cfg(feature = "high-priority")]
             high_priority_shard_id: state.high_priority_shard_id,
             status,
             generation: state.generation,
@@ -199,6 +202,7 @@ pub(crate) struct RuntimeFactsStore {
     start_instant: Instant,
     services: DashMap<ServiceInstanceId, Arc<ServiceRuntimeRecord>>,
     triggers: DashMap<ServiceInstanceId, Arc<TriggerRuntimeRecord>>,
+    #[cfg(feature = "high-priority")]
     high_priority_shards: DashMap<HighPriorityShardId, HighPriorityRuntimeShardSnapshot>,
 }
 
@@ -220,6 +224,7 @@ impl RuntimeFactsStore {
             start_instant: Instant::now(),
             services: DashMap::new(),
             triggers: DashMap::new(),
+            #[cfg(feature = "high-priority")]
             high_priority_shards: DashMap::new(),
         }
     }
@@ -250,11 +255,13 @@ impl RuntimeFactsStore {
             shutdown_requested,
             service_count: self.services.len(),
             trigger_count: self.triggers.len(),
+            #[cfg(feature = "high-priority")]
             high_priority_shards: self.high_priority_shard_snapshots(),
             generated_at: Utc::now(),
         }
     }
 
+    #[cfg(feature = "high-priority")]
     pub(crate) fn record_high_priority_shards(
         &self,
         shards: Vec<HighPriorityRuntimeShardSnapshot>,
@@ -265,6 +272,7 @@ impl RuntimeFactsStore {
         }
     }
 
+    #[cfg(feature = "high-priority")]
     fn high_priority_shard_snapshots(&self) -> Vec<HighPriorityRuntimeShardSnapshot> {
         let mut snapshots: Vec<_> = self
             .high_priority_shards
@@ -275,6 +283,7 @@ impl RuntimeFactsStore {
         snapshots
     }
 
+    #[cfg(feature = "high-priority")]
     pub(crate) fn record_service_high_priority_shard(
         &self,
         service_instance_id: ServiceInstanceId,
@@ -520,7 +529,7 @@ mod tests {
         wrapper: noop_service,
         watcher: None,
         priority: 80,
-        scheduling: ServiceScheduling::HighPriority,
+        scheduling: ServiceScheduling::Isolated,
         input: None,
         tags: &[],
     };

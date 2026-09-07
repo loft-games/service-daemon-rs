@@ -16,7 +16,7 @@ It earns its keep when your application has more than one long-running concern. 
 ## Why choose service-daemon?
 
 *   **Declarative orchestration** -- Describe services, triggers, providers, and their relationships with attributes like `#[service]` or `#[trigger(Cron(CleanupSchedule))]`, where trigger targets are provider types. No manual service list or ad hoc spawn supervision in `main`.
-*   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, scheduling lanes (`Standard`, `HighPriority`, `Isolated`), restart policies, graceful signal handling, early-binding TCP/Unix listeners -- the glue you'd otherwise rewrite per project.
+*   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, scheduling lanes (`Standard`, opt-in `HighPriority` via the `high-priority` feature, `Isolated`), restart policies, graceful signal handling, early-binding TCP/Unix listeners -- the glue you'd otherwise rewrite per project.
 *   **Type-safe dependency injection** -- Resolved by Rust's type system. No runtime container, no string keys, no reflection. Discovery is linker-level via `linkme`.
 *   **Causal observability** -- UUID v7 message IDs propagate across services automatically. Optional **Mermaid** topology export visualizes the running system.
 *   **Testable by design** -- A feature-gated `MockContext` lets you simulate async behavior and state transitions in a controlled sandbox without spinning up the full daemon.

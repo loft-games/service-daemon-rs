@@ -8,11 +8,13 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 static RELOAD_EVENTS: LazyLock<Mutex<Vec<&'static str>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_RELOAD_EVENTS: LazyLock<Mutex<Vec<&'static str>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 static ISOLATED_RELOAD_EVENTS: LazyLock<Mutex<Vec<&'static str>>> =
     LazyLock::new(|| Mutex::new(Vec::new()));
 static RELOAD_GENERATIONS: AtomicU32 = AtomicU32::new(0);
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_RELOAD_GENERATIONS: AtomicU32 = AtomicU32::new(0);
 static ISOLATED_RELOAD_GENERATIONS: AtomicU32 = AtomicU32::new(0);
 static NOOP_RELOAD_EVENTS: LazyLock<Mutex<Vec<&'static str>>> =
@@ -25,6 +27,7 @@ pub struct ReloadConfig {
     pub version: u32,
 }
 
+#[cfg(feature = "high-priority")]
 #[derive(Clone, Default)]
 #[provider]
 pub struct HighPriorityReloadConfig {
@@ -75,6 +78,7 @@ async fn reload_observer(_config: Arc<ReloadConfig>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[service(tags = ["__test_high_priority_reload_contract__"], scheduling = HighPriority)]
 async fn high_priority_reload_observer(
     _config: Arc<HighPriorityReloadConfig>,
@@ -304,6 +308,7 @@ async fn test_dependency_reload_transitions_through_need_reload_and_restoring() 
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[tokio::test]
 async fn test_high_priority_dependency_reload_crosses_body_lane() -> anyhow::Result<()> {
     HIGH_PRIORITY_RELOAD_GENERATIONS.store(0, Ordering::SeqCst);

@@ -1,3 +1,4 @@
+#[cfg(feature = "high-priority")]
 pub(crate) mod adaptive_scheduling;
 pub mod context;
 pub mod di;

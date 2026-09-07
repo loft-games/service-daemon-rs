@@ -20,8 +20,11 @@ static ON_DEMAND_INTERNAL_PROGRESS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 static ON_DEMAND_WORKER_INPUT_SUM: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_CLEANUP_HANDLE_READY: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_CLEANUP_WORKER_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
+#[cfg(feature = "high-priority")]
 static HIGH_PRIORITY_CLEANUP_STARTS: AtomicUsize = AtomicUsize::new(0);
 static REMOVE_HANDLES_READY: AtomicBool = AtomicBool::new(false);
 static STUBBORN_REMOVE_HANDLE: Mutex<Option<ServiceHandle>> = Mutex::new(None);
@@ -75,6 +78,7 @@ struct OnDemandWorkerHandle(ServiceHandle);
 #[derive(Clone)]
 struct InternalWorkerHandle(ServiceHandle);
 
+#[cfg(feature = "high-priority")]
 #[derive(Clone)]
 struct HighPriorityCleanupWorkerHandle(ServiceHandle);
 
@@ -270,6 +274,7 @@ async fn internal_on_demand_controller(
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[service(
     tags = ["__service_handle_high_priority_cleanup__"],
     scheduling = HighPriority
@@ -281,11 +286,13 @@ async fn high_priority_cleanup_worker(#[input] _job: &WorkerJob) -> anyhow::Resu
     Ok(())
 }
 
+#[cfg(feature = "high-priority")]
 #[provider]
 fn high_priority_cleanup_worker_handle() -> Result<HighPriorityCleanupWorkerHandle, ProviderError> {
     service_handle!(high_priority_cleanup_worker).map(HighPriorityCleanupWorkerHandle)
 }
 
+#[cfg(feature = "high-priority")]
 #[service(tags = ["__service_handle_high_priority_cleanup__"])]
 async fn high_priority_cleanup_handle_consumer(
     handle: std::sync::Arc<HighPriorityCleanupWorkerHandle>,
@@ -370,7 +377,8 @@ async fn cancel_remove_handle_catalog(
     Ok(())
 }
 
-#[service(tags = ["__service_handle_graceful_stop__"], scheduling = HighPriority)]
+#[cfg_attr(feature = "high-priority", service(tags = ["__service_handle_graceful_stop__"], scheduling = HighPriority))]
+#[cfg_attr(not(feature = "high-priority"), service(tags = ["__service_handle_graceful_stop__"], scheduling = Standard))]
 async fn stubborn_stop_worker(#[input] _job: &WorkerJob) -> anyhow::Result<()> {
     STUBBORN_STOP_STARTS.fetch_add(1, Ordering::SeqCst);
     done();
@@ -578,6 +586,7 @@ async fn wait_for_lifecycle_handles() {
     .expect("lifecycle handle catalog should publish service handles");
 }
 
+#[cfg(feature = "high-priority")]
 async fn wait_for_high_priority_cleanup_handle() {
     tokio::time::timeout(Duration::from_secs(2), async {
         while !HIGH_PRIORITY_CLEANUP_HANDLE_READY.load(Ordering::SeqCst) {
@@ -1164,6 +1173,7 @@ async fn on_demand_service_handle_creates_starts_stops_removes_and_force_removes
         .expect("daemon should shut down cleanly");
 }
 
+#[cfg(feature = "high-priority")]
 #[tokio::test]
 async fn high_priority_dynamic_remove_and_force_remove_clear_runtime_accounting() {
     HIGH_PRIORITY_CLEANUP_HANDLE_READY.store(false, Ordering::SeqCst);
@@ -1326,6 +1336,7 @@ async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
         "stubborn worker should enter first generation",
     )
     .await;
+    #[cfg(feature = "high-priority")]
     assert_eq!(
         daemon
             .runtime()
@@ -1408,7 +1419,9 @@ async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
         .expect("stubborn stop should complete");
     assert!(stopped);
     assert_eq!(stubborn.status().await, ServiceStatus::Terminated);
+    #[cfg(feature = "high-priority")]
     let high_priority_shard_counts = daemon.runtime().high_priority_shards;
+    #[cfg(feature = "high-priority")]
     assert_eq!(
         high_priority_shard_counts
             .iter()
@@ -1417,6 +1430,7 @@ async fn graceful_stop_does_not_block_other_dynamic_lifecycle_operations() {
         0,
         "stop timeout abort should clear HighPriority active generation accounting"
     );
+    #[cfg(feature = "high-priority")]
     assert_eq!(
         high_priority_shard_counts
             .iter()

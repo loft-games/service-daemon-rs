@@ -1,3 +1,5 @@
+#![cfg(feature = "high-priority")]
+
 use service_daemon::{
     DiagnosticHighPriorityPlacementDecisionKind, Registry, SchedulingAdvisoryProfile,
     ServiceDaemon, ServiceHandle, ServiceStatus, done, provider, service, service_handle,
@@ -14,6 +16,7 @@ static TEST_LOCK: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::syn
 
 struct PolicyWorkerJob {
     block_for: Duration,
+    observe_sleep: bool,
 }
 
 #[derive(Clone)]
@@ -25,11 +28,28 @@ struct PolicyWorkerHandle(ServiceHandle);
 )]
 async fn policy_worker(#[input] job: &PolicyWorkerJob) -> anyhow::Result<()> {
     WORKER_STARTS.fetch_add(1, Ordering::SeqCst);
-    if !job.block_for.is_zero() {
-        std::thread::sleep(job.block_for);
+    if job.observe_sleep {
+        done();
+        loop {
+            let completed = tokio::select! {
+                biased;
+                completed = service_daemon::sleep(Duration::from_millis(5)) => completed,
+                _ = async {
+                    std::thread::sleep(job.block_for);
+                    std::future::pending::<()>().await;
+                } => false,
+            };
+            if !completed {
+                break;
+            }
+        }
+    } else {
+        if !job.block_for.is_zero() {
+            std::thread::sleep(job.block_for);
+        }
+        done();
+        wait_shutdown().await;
     }
-    done();
-    wait_shutdown().await;
     Ok(())
 }
 
@@ -100,11 +120,13 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
     )
     .await;
     assert_eq!(daemon.runtime().high_priority_shards.len(), 1);
+    let original_shard_id = daemon.runtime().high_priority_shards[0].shard_id;
 
     let handle = policy_worker_service_handle();
     let pressured = handle
         .start(PolicyWorkerJob {
-            block_for: Duration::from_secs(3),
+            block_for: Duration::from_millis(400),
+            observe_sleep: true,
         })
         .await
         .expect("pressured worker should start");
@@ -112,13 +134,14 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
     wait_until(
         || daemon.runtime().high_priority_shards.len() >= 2,
         "HighPriority policy scale-out",
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     )
     .await;
 
     let placed_after_scale_out = handle
         .start(PolicyWorkerJob {
             block_for: Duration::ZERO,
+            observe_sleep: false,
         })
         .await
         .expect("post-scale worker should start");
@@ -133,14 +156,12 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
     )
     .await;
 
-    let pressured_runtime = pressured
-        .runtime()
-        .expect("pressured worker runtime should be visible");
     let placed_runtime = placed_after_scale_out
         .runtime()
         .expect("post-scale worker runtime should be visible");
     assert_ne!(
-        pressured_runtime.high_priority_shard_id, placed_runtime.high_priority_shard_id,
+        Some(original_shard_id),
+        placed_runtime.high_priority_shard_id,
         "new HighPriority generation should avoid the pressured shard after scale-out"
     );
 
@@ -159,12 +180,23 @@ async fn high_priority_policy_scales_out_and_places_new_dynamic_instance_on_new_
             .any(|service| service.high_priority_shard_id == placed_runtime.high_priority_shard_id),
         "service diagnostics should include actual HighPriority shard placement"
     );
+    assert!(
+        diagnostics.services.iter().any(|service| {
+            service.service_instance_id == pressured.instance_id()
+                && service.aggregate.service_sleep.completed >= 3
+        }),
+        "scale-out requires completed ServiceSleep evidence for the pressured instance"
+    );
 
     daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn high_priority_policy_scales_out_while_single_worker_shard_is_blocked() {
+async fn high_priority_policy_does_not_scale_blocked_shard_without_service_sleep_evidence() {
     let _guard = TEST_LOCK.lock().await;
     reset_policy_test_state();
     let daemon = ServiceDaemon::builder()
@@ -183,21 +215,55 @@ async fn high_priority_policy_scales_out_while_single_worker_shard_is_blocked() 
     )
     .await;
 
-    policy_worker_service_handle()
+    let instance = policy_worker_service_handle()
         .start(PolicyWorkerJob {
             block_for: Duration::from_secs(3),
+            observe_sleep: false,
         })
         .await
         .expect("pressured worker should start");
 
     wait_until(
-        || daemon.runtime().high_priority_shards.len() >= 2,
-        "HighPriority scale-out while target shard is blocked",
+        || {
+            instance
+                .runtime()
+                .is_some_and(|runtime| runtime.status == ServiceStatus::Healthy)
+                && daemon
+                    .diagnostics_snapshot()
+                    .high_priority_shards
+                    .iter()
+                    .any(|shard| {
+                        shard.aggregate.runtime_probe.completed >= 3
+                            && shard.aggregate.runtime_probe.max_drift_ms >= 100
+                    })
+        },
+        "blocked worker completion and shard probe pressure evidence",
         Duration::from_secs(5),
     )
     .await;
+    assert_eq!(daemon.runtime().high_priority_shards.len(), 1);
+    let diagnostics = daemon.diagnostics_snapshot();
+    let service = diagnostics
+        .services
+        .iter()
+        .find(|service| service.service_instance_id == instance.instance_id())
+        .expect("blocked service should have diagnostics");
+    assert_eq!(service.aggregate.service_sleep.completed, 0);
+    assert!(
+        diagnostics
+            .high_priority_placement_decisions
+            .iter()
+            .all(|decision| {
+                decision.kind != DiagnosticHighPriorityPlacementDecisionKind::ScaleOut
+                    && decision.kind != DiagnosticHighPriorityPlacementDecisionKind::Rollover
+            })
+    );
 
     daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -223,7 +289,8 @@ async fn advisory_disabled_does_not_disable_high_priority_policy() {
 
     policy_worker_service_handle()
         .start(PolicyWorkerJob {
-            block_for: Duration::from_secs(3),
+            block_for: Duration::from_millis(400),
+            observe_sleep: true,
         })
         .await
         .expect("pressured worker should start");
@@ -231,11 +298,15 @@ async fn advisory_disabled_does_not_disable_high_priority_policy() {
     wait_until(
         || daemon.runtime().high_priority_shards.len() >= 2,
         "HighPriority policy scale-out with advisory disabled",
-        Duration::from_secs(5),
+        Duration::from_secs(10),
     )
     .await;
 
     daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -260,7 +331,8 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
 
     let instance = policy_worker_service_handle()
         .start(PolicyWorkerJob {
-            block_for: Duration::from_secs(3),
+            block_for: Duration::from_millis(400),
+            observe_sleep: true,
         })
         .await
         .expect("pressured worker should start");
@@ -276,7 +348,7 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
                 })
         },
         "HighPriority policy rollover decision",
-        Duration::from_secs(6),
+        Duration::from_secs(10),
     )
     .await;
 
@@ -322,4 +394,8 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
     );
 
     daemon.shutdown();
+    daemon
+        .wait()
+        .await
+        .expect("daemon should shut down cleanly");
 }

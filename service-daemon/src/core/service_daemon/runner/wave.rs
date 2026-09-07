@@ -4,8 +4,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+#[cfg(feature = "high-priority")]
+use tracing::error;
+use tracing::{info, warn};
 
+#[cfg(feature = "high-priority")]
 use crate::ServiceScheduling;
 use crate::core::context::DaemonResources;
 use crate::models::{ServiceInstanceId, ServiceInstanceRecord, ServiceStatus};
@@ -123,6 +126,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
         isolated_startup_permits,
         control_runtime,
         standard_runtime,
+        #[cfg(feature = "high-priority")]
         high_priority_pool,
         daemon_token,
     } = parts;
@@ -131,6 +135,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
 
     let body_lanes = BodyExecutionLanes {
         standard: standard_runtime,
+        #[cfg(feature = "high-priority")]
         high_priority: high_priority_pool,
     };
     let waves = ServiceWave::from_services(&instances);
@@ -150,6 +155,7 @@ pub(super) async fn spawn_all_services(parts: SpawnAllServicesParts) {
         );
 
         for service in &wave.services {
+            #[cfg(feature = "high-priority")]
             if matches!(service.scheduling(), ServiceScheduling::HighPriority)
                 && body_lanes.high_priority.is_none()
             {

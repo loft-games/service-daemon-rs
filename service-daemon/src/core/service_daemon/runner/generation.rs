@@ -12,9 +12,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, warn};
 
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+#[cfg(feature = "high-priority")]
+use crate::core::diagnostics::run_generation_runtime_probe;
 use crate::core::diagnostics::{
     GenerationDiagnosticsHandle, ShutdownBoundaryKind, ShutdownBoundaryOutcomeSnapshot,
-    ShutdownBoundaryResultKind, ShutdownResidualActionKind, run_generation_runtime_probe,
+    ShutdownBoundaryResultKind, ShutdownResidualActionKind,
 };
 use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
 use crate::models::{ServiceFn, ServiceInstanceId, ServiceInvocationContext};
@@ -296,15 +298,20 @@ pub(super) fn run_isolated_service_generation(
                 {
                     Ok(runtime) => {
                         drop(permit);
+                        #[cfg(feature = "high-priority")]
                         let probe_diagnostics = parts.diagnostics.clone();
                         runtime.block_on(async move {
+                            #[cfg(feature = "high-priority")]
                             let probe_token = CancellationToken::new();
+                            #[cfg(feature = "high-priority")]
                             let probe_handle = tokio::spawn(run_generation_runtime_probe(
                                 probe_diagnostics,
                                 probe_token.clone(),
                             ));
                             let outcome = run_scoped_service_generation(parts).await;
+                            #[cfg(feature = "high-priority")]
                             probe_token.cancel();
+                            #[cfg(feature = "high-priority")]
                             if let Err(err) = probe_handle.await {
                                 warn!(
                                     service = %name,

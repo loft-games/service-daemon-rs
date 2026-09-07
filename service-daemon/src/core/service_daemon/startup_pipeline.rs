@@ -10,6 +10,7 @@ pub(super) enum StartupError {
     ProviderGraph(ProviderInitError),
     EagerProviderInit(ProviderInitError),
     ControlRuntime(std::io::Error),
+    #[cfg(feature = "high-priority")]
     HighPriorityRuntime(std::io::Error),
     StartupOrchestration(JoinError),
 }
@@ -27,7 +28,10 @@ impl DaemonInstanceInner {
                 StartupPreflightError::Runtime(RuntimePreparationError::Control(err)) => {
                     StartupError::ControlRuntime(err)
                 }
-                StartupPreflightError::Runtime(RuntimePreparationError::HighPriority(err)) => {
+                #[cfg(feature = "high-priority")]
+                StartupPreflightError::Runtime(RuntimePreparationError::HighPriority(err)) =>
+                {
+                    #[cfg(feature = "high-priority")]
                     StartupError::HighPriorityRuntime(err)
                 }
             })?;
@@ -45,6 +49,7 @@ impl DaemonInstanceInner {
                     isolated_startup_permits: self.isolated_startup_permits.clone(),
                     control_runtime: control_runtime.clone(),
                     standard_runtime: runtimes.standard,
+                    #[cfg(feature = "high-priority")]
                     high_priority_pool: runtimes
                         .high_priority
                         .as_ref()

@@ -1,4 +1,6 @@
-use crate::models::{Result as ServiceResult, ServiceError, ServiceScheduling};
+#[cfg(feature = "high-priority")]
+use crate::models::ServiceScheduling;
+use crate::models::{Result as ServiceResult, ServiceError};
 
 use super::runtime::RuntimePreparationError;
 use super::startup_preflight::StartupPreflightError;
@@ -21,10 +23,13 @@ impl DaemonInstanceInner {
                 StartupPreflightError::EagerProviderInit(err) => ServiceError::InternalError(
                     format!("eager provider initialization failed: {err}"),
                 ),
-                StartupPreflightError::Runtime(
-                    RuntimePreparationError::Control(err)
-                    | RuntimePreparationError::HighPriority(err),
-                ) => ServiceError::InternalError(err.to_string()),
+                StartupPreflightError::Runtime(RuntimePreparationError::Control(err)) => {
+                    ServiceError::InternalError(err.to_string())
+                }
+                #[cfg(feature = "high-priority")]
+                StartupPreflightError::Runtime(RuntimePreparationError::HighPriority(err)) => {
+                    ServiceError::InternalError(err.to_string())
+                }
             })?;
 
         self.standard_runtime = Some(runtimes.standard.clone());
@@ -32,12 +37,14 @@ impl DaemonInstanceInner {
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let body_lanes = parts::BodyExecutionLanes {
                 standard: runtimes.standard.clone(),
+                #[cfg(feature = "high-priority")]
                 high_priority: runtimes
                     .high_priority
                     .as_ref()
                     .map(|_| self.high_priority_runtime_pool.state()),
             };
             for service in self.instance_registry.records() {
+                #[cfg(feature = "high-priority")]
                 if matches!(service.scheduling(), ServiceScheduling::HighPriority)
                     && body_lanes.high_priority.is_none()
                 {

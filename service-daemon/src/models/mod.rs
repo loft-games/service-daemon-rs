@@ -8,30 +8,37 @@ pub mod trigger;
 
 pub use diagnostics::{
     DaemonDiagnosticsSnapshot, DiagnosticAggregateStats, DiagnosticConfidence,
-    DiagnosticGenerationExitKind, DiagnosticHighPriorityPlacementDecision,
-    DiagnosticHighPriorityPlacementDecisionKind, DiagnosticHighPriorityPlacementReason,
-    DiagnosticInterpretation, DiagnosticInterpretationLabel, DiagnosticLifecycleStats,
-    DiagnosticObservationStats, DiagnosticProviderFailure, DiagnosticProviderFailureBoundaryKind,
-    DiagnosticProviderFailureKind, DiagnosticProviderFailureRetry,
-    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
-    DiagnosticProviderFailureStats, DiagnosticRecommendationHint, DiagnosticRestartDecisionKind,
-    DiagnosticRuntimeLane, DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
+    DiagnosticGenerationExitKind, DiagnosticInterpretation, DiagnosticInterpretationLabel,
+    DiagnosticLifecycleStats, DiagnosticObservationStats, DiagnosticProviderFailure,
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
+    DiagnosticProviderFailureRetry, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, DiagnosticProviderFailureStats,
+    DiagnosticRecommendationHint, DiagnosticRestartDecisionKind, DiagnosticRuntimeLane,
+    DiagnosticShutdownBoundaryKind, DiagnosticShutdownBoundaryOutcome,
     DiagnosticShutdownBoundaryResultKind, DiagnosticShutdownBoundaryStats,
     DiagnosticShutdownResidualActionKind, GenerationDiagnosticsSnapshot,
-    HighPriorityShardDiagnosticsSnapshot, RuntimeLaneDiagnosticsSnapshot,
-    ServiceDiagnosticsSnapshot,
+    RuntimeLaneDiagnosticsSnapshot, ServiceDiagnosticsSnapshot,
+};
+#[cfg(feature = "high-priority")]
+pub use diagnostics::{
+    DiagnosticHighPriorityPlacementDecision, DiagnosticHighPriorityPlacementDecisionKind,
+    DiagnosticHighPriorityPlacementReason, HighPriorityShardDiagnosticsSnapshot,
 };
 pub use error::{ProviderInitError, Result, ServiceError};
+#[cfg(feature = "high-priority")]
+pub use policy::SchedulingAdvisoryProfile;
 pub use policy::{
     BackoffController, RestartPolicy, ScalingPolicy, ScalingPolicyBuilder, ScalingPolicyError,
-    SchedulingAdvisoryProfile, TriggerPolicyOverlay, TriggerPolicyOverlayBuilder,
-    TriggerPolicyOverlayError,
+    TriggerPolicyOverlay, TriggerPolicyOverlayBuilder, TriggerPolicyOverlayError,
 };
 pub use provider_error::ProviderError;
 pub use runtime::{
-    DaemonInstanceId, DaemonRuntimeSnapshot, HighPriorityRuntimeShardSnapshot, HighPriorityShardId,
-    HighPriorityShardPressureState, ReadinessServiceError, ReadinessSnapshot,
+    DaemonInstanceId, DaemonRuntimeSnapshot, ReadinessServiceError, ReadinessSnapshot,
     ServiceRuntimeSnapshot, TriggerPressureSnapshot, TriggerRuntimeSnapshot,
+};
+#[cfg(feature = "high-priority")]
+pub use runtime::{
+    HighPriorityRuntimeShardSnapshot, HighPriorityShardId, HighPriorityShardPressureState,
 };
 pub use service::{
     PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,

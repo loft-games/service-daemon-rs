@@ -474,6 +474,10 @@ impl ServiceSupervisor {
         tokio::select! {
             _ = tokio::time::sleep(restart_delay) => {}
             _ = reload_signal.notified() => {
+                #[cfg(feature = "high-priority")]
+                if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                    accounting.record_reload_signal(self.service_instance_id, self.generation);
+                }
                 info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
                 // Immediate reload -- reset backoff so we restart right away
                 self.backoff.record_success();
@@ -526,12 +530,14 @@ impl ServiceSupervisor {
             self.generation,
             resolved_scheduling,
         );
+        #[cfg(feature = "high-priority")]
         if let Some(BodyExecutionLane::HighPriority { accounting, .. }) = &self.generation_body_lane
         {
             self.resources
                 .runtime_facts
                 .record_high_priority_shards(accounting.snapshot());
         }
+        #[cfg(feature = "high-priority")]
         let (high_priority_shard_id, placement_decision) = self
             .generation_body_lane
             .as_ref()
@@ -549,7 +555,9 @@ impl ServiceSupervisor {
                 generation: self.generation,
                 declared_scheduling: self.scheduling,
                 lane: runtime_lane,
+                #[cfg(feature = "high-priority")]
                 high_priority_shard_id,
+                #[cfg(feature = "high-priority")]
                 placement_decision,
             },
         ));
@@ -572,8 +580,6 @@ impl ServiceSupervisor {
             resolved_scheduling = ?resolved_scheduling,
             body_lane = ?self.generation_body_lane,
             runtime_lane = ?runtime_lane,
-            high_priority_shard_id = ?high_priority_shard_id,
-            placement_decision = ?placement_decision,
             status = ?start_status,
             "Starting service generation"
         );
@@ -582,6 +588,7 @@ impl ServiceSupervisor {
             self.generation,
             &start_status,
         );
+        #[cfg(feature = "high-priority")]
         self.resources
             .runtime_facts
             .record_service_high_priority_shard(self.service_instance_id, high_priority_shard_id);
@@ -590,12 +597,14 @@ impl ServiceSupervisor {
             .insert(self.service_instance_id, start_status);
         self.resources.status_changed.notify_waiters();
 
-        if self.generation_body_lane.is_none()
-            || matches!(
-                self.generation_body_lane,
-                Some(BodyExecutionLane::UnavailableHighPriority(_))
-            )
-        {
+        #[cfg(feature = "high-priority")]
+        let unavailable_high_priority = matches!(
+            self.generation_body_lane,
+            Some(BodyExecutionLane::UnavailableHighPriority(_))
+        );
+        #[cfg(not(feature = "high-priority"))]
+        let unavailable_high_priority = false;
+        if self.generation_body_lane.is_none() || unavailable_high_priority {
             return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
                 "service '{}' resolved to HighPriority without an available high-priority runtime",
                 self.name
@@ -664,6 +673,7 @@ impl ServiceSupervisor {
             BodyExecutionLane::Standard(runtime) => {
                 run_body_service_generation(generation_parts, runtime.clone())
             }
+            #[cfg(feature = "high-priority")]
             BodyExecutionLane::HighPriority { runtime, .. } => {
                 run_body_service_generation(generation_parts, runtime.clone())
             }
@@ -671,6 +681,7 @@ impl ServiceSupervisor {
                 generation_parts,
                 self.isolated_startup_permits.clone(),
             ),
+            #[cfg(feature = "high-priority")]
             BodyExecutionLane::UnavailableHighPriority(_) => {
                 return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
                     "service '{}' entered Running without an available high-priority runtime",
@@ -683,6 +694,10 @@ impl ServiceSupervisor {
             tokio::select! {
                 res = &mut generation_future => res,
                 change = watch_set.changed() => {
+                    #[cfg(feature = "high-priority")]
+                    if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                        accounting.record_external_reload(self.service_instance_id, self.generation);
+                    }
                     diagnostics.record_reload_requested();
                     reload_token.cancel();
                     info!(
@@ -697,6 +712,10 @@ impl ServiceSupervisor {
                     generation_future.await
                 }
                 _ = reload_signal.notified() => {
+                    #[cfg(feature = "high-priority")]
+                    if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                        accounting.record_reload_signal(self.service_instance_id, self.generation);
+                    }
                     diagnostics.record_reload_requested();
                     reload_token.cancel();
                     info!(
@@ -713,6 +732,10 @@ impl ServiceSupervisor {
             tokio::select! {
                 res = &mut generation_future => res,
                 _ = reload_signal.notified() => {
+                    #[cfg(feature = "high-priority")]
+                    if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                        accounting.record_reload_signal(self.service_instance_id, self.generation);
+                    }
                     diagnostics.record_reload_requested();
                     reload_token.cancel();
                     info!(
@@ -735,6 +758,7 @@ impl ServiceSupervisor {
     /// Decides whether the service should restart (--> `Restart`) or stop
     /// permanently (--> `Terminated`).
     pub(super) async fn on_outcome(&mut self, result: ServiceGenerationOutcome) -> SupervisorState {
+        #[cfg(feature = "high-priority")]
         if let Some(BodyExecutionLane::HighPriority { accounting, .. }) = &self.generation_body_lane
         {
             accounting.release_generation(self.service_instance_id, self.generation);
@@ -927,6 +951,10 @@ impl ServiceSupervisor {
 
     /// Mark the service as `Terminated` and notify status listeners.
     fn terminate(&self) -> SupervisorState {
+        #[cfg(feature = "high-priority")]
+        if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+            accounting.remove_service_instance_generations(self.service_instance_id);
+        }
         if let Some(diagnostics) = self.generation_diagnostics.as_ref() {
             diagnostics.record_terminated();
         }
@@ -1205,6 +1233,7 @@ mod tests {
     fn test_body_lanes() -> BodyExecutionLanes {
         BodyExecutionLanes {
             standard: tokio::runtime::Handle::current(),
+            #[cfg(feature = "high-priority")]
             high_priority: None,
         }
     }
@@ -1212,6 +1241,7 @@ mod tests {
     fn test_body_lanes_with_high_priority() -> BodyExecutionLanes {
         BodyExecutionLanes {
             standard: tokio::runtime::Handle::current(),
+            #[cfg(feature = "high-priority")]
             high_priority: Some(
                 crate::core::service_daemon::high_priority::HighPriorityRuntimePoolState::for_test_current_runtime(),
             ),
@@ -1270,6 +1300,7 @@ mod tests {
     async fn default_body_lane_resolver_preserves_declared_scheduling_at_generation_start() {
         let declared_lanes = [
             ServiceScheduling::Standard,
+            #[cfg(feature = "high-priority")]
             ServiceScheduling::HighPriority,
             ServiceScheduling::Isolated,
         ];
@@ -1304,6 +1335,7 @@ mod tests {
                 supervisor.generation_body_lane.as_ref(),
             ) {
                 (ServiceScheduling::Standard, Some(BodyExecutionLane::Standard(_))) => {}
+                #[cfg(feature = "high-priority")]
                 (ServiceScheduling::HighPriority, Some(BodyExecutionLane::HighPriority { .. })) => {
                 }
                 (ServiceScheduling::Isolated, Some(BodyExecutionLane::Isolated)) => {}
@@ -1630,6 +1662,50 @@ mod tests {
             generation,
             RuntimeLane::Standard,
         ));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "high-priority")]
+    async fn high_priority_supervisor_distinguishes_late_policy_and_external_reload() {
+        for policy_requested in [false, true] {
+            let mut supervisor = test_supervisor(fast_policy());
+            let state = crate::core::service_daemon::high_priority::HighPriorityRuntimePoolState::for_test_current_runtime();
+            supervisor.body_lanes.high_priority = Some(state.clone());
+            supervisor.scheduling = ServiceScheduling::HighPriority;
+            supervisor.run = |_| {
+                Box::pin(async {
+                    while !crate::is_shutdown() {
+                        crate::sleep(Duration::from_millis(5)).await;
+                    }
+                    Ok(())
+                })
+            };
+            assert!(matches!(
+                supervisor.on_starting().await,
+                SupervisorState::Running
+            ));
+            let instance = supervisor.service_instance_id;
+            if policy_requested {
+                state.request_rollover(instance, 1, crate::models::HighPriorityShardId(0));
+                state.cancel_rollover(instance);
+            }
+            supervisor
+                .resources
+                .reload_signals
+                .entry(instance)
+                .or_insert_with(|| Arc::new(Notify::new()))
+                .notify_one();
+            let outcome = tokio::time::timeout(Duration::from_secs(2), supervisor.on_running())
+                .await
+                .unwrap();
+            assert!(matches!(outcome, SupervisorState::Outcome(_)));
+            assert!(!state.take_external_reload(instance, 1));
+            assert_eq!(state.take_external_reload(instance, 2), !policy_requested);
+            assert!(!state.take_external_reload(instance, 3));
+            state.record_external_reload(instance, 2);
+            supervisor.terminate();
+            assert!(!state.take_external_reload(instance, 3));
+        }
     }
 
     #[test]
