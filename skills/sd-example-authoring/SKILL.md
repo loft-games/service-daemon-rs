@@ -1,6 +1,6 @@
 ---
 name: sd-example-authoring
-description: "[dev] Author examples/* crates for the service-daemon-rs repo. Use when adding or reviewing a new example crate under examples/, to keep examples framework-topology focused and consistent with repo conventions."
+description: "[dev] Author examples/* crates and their Rust-native validation for service-daemon-rs. Use when adding or reviewing example workloads, integration tests, or calibration evidence associated with an example, keeping framework topology and test ownership aligned."
 ---
 
 # Authoring `examples/*` for service-daemon-rs
@@ -44,6 +44,21 @@ Use `ServiceError::runtime_io(...)` only when the failure is genuinely part of t
 framework service runtime boundary being demonstrated. Do not wrap example-level
 business or IPC operation errors as service-daemon framework errors just to avoid
 declaring an example-local error type.
+
+## Rust-native validation ownership
+
+Use the workspace's Rust test infrastructure for executable acceptance criteria.
+Implement deterministic evidence validation with typed Rust records and
+`#[test]` cases. Exercise real services and public lifecycle behavior through
+example-backed integration tests using `#[test]` or `#[tokio::test]`.
+
+Keep private runtime controls and internal invariants in the owning module's
+`#[cfg(test)]` tests. Reuse `examples/*` for representative workloads and public
+framework wiring. Place expensive production-default experiments behind explicit
+ignored Rust test entrypoints, with separate fast regression coverage.
+
+Read `reference.md` section "Validation and calibration evidence" when extending
+an experiment's assertions, evidence model, or reproducibility checks.
 
 ## Source of truth
 

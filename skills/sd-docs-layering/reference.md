@@ -39,6 +39,9 @@ here, not in `tutorial/`.
 - `release-validation.md` — release validation map: feature-to-test/example
   matrix, dependency baseline, linkme platform smoke coverage, example layers,
   and maintainer release checklist.
+  Production-default HighPriority calibration commands, verdicts, and evidence
+  handling live here too; raw run artifacts stay in the chosen output directory,
+  not in a chronological design-document log.
 
 ## `docs/architecture/` — internal mechanics
 

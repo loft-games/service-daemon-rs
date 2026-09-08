@@ -59,6 +59,107 @@ and reloads. External async wait outside ServiceSleep is a metric-boundary check
 not evidence of low-benefit convergence. See the experiment design and interpretation in the
 [design document](../architecture/high-priority-feedback.md#validation).
 
+#### Production-default calibration
+
+Use the separate release-build harness when evaluating the automatic defaults:
+
+```bash
+cargo test -p service-daemon --features high-priority --lib calibration::
+cargo test -p examples-scheduling --test cadence_lifecycle
+SD_CALIBRATION_OUTPUT_DIR="$PWD/target/calibration/rust-quick" cargo test -p service-daemon --release --features high-priority --lib calibration::runner::calibration_quick -- --ignored --nocapture
+SD_CALIBRATION_OUTPUT_DIR="$PWD/target/calibration/rust-baseline" cargo test -p service-daemon --release --features high-priority --lib calibration::runner::calibration_full -- --ignored --nocapture
+```
+
+Output directories must be new; earlier evidence is never overwritten. The quick
+profile runs twelve ten-second cases and only establishes `smoke_only`. The full
+profile runs three repetitions of four scenarios in three modes, ninety seconds
+per case (about 54 minutes plus compilation). Mode order rotates between
+repetitions. Reserve at least three available CPUs and 5 GiB of free workspace
+disk, and run without concurrent builds or stress tests.
+The synthetic blocking interval defaults to 250 ms; `SD_CALIBRATION_BLOCK_MS` selects a
+different interval (1–1000 ms) and records it in the manifest and case header.
+This controls the test workload, not the runtime policy. Keep it identical across
+mode comparisons, and do not replace an inconclusive baseline with a different
+workload while presenting the latter as the same experiment.
+
+For a separate, isolation-relievable dual-pressure experiment, use the existing
+400 ms workload parameter with a fresh directory:
+
+```bash
+SD_CALIBRATION_OUTPUT_DIR="$PWD/target/calibration/rust-contention-400ms" SD_CALIBRATION_BLOCK_MS=400 cargo test -p service-daemon --release --features high-priority --lib calibration::runner::calibration_full -- --ignored --nocapture
+```
+
+The contention competitor stays on the source resource while the observed
+service can move through generation rollover. Check that source-shard pressure
+continues after placement, so workload cessation does not explain the benefit.
+The interval is a workload choice, not a guarantee that every host will satisfy
+the pressure gates. A successful repeated run establishes the intervention loop
+for that workload and environment; it does not invalidate an earlier
+inconclusive run or require a production-policy change.
+
+Each case runs in its own process, with a five-second warmup, real service
+instances and supervisor reload, and the automatic production policy including
+the two-second settling period. Fixed HighPriority stops only its internal policy
+loop. No public tuning interface is introduced. Standard has one body worker;
+HighPriority starts with one worker inferred from the selected template. The
+manifest records toolchain, source and executable hashes, and workload parameters;
+the raw case records include CPU availability, policy, generation/actual placement,
+completed/interrupted sleeps, resource snapshots, policy events, and cleanup.
+The Rust runner's manifest schema 1 archives an explicit allowlist of workspace build inputs under
+`sources/`, including untracked harness/runner files, crate sources, manifests,
+the lockfile and project build configuration. It does not copy arbitrary private
+files or the global Git diff. Compilation runs from that snapshot with `--locked`;
+the executable is copied into the artifact directory and checked before use.
+The archived executable runs both the workload and typed evidence validator, so
+the manifest binds the archive ID, workload/validator executable hash, workload
+parameters, raw JSON hash and summary hash. Keep the whole artifact
+directory, not just `report.md`. Source files can be restored from `sources/`
+without the original worktree; dependency downloads and the recorded toolchain
+are still needed for rebuilding. Hash verification checks content integrity,
+not reproducible-build identity across different toolchains or environments.
+Shard probe snapshots record whether the supporting pressure gate was actually
+met. A high whole-run service mean alone does not establish sustained accepted
+windows or shard pressure; inspect both before diagnosing a missing intervention.
+
+Interpret `report.md` with the raw JSON and per-generation summary JSON:
+
+- Healthy and external asynchronous wait must not expand resources. External
+  wait is outside the measured sleep, not a low-benefit workload.
+- Contention must demonstrate an evaluated beneficial intervention. Compare
+  whole-run and post-generation results separately across all repetitions.
+  A pass requires a unique request linked by instance and source generation to
+  the evaluation, the next actual generation and shard, and sufficient comparable
+  completed before/after samples. The independent samples must support the
+  reported outcome; an `Improved` string alone is insufficient.
+- Self-induced blocking travels with the service during reload. Low-benefit
+  convergence requires a pause before the resource cap, continuing pressure and
+  samples after the pause, and no subsequent resource request.
+  Both interventions must form a continuous chain for the same instance; the
+  continuing pressure must belong to its paused generation and actual shard.
+  Missing, contradictory or cross-instance evidence cannot pass. The case header
+  must match the runner's mode, scenario, duration and blocking-work parameter.
+- Missing evidence is `inconclusive` or an error, never a pass. Preserve all
+  failed/inconclusive runs. Tail estimates with fewer than 100 samples are marked
+  in the summary; these synthetic measurements are not a latency SLA.
+  P99.9 has a separate low-sample marker below 1000 samples.
+
+Always label percentile populations: whole-run P99.9 can retain early waiting
+even when the new generation's P99 is low. Whole-run means are sample-weighted;
+a faster post-intervention generation contributes more samples. Neither the
+post-generation tail nor the whole-run mean alone describes the transition cost.
+
+The runner exits nonzero on failed, incomplete, or inconclusive full profiles.
+Do not tune thresholds merely to make the synthetic matrix green. A candidate
+change needs a separate output directory and the same workload, toolchain and
+hardware comparison. Calibration does not replace deterministic tests or the
+real 120-second timeout regression above.
+
+Older hash-only manifests cannot restore changed untracked experiment sources.
+Preserve such runs as historical observations, explicitly mark their provenance
+limitation, and do not re-label their verdicts as validation by a newer summarizer.
+If exact source contents cannot be recovered and checked against the old hashes,
+generate a new full baseline after fixing the summarizer and archive boundary.
+
 Focused checks do not replace the release matrix, ignored tests, or platform
 jobs. Local IPC tests require a writable runtime socket directory; sandbox
 denial is not a test pass.

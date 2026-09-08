@@ -110,3 +110,33 @@ changes; it is not production-policy calibration.
 
 The [maintainer validation map](../development/release-validation.md#highpriority-feedback-validation)
 defines regression scope and real timeout coverage.
+
+### Production-default calibration boundary
+
+The separate calibration harness uses the automatic policy rather than the
+short-cycle smoke policy. Test builds retain the production two-second settling
+period; only deterministic controller tests explicitly opt into zero settling.
+It compares healthy execution, movable contention, self-induced blocking that
+persists after placement, and external asynchronous wait. The last two workloads
+are intentionally different: persistent measured drift can establish low-benefit
+stopping, while unmeasured external wait cannot.
+
+The calibration records actual generation placement and policy evaluation events
+alongside raw workload samples. Whole-run latency includes the cost of waiting
+for intervention and reload; per-generation latency describes the new resource
+environment. Neither substitutes for the other. A low-benefit pause is only
+meaningful if pressure continues and the worker cap has not already prevented
+expansion. Machine-specific results validate these synthetic scenarios, not a
+general diagnosis of CPU/IO causes or a business latency guarantee. Reproduction
+commands and evidence acceptance belong in the maintainer validation map.
+
+An isolation-relievable contention experiment keeps a separate competitor on
+the source shard while the observed service rolls over to another shard.
+Sustained service and source-shard pressure must both support intervention;
+continued source pressure after relocation helps distinguish isolation benefit
+from the workload simply ending. Repeated success establishes this bounded
+feedback behavior, not universal latency improvement. Report whole-run and
+post-generation percentiles with their sample populations: early waiting remains
+part of the whole-run tail, and faster generations contribute more samples to
+sample-weighted means. A different workload is a separate experiment, not a
+replacement verdict for an earlier inconclusive baseline.

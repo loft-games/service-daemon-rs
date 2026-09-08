@@ -6,6 +6,10 @@ HighPriority requires the opt-in `high-priority` feature. It permits automatic
 resource intervention and reload, not a hard latency SLA or lossless business
 restart. Do not add artificial sleeps or manual round markers to satisfy policy;
 the initial controller only acts where real ServiceSleep evidence exists.
+Synthetic calibration is not an application SLA. External async wait outside
+the measured sleep is not evidence of low-benefit convergence; do not add sleeps
+to manufacture such evidence. Maintainer calibration commands belong in
+`docs/development/release-validation.md`, not application setup instructions.
 
 ## Using `tokio::time::sleep` in the loop
 

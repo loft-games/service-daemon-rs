@@ -47,6 +47,12 @@ commit checkpoints, or single-run pass counts. Describe benchmark conditions and
 interpretation rather than accumulating a chronological execution diary. This
 does not change the dated-release convention in `CHANGELOG.md`.
 
+For executable validation, document the owning Rust unit/integration test and
+its Cargo entrypoint. Map reusable example workloads to `examples/*`, internal
+runtime invariants to their test modules, and long experiments to their explicit
+opt-in test entrypoints. Express maintainer guidance as the intended ownership,
+workflow, and acceptance criteria.
+
 ## Keep the beginner path clean
 
 The tutorial is a curated curve. Strict, advanced, or rarely-needed APIs do **not**

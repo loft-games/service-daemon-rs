@@ -80,7 +80,48 @@ When adding or reworking an example, update the release-validation map if its
 layer or responsibility changes. Do not treat every example as a production
 compatibility promise.
 
-## 6. Contributor workflow
+## 6. Validation and calibration evidence
+
+Choose the Rust test owner according to the behavior being accepted:
+
+| Behavior | Owner and entrypoint |
+| :--- | :--- |
+| Evidence association, statistics, classification, and malformed inputs | Typed test-support functions with deterministic `#[test]` cases. |
+| Example topology and public service lifecycle | `examples/<topic>/tests/` integration tests using real example services. |
+| Private runtime placement, controller state, and internal test controls | The owning runtime module's `#[cfg(test)]` tests. |
+| Source archive restoration and artifact integrity | Rust filesystem integration tests with temporary directories and real input files. |
+| Long-running production-default calibration | Explicit `#[test]` / `#[ignore]` entrypoints run through Cargo in release mode. |
+
+Represent evidence with Rust structs, enums, and instance/generation/shard
+identities. Acceptance should connect a request to the actual generation and
+placement, comparable before/after observations, and the evaluated outcome.
+Pair each valid fixture with counterexamples for missing records, crossed
+identities, contradictory placement, and mismatched experiment parameters.
+
+Keep workload execution, evidence validation, and report rendering as distinct
+test-support responsibilities. The report presents the result established by
+Rust assertions and classification. Example workloads teach reusable framework
+wiring; private test controls remain with their runtime owner.
+
+For reproducible experiments, preserve the selected source contents, build
+configuration, executable identity, raw observations, and validator identity as
+one artifact set. Test recovery after changing or removing the original inputs,
+and test detection of modified artifacts. Record incomplete evidence explicitly.
+
+For isolation-relievable contention, verify both service and source-shard
+pressure and check that the competitor continues after the subject relocates.
+Keep changed workload parameters in a separate archive; never overwrite or
+re-label an earlier inconclusive baseline. Distinguish whole-run and
+post-generation percentile populations and sample-weighted means. Repeated
+benefit validates the stated workload, not a general SLA; do not expand runtime
+features or tune production thresholds merely to close an experiment.
+
+Describe the maintained Cargo commands and their acceptance scope in
+`docs/development/release-validation.md`. Keep fast deterministic regressions
+separate from opt-in long experiments and record the production timing and
+resource assumptions of each experiment.
+
+## 7. Contributor workflow
 
 Before opening a PR (`docs/CONTRIBUTING.md`):
 
