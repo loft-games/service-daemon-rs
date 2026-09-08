@@ -16,6 +16,8 @@ use super::runtime::HighPriorityCapacityPlan;
 
 #[cfg(test)]
 mod benchmark;
+#[cfg(test)]
+mod calibration;
 pub(crate) mod feedback;
 pub(crate) mod observation;
 pub(super) mod runtime;

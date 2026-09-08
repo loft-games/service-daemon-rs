@@ -254,6 +254,22 @@ impl DaemonInstanceInner {
         &mut self,
         now: Instant,
     ) {
+        self.evaluate_high_priority_runtime_policy_with_settle(now, settle_time());
+    }
+
+    #[cfg(test)]
+    pub(in crate::core::service_daemon) fn evaluate_high_priority_runtime_policy_for_test(
+        &mut self,
+        now: Instant,
+    ) {
+        self.evaluate_high_priority_runtime_policy_with_settle(now, Duration::ZERO);
+    }
+
+    fn evaluate_high_priority_runtime_policy_with_settle(
+        &mut self,
+        now: Instant,
+        settling: Duration,
+    ) {
         if self.high_priority_runtime_pool.is_empty() {
             return;
         }
@@ -339,13 +355,10 @@ impl DaemonInstanceInner {
                     .high_priority_runtime_pool
                     .feedback
                     .since(instance, generation);
-                let Some(sample) = self.diagnostics.high_priority_sleep_sample(
-                    instance,
-                    generation,
-                    now,
-                    since,
-                    settle_time(),
-                ) else {
+                let Some(sample) = self
+                    .diagnostics
+                    .high_priority_sleep_sample(instance, generation, now, since, settling)
+                else {
                     continue;
                 };
                 match self.high_priority_runtime_pool.feedback.observe(
@@ -520,11 +533,7 @@ fn observation_pressure(
 }
 
 fn settle_time() -> Duration {
-    if cfg!(test) {
-        Duration::ZERO
-    } else {
-        Duration::from_secs(2)
-    }
+    Duration::from_secs(2)
 }
 
 fn log_effect(effect: Effect) {
@@ -545,6 +554,10 @@ fn log_effect(effect: Effect) {
 mod timeout_tests {
     use super::*;
     use crate::models::ServiceInstanceId;
+    #[test]
+    fn high_priority_default_settling_is_not_shortened_in_test_builds() {
+        assert_eq!(settle_time(), Duration::from_secs(2));
+    }
     #[test]
     fn high_priority_timeout_pause_is_cleaned_on_remove_and_terminate() {
         for removed in [false, true] {

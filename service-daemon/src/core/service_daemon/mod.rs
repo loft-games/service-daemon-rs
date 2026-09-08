@@ -2294,13 +2294,13 @@ mod tests {
                     Duration::from_millis(200),
                 );
             }
-            daemon.evaluate_high_priority_runtime_policy(at);
+            daemon.evaluate_high_priority_runtime_policy_for_test(at);
         };
         seed_policy_service(&daemon, instance, 1, base, Duration::from_millis(200));
         feed(&mut daemon, 1, base);
         feed(&mut daemon, 1, base + Duration::from_secs(1));
         assert_eq!(daemon.high_priority_runtime_pool.total_worker_threads(), 2);
-        daemon.evaluate_high_priority_runtime_policy(base + Duration::from_secs(122));
+        daemon.evaluate_high_priority_runtime_policy_for_test(base + Duration::from_secs(122));
         state.record_reload_signal(instance, 1);
         state.release_generation(instance, 1);
         seed_policy_service(
@@ -2403,7 +2403,7 @@ mod tests {
                     Duration::from_millis(drift),
                 );
             }
-            daemon.evaluate_high_priority_runtime_policy(at);
+            daemon.evaluate_high_priority_runtime_policy_for_test(at);
             for offset in offsets {
                 let at = at + Duration::from_secs(*offset);
                 for _ in 0..3 {
@@ -2414,7 +2414,7 @@ mod tests {
                         Duration::from_millis(drift),
                     );
                 }
-                daemon.evaluate_high_priority_runtime_policy(at);
+                daemon.evaluate_high_priority_runtime_policy_for_test(at);
             }
             previous = Some(generation);
         }
@@ -2460,7 +2460,7 @@ mod tests {
             now,
             Duration::from_millis(20),
         );
-        daemon.evaluate_high_priority_runtime_policy(now);
+        daemon.evaluate_high_priority_runtime_policy_for_test(now);
 
         let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
         assert_eq!(runtime.high_priority_shards.len(), 2);
@@ -2534,7 +2534,7 @@ mod tests {
             now,
             Duration::from_millis(20),
         );
-        daemon.evaluate_high_priority_runtime_policy(now);
+        daemon.evaluate_high_priority_runtime_policy_for_test(now);
 
         let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
         assert_eq!(
@@ -2601,7 +2601,7 @@ mod tests {
             now,
             Duration::from_millis(20),
         );
-        daemon.evaluate_high_priority_runtime_policy(now);
+        daemon.evaluate_high_priority_runtime_policy_for_test(now);
 
         let runtime = daemon.resources.runtime_facts.daemon_snapshot(false);
         assert_eq!(
@@ -2666,7 +2666,7 @@ mod tests {
                 drift: Duration::ZERO,
             },
         );
-        daemon.evaluate_high_priority_runtime_policy(now + Duration::from_millis(21));
+        daemon.evaluate_high_priority_runtime_policy_for_test(now + Duration::from_millis(21));
 
         let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
             daemon.diagnostics.snapshot().into();
@@ -2680,7 +2680,7 @@ mod tests {
         );
 
         daemon.stopping_instances.remove(&service_id);
-        daemon.evaluate_high_priority_runtime_policy(now + Duration::from_millis(22));
+        daemon.evaluate_high_priority_runtime_policy_for_test(now + Duration::from_millis(22));
 
         let diagnostics: crate::models::DaemonDiagnosticsSnapshot =
             daemon.diagnostics.snapshot().into();
