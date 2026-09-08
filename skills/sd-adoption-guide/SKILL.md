@@ -78,8 +78,13 @@ daemon.wait().await?; // blocks until SIGINT / SIGTERM / Ctrl+C
 runs high→low in waves and shutdown runs low→high. A service signals readiness with
 `service_daemon::done()` (or implicitly via the first `is_shutdown()`/`sleep()`
 call). State that must survive a restart goes on the daemon's per-service Shelf.
-For cooperative latency-sensitive workers, declare `scheduling = HighPriority`
-and let the daemon manage shard placement/scale-out internally. Do not use
+For cooperative latency-sensitive workers, enable the dependency's `high-priority`
+feature, declare `scheduling = HighPriority`, and let the daemon manage resources
+internally. It observes real framework-aware sleep drift, evaluates the same
+metric after reload, and pauses low-benefit interventions. It does not infer all
+business latency, require extra instrumentation, or promise a hard real-time SLA.
+All services are reloadable; authors own progress restoration across generations.
+Do not use
 HighPriority for blocking loops; use `Isolated` when a body needs a private
 thread/runtime boundary.
 

@@ -103,7 +103,7 @@ graph TD
 
 The control plane runs supervisors, watchers, startup waves, reload, restart/backoff, shutdown, control diagnostics, the advisory analyzer, and the HighPriority runtime policy loop on the daemon-owned control runtime. User service and trigger bodies execute on their statically declared mode (`Standard`, `HighPriority`, or `Isolated`) and report outcomes back through the supervisor bridge.
 
-During daemon construction, the final selected service list is the source for initial HighPriority capacity selection. The daemon counts declared `HighPriority` services and triggers as equal registry entries, derives a capped worker count, and applies the result when the first high-priority shard is lazily created. After startup, an internal HighPriority control loop reads shard observations and live assignment facts, creates additional high-priority runtime shards within the framework's worker cap, and may request cooperative generation rollover so a future generation can be placed on a less pressured shard. It never changes a service's declared `ServiceScheduling` mode and never migrates an already running future.
+HighPriority and its advisory/control tasks require the opt-in `high-priority` feature; without it, the scheduling variant and specialized execution state are absent. Initial capacity counts selected HighPriority services and triggers equally. After startup, the controller requires fresh per-instance ServiceSleep drift with supporting shard pressure, records a baseline, and requests resource intervention through reload. Placement intent survives old-generation release, and evaluation uses the actual new-generation placement and the same sleep metric. Low-benefit or timed-out interventions pause further intervention; a late policy generation does not itself clear that pause. The controller never changes the declared scheduling mode or migrates a running future. See [HighPriority feedback control](high-priority-feedback.md) for authoritative observation, reload-origin, and convergence semantics.
 
 Internally, `core/service_daemon/` keeps the public builder facade separate from the runtime owner. `ServiceDaemon` is the builder entry point, `DaemonInstanceHandle` is the public control handle, and a process-local daemon registry owns active daemon instances while sibling modules handle builder assembly, provider graph validation/eager initialization, runtime preparation, and startup orchestration.
 
@@ -174,7 +174,11 @@ The main internal modules are:
   - `mod.rs`: Public daemon facade and lifecycle entry points.
   - `builder.rs`: `ServiceDaemonBuilder`, registry assembly, infra tag merge, trigger config injection, and simulation resource injection.
   - `provider_graph.rs`: Provider dependency graph validation and reachable eager provider initialization.
-  - `runtime.rs`: Control/high-priority runtime preparation, runtime probes, adaptive recommendation task, and runtime shutdown helpers.
+  - `runtime.rs`: Control runtime preparation and shutdown, with feature-gated HighPriority integration hooks.
+  - `high_priority.rs`: Optional shard pool, generation accounting, placement intent, and reload-origin tracking.
+  - `high_priority/runtime.rs`: Optional probe/advisory task lifecycle and resource-intervention execution.
+  - `high_priority/observation.rs`: Bounded, fresh ServiceSleep windows.
+  - `high_priority/feedback.rs`: Baseline comparison, pending intervention, pause, and re-evaluation state.
   - `startup_pipeline.rs`: Startup validation, provider startup, runtime preparation, and wave orchestration handoff.
   - `policy.rs`: Resilience configuration (backoff, jitter).
   - `runner/mod.rs`: Runtime entry points for spawning and stopping services.

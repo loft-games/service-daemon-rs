@@ -34,7 +34,7 @@ Triggers are specialized services registered through the same service registry. 
 - Resolves dependency providers once at trigger startup, outside the event loop, matching standard service behavior.
 - For `Watch` templates, registers the target provider in the generation dependency watch set so provider changes use the `ServiceDaemon` reload path.
 - Dispatches incoming events to the user handler.
-- Stores the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`) in the registry entry; the daemon runner uses it to place the user body while keeping supervision, dependency-watch evaluation, reload, restart/backoff, and shutdown coordination on the daemon control plane.
+- Stores the static scheduling declaration (`Standard`, `HighPriority`, or `Isolated`) in the registry entry; the daemon runner uses it to place the user body while keeping supervision, dependency-watch evaluation, reload, restart/backoff, and shutdown coordination on the daemon control plane. `HighPriority` exists only with the runtime crate's `high-priority` feature. Both service and trigger declarations reference that variant, so a disabled-feature declaration fails to compile rather than falling back to Standard. Verify this with the independent downstream fixtures, not only a workspace build whose members may enable the feature.
 
 ## 3. The `#[provider]` Transformation
 

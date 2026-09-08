@@ -48,6 +48,10 @@ Not API usage — how the framework works inside:
 - `lifecycle-management.md` — wave orchestration, supervisor FSM, provider-init
   error semantics (`ProviderError` Fatal/Retryable, `RestartPolicy`).
 - `macro-expansion.md` — what `#[service]`/`#[trigger]`/`#[provider]` generate.
+- `high-priority-feedback.md` — authoritative optional HighPriority observation,
+  placement, reload-origin, and convergence semantics; experiment interpretation
+  keeps whole-run and post-generation results separate. Maintainer commands belong
+  in `docs/development/release-validation.md`, usage in `docs/guide/diagnostics.md`.
 - `causal-tracing.md`, `performance-benchmarks.md`.
 
 ## `docs/CONTRIBUTING.md` — workflow

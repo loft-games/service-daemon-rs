@@ -58,6 +58,14 @@ pub static PROVIDER_REGISTRY: [ProviderEntry];
 on-demand service templates, and generated wrappers now receive a
 `ServiceInvocationContext` rather than a bare cancellation token.
 
+## Scheduling feature boundary
+
+When reviewing scheduling codegen, also run the independent downstream feature
+contract in `service-daemon/tests/high_priority_feature_contract_tests.rs`.
+`HighPriority` must be absent without the runtime's `high-priority` feature;
+both service and trigger declarations must fail, never fall back to Standard.
+A workspace build alone can hide this boundary through feature unification.
+
 ## Companions
 
 - `reference.md` — the exact `ServiceEntry` / `ProviderEntry` field contracts,

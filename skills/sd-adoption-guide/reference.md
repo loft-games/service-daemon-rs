@@ -12,7 +12,7 @@ Map each existing construct to its framework primitive:
 | :--- | :--- |
 | A `tokio::spawn`ed loop you supervise by hand | a `#[service]` |
 | Dynamically-created worker instances with per-instance config | a `#[service]` template with `#[input] cfg: &Cfg` plus daemon-bound `ServiceHandle::create(cfg)` / `start(cfg)` |
-| Cooperative latency-sensitive workers | `#[service(scheduling = HighPriority)]` plus framework-managed HighPriority placement |
+| Cooperative latency-sensitive workers | Opt-in `high-priority` feature plus `#[service(scheduling = HighPriority)]`; automatic resource intervention, not hard real-time guarantees |
 | A shared client / pool / config behind a global or `OnceCell` | a `#[provider]` injected as `Arc<T>` |
 | An `mpsc`/`broadcast` consumer task | a `#[trigger(Queue(..))]` |
 | A timer / interval task | a `#[trigger(Cron(..))]` |

@@ -9,7 +9,7 @@ Every method is chainable and optional. `build()` is infallible and returns a
 | :--- | :--- |
 | `with_registry(Registry)` | Restrict which discovered services run. Default = all static services. |
 | `with_restart_policy(RestartPolicy)` | Supervision: restart limits, backoff, provider-init timeout, wave timeouts. |
-| `with_scheduling_advisory_profile(SchedulingAdvisoryProfile)` | Tune the scheduling advisory plane. |
+| `with_scheduling_advisory_profile(SchedulingAdvisoryProfile)` | Enable/disable advisory emission; requires `high-priority`. Does not disable resource control. |
 | `with_isolated_startup_concurrency_limit(NonZeroUsize)` | Cap how many `Isolated`-scheduled services start at once. |
 | `with_cancel_token(CancellationToken)` | Supply an external token so something other than a signal can drive shutdown. |
 | `with_trigger_config<C: 'static + Clone + Send + Sync>(C)` | Inject a typed config object visible to trigger hosts. |
@@ -77,8 +77,11 @@ let policy = RestartPolicy::builder()
 ## 6. HighPriority runtime control
 
 `#[service(scheduling = HighPriority)]` and `#[trigger(..., scheduling = HighPriority)]`
-are the source-level declarations for the HighPriority mode. The daemon manages
-that mode internally at runtime.
+are the source-level declarations for the HighPriority mode. Enable the
+dependency's `high-priority` Cargo feature first; it is disabled by default.
+Without it, the mode does not exist and these declarations fail to compile.
+The daemon manages that mode internally at runtime, without global public
+threshold setters.
 
 The daemon uses conservative HighPriority runtime control:
 
@@ -86,12 +89,22 @@ The daemon uses conservative HighPriority runtime control:
   entries;
 - total HighPriority worker threads are capped by available CPU parallelism
   by default;
-- sustained shard probe pressure can create additional HighPriority shards;
+- fresh sustained instance-level ServiceSleep drift, with supporting shard probe
+  pressure, can justify additional HighPriority shards;
 - cooperative rollover can ask an existing HighPriority generation to reload so
-  the next generation receives a better shard placement.
+  the next generation consumes a placement intent; benefit is evaluated using
+  the same sleep metric at its actual placement;
+- repeated low benefit or timeout pauses intervention. A late policy generation
+  does not clear the pause; healthy evidence or an observed external reload can
+  rearm evaluation. Missing evidence does not count as low benefit.
 
 `SchedulingAdvisoryProfile` is separate: disabling advisory logs does not disable
 HighPriority scale-out or rollover.
+
+All services may reload; authors own business continuity. The mode provides no
+hard latency SLA. Normal framework-aware sleep supplies observations, with no
+mandatory business instrumentation. Trigger concurrency scaling and the
+`diagnostics` topology feature are separate from this execution mode.
 
 ## 7. Choosing production vs simulation execution
 

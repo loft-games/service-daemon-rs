@@ -94,6 +94,20 @@ When you add or change a compile error, add/update the matching `tests/fail/`
 fixture and refresh its `.stderr` (trybuild can regenerate it; review the diff).
 Run with `cargo test -p example-macro-tests`.
 
+### Scheduling feature contract
+
+Scheduling feature changes additionally require:
+
+```bash
+cargo test -p service-daemon --test high_priority_feature_contract_tests
+```
+
+This creates an independent downstream workspace and checks direct enum use,
+`#[service]`, and `#[trigger]` with HighPriority disabled/enabled. Keep the
+runtime variant feature-gated; the emitted reference enforces the boundary.
+Do not emit consumer-local feature checks that assume the consumer uses the
+same feature names, or rely only on the macro-test example (which enables HP).
+
 ## 4. Where macro behavior is documented
 
 - `docs/architecture/macro-expansion.md` — what `#[service]`/`#[trigger]`/

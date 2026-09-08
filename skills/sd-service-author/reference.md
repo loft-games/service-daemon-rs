@@ -115,6 +115,16 @@ converted with `.into()`.
   they can reach a reload-safe point and store needed progress in the Shelf or
   managed providers before exiting.
 
+Enable `high-priority` in the dependency's Cargo features before declaring this
+mode. The controller uses fresh completed ServiceSleep drift with supporting
+shard pressure, then compares the same metric after actual new-generation
+placement. It pauses repeated low-benefit interventions; it does not promise
+hard real-time latency. There are no global public tuning setters or required
+round-observation APIs. Services without valid sleep observations do not drive
+the initial feedback path. All services are reloadable without a separate
+eligibility declaration; saving/restoring in-flight business progress is the
+author's responsibility, not a framework guarantee of lossless reload.
+
 (Exact builder/attribute wiring for priority and scheduling is covered by the
 `sd-daemon-bootstrap` skill.)
 

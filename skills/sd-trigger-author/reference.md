@@ -64,6 +64,14 @@ Rules:
 - Triggers are `ServiceDescription` entries, so a declared `HighPriority` trigger
   contributes to runtime lane sizing exactly like a service.
 
+HighPriority requires the dependency's `high-priority` Cargo feature; without it,
+the declaration fails to compile. Trigger-host `ScalingPolicy` and policy overlays
+govern dispatch concurrency/retry behavior, not HighPriority runtime shard scaling.
+The initial runtime feedback path uses completed framework-aware ServiceSleep
+observations with supporting shard pressure, not trigger backlog or handler
+throughput. Do not add artificial sleeps to a handler for policy input. Authors
+remain responsible for in-flight business work across reload.
+
 ## 5. Extending hosts (advanced)
 
 The built-in hosts are `SignalHost`, `TopicHost`, `CronHost`, `WatchHost`. The

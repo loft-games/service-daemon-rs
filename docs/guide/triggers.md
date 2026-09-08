@@ -108,7 +108,13 @@ Triggers also support the same static `scheduling` declaration as services. The 
 async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
-Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` is not an overflow pool for ordinary triggers; a trigger uses that lane only when its source declaration asks for it. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed.
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. Enable `high-priority` in the runtime dependency's Cargo features before using the HighPriority declaration; without it this example fails to compile. `HighPriority` is not an overflow pool for ordinary triggers; a trigger uses that lane only when its source declaration asks for it. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed.
+
+Runtime shard intervention is separate from trigger dispatch concurrency scaling.
+The initial HighPriority feedback path uses valid framework-aware ServiceSleep
+observations, not queue backlog or handler throughput. Do not add artificial
+sleeps to handlers to drive policy. See [Diagnostics](diagnostics.md) for the
+observation limits and reload responsibilities.
 
 ## 4. Parameter Mapping Rules
 

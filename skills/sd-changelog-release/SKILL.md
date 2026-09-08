@@ -29,6 +29,16 @@ asks to publish that internal context.
 
 ## Recording a change
 
+Compare the final behavior with the previous released tag, not the preceding
+commit or review round. Use `git show <released-tag>:<path>` and
+`git diff <released-tag> -- <path>` to confirm that an alleged old behavior shipped.
+A `fix:` commit is not automatically a `Fixed` release entry: fixes to a feature
+introduced during the same unreleased cycle belong in that feature's final
+description. Likewise, merge unreleased API redesigns into the final `Added`
+contract rather than documenting migrations from interfaces users never received.
+Keep `Changed` for migrations from released behavior and `Fixed` for problems
+present in the released baseline. Preserve all released sections unchanged.
+
 Under `## [Unreleased]`, add a bullet to the right `###` subsection:
 
 | Subsection | For |
@@ -40,9 +50,9 @@ Under `## [Unreleased]`, add a bullet to the right `###` subsection:
 | `Fixed` | bug fixes |
 | `Security` | vulnerability fixes |
 
-Commits follow Conventional Commits, which map cleanly: `feat:` → **Added**,
-`fix:` → **Fixed**, `refactor:`/`perf:` → **Changed**, a breaking change → a
-version bump plus a **Changed**/**Removed** note.
+Conventional Commit prefixes help locate changes, but release-baseline evidence
+determines their changelog category. Describe the final user-visible difference,
+not the sequence of implementation commits.
 
 Add a changelog entry when release-validation work changes visible behavior or
 maintainer release gates. Record diagnostics output contract changes, file

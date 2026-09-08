@@ -2,6 +2,32 @@
 
 This guide is for developers looking to add new capabilities to the `service-daemon-rs` core or macros.
 
+## Maintaining HighPriority feedback control
+
+Read [HighPriority feedback control](../architecture/high-priority-feedback.md)
+before changing scheduling behavior. Keep observations, decisions, and resource
+execution separate: `high_priority/observation.rs` owns bounded sleep windows,
+`high_priority/feedback.rs` owns comparison/pause state, and
+`high_priority/runtime.rs` connects decisions to the shard pool and existing
+supervisor reload path. These paths are under `service-daemon/src/core/service_daemon/`.
+
+- Keep the mode and specialized state behind `high-priority`; Core lifecycle
+  facts and Standard/Isolated execution must work without it.
+- Evaluate the same instance-level metric that triggered intervention. Shard
+  probes support execution-pressure evidence; they are not CPU/IO attribution
+  and cannot independently drive this feedback path.
+- Preserve next-generation placement intent and compare against actual placement.
+  All services are reloadable; business continuity remains the author's concern.
+- Preserve pause identity after pending intervention expiry. A late policy reload
+  must not be mistaken for an external reload. Consume external reload evidence
+  only after its generation boundary, and clear instance state on removal/termination.
+- Keep thresholds internal. Do not add global public tuning setters, mandatory
+  business instrumentation, or cross-mode migration as part of controller maintenance.
+
+For required regressions, the independent feature matrix, and the real-time
+timeout test, follow [HighPriority validation](release-validation.md#highpriority-feedback-validation).
+
+
 ## 1. Adding a New Trigger Template
 
 Triggers are implemented as stateful hosts with a two-phase lifecycle managed by the **Policy-Engine separation** model.

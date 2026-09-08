@@ -1,5 +1,12 @@
 # `#[service]` pitfalls
 
+## Treating HighPriority as a latency guarantee
+
+HighPriority requires the opt-in `high-priority` feature. It permits automatic
+resource intervention and reload, not a hard latency SLA or lossless business
+restart. Do not add artificial sleeps or manual round markers to satisfy policy;
+the initial controller only acts where real ServiceSleep evidence exists.
+
 ## Using `tokio::time::sleep` in the loop
 
 `tokio::time::sleep` ignores shutdown — the service finishes the full delay before

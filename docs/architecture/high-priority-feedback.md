@@ -86,20 +86,27 @@ These are machine-specific measurements, not CI latency guarantees or production
 threshold calibration. External wait checks the observation boundary; the
 deterministic feedback tests, not that workload, prove low-benefit stopping.
 
-### Local smoke observation (2026-09-07)
+### Experiment design and interpretation
 
-One debug-profile run with the short-cycle internal test policy produced these
-results; they are not a repeated benchmark study or production-policy calibration:
+The smoke harness starts with one body-lane worker. It compares Standard,
+fixed HighPriority with its controller stopped, and adaptive HighPriority with
+a short-cycle internal policy permitting two HighPriority workers. Each scenario
+runs for four seconds and records real framework sleep calls and generation
+changes; it is not production-policy calibration.
 
-| Scenario / mode | HP workers | Probe reloads | Sleep drift P99 (ms) |
-| --- | ---: | ---: | ---: |
-| Shared worker CPU contention / Standard | 0 | 0 | 25.147 |
-| Shared worker CPU contention / fixed HighPriority | 1 | 0 | 25.241 |
-| Shared worker CPU contention / adaptive HighPriority, all generations | 2 | 1 | 20.061 |
-| Shared worker CPU contention / adaptive HighPriority, new generation only | 2 | 1 | 1.432 |
-| External async wait / adaptive HighPriority | 1 | 0 | 1.511 |
+- Execution contention combines a five-millisecond sleep loop with a competing
+  service performing 25 milliseconds of CPU work. Compare whole-run latency,
+  post-reload latency, worker cost, and reload count. A lower post-reload tail
+  demonstrates improvement for that workload, not an absolute latency guarantee.
+- The external-wait scenario adds 40 milliseconds of asynchronous wait outside
+  the measured sleep. Business-round duration and sleep drift are different
+  measurements: external wait alone is not evidence for shard expansion.
+- Whole-run statistics include pre-intervention pressure and reload transitions.
+  Never substitute post-generation results for the whole-run tail or compare
+  different modes using different observation scopes.
+- The smoke test requires observations but does not assert machine-dependent
+  latency thresholds. Deterministic controller tests establish low-benefit
+  stopping; passing this experiment does not establish that property by itself.
 
-The whole-run adaptive tail includes the pre-intervention interval; the
-new-generation result must not be substituted for the whole-run result. The
-external-wait case retained roughly 47 ms median business-round duration without
-mistaking it for sleep drift or requesting expansion.
+The [maintainer validation map](../development/release-validation.md#highpriority-feedback-validation)
+defines regression scope and real timeout coverage.

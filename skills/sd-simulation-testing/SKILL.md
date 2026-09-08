@@ -62,6 +62,16 @@ empty registry; opt services in by tag before `build()`. `run_for_duration(d)` i
 the deterministic driver on `SimulationHandle` and exists **only** under the
 `simulation` feature.
 
+## HighPriority verification boundary
+
+`simulation` does not enable `high-priority`; enable both when a test declares
+that execution mode. MockContext validates service behavior and lifecycle with
+test resources, not production tail latency or the benefit of adding shards.
+Do not treat bounded-duration simulation as virtual-time proof of a real
+intervention deadline. Maintainer validation separates deterministic controller
+tests, real supervisor/reload integration, and a separately run load experiment;
+see `docs/development/release-validation.md` in the framework repository.
+
 ## The two roles
 
 - **`MockContextBuilder`** — *before* start: `with_shelf`, `with_status`,

@@ -39,6 +39,14 @@ use them to guide current work, but do not migrate their current-only blockers,
 handoff notes, or planning details into public docs, changelog entries, PR text,
 or commit messages unless the user explicitly says that boundary is overridden.
 
+## Record facts, not task history
+
+Long-lived documentation describes current contracts, mechanisms, reproducible
+validation, and evidence limits. Do not append dated task recaps, review rounds,
+commit checkpoints, or single-run pass counts. Describe benchmark conditions and
+interpretation rather than accumulating a chronological execution diary. This
+does not change the dated-release convention in `CHANGELOG.md`.
+
 ## Keep the beginner path clean
 
 The tutorial is a curated curve. Strict, advanced, or rarely-needed APIs do **not**

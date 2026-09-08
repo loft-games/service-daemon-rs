@@ -59,6 +59,10 @@ emits a runtime warning.
 4. **Set `priority`** to order startup waves (high→low) and shutdown (low→high).
 5. **Use `#[input]` only for on-demand service templates.** The input is borrowed
    as `&T` for each generation and is owned by the service instance record.
+6. **Opt in before choosing HighPriority.** Enable the dependency's `high-priority`
+   feature; without it the variant and macro declaration do not compile. All
+   services may be reloaded; authors own cross-generation business continuity.
+   Use normal framework-aware sleep, not extra instrumentation for the controller.
 
 See `reference.md` for the full lifecycle and error model, and the
 `sd-daemon-bootstrap` skill (if installed) for wiring services into a daemon.

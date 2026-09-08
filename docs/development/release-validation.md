@@ -21,6 +21,50 @@ non-default features.
 
 ## General Platform CI
 
+### HighPriority feedback validation
+
+Use the [design contract](../architecture/high-priority-feedback.md) together with
+these focused checks when changing observations, placement, or convergence:
+
+```bash
+cargo test -p service-daemon --no-default-features --lib
+cargo test -p service-daemon --all-features --lib
+cargo test -p service-daemon --features high-priority --lib high_priority
+cargo test -p service-daemon --test high_priority_feature_contract_tests
+cargo test -p service-daemon --features high-priority --test high_priority_runtime_policy_tests
+```
+
+The last command includes
+`timeout_reload::late_policy_generation_stays_paused_until_external_provider_reload`.
+It waits for the real 120-second intervention deadline, then verifies fresh
+pressure cannot rearm the late policy generation, the warning is emitted once,
+and an external provider reload restores evaluation. Allow several minutes;
+other tests sharing its lock may report waiting for more than 60 seconds.
+Do not replace this coverage with a shortened policy timer or a capacity-bound
+test that could hide an unintended rollover.
+
+The downstream compile fixture runs outside the workspace feature union. It must
+reject direct, service-macro, and trigger-macro HighPriority declarations without
+the feature and accept them with it; Standard/Isolated work in both cases.
+
+Run the manual experiment without concurrent builds or stress tests:
+
+```bash
+cargo test -p service-daemon --features high-priority --lib benchmark -- --ignored --nocapture
+```
+
+This uses a short-cycle test policy and does not calibrate production defaults.
+Report whole-run and per-generation latency separately, alongside worker counts
+and reloads. External async wait outside ServiceSleep is a metric-boundary check,
+not evidence of low-benefit convergence. See the experiment design and interpretation in the
+[design document](../architecture/high-priority-feedback.md#validation).
+
+Focused checks do not replace the release matrix, ignored tests, or platform
+jobs. Local IPC tests require a writable runtime socket directory; sandbox
+denial is not a test pass.
+
+### Workspace commands
+
 `rust.yml` treats Linux GNU and Windows MSVC as cross-platform general CI
 platforms:
 

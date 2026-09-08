@@ -13,6 +13,21 @@ Service authors handle business continuity across reload; the framework does
 not promise an absolute latency SLA. Core lifecycle snapshots and the
 `diagnostics` topology feature do not require HighPriority.
 
+Add `high-priority` to the `features` list of your existing `service-daemon`
+dependency. There is no global public threshold setter. The initial feedback
+path uses completed framework-aware sleep drift, not total business-cycle time
+or queue backlog; a service without valid sleep observations cannot drive it.
+Do not insert artificial sleeps or mandatory round markers just to feed policy.
+Trigger concurrency scaling is a separate mechanism from runtime shard expansion.
+
+A pause warning reports the instance, before/after metric when available,
+placement, resource count, and reason. Insufficient evidence is not low benefit.
+A timed-out policy generation arriving late does not rearm expansion; fresh
+healthy evidence or an explicitly observed external reload can permit evaluation
+again. These are resource-management semantics, not a lossless reload promise.
+Maintainers can find the internal contract in
+[HighPriority feedback control](../architecture/high-priority-feedback.md).
+
 `DaemonLayer` is a `tracing::Layer` that captures tracing events, extracts service and trigger IDs from the current span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.

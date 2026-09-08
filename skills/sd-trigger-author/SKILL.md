@@ -47,3 +47,7 @@ does not validate against a closed keyword list. Handlers are `async` and return
 3. **Triggers are supervised like services** — keep handlers async, return
    `anyhow::Result<()>`; a handler `Err` is retried by the trigger runner, and
    `priority`/`scheduling`/`tags` work the same as `#[service]`.
+4. **HighPriority is opt-in.** Enable the dependency's `high-priority` feature
+   before declaring it. Runtime shard intervention is not trigger concurrency
+   scaling; selecting the mode does not make backlog an input to the current
+   ServiceSleep-based feedback controller. No extra handler instrumentation is required.

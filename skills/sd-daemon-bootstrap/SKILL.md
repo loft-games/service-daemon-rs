@@ -66,6 +66,14 @@ shuts down after them. Priority is a `u8`, default `50`. Named constants:
 
 Set it with `#[service(priority = ServicePriority::STORAGE)]` or a bare number.
 
+## Execution modes
+
+For `scheduling = HighPriority`, first enable `high-priority` on the runtime
+dependency. Standard uses the calling runtime; Isolated uses a private runtime
+per generation; HighPriority permits automatic resource intervention and reload.
+The mode is not a hard real-time guarantee. Its thresholds are internal, not
+global public builder settings. See the reference's HighPriority section.
+
 ## Companions
 
 - `reference.md` — full builder method list, `run` vs `wait` vs `shutdown`,
