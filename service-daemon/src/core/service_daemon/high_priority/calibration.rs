@@ -12,6 +12,10 @@ use crate::{Registry, ServiceDaemon, service};
 
 mod artifacts;
 mod evidence;
+#[cfg(target_os = "linux")]
+mod idle;
+#[cfg(target_os = "linux")]
+mod reuse;
 mod runner;
 
 static START: OnceLock<Instant> = OnceLock::new();

@@ -136,13 +136,21 @@ impl DaemonInstanceInner {
         diagnostics: std::sync::Arc<crate::core::diagnostics::DiagnosticsStore>,
         token: CancellationToken,
     ) {
-        self.runtime_probe_tasks
-            .push(probe_runtime.spawn(run_high_priority_shard_runtime_probe(
-                diagnostics,
-                shard_id,
-                shard_runtime,
-                token,
-            )));
+        #[cfg(test)]
+        let token = token.child_token();
+        #[cfg(test)]
+        let experiment_token = token.clone();
+        let task = probe_runtime.spawn(run_high_priority_shard_runtime_probe(
+            diagnostics,
+            shard_id,
+            shard_runtime,
+            token,
+        ));
+        #[cfg(test)]
+        self.high_priority_runtime_pool
+            .experiment_probes
+            .insert(shard_id, (task.id(), experiment_token));
+        self.runtime_probe_tasks.push(task);
     }
 
     pub(in crate::core::service_daemon) fn spawn_adaptive_recommendation_loop(
@@ -435,6 +443,15 @@ impl DaemonInstanceInner {
         instance: crate::models::ServiceInstanceId,
         now: Instant,
     ) -> Option<HighPriorityShardId> {
+        // Experimental preference is absent from non-test builds. All pressure,
+        // cooldown, rollover and benefit gates remain shared with production.
+        #[cfg(test)]
+        if let Some(target) = self
+            .high_priority_runtime_pool
+            .experiment_idle_target(source)
+        {
+            return Some(target);
+        }
         match self.high_priority_runtime_pool.scale_out(now) {
             Ok(Some(shard_id)) => {
                 self.record_high_priority_policy_decision(HighPriorityPlacementDecision {

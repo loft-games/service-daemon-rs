@@ -307,6 +307,13 @@ pub(super) struct HighPriorityRuntimePool {
     total_worker_threads: usize,
     last_scale_at: Option<Instant>,
     last_rollover_at: Option<Instant>,
+    #[cfg(test)]
+    experiment_prefer_idle: bool,
+    #[cfg(test)]
+    experiment_probes: std::collections::BTreeMap<
+        HighPriorityShardId,
+        (tokio::task::Id, tokio_util::sync::CancellationToken),
+    >,
 }
 
 impl HighPriorityRuntimePool {
@@ -337,7 +344,28 @@ impl HighPriorityRuntimePool {
             total_worker_threads: 0,
             last_scale_at: None,
             last_rollover_at: None,
+            #[cfg(test)]
+            experiment_prefer_idle: false,
+            #[cfg(test)]
+            experiment_probes: Default::default(),
         }
+    }
+
+    #[cfg(test)]
+    fn experiment_idle_target(&self, source: HighPriorityShardId) -> Option<HighPriorityShardId> {
+        if !self.experiment_prefer_idle {
+            return None;
+        }
+        self.snapshot()
+            .into_iter()
+            .filter(|shard| {
+                shard.shard_id != source
+                    && shard.active_generations == 0
+                    && shard.assigned_instances == 0
+                    && shard.pressure_state == HighPriorityShardPressureState::Nominal
+            })
+            .map(|shard| shard.shard_id)
+            .min()
     }
 
     pub(super) fn state(&self) -> Arc<HighPriorityRuntimePoolState> {
@@ -453,6 +481,8 @@ impl HighPriorityRuntimePool {
     }
 
     fn create_shard(&mut self, worker_threads: usize) -> std::io::Result<HighPriorityShardId> {
+        #[cfg(test)]
+        let creation_started = Instant::now();
         let shard_id = HighPriorityShardId(self.next_shard_id);
         self.next_shard_id = self.next_shard_id.saturating_add(1);
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -475,6 +505,12 @@ impl HighPriorityRuntimePool {
                 created_at: Utc::now(),
                 handle,
             });
+        #[cfg(test)]
+        tracing::info!(
+            shard = shard_id.0,
+            creation_ns = creation_started.elapsed().as_nanos() as u64,
+            "HighPriority experimental shard creation measured"
+        );
         Ok(shard_id)
     }
 
@@ -594,6 +630,57 @@ mod tests {
         );
         assert_eq!(pool.snapshot().len(), 2);
         assert_eq!(pool.total_worker_threads(), 2);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn experimental_idle_preference_is_opt_in_and_requires_truly_empty_nominal_target() {
+        let mut pool = HighPriorityRuntimePool::new_with_parallelism(
+            HighPriorityRuntimeControl::for_testing(),
+            plan(1),
+            NonZeroUsize::new(3),
+        );
+        pool.prepare_initial_runtime().unwrap();
+        pool.experiment_prefer_idle = true;
+        assert_eq!(pool.experiment_idle_target(HighPriorityShardId(0)), None);
+        pool.scale_out(Instant::now()).unwrap();
+        pool.experiment_prefer_idle = false;
+        assert_eq!(pool.experiment_idle_target(HighPriorityShardId(0)), None);
+        pool.experiment_prefer_idle = true;
+        assert_eq!(pool.experiment_idle_target(HighPriorityShardId(0)), None);
+        pool.state.record_pressure(
+            HighPriorityShardId(1),
+            HighPriorityShardPressureState::Nominal,
+        );
+        assert_eq!(
+            pool.experiment_idle_target(HighPriorityShardId(0)),
+            Some(HighPriorityShardId(1))
+        );
+        pool.state.record_pressure(
+            HighPriorityShardId(1),
+            HighPriorityShardPressureState::Pressured,
+        );
+        assert_eq!(pool.experiment_idle_target(HighPriorityShardId(0)), None);
+        pool.state.record_pressure(
+            HighPriorityShardId(1),
+            HighPriorityShardPressureState::Nominal,
+        );
+        let instance = ServiceInstanceId::new(uuid::Uuid::from_u128(0xab01));
+        pool.state.select_generation(instance, 1).unwrap();
+        assert!(
+            pool.state
+                .request_rollover(instance, 1, HighPriorityShardId(1))
+        );
+        pool.state.release_generation(instance, 1);
+        pool.state.select_generation(instance, 2).unwrap();
+        assert_eq!(pool.experiment_idle_target(HighPriorityShardId(0)), None);
+        pool.state.release_generation(instance, 2);
+        assert_eq!(pool.experiment_idle_target(HighPriorityShardId(0)), None);
+        pool.state.remove_service_instance(instance);
+        assert_eq!(
+            pool.experiment_idle_target(HighPriorityShardId(0)),
+            Some(HighPriorityShardId(1))
+        );
         pool.shutdown();
     }
 
