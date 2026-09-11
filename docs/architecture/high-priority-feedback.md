@@ -65,6 +65,22 @@ instance/generation, target/actual placement, and resource count. Routine policy
 polling does not repeatedly print that warning. Stopping expansion does not
 immediately reclaim shards; scale-down is outside this controller.
 
+The current pool-retention choice and its evidence limits are described in
+[Performance Benchmarks](performance-benchmarks.md#highpriority-resource-retention-and-reclamation-evidence).
+Idle cost, reuse reliability, placement order and reclamation savings are distinct
+questions; evidence for one must not be presented as proof of the others.
+
+Production intervention selection remains allocation-first, with existing-shard
+fallback when scale-out returns no new shard. The idle-first comparison is a
+test-only candidate: its measured resource-peak benefit is not a production
+contract change, tail-latency guarantee or implementation of reclamation.
+
+Separately, controlled test-only reclamation demonstrates real thread/FD release
+and subsequent rebuilding. It does not implement concurrent production retirement
+or establish reliable CPU/RSS savings. A production controller remains deferred;
+the evidence favors evaluating the narrower reuse-policy change first, unless
+deployment resource constraints justify reclamation-specific work.
+
 ## Validation
 
 Deterministic tests cover window boundaries, stale samples, generation handoff,

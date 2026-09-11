@@ -1,16 +1,18 @@
 # Performance Benchmarks
 
-This document records the official performance measurements and resource consumption
-characteristics of the service-daemon-rs framework. All tests were conducted in a
-controlled environment to ensure reproducibility.
+This document records workload-specific performance measurements and resource
+consumption characteristics of service-daemon-rs. Results belong to their stated
+environment and measurement population, not a universal performance guarantee.
+The service-count measurements below and the HighPriority resource-retention
+experiments use different methods and must not be combined into one cost model.
 
-## Summary
+## Service-count Measurement Summary
 
 - **Memory cost is linear in service count**: each additional service adds roughly **~3.5 KB** RSS overhead. Up to 1,000 services were measured stable in the test environment.
 - **Per-service cost includes**: DI resolution, logging plumbing, graceful-shutdown wiring. These are paid once at registration; runtime overhead per event is dominated by the user code, not framework bookkeeping.
 - **Two control-flow styles, same supervisor**: `is_shutdown()` polling loops and event-driven triggers run under the same restart/lifecycle machinery. Migrating from one to the other does not change the orchestration layer.
 
-## Test Environment
+## Service-count Test Environment
 
 - **Operating System**: Linux x64
 - **CPU**: (Test host physical CPU)
@@ -243,6 +245,184 @@ The comparison above is meant as analysis of architectural trade-offs, not a
 ranking. The two projects target different scopes.
 
 ---
+
+## HighPriority Resource Retention and Reclamation Evidence
+
+HighPriority currently retains a bounded runtime pool rather than automatically
+reclaiming empty shards. Low pressure is not, by itself, evidence that isolation
+is unnecessary. Resource retention, placement order, and reclamation are separate
+decisions. Experiment commands and acceptance checks live in the
+[maintainer validation map](../development/release-validation.md#linux-empty-shard-reuse-experiment).
+
+### What the available observations establish
+
+The Linux idle-cost experiment used release builds, three independent processes,
+and thirty-second windows after real services had run and been removed. On its
+twelve-CPU host, retaining twelve single-worker shards with HP probes enabled
+had low measured process CPU cost and a small paired RSS increase relative to
+one shard. With HP probes disabled, the observed HP-worker CPU and context-switch
+increments were zero. This supports waiting rather than busy-spinning in those
+windows, not a promise that idle workers never wake. Probe disabling is an
+experimental control, not a production recommendation.
+
+Retention still costs threads, file descriptors and virtual address space.
+Virtual address space is not resident memory; process RSS includes framework,
+sampler and allocator state. Whole-daemon shutdown is not a measurement of
+single-shard reclamation, and RSS remaining elevated after shutdown establishes
+neither a leak nor the amount reclamation would return. Power was not measured.
+
+The reported two-episode reuse experiment exercised production policy with an
+empty, Nominal shard remaining after the first subject was removed and a
+sixty-five-second quiet valley. Across three independent repetitions per
+condition, a full two-worker budget reused the empty shard without growth;
+a three-worker budget with spare capacity allocated another shard instead.
+Both conditions reported actual generation relocation and improved evaluation
+samples while source contention continued. These reuse observations are recorded
+from the experiment report; they are not a new independent replay by this document.
+
+Thus an empty shard can be useful reserve capacity rather than necessarily
+stranded worker budget. The conditions used different CPU affinities to infer
+their budgets, so they do not rank reuse versus allocation performance.
+Evaluation-window means are not whole-run or post-generation tail percentiles.
+Preserve raw records, source/executable manifests and interpretation notes;
+the documentation is not a substitute for the experiment archive.
+
+The fixed-budget repeated-cycle experiment extends that evidence to six pressure
+episodes in each of three independent processes. With the production-inferred
+budget fixed at three workers, the first two episodes grew the pool from one to
+two and then three workers. The remaining four reused hp#1 without further
+growth. Each episode established actual relocation and PressureCleared from
+comparable evaluation samples while the source competitor remained active.
+After removal, target active/assigned counts returned to zero, and round
+boundaries had no pending placement or rollover. This establishes useful control
+at the budget ceiling, not merely a resource count constrained by the cap.
+
+Resource stability is not balanced utilization or proof that every retained
+shard is necessary: hp#2 stayed empty after the second subject was removed,
+while subsequent episodes selected hp#1. This motivates an equal-condition
+allocation-first versus idle-first comparison; it does not establish that
+omitting hp#2 would preserve recovery performance. Each subject was removed
+after its episode, so concurrent instance count decreased across rounds. The
+experiment validates each episode's own intervention, not a fixed-concurrency
+throughput comparison. Evaluation-window means and post-generation percentiles
+must not be substituted for whole-run tail latency.
+
+The original measurement archive and corrected replay verifier have separate
+source/executable identities. Independent hash checks and corrected replay
+validated the preserved reports. The correction regenerates the report and
+compares its serialized bytes rather than comparing reparsed floating-point
+means; it introduces neither numeric tolerance nor new measurements. Success
+of the corrected verifier does not retroactively establish that the original
+executable's replay succeeded. Earlier experiment archives unavailable at their
+original paths were not revalidated by this check or replaced by these results.
+
+### Same-budget placement preference evidence
+
+The placement A/B experiment used four fresh-process pairs, alternating arm
+order, with the same archived release binary, three-CPU affinity, inferred
+budget and initial topology. Only the test-only placement preference differed
+after the common first intervention and empty-shard valley. Independent archive
+hash verification and raw-data replay supported the preserved comparison.
+
+Idle-first reused hp#1 and kept peak HP workers at two, while allocation-first
+created hp#2 and peaked at three. Both arms completed actual generation relocation
+and benefit evaluation, with source contention continuing. This is repeatable
+avoidance of one worker/shard allocation in this workload, not evidence that
+process CPU or RSS fell proportionally; neither was measured here.
+
+In the paired observations, idle-first generation and evaluation completion
+were not later. That does not isolate runtime construction cost: the workload's
+blocking cadence and policy observation timing also affect recovery delay.
+Post-generation P99 differences had both signs, and idle-first included a larger
+single maximum drift. Four pairs do not establish statistical non-inferiority
+or that every tail metric is unchanged or better.
+
+The comparison uses a fixed fifty-second second-pressure phase and a separate
+thirty-second post-generation window beginning after two seconds of settling.
+Phase P99.9 retains the initial long waits and must not be replaced by the much
+lower post-generation P99. Each Post window has roughly five thousand completed
+samples; P99.9 remains exploratory under this experiment's ten-thousand-sample
+guidance. Neither population is the entire process lifetime.
+
+### Controlled reclamation and rebuild evidence
+
+The long-valley experiment compared retaining and preferentially reusing hp#1
+with reclaiming it and rebuilding on demand. Four fresh-process pairs used the
+same archived release binary, three-CPU budget, workload and five-minute valley,
+with alternating arm order. Both arms used the experimental idle-first preference;
+this isolates reclamation from the preceding allocation-first comparison.
+Independent hash checks and same-binary raw-data replay supported the archive.
+
+In the stable valley, reclamation reduced HP workers from two to one, process
+threads from six to five, and file descriptors from twenty-two to eighteen.
+The target worker TID disappeared, its probe and runtime shutdown completed,
+and the initial worker survived. This demonstrates actual release, not merely
+accounting changes. Both arms still peaked at two HP workers over the full case:
+the benefit was lower valley occupancy, not a lower peak. The next pressure
+episode reused hp#1 in the retention arm and created fresh hp#2 in the reclamation
+arm; both completed actual generation relocation and benefit evaluation.
+
+The resource dimensions do not share one conclusion. Paired process CPU changes
+had both signs, so no reliable CPU-time break-even valley length was established.
+Immediate RSS did not fall; slightly lower later endpoints include sampling,
+retained records and allocator effects, not an isolated runtime-memory return.
+The experimental shutdown path used helper threads and coincided with increased
+virtual address space. This is not equivalent RSS growth, nor proof of the
+entire allocation source or an inherent cost of every reclamation implementation.
+The target worker exited before the total thread count fell: helper threads
+temporarily masked the reduction in immediate process-wide snapshots.
+
+Measured shutdown and construction wall times were sub-millisecond, whereas
+paired generation-recovery differences were hundreds of milliseconds with both
+signs. Do not attribute recovery differences directly to construction cost or
+conclude that rebuilding has no recovery cost. Post-generation tails use the
+same settling-plus-thirty-second population as the placement comparison; the
+full second-pressure phase retains initial long waits. Neither four pairs nor
+roughly five thousand Post samples establishes tail non-inferiority or an SLA.
+
+The hook only removes the last dynamic shard after checking emptiness and
+reservations; the experiment excludes concurrent service creation. It is not a
+production retirement protocol. Its helper-thread shutdown path should not be
+adopted without separately designing shutdown-resource ownership and lifetime.
+Actual thread/FD release establishes value when those are deployment constraints;
+general CPU/RSS net savings and the need for a full controller remain unproven.
+
+### Questions that must remain separate
+
+| Experiment | Question | Decision boundary |
+| --- | --- | --- |
+| Idle resource cost | Is retaining empty capacity materially expensive? | Establishes retention cost in the measured environment, not actual reclamation savings. |
+| Empty-shard reuse | Can reserve capacity help a later pressured service at the budget ceiling? | Establishes useful reuse in the measured case, not repeated-cycle reliability or optimal placement order. |
+| Repeated pressure cycles | Does reuse remain effective with bounded resources and correct lifecycle accounting? | Observed in the finite six-episode workload with per-round placement, benefit and cleanup evidence; not a long-duration soak, allocator convergence or balanced utilization guarantee. |
+| Allocation-first versus idle-first | Can placement order reduce resource growth while retaining effective recovery? | Equal-condition pairs demonstrated lower peak HP workers and effective recovery; tail non-inferiority and general production suitability remain unproven. This concerns avoiding creation, not reclaiming existing resources. |
+| Long-valley reclamation | Do actual releases outweigh subsequent rebuild and recovery costs? | Controlled pairs demonstrated real thread/FD release and effective rebuilding, but not reliable CPU/RSS net savings, tail non-inferiority or a production concurrent-retirement protocol. |
+
+The available observations cover idle cost, two-episode reuse, finite
+repeated-cycle reuse, a bounded placement-order comparison and controlled
+reclamation/rebuilding. They support an idle-first resource-peak benefit and
+reclamation's valley thread/FD release for the tested workload, not universal
+performance superiority or general CPU/RSS net savings. Multiple processes
+or pressure episodes are repetitions, not additional categories of evidence.
+Do not infer that an available test entrypoint means its performance claim has
+been validated.
+
+### Current decision
+
+Retaining the bounded pool is a reasonable current choice for the measured
+scenario. There is no demonstrated need here to introduce automatic reclamation
+or active service consolidation solely to save idle CPU or a small amount of RSS.
+Finite repeated-cycle reuse also provides no evidence that reclamation is needed
+to unblock intervention at the worker ceiling in this workload.
+This is not a claim that scale-down can never be useful: the controlled experiment
+establishes concrete thread/FD release. Revisit production reclamation when such
+deployment constraints justify it; address-space, resident-memory and power goals
+still need direct evidence of net benefit for the proposed implementation.
+The placement comparison supports a narrow production-design discussion about
+idle-first reuse without destroying runtimes. It does not authorize changing the
+default, add a latency guarantee, or justify a full reclamation controller. Production
+adoption needs explicit eligibility, reservation/concurrency, observation
+freshness, cooldown and failure semantics, plus performance acceptance criteria.
+The production default remains allocation-first; the candidate is test-only.
 
 ## 6. Reproducing Results
 

@@ -164,6 +164,215 @@ Focused checks do not replace the release matrix, ignored tests, or platform
 jobs. Local IPC tests require a writable runtime socket directory; sandbox
 denial is not a test pass.
 
+#### Linux idle-resource cost experiment
+
+Measure the cost of retaining empty HighPriority resources before deciding whether
+to implement reclamation. This test-only experiment constructs one shard and then
+up to twelve single-worker shards (bounded by the current worker budget), starts
+and removes real services on them, and measures HP probes on/off. Control/Standard
+probes and the policy loop remain enabled. It does not test automatic scale-out
+decisions or implement single-shard shutdown.
+
+```bash
+cargo test -p service-daemon --features high-priority --lib calibration::idle -- --test-threads=1
+SD_IDLE_DIR="$PWD/target/calibration/linux-idle-cost" cargo test -p service-daemon --release --features high-priority --lib calibration::idle::idle_cost_experiment -- --ignored --nocapture
+```
+
+Use a new absolute directory, at least two available workers, and Linux procfs
+with readable per-thread `schedstat` and process `smaps_rollup`. Allow about ten
+minutes plus compilation; keep other builds and stress tasks stopped. Three
+fresh processes use thirty-second windows, with HP-probe order alternating.
+`SD_IDLE_SECONDS` can shorten a separate smoke run, not establish cost evidence.
+The driver builds from an allowlisted source snapshot and retains executable,
+raw thread/memory samples, pool/probe evidence, completed windows, exit status,
+report, and content hashes. Preserve failures as well as completed runs.
+
+Interpret HP-worker CPU separately from total process CPU, which also includes
+control work and sampling. Thread identity changes or counter resets invalidate
+a window. Report RSS/PSS separately from virtual address space; process memory
+also includes the harness, retained diagnostics and allocator caches. The
+after-daemon-shutdown comparison includes control runtime teardown and is not
+evidence of an implemented single-shard reclamation path. No universal acceptable
+idle-cost threshold or automatic decision to add scale-down follows from this
+experiment.
+
+#### Linux empty-shard reuse experiment
+
+For the resource-retention decision and the separate questions answered by idle
+cost, reuse, repeated cycles, placement-order comparisons and reclamation, see
+[the performance evidence boundaries](../architecture/performance-benchmarks.md#highpriority-resource-retention-and-reclamation-evidence).
+
+Validate whether a shard left empty by an earlier intervention helps an already
+running service during a later pressure episode. This test uses production
+policy, real generation rollover, removal of the first affected instance, and
+a sixty-five-second quiet valley. It does not change policy thresholds, disable
+probes, force placement, or implement scale-down.
+
+```bash
+cargo test -p service-daemon --features high-priority --lib calibration::reuse -- --test-threads=1
+mkdir -p target/calibration
+SD_REUSE_DIR="$PWD/target/calibration/empty-shard-reuse" cargo test -p service-daemon --release --features high-priority --lib calibration::reuse::reuse_experiment -- --ignored --nocapture
+```
+
+Use a new absolute directory, Linux `taskset`, and at least three available CPUs.
+Allow about twelve minutes plus compilation, with other builds/stress tasks
+stopped. The driver archives and builds the sources, then runs three fresh
+processes per capacity, alternating case order. Two- and three-CPU affinity
+produce inferred worker budgets of two and three without policy overrides.
+These are placement comparisons, not equivalent-capacity performance comparisons.
+
+Accept evidence only when both interventions independently pass the existing
+Rust validator, the retained target is empty and Nominal immediately before the
+second request, actual generation placement matches the request, and source
+pressure continues after intervention. Report reuse without worker growth
+separately from allocating another shard despite an existing empty one. Preserve
+raw observations, resource/probe snapshots, exits, failures, executable and source
+hashes. A failed case is insufficient evidence, not proof that reuse is impossible.
+Results establish behavior for this workload, not universal reuse or latency
+guarantees; they do not by themselves establish that reclamation is necessary.
+
+The repeated-cycle variant holds the inferred budget at three workers and runs
+six pressure episodes in each of three fresh processes. All six subjects are
+already running on the original shard before pressure starts; each is activated
+once, independently evaluated, and removed through the public lifecycle API.
+The first two episodes exercise growth; the remaining four must demonstrate
+reuse at the ceiling. Sixty-five-second inter-round valleys keep production
+cooldowns intact. Allow approximately twenty-five minutes plus compilation.
+
+```bash
+mkdir -p target/calibration
+SD_REUSE_DIR="$PWD/target/calibration/repeated-pressure" cargo test -p service-daemon --release --features high-priority --lib calibration::reuse::cycles_experiment -- --ignored --nocapture
+# Read-only replay using the archived executable; repeat for each case directory.
+SD_REUSE_CASE="$PWD/target/calibration/repeated-pressure/1-capacity-3" target/calibration/repeated-pressure/reuse-test --exact core::service_daemon::high_priority::calibration::reuse::cycles::cycles_replay --ignored --nocapture
+```
+
+Require complete per-round evidence, bounded worker counts throughout, correct
+active/assigned accounting after every removal, and no pending placement or
+rollover at round boundaries. Each full-budget intervention must use a target
+observed empty and Nominal immediately beforehand. Preserve partial-round raw
+observations on failure. Replay checks stored results and rejects missing rounds
+and crossed identities. Six episodes establish finite repeated-cycle behavior,
+not a long-duration soak, allocator-memory convergence, or an idle-first policy
+comparison; those need separate evidence.
+
+Distinguish successful repeated reuse from utilization of every retained shard.
+Record which targets remain unused; repeatedly selecting the same empty target
+does not alone indicate a correctness defect or prove another shard unnecessary.
+Since subjects are removed after each episode, do not treat successive rounds
+as equal-concurrency performance comparisons. An allocation-first/idle-first
+comparison must hold CPU affinity, budget, workload and initial topology equal;
+it is separate from testing reclamation savings and rebuild costs.
+
+Replay compares the exact regenerated report bytes, avoiding a second floating
+point parse of serialized means. If a replay-only correction is needed after a
+run, preserve its original source, executable, reports and manifest. Archive and
+run a separately identified verifier against the existing raw data:
+
+```bash
+SD_REUSE_DIR="$PWD/target/calibration/repeated-pressure" cargo test -p service-daemon --release --features high-priority --lib -j 2 calibration::reuse::cycles::cycles_archive_replay -- --ignored --nocapture
+```
+
+This creates a fresh `replay-verifier/` subdirectory, verifies original hashes
+before and after replay, and records new verifier sources, executable, exits and
+their hashes without rewriting the original manifest. It does not rerun the
+workload or retroactively change the identity of its producer.
+
+Report original-executable replay failures separately from corrected-verifier
+success. Byte-identical report reconstruction establishes replay consistency,
+not a new workload run. If earlier archives are unavailable, state that they
+cannot be rechecked; never regenerate them from newer sources as replacements.
+
+#### Same-budget placement preference comparison
+
+The idle-first A/B variant is a `cfg(test)`-only experiment, not a production
+configuration or a change to default placement semantics. Its default-disabled
+pool-local switch is enabled only after the common first intervention and
+sixty-five-second empty-shard valley. The candidate must be a different Nominal
+shard with zero active generations and zero assigned instances. All pressure,
+global-pressure, cooldown, generation rollover and benefit gates stay shared.
+
+```bash
+mkdir -p target/calibration
+SD_REUSE_DIR="$PWD/target/calibration/placement-ab" cargo test -p service-daemon --release --features high-priority --lib -j 2 calibration::reuse::ab_experiment -- --ignored --nocapture
+```
+
+Four fresh-process pairs alternate growth-first/idle-first order, using the
+same archived executable, three-CPU affinity, inferred budget three, initial
+topology and workload. Allow about twenty minutes plus compilation and stop
+unrelated builds during measurement. Each arm must independently pass the
+two-intervention validator and exact-byte raw-data replay; failed or incomplete
+cases remain archived and must not disappear from the comparison.
+
+Compare peak workers, pressure-onset-to-generation/evaluation delay, and tails
+from separate populations: the full fixed fifty-second second pressure phase,
+and thirty seconds after the new generation's two-second settling interval.
+Both windows require complete observations. Mark P99.9 exploratory below 10,000
+samples. Report paired differences and variability; four pairs do not establish
+statistical non-inferiority or a universal latency guarantee. Resource reduction
+alone does not authorize changing production defaults or adding scale-down.
+
+Keep resource benefit and performance claims separate: avoiding one HP worker
+does not imply proportional process CPU/RSS savings, and earlier generation
+arrival does not measure runtime construction cost. Preserve adverse Max and
+percentile differences even when both arms satisfy intervention acceptance.
+The controlled empty-shard valley does not validate concurrent target selection,
+pending placement reservations or reuse during cooldown. Before production
+adoption, separately define and test target eligibility and fresh observations,
+concurrent startup/reservations, failed requests and lifecycle cleanup, existing
+fallback behavior, cooldown semantics and benefit-pause protection. Do not simply
+enable the experimental switch by default.
+
+#### Long-valley retention versus reclamation
+
+The Linux `reclaim_experiment` compares retaining/reusing an empty shard with
+test-only, controlled tail reclamation followed by demand-driven rebuilding.
+It is not a production scale-down controller or a public policy setting.
+
+```bash
+mkdir -p target/calibration
+SD_REUSE_DIR="$PWD/target/calibration/reclamation" cargo test -p service-daemon --release --features high-priority --lib -j 2 calibration::reuse::reclaim_experiment -- --ignored --nocapture
+```
+
+Allow about fifty minutes plus compilation for four fresh-process pairs. Both
+arms use the same archived executable, three-CPU affinity and inferred budget,
+natural first expansion, a five-minute low valley, and a fixed fifty-second
+second pressure phase. Alternate arm order and keep unrelated builds stopped.
+Retaining uses the experimental idle-first preference from the preceding A/B;
+reclamation removes only the last dynamically created, empty Nominal shard.
+
+Reclamation must reject active/assigned/reserved targets and the initial shard,
+detach the target from placement, stop and join only its probe, then join the
+runtime shutdown before crediting worker budget. Verify the actual Linux worker
+TID disappeared and the initial worker survived. Rebuilding uses a fresh shard
+identity. No concurrent service creation is permitted during this controlled
+experiment; successful results do not validate a production concurrent-retirement
+protocol. Historical diagnostics may retain the retired shard's observations;
+the live placement list and runtime facts must exclude it.
+
+Report thread and file-descriptor release separately from RSS/PSS and virtual
+address space. Compare stable idle CPU/context-switch rates and record process
+CPU counters that include exited threads around transitions. Sampling overhead
+and trace-buffer growth affect process-wide memory and CPU and are common to
+both arms. Do not infer proportional CPU/RSS savings from worker counts, equate
+virtual memory with resident memory, or assign a universal economic score.
+Only estimate a CPU-time break-even interval when both saving and transition
+cost are identifiable above noise; otherwise mark it inconclusive.
+
+Separate target-worker exit from an immediate reduction in total process threads:
+shutdown helpers can temporarily replace the retired worker in the count. Keep
+both transition snapshots and stable-valley observations. A helper-thread path
+may also change address-space retention; do not attribute the entire difference
+without an allocator/mapping control or generalize it to production reclamation.
+Report valley occupancy separately from full-case resource peaks. Successful
+rebuilding establishes functional recovery, not that generation-delay differences
+equal measured runtime construction cost or that all tails are non-inferior.
+
+Use the same fixed post-generation thirty-second tail window after two-second
+settling, separate from whole-second-phase tails. Preserve incomplete cases and
+replay each successful case using the archived `reclaim_replay` entrypoint.
+Fast `reclaim_` unit tests cover ownership refusal, real probe/worker shutdown,
+fresh identity/budget and counter integrity. Keep all preceding archives intact.
+
 ### Workspace commands
 
 `rust.yml` treats Linux GNU and Windows MSVC as cross-platform general CI
