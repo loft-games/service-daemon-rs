@@ -402,8 +402,40 @@ impl DaemonInstanceInner {
         else {
             return;
         };
-        let scale_out = self.high_priority_runtime_pool.scale_out(now);
-        let target = match scale_out {
+        let target =
+            self.select_high_priority_intervention_target(candidate.shard, candidate.instance, now);
+        if let Some(target) = target
+            && self.high_priority_runtime_pool.state().request_rollover(
+                candidate.instance,
+                candidate.generation,
+                target,
+            )
+        {
+            let workers = self.high_priority_runtime_pool.total_worker_threads();
+            self.high_priority_runtime_pool
+                .feedback
+                .start(candidate, target, workers, now);
+            self.high_priority_runtime_pool.record_rollover_batch(now);
+            self.record_high_priority_policy_decision(HighPriorityPlacementDecision {
+                shard_id: Some(target),
+                kind: HighPriorityPlacementDecisionKind::Rollover,
+                reason: HighPriorityPlacementReason::PolicyRollover,
+            });
+            tracing::info!(service_instance_id = %candidate.instance, generation = candidate.generation, source_shard = %candidate.shard, target_shard = %target, metric = "service_sleep.mean_drift_ns", baseline = candidate.window.mean_drift_ns, samples = candidate.window.completed, workers, "HighPriority resource intervention requested");
+            signal.notify_one();
+        } else {
+            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::NoBetterShard);
+        }
+        self.sync_high_priority_runtime_facts();
+    }
+
+    fn select_high_priority_intervention_target(
+        &mut self,
+        source: HighPriorityShardId,
+        instance: crate::models::ServiceInstanceId,
+        now: Instant,
+    ) -> Option<HighPriorityShardId> {
+        match self.high_priority_runtime_pool.scale_out(now) {
             Ok(Some(shard_id)) => {
                 self.record_high_priority_policy_decision(HighPriorityPlacementDecision {
                     shard_id: Some(shard_id),
@@ -432,40 +464,17 @@ impl DaemonInstanceInner {
                     .snapshot()
                     .into_iter()
                     .filter(|shard| {
-                        shard.shard_id != candidate.shard
+                        shard.shard_id != source
                             && shard.pressure_state == HighPriorityShardPressureState::Nominal
                     })
                     .min_by_key(|shard| (shard.active_generations, shard.shard_id))
                     .map(|shard| shard.shard_id)
             }
             Err(error) => {
-                tracing::warn!(%error, service_instance_id = %candidate.instance, "HighPriority shard allocation failed; intervention was not started");
+                tracing::warn!(%error, service_instance_id = %instance, "HighPriority shard allocation failed; intervention was not started");
                 None
             }
-        };
-        if let Some(target) = target
-            && self.high_priority_runtime_pool.state().request_rollover(
-                candidate.instance,
-                candidate.generation,
-                target,
-            )
-        {
-            let workers = self.high_priority_runtime_pool.total_worker_threads();
-            self.high_priority_runtime_pool
-                .feedback
-                .start(candidate, target, workers, now);
-            self.high_priority_runtime_pool.record_rollover_batch(now);
-            self.record_high_priority_policy_decision(HighPriorityPlacementDecision {
-                shard_id: Some(target),
-                kind: HighPriorityPlacementDecisionKind::Rollover,
-                reason: HighPriorityPlacementReason::PolicyRollover,
-            });
-            tracing::info!(service_instance_id = %candidate.instance, generation = candidate.generation, source_shard = %candidate.shard, target_shard = %target, metric = "service_sleep.mean_drift_ns", baseline = candidate.window.mean_drift_ns, samples = candidate.window.completed, workers, "HighPriority resource intervention requested");
-            signal.notify_one();
-        } else {
-            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::NoBetterShard);
         }
-        self.sync_high_priority_runtime_facts();
     }
 
     fn sync_scale_out_suppression_to_diagnostics(&self, _now: Instant) {
