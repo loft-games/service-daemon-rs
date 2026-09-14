@@ -30,6 +30,60 @@ jobs:
       - name: Rust Check No Default Features
         run: cargo check -p service-daemon --no-default-features
 
+  benchmarks:
+    name: Framework benchmarks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      BENCH_REPORT_ROOT: ${{ github.workspace }}/target/criterion/ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Test benchmark report adapter
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_framework_benchmark_report.py'
+      - name: Record measurement environment
+        id: environment
+        run: python3 .github/scripts/framework_benchmark_report.py capture "$BENCH_REPORT_ROOT"
+      - name: Build framework benchmarks
+        run: cargo bench --locked -p service-daemon --bench framework --no-run
+      - name: Smoke framework benchmarks
+        run: cargo bench --locked -p service-daemon --bench framework -- --test
+      - name: Build HighPriority framework benchmarks
+        run: cargo bench --locked -p service-daemon --bench framework --features high-priority --no-run
+      - name: Smoke HighPriority framework benchmarks
+        run: cargo bench --locked -p service-daemon --bench framework --features high-priority -- --test
+      - name: Measure framework benchmarks
+        id: measure_default
+        timeout-minutes: 15
+        env:
+          CRITERION_HOME: ${{ env.BENCH_REPORT_ROOT }}/default
+        run: cargo bench --locked -p service-daemon --bench framework -- --noplot 2>&1 | tee "$BENCH_REPORT_ROOT/default.log"
+      - name: Measure HighPriority framework benchmarks
+        id: measure_hp
+        if: ${{ !cancelled() && steps.environment.outcome == 'success' }}
+        timeout-minutes: 15
+        env:
+          CRITERION_HOME: ${{ env.BENCH_REPORT_ROOT }}/high-priority
+        run: cargo bench --locked -p service-daemon --bench framework --features high-priority -- --noplot 2>&1 | tee "$BENCH_REPORT_ROOT/high-priority.log"
+      - name: Publish benchmark summary
+        if: always()
+        run: |
+          python3 .github/scripts/framework_benchmark_report.py report "$BENCH_REPORT_ROOT" \
+            --default-status '${{ steps.measure_default.outcome }}' \
+            --high-priority-status '${{ steps.measure_hp.outcome }}'
+      - name: Upload benchmark report and raw results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: framework-benchmarks-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.BENCH_REPORT_ROOT }}/
+          retention-days: 30
+          if-no-files-found: error
+
   test:
     name: Test
     runs-on: ubuntu-latest

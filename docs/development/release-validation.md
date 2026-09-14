@@ -21,6 +21,99 @@ non-default features.
 
 ## General Platform CI
 
+### Framework operation benchmarks
+
+The `framework` Criterion target measures framework operation costs independently
+of the runtime experiments below. Criterion is a dev-dependency; the library and
+benchmark share `src/crate_root.rs` declarations and the same implementation files.
+Cargo enables `cfg(test)` for this target. The benchmarks call framework operations
+directly using pre-built fixtures.
+
+One concrete configuration difference matters: with default features,
+`cfg(test)` retains runtime-probe counters and snapshot reads that a normal
+non-HighPriority library build replaces with zero statistics. These are
+test-build operation baselines, not exact default-production timings. The
+startup banner records test/HighPriority/debug configuration; compare like builds.
+
+The `Rust CI` workflow has a dedicated Linux `Framework benchmarks` job. It runs
+separately from `Check` and `Test`, and compiles, smoke-runs, then fully measures
+the default and HighPriority configurations. The two measurements run sequentially
+on the job's runner. Equivalent local build and smoke commands are:
+
+```bash
+cargo bench -p service-daemon --bench framework --no-run
+cargo bench -p service-daemon --bench framework -- --test
+cargo bench -p service-daemon --bench framework --features high-priority --no-run
+cargo bench -p service-daemon --bench framework --features high-priority -- --test
+```
+
+Open **Actions → Rust CI → a run → Summary** for the benchmark tables. Each table
+shows mean ns/op, the mean's confidence interval, median ns/op, and sample count.
+These estimates describe operation costs; confidence intervals are not latency
+percentiles. The report includes the checked-out commit (the merge commit for a
+normal PR run), toolchain, lockfile hash, CPU, OS and feature configuration.
+
+Download `framework-benchmarks-<run-id>-<attempt>` from the run's **Artifacts** for
+`report.md`, `metadata.json`, command logs, and raw Criterion JSON in separate
+`default/` and `high-priority/` directories. Artifacts are retained for 30 days.
+CI uses `--locked` and `--noplot`; Markdown and JSON are the published reports.
+
+Failed commands, missing cases, or malformed result files fail the job. The
+summary marks incomplete configurations as failed and preserves available rows;
+report generation and artifact upload are attempted even after earlier failures.
+Runner termination or cancellation can prevent final publication. No timing
+threshold fails CI, and results from different hosted runners are not automatically
+classified as regressions. Each run uses a fresh directory; prior Criterion
+baselines are not restored into it.
+
+The CI report adapter presents Criterion's existing estimates. Its filesystem
+and failure-path tests run without Cargo:
+
+```bash
+python3 -B -m unittest discover -s .github/scripts -p 'test_framework_benchmark_report.py'
+```
+
+There are seven default measurement points and eight with HighPriority enabled:
+
+| Group | Cases | Measurement contract |
+| :--- | :--- | :--- |
+| `observation` | `standard_steady`, plus `high_priority_steady` when enabled | Real completed ServiceSleep recording, requested 1 ms / elapsed 2 ms. Pre-fill 128 observations outside timing; measure recording including its internal clock, locks and aggregate updates, never a real sleep. |
+| `diagnostics_snapshot` | 1, 32, 256 instances | One Standard generation and 128 observations per instance. Include full snapshot creation, consumption and destruction; exclude fixture construction, concurrent writes and serialization. These sizes are measurement points, not recommended capacities. |
+| `provider_resolve` | `immutable_warm`, `managed_warm`, `arc_clone_drop_reference` | Pre-initialized `StateManager<u64>` with real managed promotion for the managed case. Reuse a current-thread runtime; time async resolution and returned Arc consumption/destruction, not initialization or per-operation runtime/block_on construction. The Arc case uses the same async measurement form and is a reference, not a required target. |
+
+Fixture assertions run outside timing, also in smoke mode: aggregate counts must
+match at generation/service/lane levels, the HP window must stay bounded, snapshot
+populations must match, and warm resolution must return the expected Arc without
+calling an initializer. Criterion's default sampling parameters are retained.
+The HP fixture waits once for 2 ms before pre-filling so inferred sleep starts
+are inside the registered generation; this setup wait and the zero-settling
+window inspection are not timed and do not run or modify the production policy.
+
+For local full measurements, avoid concurrent builds or stress tests, and
+keep feature configurations in separate directories:
+
+```bash
+CRITERION_HOME="$PWD/target/criterion/default" cargo bench -p service-daemon --bench framework
+CRITERION_HOME="$PWD/target/criterion/high-priority" cargo bench -p service-daemon --bench framework --features high-priority
+```
+
+Run these commands from the workspace root; absolute output paths avoid Cargo's
+package working directory changing the destination. Use fresh output directories
+when preserving a run; Criterion may update prior
+results at the selected location. For cross-revision comparisons, record the
+commit, dirty-worktree state (and preserve changed source if needed), lockfile,
+toolchain, host, feature set, parameters and fixture definition. Keep them
+comparable before interpreting Criterion's baseline differences. Reports remain
+under `target/` and are not committed or automatically cleaned by this workflow.
+They are not the recoverable source-and-executable archives of the long runtime
+experiments. Operation timings are neither service recovery times nor sleep-drift
+P99/P99.9 or business throughput guarantees. CI acceptance requires successful
+execution and complete results, not a percentage-regression threshold.
+Console statistics and JSON results do not require plotting tools. With the
+selected minimal Criterion features (no `plotters`), graphical HTML reports
+require an available Gnuplot installation; missing plots do not imply missing
+measurements. This workflow does not install extra plotting software.
+
 ### HighPriority feedback validation
 
 Use the [design contract](../architecture/high-priority-feedback.md) together with

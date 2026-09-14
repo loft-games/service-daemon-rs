@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Framework Microbenchmarks**: Added a dev-only Criterion target for observation recording, diagnostic snapshots at multiple instance counts, and warm provider resolution. A dedicated Linux CI job builds, smoke-runs and measures default and HighPriority configurations, publishes statistical summaries, and archives reports and raw results for 30 days.
+
 - **Unified IPC Streams**: Added `IpcStream`, a platform-neutral `AsyncRead` / `AsyncWrite` stream returned by IPC provider `accept()` and `connect()` helpers.
 - **Cross-platform Local IPC Providers**: Added `LocalIpcListen` and `LocalIpcConnect` provider templates that accept logical names and map them to Unix domain sockets or Windows named pipes. Their `accept().await?` / `connect().await?` helpers return `IpcStream`, and connector providers defer dialing until `connect()`. Name arguments accept string literals or paths to `const`/`static &'static str` values.
 - **Provider Attribute Normalization**: Added explicit `default = ...` and `template = ...` provider head forms while preserving existing bare defaults and built-in template syntax.

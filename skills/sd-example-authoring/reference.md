@@ -89,6 +89,7 @@ Choose the Rust test owner according to the behavior being accepted:
 | Evidence association, statistics, classification, and malformed inputs | Typed test-support functions with deterministic `#[test]` cases. |
 | Example topology and public service lifecycle | `examples/<topic>/tests/` integration tests using real example services. |
 | Private runtime placement, controller state, and internal test controls | The owning runtime module's `#[cfg(test)]` tests. |
+| Framework operation cost and scaling with input size | The `service-daemon` Criterion `framework` target; the dedicated CI job builds, smoke-runs and measures both configurations, then publishes a Summary and downloadable results. |
 | Source archive restoration and artifact integrity | Rust filesystem integration tests with temporary directories and real input files. |
 | Long-running production-default calibration | Explicit `#[test]` / `#[ignore]` entrypoints run through Cargo in release mode. |
 
@@ -102,6 +103,20 @@ Keep workload execution, evidence validation, and report rendering as distinct
 test-support responsibilities. The report presents the result established by
 Rust assertions and classification. Example workloads teach reusable framework
 wiring; private test controls remain with their runtime owner.
+
+Internal Criterion benchmarks share the library's source declarations through
+`service-daemon/src/crate_root.rs`. Verify the operation, fixture state and timing
+boundary, including configuration differences introduced by `cfg(test)`. Keep setup assertions
+outside timing but active in smoke mode. Report operation costs separately from
+system recovery and service latency evidence. Criterion output is not a full
+recoverable experiment archive; record source/configuration identity separately.
+
+The CI report adapter in `.github/scripts/framework_benchmark_report.py` presents
+Criterion JSON estimates and checks result completeness. Keep its expected case
+IDs aligned when adding or renaming benchmarks, and run its companion Python
+unittest suite. Missing results and failed commands fail the job; timing changes
+do not. Reports and raw results are retained as artifacts for 30 days. See
+`docs/development/release-validation.md` for commands and report locations.
 
 For reproducible experiments, preserve the selected source contents, build
 configuration, executable identity, raw observations, and validator identity as
