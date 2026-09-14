@@ -41,6 +41,7 @@ pub(super) fn in_log_processing() -> bool {
 }
 
 /// Renders a log event into the provided buffer with ANSI color codes.
+/// Displays the captured UTC instant in the process-local timezone with its offset.
 ///
 /// The buffer is cleared but NOT deallocated, allowing memory reuse across
 /// successive calls within a batch loop.
@@ -50,7 +51,10 @@ pub(super) fn render_to_buf(event: &LogEvent, buf: &mut String) {
     let _ = write!(
         buf,
         "{} {}{:<5}{} [{}] {}",
-        event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        event
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
         color,
         event.level.as_str(),
         reset,

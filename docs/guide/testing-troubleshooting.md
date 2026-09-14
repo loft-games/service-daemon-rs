@@ -16,6 +16,20 @@ pub async fn db_pool() -> MyDbPool {
 - Use **Queues** for fanning out tasks to multiple services.
 - Use **Watch Triggers** to react to data changes without tight coupling.
 
+### Log timestamps and container timezones
+
+Console text logs render the captured event time in the process-local timezone,
+with millisecond precision and an explicit offset (for example,
+`2026-09-15T04:30:45.123+08:00`). Internal event timestamps and structured JSON
+file logs remain UTC; text rendering does not change the recorded instant.
+
+Configure the deployment timezone before starting the process. For a Linux
+container using `TZ=Asia/Shanghai`, ensure the image also supplies the matching
+timezone data (commonly via `tzdata`). The framework does not hardcode Shanghai
+or provide a separate logging timezone setting. In a UTC environment, text logs
+use `+00:00`. Log consumers should parse the offset rather than require a literal
+`Z` suffix on console lines; JSON timestamp semantics are unchanged.
+
 ## 2. Testing
 
 The framework is designed for testability. Use `cargo test` to run the integrated suites.

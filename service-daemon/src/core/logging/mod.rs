@@ -197,6 +197,61 @@ mod tests {
     // 5A: ConsoleRenderer ANSI color output tests
     // =======================================================================
 
+    #[cfg(unix)]
+    #[test]
+    fn render_timestamp_respects_process_timezone() {
+        const CHILD_TZ: &str = "SD_LOG_RENDER_TEST_TZ";
+        if let Ok(zone) = std::env::var(CHILD_TZ) {
+            let mut event = make_event(LogLevel::Info, "timezone", None, None, None, None, None);
+            event.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-14T20:30:45.123Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let original = event.timestamp;
+            let output = render_to_string(&event);
+            let timestamp = output.split_whitespace().next().unwrap();
+            let expected = match zone.as_str() {
+                "UTC0" => "2026-09-14T20:30:45.123+00:00",
+                "CST-8" => "2026-09-15T04:30:45.123+08:00",
+                _ => panic!("unexpected test timezone: {zone}"),
+            };
+            assert_eq!(timestamp, expected);
+            assert_eq!(
+                chrono::DateTime::parse_from_rfc3339(timestamp).unwrap(),
+                original
+            );
+            assert_eq!(event.timestamp, original);
+            #[cfg(feature = "file-logging")]
+            {
+                let json: serde_json::Value =
+                    serde_json::from_str(&super::render::format_event_json(&event)).unwrap();
+                assert_eq!(json["timestamp"], "2026-09-14T20:30:45.123Z");
+            }
+            return;
+        }
+
+        // POSIX zones need no zoneinfo database. Each fresh process initializes
+        // its own local timezone, without mutating the parallel test runner.
+        for zone in ["UTC0", "CST-8"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "core::logging::tests::render_timestamp_respects_process_timezone",
+                    "--nocapture",
+                ])
+                .env("TZ", zone)
+                .env(CHILD_TZ, zone)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "timezone {zone}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+    }
+
     #[test]
     fn render_info_level_contains_green_ansi_code() {
         let event = make_event(LogLevel::Info, "hello world", None, None, None, None, None);

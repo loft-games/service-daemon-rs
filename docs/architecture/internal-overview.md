@@ -189,7 +189,7 @@ The main internal modules are:
   - `mod.rs`: Public logging facade, subscriber initialization, and re-exports.
   - `model.rs`: Log event model, broadcast queue, and batch-size configuration.
   - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUIDv7 message IDs, UUID-backed service instance IDs, and trigger instance IDs) for asynchronous tracing.
-  - `render.rs`: Console and feature-gated JSON rendering.
+  - `render.rs`: Console and feature-gated JSON rendering. Console timestamps convert the captured UTC instant to the process-local timezone and include its numeric offset; the event model and JSON serialization remain UTC.
   - `services.rs`: Console log drain service.
   - `file.rs`: Feature-gated file logging configuration and drain service.
   - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID-backed service instance fields and numeric sequence fields instead of heap-allocated composite strings.

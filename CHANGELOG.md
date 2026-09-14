@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Console Log Timezone**: Text logs now display the process-local time with an explicit numeric UTC offset instead of fixed UTC with a `Z` suffix. Internal event timestamps and structured JSON file logs remain UTC; console parsers must accept the offset.
 - **IPC Provider Helper API**: Existing `UnixListen` and `UnixConnect` providers expose `accept().await?` / `connect().await?` returning `IpcStream`. `UnixConnect` resolves as an endpoint handle and defers dialing to `connect().await?` instead of opening an initialization probe connection.
 - **Provider Template String Arguments**: Existing `UnixListen`, `UnixConnect`, and shared provider `env` arguments now accept either a string literal or a path to a `const`/`static &'static str`; dynamic string expressions remain rejected by the macro.
 - **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
