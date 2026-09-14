@@ -151,6 +151,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+      - name: Install musl C toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          command -v musl-gcc
+          musl-gcc --version
+          {
+            echo 'CC_x86_64_unknown_linux_musl=musl-gcc'
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc'
+          } >> "$GITHUB_ENV"
       - name: Install Rust (${{ matrix.target }})
         shell: bash
         run: bash .github/scripts/install-rust-toolchain stable "${{ matrix.target }}" llvm-tools-preview
