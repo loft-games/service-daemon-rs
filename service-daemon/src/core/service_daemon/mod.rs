@@ -1484,9 +1484,9 @@ mod tests {
     #[cfg(feature = "high-priority")]
     use crate::models::policy::HighPriorityRuntimeControl;
     use crate::models::{
-        ProviderEntry, ProviderInitError, Registry, ServiceEntry, ServiceEntryId,
-        ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry, ServiceParam,
-        ServiceScheduling,
+        ProviderDependencyKind, ProviderEntry, ProviderInitError, Registry, ServiceEntry,
+        ServiceEntryId, ServiceInstanceHandle, ServiceInstanceRecord, ServiceInstanceRegistry,
+        ServiceParam, ServiceScheduling,
     };
     #[cfg(feature = "high-priority")]
     use crate::{TT::*, trigger};
@@ -1819,9 +1819,13 @@ mod tests {
                 name: "b",
                 type_name: "B",
                 type_id: tid_b,
+                kind: ProviderDependencyKind::Snapshot,
             }]),
             eager: false,
             init: noop_init,
+            init_eager: noop_init,
+            init_rwlock: noop_init,
+            init_mutex: noop_init,
         };
         let b = ProviderEntry {
             name: "B",
@@ -1830,6 +1834,9 @@ mod tests {
             params: &[],
             eager: false,
             init: noop_init,
+            init_eager: noop_init,
+            init_rwlock: noop_init,
+            init_mutex: noop_init,
         };
 
         validate_dependency_graph(&[], [&a, &b]).expect("linear chain must validate");
@@ -1888,9 +1895,13 @@ mod tests {
                 name: "b",
                 type_name: "B",
                 type_id: tid_b,
+                kind: ProviderDependencyKind::Snapshot,
             }]),
             eager: false,
             init: noop_init,
+            init_eager: noop_init,
+            init_rwlock: noop_init,
+            init_mutex: noop_init,
         };
         let b = ProviderEntry {
             name: "B",
@@ -1900,9 +1911,13 @@ mod tests {
                 name: "a",
                 type_name: "A",
                 type_id: tid_a,
+                kind: ProviderDependencyKind::Snapshot,
             }]),
             eager: false,
             init: noop_init,
+            init_eager: noop_init,
+            init_rwlock: noop_init,
+            init_mutex: noop_init,
         };
 
         let err =

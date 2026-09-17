@@ -63,6 +63,24 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
         self.epoch_counter().load(Ordering::Acquire)
     }
 
+    pub(crate) fn snapshot_ready(&self) -> Option<Arc<T>> {
+        if let Some(rx) = self.watch_rx.get() {
+            return Some(rx.borrow().clone());
+        }
+        self.snapshot_cache.get().cloned()
+    }
+
+    pub(crate) fn rwlock_ready(&self) -> Option<Arc<TrackedRwLock<T>>> {
+        self.lock.get().cloned()
+    }
+
+    pub(crate) fn mutex_ready(&self) -> Option<Arc<TrackedMutex<T>>> {
+        self.lock
+            .get()
+            .cloned()
+            .map(|lock| Arc::new(TrackedMutex { inner: lock }))
+    }
+
     /// Internal helper to get or initialize the shared notification handle.
     async fn get_notify(&self) -> Arc<TokioNotify> {
         self.change_notify

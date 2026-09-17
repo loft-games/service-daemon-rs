@@ -7,12 +7,16 @@ use petgraph::{
 };
 
 use crate::core::context::__run_daemon_resources_scope;
+use crate::core::provider_executor::prepare_eager_provider_params;
 use crate::core::provider_init::{
     ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
     ProviderInitSourceKind, ProviderRuntimePhase, provider_init_failure_into_error,
     with_provider_runtime_phase,
 };
-use crate::models::{PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, ServiceDescription};
+use crate::models::{
+    PROVIDER_REGISTRY, ProviderDependencyKind, ProviderEntry, ProviderInitError,
+    ServiceDescription, ServiceParam,
+};
 
 use super::DaemonInstanceInner;
 
@@ -57,99 +61,29 @@ impl DaemonInstanceInner {
             return Ok(());
         }
 
-        // 4) Toposort reachable provider DAG to get a deterministic init order.
-        // Nodes are provider TypeIds; edges are dep -> provider.
-        let mut graph = DiGraph::<TypeId, ()>::new();
-        let mut nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
-
-        for type_id in reachable.iter().copied() {
-            if providers_by_id.contains_key(&type_id) {
-                nodes
-                    .entry(type_id)
-                    .or_insert_with(|| graph.add_node(type_id));
-            }
-        }
-
-        for (&type_id, entry) in providers_by_id.iter() {
-            if !reachable.contains(&type_id) {
-                continue;
-            }
-            let Some(&provider_node) = nodes.get(&type_id) else {
-                continue;
-            };
-            for dependency in entry.params {
-                if !reachable.contains(&dependency.type_id) {
-                    continue;
-                }
-                if let Some(&dependency_node) = nodes.get(&dependency.type_id) {
-                    graph.add_edge(dependency_node, provider_node, ());
-                }
-            }
-        }
-
-        // Cycles are pre-checked by validate_dependency_graph() in run();
-        // if we still land in Err here, report it as a Fatal init error
-        // rather than panicking, as a defense-in-depth measure.
-        let order = match toposort(&graph, None) {
-            Ok(order) => order,
-            Err(err) => {
-                let offending = providers_by_id
-                    .iter()
-                    .find_map(|(type_id, provider)| {
-                        (*type_id == graph[err.node_id()]).then_some(provider.name)
-                    })
-                    .unwrap_or("<unknown>");
-                return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::with_phase(
-                        offending,
-                        ProviderRuntimePhase::FrameworkValidation,
-                        ProviderInitBoundaryKind::FrameworkValidation,
-                    ),
-                    ProviderInitFailure::fatal(
-                        offending,
-                        "Circular provider dependency reached eager_init; \
-                              this should have been caught by validate_dependency_graph"
-                            .to_owned(),
-                        ProviderInitSourceKind::FrameworkGraphValidation,
-                    ),
-                ));
-            }
-        };
-
-        // 5) Execute init in order, only for eager providers.
-        let eager_ids: HashSet<TypeId> = eager_targets
+        let eager_params: Vec<ServiceParam> = eager_targets
             .iter()
-            .map(|provider| provider.type_id)
-            .collect();
-        for node in order {
-            let type_id = graph[node];
-            if !eager_ids.contains(&type_id) {
-                continue;
-            }
-            let Some(entry) = providers_by_id.get(&type_id).copied() else {
-                return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::with_phase(
-                        "<unknown>",
-                        ProviderRuntimePhase::StartupEagerInit,
-                        ProviderInitBoundaryKind::FrameworkValidation,
-                    ),
-                    ProviderInitFailure::fatal(
-                        "<unknown>",
-                        "provider missing from eager initialization graph".to_owned(),
-                        ProviderInitSourceKind::FrameworkEagerInit,
-                    ),
-                ));
-            };
-            let resources = self.resources.clone();
-            __run_daemon_resources_scope(resources, || async {
-                with_provider_runtime_phase(
-                    ProviderRuntimePhase::StartupEagerInit,
-                    (entry.init)(self.restart_policy, self.cancellation_token.clone()),
-                )
-                .await
+            .map(|provider| ServiceParam {
+                name: "<eager>",
+                type_name: provider.name,
+                type_id: provider.type_id,
+                kind: ProviderDependencyKind::Snapshot,
             })
-            .await?;
-        }
+            .collect();
+
+        let resources = self.resources.clone();
+        __run_daemon_resources_scope(resources, || async {
+            with_provider_runtime_phase(
+                ProviderRuntimePhase::StartupEagerInit,
+                prepare_eager_provider_params(
+                    &eager_params,
+                    self.restart_policy,
+                    self.cancellation_token.clone(),
+                ),
+            )
+            .await
+        })
+        .await?;
 
         Ok(())
     }

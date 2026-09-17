@@ -108,6 +108,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let wrapper_fn = crate::common::generate_wrapper_fn(
         &wrapper_name,
+        &param_entries,
         &quote! {
             #(#resolve_tokens)*
             #call_expr

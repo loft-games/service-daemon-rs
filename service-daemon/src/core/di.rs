@@ -88,7 +88,7 @@ impl ProviderDependencyWatchSet {
 /// Calls made outside a daemon context fall back to the root provider scope.
 ///
 /// If you see a compile error about this trait not being implemented, it means
-/// you forgot to add `#[provider]` for that type or write a manual provider impl.
+/// you forgot to add `#[provider]` for that type.
 #[diagnostic::on_unimplemented(
     message = "Missing Provider: The type `{Self}` cannot be injected.",
     label = "this requires `{Self}: Provided`",
@@ -105,6 +105,20 @@ pub trait Provided: 'static + Send + Sync + Clone + Sized {
     -> impl std::future::Future<Output = std::result::Result<Arc<Self>, ProviderInitError>> + Send;
 }
 
+#[doc(hidden)]
+#[diagnostic::on_unimplemented(
+    message = "Registered Provider required: `{Self}` must be declared with `#[provider]`.",
+    label = "this injection requires a `#[provider]` registration for `{Self}`",
+    note = "Add `#[provider]` to a function returning `{Self}`, or use `#[provider]` on the struct definition."
+)]
+pub trait ProviderDefinition: ManagedProvided {
+    fn ready_snapshot() -> std::result::Result<Arc<Self>, ProviderInitError>;
+
+    fn ready_rwlock() -> std::result::Result<Arc<RwLock<Self>>, ProviderInitError>;
+
+    fn ready_mutex() -> std::result::Result<Arc<Mutex<Self>>, ProviderInitError>;
+}
+
 /// A trait for provider types that support managed mutable state.
 ///
 /// This capability is required for `Arc<RwLock<T>>` and `Arc<Mutex<T>>`
@@ -116,12 +130,13 @@ pub trait Provided: 'static + Send + Sync + Clone + Sized {
 /// override/internal fork. Outside a daemon context, helper calls use the root
 /// slot fallback.
 ///
-/// Manual impls for the same type conflict with the macro-generated impl and
-/// are reported by Rust as duplicate impl errors.
+/// Provider injection is defined by `#[provider]`; direct hand-written provider
+/// capability impls do not register dependency metadata and are not supported
+/// as DI entry points.
 #[diagnostic::on_unimplemented(
     message = "Managed Provider required: `{Self}` cannot be injected as `Arc<RwLock<_>>` or `Arc<Mutex<_>>`.",
     label = "this injection requires `{Self}: ManagedProvided`",
-    note = "Add `#[provider]` to let the macro generate managed-state support, or implement `ManagedProvided` manually for `{Self}`."
+    note = "Add `#[provider]` to let the macro generate managed-state support for `{Self}`."
 )]
 pub trait ManagedProvided: Provided {
     /// Resolves a live tracked `RwLock` for this type.
@@ -147,13 +162,12 @@ pub trait ManagedProvided: Provided {
 /// published, or when the daemon switches that provider type to a local
 /// override/fork.
 ///
-/// Current pre-release behavior: `#[provider]` does not try to defer to manual
-/// impls. If you also hand-write `WatchableProvided` for the same type, Rust
-/// will emit the normal duplicate-impl compile error.
+/// Current pre-release behavior: `#[provider]` owns this implementation. Direct
+/// hand-written provider capability impls are not supported as DI entry points.
 #[diagnostic::on_unimplemented(
     message = "Watchable Provider required: `{Self}` cannot be used with `Watch(...)` triggers.",
     label = "this trigger requires `{Self}: WatchableProvided`",
-    note = "Add `#[provider]` to let the macro generate watch support, or implement `WatchableProvided` manually for `{Self}`."
+    note = "Add `#[provider]` to let the macro generate watch support for `{Self}`."
 )]
 pub trait WatchableProvided: ManagedProvided {
     /// Captures the current dependency baseline and returns a watch handle for later awaiting.

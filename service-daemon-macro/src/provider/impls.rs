@@ -74,6 +74,24 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             .to_uppercase()
             .replace(|c: char| !c.is_alphanumeric(), "_")
     );
+    let init_eager_fn_name = format_ident!(
+        "__PROVIDER_INIT_EAGER_{}",
+        type_name_str
+            .to_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    let init_rwlock_fn_name = format_ident!(
+        "__PROVIDER_INIT_RWLOCK_{}",
+        type_name_str
+            .to_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
+    let init_mutex_fn_name = format_ident!(
+        "__PROVIDER_INIT_MUTEX_{}",
+        type_name_str
+            .to_uppercase()
+            .replace(|c: char| !c.is_alphanumeric(), "_")
+    );
 
     let provider_origin_lit = syn::LitStr::new(&provider_origin, user_span);
     let provider_definition_site = quote_spanned! { user_span =>
@@ -189,9 +207,93 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         #(#item_attrs)*
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
+                let policy = service_daemon::RestartPolicy::default();
+                let cancel = service_daemon::__private::current_cancellation_token();
+                service_daemon::__private::prepare_provider_type(
+                    std::any::TypeId::of::<Self>(),
+                    service_daemon::__private::ProviderDependencyKind::Snapshot,
+                    policy,
+                    cancel,
+                )
+                .await?;
+                <Self as service_daemon::__private::ProviderDefinition>::ready_snapshot()
+            }
+        }
+
+        #(#item_attrs)*
+        impl service_daemon::ManagedProvided for #type_tokens {
+            async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
+                let policy = service_daemon::RestartPolicy::default();
+                let cancel = service_daemon::__private::current_cancellation_token();
+                service_daemon::__private::prepare_provider_type(
+                    std::any::TypeId::of::<Self>(),
+                    service_daemon::__private::ProviderDependencyKind::RwLock,
+                    policy,
+                    cancel,
+                )
+                .await?;
+                <Self as service_daemon::__private::ProviderDefinition>::ready_rwlock()
+            }
+
+            async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
+                let policy = service_daemon::RestartPolicy::default();
+                let cancel = service_daemon::__private::current_cancellation_token();
+                service_daemon::__private::prepare_provider_type(
+                    std::any::TypeId::of::<Self>(),
+                    service_daemon::__private::ProviderDependencyKind::Mutex,
+                    policy,
+                    cancel,
+                )
+                .await?;
+                <Self as service_daemon::__private::ProviderDefinition>::ready_mutex()
+            }
+
+            async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                let policy = service_daemon::RestartPolicy::default();
+                let cancel = service_daemon::__private::current_cancellation_token();
+                service_daemon::__private::prepare_provider_params(
+                    &[#(#param_entries),*],
+                    policy,
+                    cancel.clone(),
+                )
+                .await
+                .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?;
+                service_daemon::__private::resolve_provider_managed_with_scope(&#singleton_name, #cache_scope, || async {
+                    #managed_init_fn
+                })
+                .await
+            }
+        }
+
+        #(#item_attrs)*
+        impl service_daemon::__private::ProviderDefinition for #type_tokens {
+            fn ready_snapshot() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
+                service_daemon::__private::ready_provider_snapshot_with_scope(&#singleton_name, #cache_scope)
+                    .ok_or_else(|| service_daemon::__private::missing_prepared_provider_error(#type_name_str, #type_name_str))
+            }
+
+            fn ready_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
+                service_daemon::__private::ready_provider_rwlock_with_scope(&#singleton_name, #cache_scope)
+                    .ok_or_else(|| service_daemon::__private::missing_prepared_provider_error(#type_name_str, #type_name_str))
+            }
+
+            fn ready_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
+                service_daemon::__private::ready_provider_mutex_with_scope(&#singleton_name, #cache_scope)
+                    .ok_or_else(|| service_daemon::__private::missing_prepared_provider_error(#type_name_str, #type_name_str))
+            }
+        }
+
+        #watchable_impl
+
+        #helper_impl
+
+        #(#item_attrs)*
+        fn #init_fn_name(
+            policy: service_daemon::RestartPolicy,
+            cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
+            Box::pin(async move {
                 service_daemon::__private::resolve_provider_snapshot_with_scope(&#singleton_name, #cache_scope, || async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::__private::current_cancellation_token();
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
                         service_daemon::__private::ProviderInitBoundaryKind::SnapshotResolve,
@@ -213,15 +315,49 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     }
                 })
                 .await
-            }
+                .map(|_| ())
+            })
         }
 
         #(#item_attrs)*
-        impl service_daemon::ManagedProvided for #type_tokens {
-            async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
+        fn #init_eager_fn_name(
+            policy: service_daemon::RestartPolicy,
+            cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
+            Box::pin(async move {
+                service_daemon::__private::resolve_provider_snapshot_with_scope(&#singleton_name, #cache_scope, || async {
+                    let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
+                        #type_name_str,
+                        service_daemon::__private::ProviderInitBoundaryKind::EagerInit,
+                    );
+                    match service_daemon::__private::catch_init_panic(
+                        #type_name_str,
+                        async move { #framework_init_fn },
+                    )
+                    .await
+                    {
+                        Ok(result) => service_daemon::__private::provider_init_failure_boundary(provider_init_context, result),
+                        Err(error) => service_daemon::__private::provider_init_failure_boundary(
+                            provider_init_context,
+                            Err(service_daemon::__private::ProviderInitFailure::new(
+                                service_daemon::__private::ProviderInitSourceKind::Panic,
+                                error,
+                            )),
+                        ),
+                    }
+                })
+                .await
+                .map(|_| ())
+            })
+        }
+
+        #(#item_attrs)*
+        fn #init_rwlock_fn_name(
+            policy: service_daemon::RestartPolicy,
+            cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
+        ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
+            Box::pin(async move {
                 service_daemon::__private::resolve_provider_rwlock_with_scope(&#singleton_name, #cache_scope, || async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::__private::current_cancellation_token();
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
                         service_daemon::__private::ProviderInitBoundaryKind::RwLockResolve,
@@ -243,59 +379,20 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                     }
                 })
                 .await
-            }
-
-            async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
-                service_daemon::__private::resolve_provider_mutex_with_scope(&#singleton_name, #cache_scope, || async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::__private::current_cancellation_token();
-                    let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
-                        #type_name_str,
-                        service_daemon::__private::ProviderInitBoundaryKind::MutexResolve,
-                    );
-                    match service_daemon::__private::catch_init_panic(
-                        #type_name_str,
-                        async move { #framework_init_fn },
-                    )
-                    .await
-                    {
-                        Ok(result) => service_daemon::__private::provider_init_failure_boundary(provider_init_context, result),
-                        Err(error) => service_daemon::__private::provider_init_failure_boundary(
-                            provider_init_context,
-                            Err(service_daemon::__private::ProviderInitFailure::new(
-                                service_daemon::__private::ProviderInitSourceKind::Panic,
-                                error,
-                            )),
-                        ),
-                    }
-                })
-                .await
-            }
-
-            async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
-                service_daemon::__private::resolve_provider_managed_with_scope(&#singleton_name, #cache_scope, || async {
-                    let policy = service_daemon::RestartPolicy::default();
-                    let cancel = service_daemon::__private::current_cancellation_token();
-                    #managed_init_fn
-                })
-                .await
-            }
+                .map(|_| ())
+            })
         }
 
-        #watchable_impl
-
-        #helper_impl
-
         #(#item_attrs)*
-        fn #init_fn_name(
+        fn #init_mutex_fn_name(
             policy: service_daemon::RestartPolicy,
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                service_daemon::__private::resolve_provider_snapshot_with_scope(&#singleton_name, #cache_scope, || async {
+                service_daemon::__private::resolve_provider_mutex_with_scope(&#singleton_name, #cache_scope, || async {
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
-                        service_daemon::__private::ProviderInitBoundaryKind::EagerInit,
+                        service_daemon::__private::ProviderInitBoundaryKind::MutexResolve,
                     );
                     match service_daemon::__private::catch_init_panic(
                         #type_name_str,
@@ -330,6 +427,9 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             params: &[#(#param_entries),*],
             eager: #eager,
             init: #init_fn_name,
+            init_eager: #init_eager_fn_name,
+            init_rwlock: #init_rwlock_fn_name,
+            init_mutex: #init_mutex_fn_name,
         };
     }
 }

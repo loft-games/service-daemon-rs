@@ -85,7 +85,11 @@ The macro-generated `Provided::resolve()`, lock helpers, `resolve_managed()`, an
 3. Otherwise inherit the generated root slot.
 4. If no daemon context exists, use the generated root slot directly.
 
-Service wrappers, trigger wrappers, provider dependency resolution, reachable eager initialization, and generated dependency watch builders all use the same bridge path. The user-facing macro syntax remains `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`; scope and slot ids stay internal.
+Service wrappers, trigger wrappers, provider dependency preparation, reachable eager initialization, and generated dependency watch builders all use the same bridge path. The user-facing macro syntax remains `Arc<T>`, `Arc<RwLock<T>>`, or `Arc<Mutex<T>>`; scope and slot ids stay internal.
+
+Provider macros register a single-node constructor plus dependency metadata. They do not recursively initialize dependency providers inside the generated constructor. The runtime provider executor expands the selected dependency graph, initializes dependencies in topological order, and then the generated wrapper reads already-prepared values through an internal ready-only bridge. If a generated constructor asks for a dependency that the executor did not prepare, that is a framework assembly error rather than an opportunity to fall back to recursive resolution.
+
+Direct provider helper calls use the same executor path before reading the effective slot. Hand-written provider capability trait implementations are not supported as DI entry points because they do not register dependency metadata or a single-node constructor.
 
 Manual `WatchableProvided` implementations should return a `ProviderDependencyWatch` from `watch_dependency()` instead of exposing an async `changed()` method. Generated providers implement this by delegating to the scoped `provider_dependency_watch(...)` bridge, which captures the provider value and binding baselines when the watch handle is constructed.
 

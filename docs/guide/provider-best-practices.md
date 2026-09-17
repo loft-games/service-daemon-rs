@@ -385,7 +385,7 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 * **"I need a built-in template for my DB"**: No. Use an `async fn` provider that returns your connection pool.
 * **"Built-in templates are faster"**: No. They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are shorthand for common primitives.
 * **"Provider overrides should be global"**: No. Test-time overrides belong to a simulation daemon scope so they do not pollute root helper resolution or other daemon instances.
-* **"Provided is hard to implement"**: You should **never** implement provider capability traits manually for normal usage. Let `#[provider]` do it for you.
+* **"Can I hand-write `Provided`?"**: No. Provider DI requires registration metadata and a generated single-node constructor. Use `#[provider]`; hand-written capability trait impls are not supported as injection entry points.
 
 ---
 

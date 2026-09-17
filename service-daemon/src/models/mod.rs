@@ -42,9 +42,9 @@ pub use runtime::{
 };
 pub use service::{
     PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
-    ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn, ServiceHandle,
-    ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId, ServiceInvocationContext,
-    ServiceParam, ServiceScheduling, ServiceStatus,
+    ProviderDependencyKind, ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn,
+    ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId,
+    ServiceInvocationContext, ServiceParam, ServiceScheduling, ServiceStatus,
 };
 pub(crate) use service::{
     ServiceCatalog, ServiceCatalogProjection, ServiceControl, ServiceInputPayload,

@@ -321,6 +321,11 @@ impl ParamProcessor {
     ) -> syn::Result<()> {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
+        let dependency_kind = match wrapper {
+            WrapperKind::Arc(_) => quote! { Snapshot },
+            WrapperKind::ArcRwLock(_, _) => quote! { RwLock },
+            WrapperKind::ArcMutex(_, _) => quote! { Mutex },
+        };
 
         self.watcher_arms.push(quote! {
             watch_set.push(<#inner_type as service_daemon::WatchableProvided>::watch_dependency());
@@ -329,7 +334,7 @@ impl ParamProcessor {
         match wrapper {
             WrapperKind::Arc(arc_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
+                    let #arg_name = <#inner_type as service_daemon::__private::ProviderDefinition>::ready_snapshot()?;
                 });
                 let clean_arg = syn::parse2(
                     quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
@@ -344,7 +349,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
+                    let #arg_name = <#inner_type as service_daemon::__private::ProviderDefinition>::ready_rwlock()?;
                 });
                 let rw_path = quote_spanned! { rwlock_span => service_daemon::RwLock<#inner_type> };
                 let clean_arg =
@@ -362,7 +367,7 @@ impl ParamProcessor {
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
+                    let #arg_name = <#inner_type as service_daemon::__private::ProviderDefinition>::ready_mutex()?;
                 });
                 let mutex_path =
                     quote_spanned! { mutex_span => service_daemon::Mutex<#inner_type> };
@@ -386,6 +391,7 @@ impl ParamProcessor {
                 name: #arg_name_str,
                 type_name: #type_str,
                 type_id: std::any::TypeId::of::<#inner_type>(),
+                kind: service_daemon::__private::ProviderDependencyKind::#dependency_kind,
             }
         });
 
@@ -897,6 +903,7 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
 /// Generates a standard asynchronous wrapper function.
 pub fn generate_wrapper_fn(
     wrapper_name: &syn::Ident,
+    param_entries: &[proc_macro2::TokenStream],
     content: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let service_invocation = service_invocation_ident();
@@ -907,6 +914,12 @@ pub fn generate_wrapper_fn(
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
                 let token = #service_invocation.cancellation_token();
+                service_daemon::__private::prepare_provider_params(
+                    &[#(#param_entries),*],
+                    service_daemon::RestartPolicy::default(),
+                    token.clone(),
+                )
+                .await?;
                 #content
             })
         }

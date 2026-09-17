@@ -11,6 +11,7 @@ use crate::core::di::{
     ProviderDependencyChange, ProviderDependencyChangeReason, ProviderDependencyWatch,
 };
 use crate::core::managed_state::{StateManager, TrackedMutex, TrackedRwLock};
+use crate::models::ProviderInitError;
 
 const ROOT_PROVIDER_SCOPE_RAW_ID: u64 = 0;
 static NEXT_PROVIDER_SCOPE_ID: AtomicU64 = AtomicU64::new(1);
@@ -316,6 +317,83 @@ where
         local_manager.resolve_snapshot_result(init).await
     } else {
         root_manager.resolve_snapshot_result(init).await
+    }
+}
+
+fn ready_local_provider_manager<T>() -> Option<Arc<StateManager<T>>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    current_local_provider_manager::<T>()
+}
+
+fn ready_daemon_local_provider_manager<T>() -> Option<Arc<StateManager<T>>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    current_daemon_local_provider_manager::<T>()
+}
+
+pub fn ready_provider_snapshot_with_scope<T>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+) -> Option<Arc<T>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => ready_local_provider_manager::<T>()
+            .and_then(|manager| manager.snapshot_ready())
+            .or_else(|| root_manager.snapshot_ready()),
+        ProviderCacheScope::DaemonLocal => ready_daemon_local_provider_manager::<T>()
+            .and_then(|manager| manager.snapshot_ready())
+            .or_else(|| root_manager.snapshot_ready()),
+    }
+}
+
+pub fn ready_provider_rwlock_with_scope<T>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+) -> Option<Arc<TrackedRwLock<T>>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => ready_local_provider_manager::<T>()
+            .and_then(|manager| manager.rwlock_ready())
+            .or_else(|| root_manager.rwlock_ready()),
+        ProviderCacheScope::DaemonLocal => ready_daemon_local_provider_manager::<T>()
+            .and_then(|manager| manager.rwlock_ready())
+            .or_else(|| root_manager.rwlock_ready()),
+    }
+}
+
+pub fn ready_provider_mutex_with_scope<T>(
+    root_manager: &'static StateManager<T>,
+    cache_scope: ProviderCacheScope,
+) -> Option<Arc<TrackedMutex<T>>>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    match cache_scope {
+        ProviderCacheScope::Inherited => ready_local_provider_manager::<T>()
+            .and_then(|manager| manager.mutex_ready())
+            .or_else(|| root_manager.mutex_ready()),
+        ProviderCacheScope::DaemonLocal => ready_daemon_local_provider_manager::<T>()
+            .and_then(|manager| manager.mutex_ready())
+            .or_else(|| root_manager.mutex_ready()),
+    }
+}
+
+pub fn missing_prepared_provider_error(
+    provider: &'static str,
+    dependency: &'static str,
+) -> ProviderInitError {
+    ProviderInitError::Fatal {
+        provider: provider.to_owned(),
+        message: format!(
+            "provider dependency `{dependency}` was not prepared before constructing `{provider}`"
+        ),
     }
 }
 

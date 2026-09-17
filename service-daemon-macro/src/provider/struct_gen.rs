@@ -397,14 +397,20 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> syn::Re
                 let field_name = field.ident.as_ref()?;
                 let (inner_type, wrapper) = decompose_type(&field.ty);
                 // Only Arc-wrapped fields are DI dependencies
-                wrapper.map(|_| {
+                wrapper.map(|wrapper| {
                     let field_name_str = field_name.to_string();
                     let type_str = quote!(#inner_type).to_string().replace(' ', "");
+                    let dependency_kind = match wrapper {
+                        WrapperKind::ArcRwLock(_, _) => quote! { RwLock },
+                        WrapperKind::ArcMutex(_, _) => quote! { Mutex },
+                        WrapperKind::Arc(_) => quote! { Snapshot },
+                    };
                     quote! {
                         service_daemon::__private::ServiceParam {
                             name: #field_name_str,
                             type_name: #type_str,
                             type_id: std::any::TypeId::of::<#inner_type>(),
+                            kind: service_daemon::__private::ProviderDependencyKind::#dependency_kind,
                         }
                     }
                 })
@@ -710,9 +716,9 @@ fn generate_required_env_constructor(
 /// Generates the constructor for the struct provider.
 ///
 /// Supports automatic injection for:
-/// - `Arc<T>` fields -> `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` fields -> `<T as ManagedProvided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` fields -> `<T as ManagedProvided>::resolve_mutex().await`
+/// - `Arc<T>` fields -> ready snapshot dependency
+/// - `Arc<RwLock<T>>` fields -> ready tracked RwLock dependency
+/// - `Arc<Mutex<T>>` fields -> ready tracked Mutex dependency
 /// - Other fields -> `Default::default()`
 ///
 /// Uses `decompose_type` from `common` to handle Arc pattern matching consistently.
@@ -751,52 +757,39 @@ fn generate_constructor(
                         Some(WrapperKind::ArcRwLock(_, _)) => {
                             if managed_errors {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
-                                        .await
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_rwlock()
                                         .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
-                                        .await
-                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
-                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
-                                            e,
-                                        ))?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_rwlock()
+                                        .map_err(service_daemon::__private::ProviderInitFailure::from)?
                                 }
                             }
                         }
                         Some(WrapperKind::ArcMutex(_, _)) => {
                             if managed_errors {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
-                                        .await
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_mutex()
                                         .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
-                                        .await
-                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
-                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
-                                            e,
-                                        ))?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_mutex()
+                                        .map_err(service_daemon::__private::ProviderInitFailure::from)?
                                 }
                             }
                         }
                         Some(WrapperKind::Arc(_)) => {
                             if managed_errors {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_managed().await?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_snapshot()
+                                        .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::Provided>::resolve()
-                                        .await
-                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
-                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
-                                            e,
-                                        ))?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_snapshot()
+                                        .map_err(service_daemon::__private::ProviderInitFailure::from)?
                                 }
                             }
                         }

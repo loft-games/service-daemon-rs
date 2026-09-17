@@ -67,6 +67,7 @@ pub mod __private {
 
     pub use crate::ProviderDependencyWatchSet;
     pub use crate::core::context::{__resolve_service_handle, current_cancellation_token};
+    pub use crate::core::di::ProviderDefinition;
     pub use crate::core::managed_state::{
         StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
     };
@@ -76,18 +77,21 @@ pub mod __private {
         init_fallible_with_source, provider_init_boundary, provider_init_failure_boundary,
         provider_init_failure_into_error, with_provider_runtime_phase,
     };
+    pub use crate::core::provider_executor::{prepare_provider_params, prepare_provider_type};
     pub use crate::core::provider_scope::{
-        ProviderCacheScope, provider_changed, provider_dependency_watch, resolve_provider_managed,
-        resolve_provider_managed_with_scope, resolve_provider_mutex,
+        ProviderCacheScope, missing_prepared_provider_error, provider_changed,
+        provider_dependency_watch, ready_provider_mutex_with_scope,
+        ready_provider_rwlock_with_scope, ready_provider_snapshot_with_scope,
+        resolve_provider_managed, resolve_provider_managed_with_scope, resolve_provider_mutex,
         resolve_provider_mutex_with_scope, resolve_provider_rwlock,
         resolve_provider_rwlock_with_scope, resolve_provider_snapshot,
         resolve_provider_snapshot_with_scope,
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
-        PROVIDER_REGISTRY, ProviderEntry, SERVICE_REGISTRY, ServiceEntry, ServiceEntryId,
-        ServiceFn, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId,
-        ServiceInvocationContext, ServiceParam,
+        PROVIDER_REGISTRY, ProviderDependencyKind, ProviderEntry, SERVICE_REGISTRY, ServiceEntry,
+        ServiceEntryId, ServiceFn, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle,
+        ServiceInstanceId, ServiceInvocationContext, ServiceParam,
     };
 
     pub use futures;

@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod logging;
 pub mod managed_state;
 pub mod provider_init;
+pub(crate) mod provider_executor;
 pub(crate) mod provider_scope;
 pub(crate) mod runtime_facts;
 pub mod service_daemon;

@@ -50,7 +50,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         clean_inputs,
         resolve_tokens,
         call_args,
-        param_entries,
+        mut param_entries,
         mut watcher_arms,
         di_idents,
         ..
@@ -71,6 +71,16 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Triggers always watch their target for configuration changes,
     // in addition to any DI dependency watch handles from trigger parameter extraction.
+    let target_type_str = quote!(#target_type).to_string().replace(' ', "");
+    param_entries.push(quote! {
+        service_daemon::__private::ServiceParam {
+            name: "__trigger_target",
+            type_name: #target_type_str,
+            type_id: std::any::TypeId::of::<#target_type>(),
+            kind: service_daemon::__private::ProviderDependencyKind::Snapshot,
+        }
+    });
+
     if is_watch_host {
         watcher_arms.push(quote! {
             watch_set.push(<#target_type as service_daemon::WatchableProvided>::watch_dependency());
@@ -107,7 +117,8 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         body,
     );
 
-    let wrapper_fn = crate::common::generate_wrapper_fn(&wrapper_name, &event_loop_call);
+    let wrapper_fn =
+        crate::common::generate_wrapper_fn(&wrapper_name, &param_entries, &event_loop_call);
 
     let registry_entry =
         crate::common::generate_static_registry_entry(crate::common::RegistryEntryInput {

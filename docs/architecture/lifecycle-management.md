@@ -194,13 +194,15 @@ The generated wrapper path (`snapshot_resolve`, `rwlock_resolve`, `mutex_resolve
 
 ### 5.4. Lazy vs. Eager Provider Initialization
 
-The default behavior is **lazy** for all providers (including `Listen`). Lazy initialization happens the first time a selected service, trigger, provider dependency, or helper call resolves that provider in its current effective scope.
+The default behavior is **lazy** for all providers (including `Listen`). Lazy initialization happens when a selected service, trigger, provider dependency, or helper call creates a runtime demand for that provider in its current effective scope.
+
+The daemon handles that demand by asking the provider executor to prepare the relevant dependency graph. The executor initializes provider nodes in dependency order and generated service/trigger/provider wrappers then read already-prepared values. This keeps provider construction from forming language-level `A.await -> B.await -> C.await` initialization chains while preserving the same effective provider slots.
 
 A provider may opt into **eager** initialization via an explicit macro parameter:
 
 - `#[provider(..., eager = true)]`
 
-Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers resolve through that daemon's provider scope, not by bypassing the scoped bridge. By default the daemon inherits the root provider slot; simulation overrides or internal forks can install a daemon-local slot before eager initialization, so startup seeds the local slot without polluting root state.
+Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers and their dependencies are prepared through that daemon's provider scope, not by bypassing the scoped bridge. By default the daemon inherits the root provider slot; simulation overrides or internal forks can install a daemon-local slot before eager initialization, so startup seeds the local slot without polluting root state.
 
 ### 5.5. RestartPolicy reuse
 

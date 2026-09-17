@@ -194,6 +194,16 @@ pub struct ServiceParam {
     pub type_name: &'static str,
     /// Compiler-assigned type identity for dependency graph edges.
     pub type_id: TypeId,
+    /// How the dependency is injected into the generated wrapper.
+    pub kind: ProviderDependencyKind,
+}
+
+/// Describes the shape of a provider dependency injection site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderDependencyKind {
+    Snapshot,
+    RwLock,
+    Mutex,
 }
 
 /// Static description of a service instance input parameter.
@@ -1268,6 +1278,18 @@ pub struct ProviderEntry {
     /// effective slot, falling back to the generated root slot when no daemon
     /// scope is active.
     pub init: fn(
+        RestartPolicy,
+        tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
+    pub init_eager: fn(
+        RestartPolicy,
+        tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
+    pub init_rwlock: fn(
+        RestartPolicy,
+        tokio_util::sync::CancellationToken,
+    ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
+    pub init_mutex: fn(
         RestartPolicy,
         tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
