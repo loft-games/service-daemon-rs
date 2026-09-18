@@ -110,6 +110,15 @@ same feature names, or rely only on the macro-test example (which enables HP).
 
 ## 4. Where macro behavior is documented
 
+Value/env conversion belongs in `provider/struct_gen.rs`, shared by default and
+required-env constructors (including raw managed errors). Keep underlying-type
+handling alias-safe: preserve String whitespace, trim non-strings, distinguish
+empty/missing from parse failures, and apply the documented bool false-token
+rule. Run `cargo test -p service-daemon-macro env_tests` and
+`cargo test -p service-daemon --test provider_env_contract_tests`; the latter
+isolates env values and provider caches per subprocess across snapshot, managed,
+RwLock, and Mutex paths. Do not apply these value rules to socket templates.
+
 - `docs/architecture/macro-expansion.md` — what `#[service]`/`#[trigger]`/
   `#[provider]` generate (the authoritative internal explanation).
 - `docs/development/extending-framework.md` — maintainer guidance for extending

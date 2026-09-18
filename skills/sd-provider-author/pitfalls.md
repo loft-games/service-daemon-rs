@@ -49,5 +49,12 @@ value provider is a compile error.
 ## Env-only provider with a missing variable
 
 `#[provider(env = "API_KEY")]` (no default) fails initialization if the env var is
-absent. Provide a default (`#[provider("fallback", env = "API_KEY")]`) when the
+absent or empty (after trimming for non-String types). Provide a default
+(`#[provider("fallback", env = "API_KEY")]`) when the
 value is optional.
+
+## Bool environment values
+
+`false`, `off`, `no` (ASCII case-insensitive), and `0` mean false after trimming.
+Every other nonempty string means true. Empty
+or whitespace-only bool input uses the default, or fails if no default exists.

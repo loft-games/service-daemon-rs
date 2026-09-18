@@ -114,6 +114,18 @@ Provider helper signatures are part of the macro public contract and depend on d
 
 ### Provider Init Boundary
 
+Value/env conversion is emitted by `generate_env_value_parse` in
+`provider/struct_gen.rs`, shared by `Default` and required-env constructors.
+It uses `TypeId` equality to recognize underlying `String` and `bool`, including
+aliases, without downcasts or a new public trait. Strings retain whitespace;
+other types are trimmed, then bool false tokens (`false`, `off`, `no`, `0`) are
+normalized before `FromStr`. Every other nonempty bool input becomes true.
+The emitted `Option<Result<T, T::Err>>` separates empty/missing input from parse
+failure. Required empty input is `EnvironmentMissing`; other parse failures
+remain `EnvironmentParse`. The raw managed constructor maps both to
+`ProviderError::Fatal`. Default-backed values fall back on either condition.
+Socket/address templates retain their own conversion rules.
+
 Generated provider impls keep an explicit `match` around `catch_init_panic(...).await` for snapshot, `RwLock`, `Mutex`, and eager initialization paths. The normal branch preserves hidden `ProviderInitFailure` source kinds such as env parse, dependency provider failure, user fatal, retry timeout, or system I/O. The panic branch tags the converted fatal error as `panic`. The public error remains `ProviderInitError`, with diagnostics keyed by boundary names such as `snapshot_resolve`, `rwlock_resolve`, `mutex_resolve`, or `eager_init`.
 
 Fallible helpers expose `ProviderInitError` directly. Direct-return helpers are generated only for providers without a declared fallible path. If one receives an error from the shared boundary, it panics with the helper name, provider type, `#[provider]` origin, provider definition location, helper callsite, module path, and original error. The re-raised panic is span-tagged to the provider definition, not to a macro crate source line.

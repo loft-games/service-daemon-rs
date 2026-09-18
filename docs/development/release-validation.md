@@ -21,6 +21,18 @@ non-default features.
 
 ## General Platform CI
 
+### Value provider environment contract
+
+Run `cargo test -p service-daemon-macro env_tests` for code-generation unit
+coverage and `cargo test -p service-daemon --test provider_env_contract_tests`
+for actual generated-provider behavior. The integration matrix supplies env
+values to isolated subprocesses rather than mutating the multithreaded test
+process environment. Each value runs through snapshot, raw managed, `RwLock`,
+and `Mutex` initialization independently, without reusing a cached provider slot.
+Coverage includes missing/empty values, non-string trimming, bool false tokens
+and arbitrary true tokens, string whitespace preservation, aliases, qualified
+types, custom `FromStr`, and default-versus-required failure behavior.
+
 ### Framework operation benchmarks
 
 The `framework` Criterion target measures framework operation costs independently

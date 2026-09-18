@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Value Provider Environment Conversion**: Non-string env values are now trimmed before parsing. Bool values accept case-insensitive `false`/`off`/`no` and exactly `0` as false, with every other nonempty value treated as true. Empty input uses the declared default or fails as missing required configuration; strings preserve whitespace. Applies consistently to snapshot and managed initialization, including type aliases; socket/address templates are unchanged.
+
 - **Provider DI Graph Execution**: Provider dependency injection now prepares registered provider graphs through the runtime executor before generated wrappers read typed dependencies. Generated provider constructors no longer recursively initialize dependency providers, and hand-written provider capability trait impls are no longer supported as DI entry points; use `#[provider]` so dependency metadata and single-node constructors are registered.
 - **Console Log Timezone**: Text logs now display the process-local time with an explicit numeric UTC offset instead of fixed UTC with a `Z` suffix. Internal event timestamps and structured JSON file logs remain UTC; console parsers must accept the offset.
 - **IPC Provider Helper API**: Existing `UnixListen` and `UnixConnect` providers expose `accept().await?` / `connect().await?` returning `IpcStream`. `UnixConnect` resolves as an endpoint handle and defers dialing to `connect().await?` instead of opening an initialization probe connection.

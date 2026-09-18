@@ -26,11 +26,11 @@ The macro generates a `Default` impl from the value. Inject as `Arc<Port>`.
 #[provider("localhost:5432", env = "DATABASE_HOST")]
 pub struct DatabaseHost(pub String);
 
-// Non-String field: env var auto-parsed via `.parse()`.
+// Non-String field: trim before conversion (bool rules are described below).
 #[provider(8080, env = "PORT")]
 pub struct Port(pub i32);
 
-// Env-only, no default: initialization FAILS if the env var is missing.
+// Env-only, no default: initialization FAILS if the env var is missing or empty.
 #[provider(env = "API_KEY")]
 pub struct ApiKey(pub String);
 ```
@@ -130,9 +130,18 @@ pub async fn db_pool(url: Arc<DbUrl>) -> Result<DatabasePool, ProviderError> {
 
 | Attribute | Applies to | Meaning |
 | :--- | :--- | :--- |
-| `env = "VAR"` | value forms | Override/source the value from an env var. Non-String parsed via `.parse()`. |
+| `env = "VAR"` | value forms | Override/source the value using the conversion rules below. |
 | `capacity = N` | `Queue`/`BQueue` | Bounded queue capacity, `N > 0`. |
 | `eager = true` | any | Initialize at startup instead of lazily (see §4). |
+
+Value/env conversion preserves `String` whitespace and trims all other types
+before conversion (including type aliases). Empty input then uses the declared
+default; without a default it is a fatal missing-configuration error. Bool
+accepts every nonempty value: `false`/`off`/`no` (ASCII case-insensitive) and
+exactly `0` are false; all others are true.
+Other types use `FromStr`; parse errors fall back to the default or fail fatally
+when required. Absent/unreadable variables retain that same fallback/failure
+behavior. These rules do not change socket/address template providers.
 
 ## 3. `ProviderError` model
 

@@ -16,6 +16,26 @@ There are three ways to define a Provider. Choose based on your use case:
 
 ---
 
+### Environment-backed values
+
+For value providers such as `#[provider(true, env = "VERIFY_SSL")]`,
+environment conversion follows the field's underlying type:
+
+- `String` preserves whitespace. Other types first apply `str::trim()`.
+- An empty value after this step uses the declared default. Without a default,
+  it is a missing required configuration and initialization fails fatally.
+- For `bool`, `false`, `off`, and `no` (ASCII case-insensitive), and exactly `0`, mean
+  `false`. Every other nonempty value means `true`.
+- Other types use `FromStr` after trimming. Invalid input uses the default when
+  provided, otherwise it is a fatal parse error.
+- An absent or unreadable environment variable retains the same fallback or
+  required-configuration failure behavior.
+
+Thus `" OFF "` means `false`, and `"   "` uses the default for a bool. For a
+`String`, `""` uses the default but `"   "` remains three spaces. Type aliases
+follow their underlying type. These rules apply to value/env providers, not
+socket/address template providers or custom provider functions.
+
 ## 2. Prefer `#[provider] async fn` for custom resources
 
 For custom providers such as MQTT, Redis, or HTTP clients, use an `async fn` provider instead of changing the framework's built-in templates.

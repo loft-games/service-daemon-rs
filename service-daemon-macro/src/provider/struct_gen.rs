@@ -522,7 +522,7 @@ fn generate_extra_traits(
 fn required_env_value_provider<'a>(
     tuple_info: &'a Option<TupleStructInfo>,
     provider_args: &'a ProviderArgs,
-) -> Option<(&'a StringTemplateArg, &'a syn::Type, bool)> {
+) -> Option<(&'a StringTemplateArg, &'a syn::Type)> {
     let info = tuple_info.as_ref()?;
     match &provider_args.head {
         ProviderHead::DefaultExpr {
@@ -534,7 +534,7 @@ fn required_env_value_provider<'a>(
         .named
         .env
         .as_ref()
-        .map(|env| (env, &info.inner_type, info.is_string))
+        .map(|env| (env, &info.inner_type))
 }
 
 fn struct_provider_helper_style(
@@ -615,20 +615,12 @@ fn generate_default_impl(
         };
         let default_tokens = expand_value(default_val);
 
-        if info.is_string {
-            quote! {
-                std::env::var(#env_expr).unwrap_or_else(|_| #default_tokens)
-            }
-        } else {
-            // Non-String type: parse the env var string into the target type.
-            // This enables `#[provider(8080, env = "PORT")] struct Port(pub i32)`.
-            let inner_ty = &info.inner_type;
-            quote! {
-                std::env::var(#env_expr)
-                    .ok()
-                    .and_then(|v| v.parse::<#inner_ty>().ok())
-                    .unwrap_or_else(|| #default_tokens)
-            }
+        let parse_value = generate_env_value_parse(&info.inner_type);
+        quote! {
+            std::env::var(#env_expr)
+                .ok()
+                .and_then(|raw_value| #parse_value.and_then(std::result::Result::ok))
+                .unwrap_or_else(|| #default_tokens)
         }
     } else if let Some(default_val) = default_expr_opt {
         let default_tokens = expand_value(default_val);
@@ -649,11 +641,43 @@ fn generate_default_impl(
     }
 }
 
+/// Emit an optional parse result: empty input is missing, not a parse failure.
+/// TypeId handles aliases without downcasting or adding a public conversion trait.
+fn generate_env_value_parse(inner_type: &syn::Type) -> proc_macro2::TokenStream {
+    quote! {{
+        let value = if std::any::TypeId::of::<#inner_type>()
+            == std::any::TypeId::of::<std::string::String>()
+        {
+            raw_value.as_str()
+        } else {
+            raw_value.trim()
+        };
+        if value.is_empty() {
+            None
+        } else {
+            let value = if std::any::TypeId::of::<#inner_type>()
+                == std::any::TypeId::of::<bool>()
+            {
+                if value == "0" || value.eq_ignore_ascii_case("false")
+                    || value.eq_ignore_ascii_case("off")
+                    || value.eq_ignore_ascii_case("no")
+                {
+                    "false"
+                } else {
+                    "true"
+                }
+            } else {
+                value
+            };
+            Some(value.parse::<#inner_type>())
+        }
+    }}
+}
+
 fn generate_required_env_constructor(
     struct_name: &syn::Ident,
     env_arg: &StringTemplateArg,
     inner_type: &syn::Type,
-    is_string: bool,
     managed_errors: bool,
 ) -> proc_macro2::TokenStream {
     let env_expr = env_arg.to_static_str_expr();
@@ -679,13 +703,6 @@ fn generate_required_env_constructor(
         }
     };
 
-    if is_string {
-        return quote! {
-            let value = std::env::var(#env_expr).map_err(|_| #missing_error)?;
-            Ok(std::sync::Arc::new(#struct_name(value)))
-        };
-    }
-
     let parse_error = if managed_errors {
         quote! {
             service_daemon::ProviderError::Fatal(format!(
@@ -706,9 +723,11 @@ fn generate_required_env_constructor(
         }
     };
 
+    let parse_value = generate_env_value_parse(inner_type);
     quote! {
         let raw_value = std::env::var(#env_expr).map_err(|_| #missing_error)?;
-        let value = raw_value.parse::<#inner_type>().map_err(|e| #parse_error)?;
+        let value = #parse_value.ok_or_else(|| #missing_error)?
+            .map_err(|e| #parse_error)?;
         Ok(std::sync::Arc::new(#struct_name(value)))
     }
 }
@@ -729,16 +748,8 @@ fn generate_constructor(
     provider_args: &ProviderArgs,
     managed_errors: bool,
 ) -> proc_macro2::TokenStream {
-    if let Some((env_lit, inner_type, is_string)) =
-        required_env_value_provider(tuple_info, provider_args)
-    {
-        return generate_required_env_constructor(
-            struct_name,
-            env_lit,
-            inner_type,
-            is_string,
-            managed_errors,
-        );
+    if let Some((env_lit, inner_type)) = required_env_value_provider(tuple_info, provider_args) {
+        return generate_required_env_constructor(struct_name, env_lit, inner_type, managed_errors);
     }
 
     match fields {
@@ -823,5 +834,56 @@ fn generate_constructor(
                 Ok(std::sync::Arc::new(#struct_name::default()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn default_and_required_env_share_conversion() {
+        for ty in [
+            quote!(bool),
+            quote!(std::primitive::bool),
+            quote!(String),
+            quote!(u16),
+            quote!(Alias),
+        ] {
+            let item: ItemStruct = syn::parse2(quote!(struct Config(#ty);)).unwrap();
+            let info = TupleStructInfo::from_fields(&item.fields);
+            let inner: syn::Type = syn::parse2(ty).unwrap();
+            let parse = generate_env_value_parse(&inner).to_string();
+            let args: ProviderArgs =
+                syn::parse2(quote!(Default::default(), env = "CONFIG")).unwrap();
+            let default = generate_default_impl(&info, &args, &item.ident);
+            syn::parse2::<syn::ItemImpl>(default.clone()).unwrap();
+            assert!(default.to_string().contains(&parse));
+
+            let required_args: ProviderArgs = syn::parse2(quote!(env = "CONFIG")).unwrap();
+            let env = required_args.named.env.as_ref().unwrap();
+            for managed in [false, true] {
+                let constructor =
+                    generate_required_env_constructor(&item.ident, env, &inner, managed);
+                syn::parse2::<syn::Block>(quote!({ #constructor })).unwrap();
+                assert!(constructor.to_string().contains(&parse));
+                if managed {
+                    assert!(constructor.to_string().contains("ProviderError :: Fatal"));
+                } else {
+                    assert!(constructor.to_string().contains("EnvironmentMissing"));
+                    assert!(constructor.to_string().contains("EnvironmentParse"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn required_env_still_has_no_default_impl() {
+        let item: ItemStruct = syn::parse_quote!(
+            struct Config(bool);
+        );
+        let info = TupleStructInfo::from_fields(&item.fields);
+        let args: ProviderArgs = syn::parse2(quote!(env = "CONFIG")).unwrap();
+        assert!(generate_default_impl(&info, &args, &item.ident).is_empty());
     }
 }
