@@ -48,7 +48,7 @@ The supported provider attribute forms are:
 #[provider("fallback", env = "CONFIG_ENV")]
 #[provider(Notify)]
 #[provider(Queue(String), capacity = 128)]
-#[provider(Listen("127.0.0.1:8080"), env = "BIND_ADDR", eager = true)]
+#[provider(Listen(8080), env = "BIND_ADDR", eager = true)]
 #[provider(UnixListen("/run/app.sock"), eager = true)]
 #[provider(UnixConnect("/run/peer.sock"), env = "PEER_SOCK")]
 #[provider(NamedPipeListen(r"\\.\pipe\app"), eager = true)]
@@ -64,6 +64,14 @@ Shared attributes are parsed once and rejected at compile time if duplicated:
 | `env = "NAME"` or `env = CONST_PATH` | value providers and provider templates | The environment variable overrides the fallback when present. The argument must be a string literal or a path to a `const`/`static &'static str`. |
 | `capacity = N` | `Queue(...)` only | `N` must be greater than zero; value providers reject `capacity`. |
 | `eager = true` / `eager = false` | all provider forms | The value must be a boolean literal, not an identifier or expression. |
+
+`Listen` uses a dedicated `ListenArg` parser for integer ports and string
+literals. Numeric literals are checked against `u16` at compile time. Generated
+`try_new()` selects the environment override or default, trims the string, and
+normalizes nonempty ASCII-digit input to `0.0.0.0:<port>` after runtime range
+validation. Other strings go to the existing TCP bind path. Empty and invalid
+overrides remain initialization failures; the value-provider empty fallback
+contract does not apply here.
 
 `UnixListen`, `UnixConnect`, `NamedPipeListen`, `NamedPipeConnect`,
 `LocalIpcListen`, and `LocalIpcConnect` accept a string literal or a path to a

@@ -33,6 +33,17 @@ Coverage includes missing/empty values, non-string trimming, bool false tokens
 and arbitrary true tokens, string whitespace preservation, aliases, qualified
 types, custom `FromStr`, and default-versus-required failure behavior.
 
+### TCP listener port contract
+
+Run `cargo test -p service-daemon-macro listen_port_arguments` for port-literal
+parsing, `cargo test -p example-macro-tests --test macro_compile_tests provider_macro_cases`
+for accepted forms and invalid numeric literals, and
+`cargo test -p service-daemon --test listen_port_contract_tests` for actual binds,
+TCP connections, environment overrides, and fatal invalid-value handling.
+Runtime tests bind ephemeral ports and isolate environment cases in child
+processes. Port-only input must bind all IPv4 interfaces; explicit loopback
+addresses must remain loopback. Empty env input must not silently fall back.
+
 ### Framework operation benchmarks
 
 The `framework` Criterion target measures framework operation costs independently

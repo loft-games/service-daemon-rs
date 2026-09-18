@@ -99,6 +99,18 @@ pub(in crate::provider) fn generate_listen_template(
         impl #struct_name {
             pub fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let addr = #addr_expr;
+                let addr = addr.trim();
+                let addr = if !addr.is_empty() && addr.bytes().all(|byte| byte.is_ascii_digit()) {
+                    let port = addr.parse::<u16>().map_err(|_| {
+                        service_daemon::ProviderError::Fatal(format!(
+                            "Provider '{}' Listen port '{}' must be in 0..=65535",
+                            #struct_name_str, addr
+                        ))
+                    })?;
+                    format!("0.0.0.0:{port}")
+                } else {
+                    addr.to_owned()
+                };
                 let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
                     let msg = format!(
                         "Provider '{}' failed to bind TCP port '{}': {}",

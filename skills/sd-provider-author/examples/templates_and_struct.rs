@@ -18,7 +18,7 @@ pub struct TaskQueue;
 pub struct JobQueue;
 
 // TCP listener; env overrides the bind address. Named attrs go OUTSIDE the parens.
-#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]
+#[provider(Listen(8080), env = "LISTEN_ADDR")]
 pub struct ApiListener;
 
 // Unix socket peer connection, initialized eagerly.

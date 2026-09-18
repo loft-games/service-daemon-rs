@@ -9,7 +9,7 @@ use syn::parse::Parser;
 use syn::spanned::Spanned;
 
 use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
-use super::parser::{ProviderArgs, ProviderHead, StringTemplateArg, TemplateArg};
+use super::parser::{ListenArg, ProviderArgs, ProviderHead, StringTemplateArg, TemplateArg};
 use super::templates::{
     generate_broadcast_queue_template, generate_listen_template,
     generate_local_ipc_connect_template, generate_local_ipc_listen_template,
@@ -147,11 +147,11 @@ fn try_generate_template(
         }
         // Listen template (TCP listener with FD cloning)
         "Listen" => {
-            let bind_addr = parse_required_template_arg::<syn::LitStr>(
+            let bind_addr = parse_required_template_arg::<ListenArg>(
                 name,
                 arg.as_ref(),
-                "Listen template requires a bind address",
-                r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#,
+                "Listen template requires a port or bind address",
+                "Usage: #[provider(Listen(8080))]",
             )?;
             if provider_args.named.capacity.is_some() {
                 emit_unused_provider_template_arg_warning!(name, "Listen", "capacity");
@@ -160,7 +160,7 @@ fn try_generate_template(
                 struct_name,
                 vis,
                 attrs,
-                &bind_addr,
+                &bind_addr.0,
                 provider_args.named.env.as_ref(),
                 provider_args.named.eager,
             ))

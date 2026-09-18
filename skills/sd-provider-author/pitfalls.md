@@ -39,7 +39,11 @@ the framework.
 ## Named attributes inside template parentheses
 
 `#[provider(Listen("addr", env = "VAR"))]` is a compile error. Named attributes go
-outside: `#[provider(Listen("addr"), env = "VAR")]`.
+outside: `#[provider(Listen(8080), env = "VAR")]`.
+
+Port-only `Listen(8080)` (or env `8080`) binds all IPv4 interfaces, not just
+localhost. Use a full loopback address for local-only services. Unlike value
+providers, an empty `Listen` env override is invalid and does not use the default.
 
 ## `capacity` on the wrong form
 

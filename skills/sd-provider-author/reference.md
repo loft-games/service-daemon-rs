@@ -58,10 +58,10 @@ pub struct JobQueue;
 #[provider(BQueue(i32))]       // BQueue / BroadcastQueue aliases
 pub struct Numbers;
 
-#[provider(Listen("0.0.0.0:8080"))]                 // TCP listener
+#[provider(Listen(8080))]                         // TCP listener, all IPv4 interfaces
 pub struct ApiListener;
 
-#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")] // env overrides addr
+#[provider(Listen(8080), env = "LISTEN_ADDR")]     // env accepts a port or full address
 pub struct ConfigurableListener;
 
 #[provider(UnixListen("/run/myapp/sock"))]
@@ -85,10 +85,16 @@ pub struct LocalControlIpc;
 pub struct LocalPeerIpc;
 ```
 
-Syntax rules (enforced by the parser):
+Template syntax and initialization rules:
 
 - `capacity = N` is only valid on `Queue`/`BQueue` templates and must be `> 0`.
-- `Listen`/`UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect` take
+- Prefer `Listen(8080)` for TCP examples; `Listen("8080")` is equivalent. Both
+  bind all IPv4 interfaces. Use `Listen("127.0.0.1:8080")` for local-only access
+  or a full IPv6/hostname address when needed. `Listen` accepts integer or string
+  literals, not const paths. Ports are `0..=65535` (`0` allocates a free port).
+  Trimmed env values accept the same port/address forms; invalid or empty env
+  values fail rather than falling back. Missing/non-Unicode env uses the default.
+- `UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect` take
   a string literal or a path to a `const/static &'static str` address/path.
   `LocalIpcListen`/`LocalIpcConnect` take a string literal or `const/static
   &'static str` logical name containing only ASCII letters, digits, `.`, `_`, and

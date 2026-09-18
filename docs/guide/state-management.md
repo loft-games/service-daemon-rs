@@ -193,7 +193,7 @@ pub async fn telemetry_init() -> StatsClient {
 ```rust
 // In your providers definition:
 #[derive(Clone)]
-#[provider(Listen("127.0.0.1:8080"), env = "LISTEN_ADDR")]
+#[provider(Listen(8080), env = "LISTEN_ADDR")]
 pub struct ApiListener;
 
 // In your service:
@@ -206,6 +206,9 @@ pub async fn web_server(listener: Arc<ApiListener>) -> anyhow::Result<()> {
         .map_err(Into::into)
 }
 ```
+
+`Listen(8080)` listens on all IPv4 interfaces. `LISTEN_ADDR` accepts a port
+such as `9090` or a full address such as `127.0.0.1:9090` for local-only access.
 
 For a complete Web API reference that combines an Axum HTTP service, explicit CORS policy, `utoipa-axum` OpenAPI routing, response envelopes, graceful shutdown, and a maintenance trigger, see `examples/web-api` (`cargo run -p example-web-api`).
 

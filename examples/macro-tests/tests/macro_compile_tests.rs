@@ -77,6 +77,7 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/26_provider_local_ipc_templates.rs",
     "tests/pass/30_provider_ipc_const_paths.rs",
     "tests/pass/31_provider_env_const_paths.rs",
+    "tests/pass/34_provider_listen_ports.rs",
 ];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[
@@ -102,6 +103,7 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/34_provider_ipc_dynamic_arg.rs",
     "tests/fail/35_provider_ipc_dynamic_env.rs",
     "tests/fail/41_provider_rejects_input.rs",
+    "tests/fail/45_provider_listen_invalid_port.rs",
 ];
 
 #[cfg(not(windows))]

@@ -119,6 +119,13 @@ rule. Run `cargo test -p service-daemon-macro env_tests` and
 isolates env values and provider caches per subprocess across snapshot, managed,
 RwLock, and Mutex paths. Do not apply these value rules to socket templates.
 
+TCP `Listen` has its own port/address contract: `ListenArg` in `provider/parser.rs`
+accepts integer ports and string literals; `provider/templates/listen.rs`
+normalizes trimmed port-only defaults/env values to `0.0.0.0:<port>` and preserves
+full addresses. Keep invalid/empty overrides fatal, not default fallback.
+Validate with `listen_port_arguments` macro unit tests, `provider_macro_cases`
+compile tests, and `listen_port_contract_tests` runtime integration tests.
+
 - `docs/architecture/macro-expansion.md` — what `#[service]`/`#[trigger]`/
   `#[provider]` generate (the authoritative internal explanation).
 - `docs/development/extending-framework.md` — maintainer guidance for extending

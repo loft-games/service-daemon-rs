@@ -4,6 +4,21 @@ In the first chapter, we used a `#[provider]` macro on a simple struct. Real app
 
 For these, the struct + `Default` pattern doesn't fit -- initialization is async, fallible, or depends on configuration. Use a provider function instead.
 
+For a TCP listener, the built-in template already handles setup. Just choose a port:
+
+```rust
+use service_daemon::provider;
+
+#[provider(Listen(8080), env = "ADAPTER_API_BIND", eager = true)]
+pub struct ApiListener;
+```
+
+This listens on all IPv4 interfaces. Set `ADAPTER_API_BIND=9090` to use another
+port, or `ADAPTER_API_BIND=127.0.0.1:9090` for local-only access. Inject
+`Arc<ApiListener>` into your service and call `listener.get()?` to obtain a
+Tokio listener. See the [Listen reference](../provider-best-practices.md#the-listen-template)
+for the complete address options.
+
 ---
 
 ## 1. The Async Provider Function

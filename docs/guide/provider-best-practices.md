@@ -178,7 +178,7 @@ Built-in templates are hardcoded forms inside the `#[provider]` macro. They gene
 | :--- | :--- | :--- |
 | `Notify` | `Event` | A `tokio::sync::Notify` wrapper for one-to-one or one-to-all signaling. |
 | `Queue(T)` | `BQueue`, `BroadcastQueue` | A `tokio::sync::broadcast` channel for fan-out event distribution. |
-| `Listen(Addr)` | - | A `std::net::TcpListener` wrapper with kernel-level FD cloning. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
+| `Listen(PortOrAddr)` | - | A `std::net::TcpListener` wrapper; start with `Listen(8080)` to listen on all IPv4 interfaces. Combined with `eager = true`, binds during the system startup wave; otherwise lazy on first injection. |
 | `UnixListen(Path)` | - | **Unix-only.** A `std::os::unix::net::UnixListener` wrapper. Mirrors `Listen` but adds detect-and-unlink for stale socket files (refuses fatally if a live process holds the path). Use `accept().await?` for the common accept loop or `get()?` for manual FD cloning. |
 | `UnixConnect(Path)` | - | **Unix-only.** Holds an `Arc<PathBuf>`; `connect().await?` opens a fresh `IpcStream` on each call. `try_connect().await?` remains available for callers that need the raw Tokio `UnixStream`. |
 | `NamedPipeListen(Name)` | - | **Windows-only.** Holds a local named pipe listener wrapper. `accept().await?` yields an `IpcStream`; an internal manager replenishes the next pending instance and retries replacement create failures. |
@@ -193,16 +193,33 @@ expressions such as `format!(...)` or function calls are rejected by the macro.
 
 ### The `Listen` Template
 
+For a TCP server, start with a port number:
+
+```rust
+#[provider(Listen(8080), env = "ADAPTER_API_BIND", eager = true)]
+pub struct ApiListener;
+```
+
+`Listen(8080)` and `Listen("8080")` both bind to `0.0.0.0:8080` (all IPv4
+interfaces). Set `ADAPTER_API_BIND=9090` to change the port. For local-only
+access, use `Listen("127.0.0.1:8080")` or set the environment variable to
+`127.0.0.1:9090`. Full addresses, including IPv6 such as `[::]:8080` and
+hostnames such as `localhost:8080`, remain supported.
+
+Ports range from `0` to `65535`; `0` asks the OS to allocate a free port.
+String addresses and environment values are trimmed before binding. A nonempty
+ASCII-digit string is interpreted as a port; invalid values fail initialization
+rather than silently using the default. An empty environment value also fails.
+
 The `Listen` provider gives you a `std::net::TcpListener` wrapped so that multiple services can share the same port across reloads. Two relevant properties:
 1. **OS-level sharing**: `get()` clones the underlying file descriptor via the kernel's `dup` syscall, so multiple services or reload generations can hold a `tokio::net::TcpListener` for the same physical port without conflicts.
-2. **Environment fallback**: `#[provider(Listen("127.0.0.1:8080"), env = "PORT")]` will pick up `PORT` if set, falling back to the literal otherwise. `env` may also be a path to a `const`/`static &'static str`.
+2. **Environment fallback**: `#[provider(Listen(8080), env = "PORT")]` uses `PORT` when readable, falling back to the declared port when absent or not valid Unicode. `env` may also be a path to a `const`/`static &'static str`.
 
 Like every provider, `Listen` is **lazy by default** -- the bind happens the first time a service requests it. To bind the port during the system startup wave (the case you actually want for health probes and supervisor-style liveness checks), declare it with `eager = true` (see below).
 
-Use loopback addresses for local-only services. Binding to `0.0.0.0` exposes
-the listener on external interfaces and belongs in deployment-specific
-configuration with firewall, authentication, rate-limit, TLS or reverse-proxy
-controls already designed.
+Use loopback addresses for local-only services. A port-only declaration exposes
+the listener on external IPv4 interfaces; configure appropriate firewall,
+authentication, and TLS or reverse-proxy controls for production deployments.
 
 ### The `UnixListen` and `UnixConnect` Templates (Unix Domain Sockets)
 

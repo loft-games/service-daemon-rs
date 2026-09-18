@@ -135,6 +135,22 @@ pub enum StringTemplateArg {
     Path(syn::Path),
 }
 
+/// TCP listeners accept a port literal or the existing full address string.
+pub struct ListenArg(pub syn::LitStr);
+
+impl Parse for ListenArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::LitInt) {
+            let port: syn::LitInt = input.parse()?;
+            let value = port
+                .base10_parse::<u16>()
+                .map_err(|_| syn::Error::new(port.span(), "Listen port must be in 0..=65535"))?;
+            return Ok(Self(syn::LitStr::new(&value.to_string(), port.span())));
+        }
+        input.parse::<syn::LitStr>().map(Self)
+    }
+}
+
 impl StringTemplateArg {
     pub fn to_static_str_expr(&self) -> proc_macro2::TokenStream {
         match self {
@@ -449,6 +465,30 @@ impl ProviderArgs {
 mod tests {
     use super::*;
     use quote::quote;
+
+    #[test]
+    fn listen_port_arguments() {
+        for (input, expected) in [
+            (quote!(0), "0"),
+            (quote!(8080), "8080"),
+            (quote!(65535), "65535"),
+            (quote!("0080"), "0080"),
+            (quote!("127.0.0.1:0"), "127.0.0.1:0"),
+            (quote!("[::1]:0"), "[::1]:0"),
+        ] {
+            let arg = syn::parse2::<ListenArg>(input).unwrap();
+            assert_eq!(arg.0.value(), expected);
+        }
+        for input in [
+            quote!(65536),
+            quote!(-1),
+            quote!(1.5),
+            quote!(some_port()),
+            quote!(PORT),
+        ] {
+            assert!(syn::parse2::<ListenArg>(input).is_err());
+        }
+    }
 
     /// Helper: parse a token stream into ProviderArgs.
     fn parse_args(tokens: proc_macro2::TokenStream) -> syn::Result<ProviderArgs> {
