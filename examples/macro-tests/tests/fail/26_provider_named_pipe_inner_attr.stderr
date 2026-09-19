@@ -1,4 +1,4 @@
-error: Unexpected tokens inside template parentheses; named attributes like `env` belong outside: #[provider(Listen("addr"), env = "VAR")]
+error: Unexpected tokens inside NamedPipeListen template parentheses; named attributes like `env` belong outside: #[provider(NamedPipeListen(...), env = "VAR")]
  --> tests/fail/26_provider_named_pipe_inner_attr.rs:5:43
   |
 5 | #[provider(NamedPipeListen(r"\\.\pipe\bad", env = "PIPE_NAME"))]
