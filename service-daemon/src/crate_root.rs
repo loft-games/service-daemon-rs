@@ -8,7 +8,7 @@ pub use core::context::{
 };
 pub use core::di::{
     ManagedProvided, Provided, ProviderDependencyChange, ProviderDependencyChangeReason,
-    ProviderDependencyWatch, ProviderDependencyWatchSet, WatchableProvided,
+    ProviderContract, ProviderDependencyWatch, ProviderDependencyWatchSet, WatchableProvided,
 };
 pub use core::ipc::IpcStream;
 pub use core::logging::{
@@ -74,10 +74,14 @@ pub mod __private {
     pub use crate::core::provider_init::{
         ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
         ProviderInitSourceKind, ProviderRuntimePhase, catch_init_panic, init_fallible,
-        init_fallible_with_source, provider_init_boundary, provider_init_failure_boundary,
-        provider_init_failure_into_error, with_provider_runtime_phase,
+        init_fallible_with_source, init_provider_candidate, init_provider_candidate_with_source,
+        provider_init_boundary, provider_init_failure_boundary, provider_init_failure_into_error,
+        with_provider_runtime_phase,
     };
-    pub use crate::core::provider_executor::{prepare_provider_params, prepare_provider_type};
+    pub use crate::core::provider_executor::{
+        prepare_provider_params, prepare_provider_type, provider_contract_cache_scope,
+        resolve_provider_contract, resolve_provider_contract_managed,
+    };
     pub use crate::core::provider_scope::{
         ProviderCacheScope, missing_prepared_provider_error, provider_changed,
         provider_dependency_watch, ready_provider_mutex_with_scope,
@@ -89,9 +93,10 @@ pub mod __private {
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
-        PROVIDER_REGISTRY, ProviderDependencyKind, ProviderEntry, SERVICE_REGISTRY, ServiceEntry,
-        ServiceEntryId, ServiceFn, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle,
-        ServiceInstanceId, ServiceInvocationContext, ServiceParam,
+        PROVIDER_CANDIDATE_REGISTRY, PROVIDER_REGISTRY, ProviderCandidateEntry,
+        ProviderCandidateInitError, ProviderDependencyKind, ProviderEntry, SERVICE_REGISTRY,
+        ServiceEntry, ServiceEntryId, ServiceFn, ServiceHandle, ServiceInputDescriptor,
+        ServiceInstanceHandle, ServiceInstanceId, ServiceInvocationContext, ServiceParam,
     };
 
     pub use futures;
@@ -104,7 +109,7 @@ pub mod __private {
 }
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{provider, service, service_handle, trigger};
+pub use service_daemon_macro::{provider, provider_contract, provider_impl, service, service_handle, trigger};
 
 /// A prelude module for commonly used items and trigger templates.
 ///
@@ -115,12 +120,12 @@ pub mod prelude {
     pub use crate::{
         DaemonDiagnosticsSnapshot, DaemonInstanceHandle, DaemonInstanceId, DaemonRuntimeSnapshot,
         DiagnosticRuntimeLane, IpcStream, ManagedProvided, Provided, ReadinessSnapshot,
-        ServiceDaemon, ServiceError, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle,
+        ProviderContract, ServiceDaemon, ServiceError, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle,
         ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
         TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
         TriggerRuntimeSnapshot, WatchableProvided, current_service_instance_id, done, is_shutdown,
-        provider, service, service_handle, shelve, shelve_clone, sleep, spawn_with_context, state,
-        trigger, trigger_config, unshelve, wait_shutdown,
+        provider, provider_contract, provider_impl, service, service_handle, shelve, shelve_clone,
+        sleep, spawn_with_context, state, trigger, trigger_config, unshelve, wait_shutdown,
     };
     #[cfg(feature = "high-priority")]
     pub use crate::{

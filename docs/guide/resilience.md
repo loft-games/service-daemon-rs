@@ -91,12 +91,15 @@ async fn license_checker() -> anyhow::Result<()> {
 
 When a provider's initialization fails, the daemon distinguishes transient errors from terminal provider-init boundary failures. User provider functions opt into this behavior by returning `Result<T, ProviderError>`; framework-generated providers can also produce `ProviderInitError` for required environment variables, parse failures, dependency-provider failures, panic translation, timeout, cancellation, and eager dependency-graph defense errors.
 
-### 2.1. Provider Error Mapping: Retryable vs Fatal
+### 2.1. Provider Error Mapping: Retryable, Fatal, and Unavailable
 
 When a provider fails to initialize, it can influence the daemon's behavior by returning specific error variants:
 
 - **Retryable**: the daemon retries initialization with provider-init backoff until `RestartPolicy::provider_init_timeout` expires. If the timeout expires, the terminal boundary error is `ProviderInitError::Timeout`.
 - **Fatal**: the daemon does not retry the provider. The terminal boundary error is `ProviderInitError::Fatal`, and the supervisor requests daemon shutdown for lazy failures or aborts startup for eager failures.
+- **Unavailable**: in a `#[provider_impl]` candidate, the runtime tries the next
+  candidate for the same `#[provider_contract]`. In an ordinary `#[provider]`,
+  there is no fallback candidate, so the runtime treats it as fatal.
 
 Provider retry/backoff is separate from service-generation restart/backoff. A provider-init terminal error bypasses the normal service restart loop; it is recorded as a provider-init lifecycle exit and does not synthesize a restart decision.
 

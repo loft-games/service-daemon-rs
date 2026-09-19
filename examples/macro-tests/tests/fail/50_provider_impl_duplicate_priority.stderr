@@ -1,0 +1,5 @@
+error: duplicate provider_impl attribute `priority`
+ --> tests/fail/50_provider_impl_duplicate_priority.rs:7:32
+  |
+7 | #[provider_impl(priority = 10, priority = 20)]
+  |                                ^^^^^^^^

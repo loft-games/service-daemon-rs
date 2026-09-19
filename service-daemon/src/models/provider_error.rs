@@ -14,4 +14,11 @@ pub enum ProviderError {
     /// The daemon should retry with backoff until `RestartPolicy::provider_init_timeout`
     /// is exceeded.
     Retryable(String),
+    /// This provider implementation cannot provide the requested value in the current process.
+    ///
+    /// Ordinary `#[provider]` declarations have no fallback candidate, so the
+    /// daemon treats this as fatal. `#[provider_impl]` candidates for a
+    /// `#[provider_contract]` output use it to advance to the next registered
+    /// candidate.
+    Unavailable(String),
 }

@@ -44,6 +44,24 @@ Runtime tests bind ephemeral ports and isolate environment cases in child
 processes. Port-only input must bind all IPv4 interfaces; explicit loopback
 addresses must remain loopback. Empty env input must not silently fall back.
 
+### Provider contract candidate chain
+
+Run `cargo test -p service-daemon --test provider_contract_integration_tests`
+for runtime fallback behavior, priority ordering, retry-timeout advancement,
+fatal/panic/cancellation preservation, no-candidate fatal initialization,
+selected-candidate dependency preparation, equal-priority ordering, eager
+reachability, daemon cache scope, and managed snapshot/RwLock/Mutex/watch support.
+Run `cargo test -p service-daemon --features simulation --test
+provider_contract_integration_tests` for daemon-local simulation overrides. Run
+`cargo test -p service-daemon --test provider_init_boundary_integration_tests
+provider_contract` for source/retry diagnostics and error-level logs. Run
+`cargo test -p example-macro-tests --test macro_compile_tests provider_macro_cases`
+for compile-time acceptance and rejection of `#[provider_contract]` /
+`#[provider_impl]` syntax, including the contract `eager` attribute. Run
+`cargo test -p example-provider-contract` for the real cross-crate topology where
+the shared crate owns both the injectable type and consuming service while the
+app crate supplies local implementation candidates.
+
 ### Framework operation benchmarks
 
 The `framework` Criterion target measures framework operation costs independently
@@ -491,8 +509,7 @@ fresh identity/budget and counter integrity. Keep all preceding archives intact.
 
 ### Workspace commands
 
-`rust.yml` treats Linux GNU and Windows MSVC as cross-platform general CI
-platforms:
+The Linux jobs in `rust.yml` own the exhaustive workspace gates:
 
 ```bash
 cargo check --workspace
@@ -504,16 +521,23 @@ cargo test -p service-daemon --no-default-features
 cargo clippy --workspace -- -D warnings
 ```
 
-The Windows MSVC job runs these gates with
-`--target x86_64-pc-windows-msvc` for the cross-platform workspace surface. It
-explicitly excludes Unix-only example crates such as `example-unix-domain-socket`
-and keeps the local IPC examples in the IPC-specific job. Its
-test steps use `.github/scripts/cargo-test-windows-msvc-general` so
-`service-daemon` integration tests can run on Windows while skipping
-platform-specific IPC targets (`local_ipc_*`, `named_pipe_*`, and `unix_*`).
-Keep OS-specific IPC checks separate from this baseline so generic runtime
-regressions, Unix-socket regressions, named-pipe regressions, and LocalIpc
-mapping regressions fail in clearly named jobs.
+The Windows MSVC general job uses
+`.github/scripts/cargo-test-windows-msvc-general` with
+`--target x86_64-pc-windows-msvc`. It runs the cross-platform workspace tests
+with default features, excluding Unix-only and dedicated named-pipe examples;
+then runs the `service-daemon` default-feature library, documentation, and
+non-IPC integration targets. A focused all-features pass covers the library,
+documentation, and integration targets whose behavior changes under optional
+features, including file logging, HighPriority, simulation ownership, reload,
+and scheduling. It also checks that `service-daemon` compiles without default
+features on Windows.
+
+Windows Clippy is not part of this job; the Linux jobs own all Clippy gates.
+The dedicated Windows local IPC job owns NamedPipe runtime tests and the
+Windows-only NamedPipe trybuild fixtures. Keep OS-specific IPC checks separate
+from the general baseline so generic runtime regressions, Unix-socket
+regressions, named-pipe regressions, and LocalIpc mapping regressions fail in
+clearly named jobs.
 
 ## Dependency Baseline
 
@@ -630,7 +654,7 @@ stays in `UnixListen` / `UnixConnect` / `NamedPipeListen` /
 | Feature verification | `logging`, `diagnostics`, `scheduling`, `local-ipc`, `unix-domain-socket`, `named-pipe` | Keep non-default or focused framework features compiling and runnable. |
 | Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
 | Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
-| Adoption reference | `web-api`, `controller-bridge` | Show realistic integration shapes without turning every detail into a framework contract. |
+| Adoption reference | `web-api`, `controller-bridge`, `provider-contract`, `on-demand` | Show realistic integration shapes without turning every detail into a framework contract. |
 
 When adding an example, classify it here first. Do not treat every example as a
 production compatibility promise.

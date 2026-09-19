@@ -16,10 +16,14 @@ The sections below expand each surface into its implementation model and public 
 
 ## 1. Unified Registry (Linkme)
 
-Both standard services and event-driven triggers are collected into a `SERVICE_REGISTRY`, while dependency providers are collected into a `PROVIDER_REGISTRY`. Both are managed at link time using the `linkme` crate. 
+Both standard services and event-driven triggers are collected into a
+`SERVICE_REGISTRY`, ordinary provider definitions and provider contracts are
+collected into a `PROVIDER_REGISTRY`, and contract implementation candidates are
+collected into a `PROVIDER_CANDIDATE_REGISTRY`. These slices are managed at link
+time using the `linkme` crate.
 
 ### How link-time discovery works
-1. **Registry entries**: The framework macros generate `#[distributed_slice]` entries. At compile time, the Rust compiler and linker place these pointers into the `SERVICE_REGISTRY` and `PROVIDER_REGISTRY` slices.
+1. **Registry entries**: The framework macros generate `#[distributed_slice]` entries. At compile time, the Rust compiler and linker place these pointers into the `SERVICE_REGISTRY`, `PROVIDER_REGISTRY`, and `PROVIDER_CANDIDATE_REGISTRY` slices.
 2. **Registry loading**: the process-wide service catalog lazily scans `SERVICE_REGISTRY` once and builds lookup indexes by entry id, wrapper function pointer, and tag. There is no filesystem scan or runtime reflection step.
 3. **Module reachability**: Any module included in the compilation tree via `mod` has its services and providers registered. No manual list maintenance is required.
 
@@ -42,10 +46,18 @@ A `ServiceInstanceHandle` carries the runtime `ServiceInstanceId`, static `Servi
 
 ## 2. Decentralized Dependency Injection
 
-`service-daemon-rs` separates provider discovery from provider ownership. `PROVIDER_REGISTRY` tells the daemon which provider definitions exist, while provider scopes decide which cached instance a daemon generation actually receives.
+`service-daemon-rs` separates provider discovery from provider ownership.
+`PROVIDER_REGISTRY` tells the daemon which provider definitions or contracts
+exist, and `PROVIDER_CANDIDATE_REGISTRY` lists fallback implementations for
+contract outputs. Provider scopes decide which cached instance a daemon
+generation actually receives.
 
 - **Root compatibility slot**: each generated provider still owns a root `StateManager<T>` slot. Helper calls such as `T::resolve()` made outside a daemon context use this root fallback.
 - **Daemon effective scope**: service bodies, trigger bodies, dependency watch construction, and reachable eager initialization resolve through the current daemon's `DaemonResources` provider scope.
+- **Contract candidate scope**: `#[provider_impl]` entries record whether their
+  body uses `service_handle!`. If any fallback candidate requires it, the shared
+  contract uses daemon-local caching; otherwise separate daemons may inherit the
+  same root contract value.
 - **Inherited by default**: a daemon scope normally inherits the root slot, preserving the simple "one shared provider" behavior for ordinary applications.
 - **Local shadowing**: internal forks and simulation overrides install a daemon-local slot for a single provider type. That slot has its own cache, managed locks, watch notification, and binding epoch.
 - **Recursive Resolution**: provider dependencies resolve through the same effective scope, so a provider initialized for a daemon sees the same ownership boundary as the service or trigger that requested it.

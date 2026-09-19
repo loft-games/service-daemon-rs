@@ -21,7 +21,7 @@ User-facing — using the framework:
 | :--- | :--- |
 | `sd-adoption-guide` | Whether and how to migrate an existing project onto the framework (journey front door) |
 | `sd-service-author` | Writing `#[service]`: loop shape, readiness `done()`, interruptible `sleep`, restart, and `#[input]` service templates |
-| `sd-provider-author` | Writing `#[provider]`: lazy/eager and `ProviderError::Fatal` vs `Retryable` |
+| `sd-provider-author` | Writing providers: `#[provider]`, provider contracts, lazy/eager, and `ProviderError` classification |
 | `sd-trigger-author` | Writing `#[trigger]`: host families `Queue` / `Cron` / `Signal` / `Watch` |
 | `sd-state-management` | Managed state `Arc<RwLock<T>>`, `Watch` notifications, the keyed Shelf |
 | `sd-daemon-bootstrap` | Assembling `main()`: builder, tag-filtered `Registry`, `run()` vs `wait()`, priority waves, and selected service-template behavior |

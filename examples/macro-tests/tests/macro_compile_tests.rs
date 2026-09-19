@@ -78,7 +78,15 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/30_provider_ipc_const_paths.rs",
     "tests/pass/31_provider_env_const_paths.rs",
     "tests/pass/34_provider_listen_ports.rs",
+    "tests/pass/35_provider_contract_impl.rs",
+    "tests/pass/36_provider_contract_eager.rs",
 ];
+
+#[cfg(not(windows))]
+const PROVIDER_PLATFORM_PASS_CASES: &[&str] = &[];
+
+#[cfg(windows)]
+const PROVIDER_PLATFORM_PASS_CASES: &[&str] = &["tests/pass/24_provider_named_pipe_templates.rs"];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/04_provider_on_enum.rs",
@@ -104,6 +112,14 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/35_provider_ipc_dynamic_env.rs",
     "tests/fail/41_provider_rejects_input.rs",
     "tests/fail/45_provider_listen_invalid_port.rs",
+    "tests/fail/46_provider_impl_requires_contract.rs",
+    "tests/fail/47_provider_contract_duplicate_eager.rs",
+    "tests/fail/48_provider_contract_unknown_attr.rs",
+    "tests/fail/49_provider_contract_malformed_eager.rs",
+    "tests/fail/50_provider_impl_duplicate_priority.rs",
+    "tests/fail/51_provider_impl_unknown_attr.rs",
+    "tests/fail/52_provider_impl_non_integer_priority.rs",
+    "tests/fail/53_provider_impl_priority_out_of_range.rs",
 ];
 
 #[cfg(not(windows))]
@@ -113,7 +129,12 @@ const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[
 ];
 
 #[cfg(windows)]
-const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &["tests/fail/36_provider_named_pipe_dynamic_arg.rs"];
+const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[
+    "tests/fail/26_provider_named_pipe_inner_attr.rs",
+    "tests/fail/27_provider_named_pipe_tuning_attr.rs",
+    "tests/fail/28_provider_named_pipe_capacity_attr.rs",
+    "tests/fail/36_provider_named_pipe_dynamic_arg.rs",
+];
 
 const INTEGRATION_PASS_CASES: &[&str] = &[
     "tests/pass/06_trigger_templates.rs",
@@ -148,9 +169,11 @@ fn trigger_macro_cases() {
 
 #[test]
 fn provider_macro_cases() {
+    let mut pass_cases = Vec::from(PROVIDER_PASS_CASES);
+    pass_cases.extend_from_slice(PROVIDER_PLATFORM_PASS_CASES);
     let mut fail_cases = Vec::from(PROVIDER_FAIL_CASES);
     fail_cases.extend_from_slice(PROVIDER_PLATFORM_FAIL_CASES);
-    run_cases(PROVIDER_PASS_CASES, &fail_cases);
+    run_cases(&pass_cases, &fail_cases);
 }
 
 #[test]

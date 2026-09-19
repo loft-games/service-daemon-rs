@@ -49,7 +49,7 @@ Not API usage — how the framework works inside:
 
 - `internal-overview.md` — the big picture (registries, DI resolution, status plane).
 - `lifecycle-management.md` — wave orchestration, supervisor FSM, provider-init
-  error semantics (`ProviderError` Fatal/Retryable, `RestartPolicy`).
+  error semantics (`ProviderError` Fatal/Retryable/Unavailable, `RestartPolicy`).
 - `macro-expansion.md` — what `#[service]`/`#[trigger]`/`#[provider]` generate.
 - `high-priority-feedback.md` — authoritative optional HighPriority observation,
   placement, reload-origin, and convergence semantics; experiment interpretation

@@ -1,0 +1,5 @@
+error: duplicate provider_contract attribute `eager`
+ --> tests/fail/47_provider_contract_duplicate_eager.rs:4:35
+  |
+4 | #[provider_contract(eager = true, eager = false)]
+  |                                   ^^^^^

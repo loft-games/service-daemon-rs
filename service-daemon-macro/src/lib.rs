@@ -139,6 +139,22 @@ pub fn provider(attr: TokenStream, item: TokenStream) -> TokenStream {
     provider::provider_impl(attr, item)
 }
 
+/// Marks a shared type as a provider contract.
+///
+/// A provider contract keeps dependency injection type-checked on the shared
+/// output type while allowing downstream crates to register local
+/// `#[provider_impl]` fallback candidates for that output.
+#[proc_macro_attribute]
+pub fn provider_contract(attr: TokenStream, item: TokenStream) -> TokenStream {
+    provider::provider_contract_impl(attr, item)
+}
+
+/// Registers a local implementation candidate for a `#[provider_contract]`.
+#[proc_macro_attribute]
+pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
+    provider::provider_candidate_impl(attr, item)
+}
+
 /// Marks a function as an event-driven trigger.
 ///
 /// The macro automatically registers the trigger in the global registry

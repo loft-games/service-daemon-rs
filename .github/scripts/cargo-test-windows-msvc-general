@@ -30,3 +30,29 @@ for test_file in service-daemon/tests/*.rs; do
       ;;
   esac
 done
+
+# Exercise code that is compiled out of the default-feature test pass. Keep
+# this list focused on integration targets whose behavior changes under one or
+# more optional features; platform-specific IPC remains owned by its dedicated
+# jobs.
+cargo test "${cargo_flags[@]}" -p service-daemon --all-features --lib
+cargo test "${cargo_flags[@]}" -p service-daemon --all-features --doc
+
+feature_integration_tests=(
+  eager_integration_tests
+  file_logging_degrade_tests
+  high_priority_runtime_policy_tests
+  provider_contract_integration_tests
+  provider_ownership_characterization
+  reload_integration_tests
+  scheduling_integration
+  service_handle_integration_tests
+)
+
+for test_name in "${feature_integration_tests[@]}"; do
+  cargo test "${cargo_flags[@]}" -p service-daemon --all-features --test "$test_name"
+done
+
+# The minimal feature surface must also keep compiling on Windows. Linux owns
+# the exhaustive no-default-features test and Clippy gates.
+cargo check "${cargo_flags[@]}" -p service-daemon --no-default-features

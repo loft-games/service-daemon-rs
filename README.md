@@ -83,6 +83,7 @@ The `examples/` directory contains focused examples organized by use case:
 | **on-demand** | Dynamic service instances with periodic `start`, `stop`, and `remove` | `cargo run -p example-on-demand` |
 | **web-api** | Axum HTTP API with explicit CORS, OpenAPI docs, request envelopes, graceful shutdown, and maintenance triggers | `cargo run -p example-web-api` |
 | **controller-bridge** | Simulated controller bridge: fake transport, framing, protobuf, bounded command correlation, custom `TriggerHost`, and status watch side effects | `cargo run -p example-controller-bridge` |
+| **provider-contract** | Shared provider type and service with app-local prioritized fallback implementations | `cargo run -p example-provider-contract` |
 | **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
 | **local-ipc** | Cross-platform logical-name local IPC over Unix sockets or Windows named pipes | `cargo run -p example-local-ipc` |
 | **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |

@@ -22,6 +22,8 @@ than a third-party diagnostics shim.
 | :--- | :--- | :--- |
 | `#[service]` | `service` (lib.rs:63) | `service::service_impl(attr, item)` |
 | `#[provider]` | `provider` (lib.rs:137) | `provider::provider_impl(attr, item)` |
+| `#[provider_contract]` | `provider_contract` | `provider::provider_contract_impl(attr, item)` |
+| `#[provider_impl]` | `provider_impl` | `provider::provider_candidate_impl(attr, item)` |
 | `#[trigger]` | `trigger` (lib.rs:192) | `trigger::trigger_impl(attr, item)` |
 
 ## Parse / codegen split
@@ -40,7 +42,7 @@ Change parsing in `parser.rs`; change emitted code in `codegen.rs` /
 
 ## What the macros emit: the linkme registries
 
-Generated code registers itself into two `linkme` distributed slices defined in
+Generated code registers itself into `linkme` distributed slices defined in
 `service-daemon/src/models/service.rs` — no `build.rs`, no runtime scanning:
 
 ```rust
@@ -51,12 +53,21 @@ pub static SERVICE_REGISTRY: [ServiceEntry];
 #[allow(unsafe_code)]
 #[distributed_slice]
 pub static PROVIDER_REGISTRY: [ProviderEntry];
+
+#[allow(unsafe_code)]
+#[distributed_slice]
+pub static PROVIDER_CANDIDATE_REGISTRY: [ProviderCandidateEntry];
 ```
 
-`#[service]` / `#[trigger]` emit a `ServiceEntry`; `#[provider]` emits a
-`ProviderEntry`. `ServiceEntry.input` distinguishes auto-start services from
+`#[service]` / `#[trigger]` emit a `ServiceEntry`; `#[provider]` and
+`#[provider_contract]` emit a `ProviderEntry`; `#[provider_impl]` emits a
+`ProviderCandidateEntry`. `ServiceEntry.input` distinguishes auto-start services from
 on-demand service templates, and generated wrappers now receive a
 `ServiceInvocationContext` rather than a bare cancellation token.
+
+Provider candidates carry inferred cache scope and boxed `ProviderInitFailure`
+facts. Keep runtime dependency preparation limited to the attempted candidate,
+while the structural graph still includes every candidate edge for cycle checks.
 
 ## Scheduling feature boundary
 
@@ -68,7 +79,8 @@ A workspace build alone can hide this boundary through feature unification.
 
 ## Companions
 
-- `reference.md` — the exact `ServiceEntry` / `ProviderEntry` field contracts,
+- `reference.md` — the exact `ServiceEntry` / `ProviderEntry` /
+  `ProviderCandidateEntry` field contracts,
   the inspect-and-test workflow (`cargo expand`, trybuild), and the relevant docs.
 - `pitfalls.md` — the traps (changing an entry struct without updating codegen,
   forgetting `#[allow(unsafe_code)]`, stale trybuild `.stderr`).

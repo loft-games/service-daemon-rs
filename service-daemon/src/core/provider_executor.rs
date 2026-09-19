@@ -7,12 +7,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::provider_init::{
     ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
-    ProviderInitSourceKind, provider_init_failure_boundary,
+    ProviderInitSourceKind, provider_init_failure_boundary, provider_init_failure_into_error,
 };
+use crate::core::provider_scope::ProviderCacheScope;
 use crate::RestartPolicy;
 use crate::models::{
-    PROVIDER_REGISTRY, ProviderDependencyKind, ProviderEntry, ProviderInitError, ServiceParam,
+    PROVIDER_CANDIDATE_REGISTRY, PROVIDER_REGISTRY, ProviderCandidateEntry,
+    ProviderCandidateInitError, ProviderDependencyKind, ProviderEntry, ProviderError,
+    ProviderInitError, ServiceParam,
 };
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProviderDemand {
@@ -204,6 +209,180 @@ pub async fn prepare_provider_type(
         kind,
     }];
     prepare_provider_params(&params, policy, cancel).await
+}
+
+#[doc(hidden)]
+pub async fn resolve_provider_contract<T>(
+    contract_name: &'static str,
+    policy: RestartPolicy,
+    cancel: CancellationToken,
+) -> Result<Arc<T>, ProviderInitFailure>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    resolve_provider_contract_inner::<T>(contract_name, policy, cancel).await
+}
+
+#[doc(hidden)]
+pub async fn resolve_provider_contract_managed<T>(
+    contract_name: &'static str,
+    policy: RestartPolicy,
+    cancel: CancellationToken,
+) -> Result<Arc<T>, ProviderError>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    resolve_provider_contract_inner::<T>(contract_name, policy, cancel)
+        .await
+        .map_err(|failure| ProviderError::Fatal(failure.error().to_string()))
+}
+
+async fn resolve_provider_contract_inner<T>(
+    contract_name: &'static str,
+    policy: RestartPolicy,
+    cancel: CancellationToken,
+) -> Result<Arc<T>, ProviderInitFailure>
+where
+    T: 'static + Send + Sync + Clone,
+{
+    let output_type_id = TypeId::of::<T>();
+    let mut candidates: Vec<&'static ProviderCandidateEntry> = PROVIDER_CANDIDATE_REGISTRY
+        .iter()
+        .filter(|candidate| candidate.output_type_id == output_type_id)
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.module.cmp(right.module))
+            .then_with(|| left.name.cmp(right.name))
+    });
+
+    if candidates.is_empty() {
+        let message = format!(
+            "provider contract `{contract_name}` has no registered #[provider_impl] candidates"
+        );
+        error!(provider = contract_name, "{message}");
+        return Err(ProviderInitFailure::fatal(
+            contract_name,
+            message,
+            ProviderInitSourceKind::UserProviderFatal,
+        ));
+    }
+
+    let mut last_non_fatal: Option<String> = None;
+    for candidate in candidates {
+        if cancel.is_cancelled() {
+            return Err(ProviderInitFailure::cancelled(candidate.name));
+        }
+
+        if let Err(error) = prepare_provider_params(candidate.params, policy, cancel.clone()).await {
+            match error {
+                ProviderInitError::Timeout {
+                    provider,
+                    timeout,
+                    last_error,
+                } => {
+                    let message = format!(
+                        "candidate `{}` dependency `{provider}` timed out after {:?}: {last_error}",
+                        candidate.name, timeout
+                    );
+                    warn!(
+                        provider = contract_name,
+                        candidate = candidate.name,
+                        "{message}"
+                    );
+                    last_non_fatal = Some(message);
+                    continue;
+                }
+                ProviderInitError::Fatal { .. } | ProviderInitError::Cancelled { .. } => {
+                    return Err(ProviderInitFailure::new(
+                        ProviderInitSourceKind::DependencyProvider,
+                        error,
+                    ));
+                }
+            }
+        }
+
+        match (candidate.init)(policy, cancel.clone()).await {
+            Ok(value) => match value.downcast::<T>() {
+                Ok(value) => {
+                    info!(
+                        provider = contract_name,
+                        candidate = candidate.name,
+                        priority = candidate.priority,
+                        "Provider contract candidate selected"
+                    );
+                    return Ok(value);
+                }
+                Err(_) => {
+                    return Err(ProviderInitFailure::fatal(
+                        candidate.name,
+                        format!(
+                            "provider candidate returned a value that does not match contract `{contract_name}`"
+                        ),
+                        ProviderInitSourceKind::UserProviderFatal,
+                    ));
+                }
+            },
+            Err(ProviderCandidateInitError::Unavailable(message)) => {
+                let message = format!("candidate `{}` unavailable: {message}", candidate.name);
+                info!(
+                    provider = contract_name,
+                    candidate = candidate.name,
+                    "{message}"
+                );
+                last_non_fatal = Some(message);
+            }
+            Err(ProviderCandidateInitError::Failed(failure))
+                if matches!(failure.error(), ProviderInitError::Timeout { .. }) =>
+            {
+                let error = provider_init_failure_into_error(
+                    ProviderInitBoundaryContext::new(
+                        candidate.name,
+                        ProviderInitBoundaryKind::SnapshotResolve,
+                    ),
+                    (*failure).clone(),
+                );
+                let message = format!("candidate `{}` timed out: {error}", candidate.name);
+                warn!(
+                    provider = contract_name,
+                    candidate = candidate.name,
+                    "{message}"
+                );
+                last_non_fatal = Some(message);
+            }
+            Err(ProviderCandidateInitError::Failed(failure)) => {
+                return Err(*failure);
+            }
+        }
+    }
+
+    let message = match last_non_fatal {
+        Some(message) => format!(
+            "provider contract `{contract_name}` exhausted all #[provider_impl] candidates; last result: {message}"
+        ),
+        None => format!("provider contract `{contract_name}` exhausted all #[provider_impl] candidates"),
+    };
+    error!(provider = contract_name, "{message}");
+    Err(ProviderInitFailure::fatal(
+        contract_name,
+        message,
+        ProviderInitSourceKind::UserProviderFatal,
+    ))
+}
+
+#[doc(hidden)]
+pub fn provider_contract_cache_scope(output_type_id: TypeId) -> ProviderCacheScope {
+    if PROVIDER_CANDIDATE_REGISTRY.iter().any(|candidate| {
+        candidate.output_type_id == output_type_id
+            && candidate.cache_scope == ProviderCacheScope::DaemonLocal
+    }) {
+        ProviderCacheScope::DaemonLocal
+    } else {
+        ProviderCacheScope::Inherited
+    }
 }
 
 fn providers_by_id() -> Result<HashMap<TypeId, &'static ProviderEntry>, ProviderInitError> {

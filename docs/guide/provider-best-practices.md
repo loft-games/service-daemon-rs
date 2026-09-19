@@ -6,13 +6,14 @@ This guide helps you choose how to provide dependencies in your `service-daemon-
 
 ## 1. Choosing Your Strategy
 
-There are three ways to define a Provider. Choose based on your use case:
+There are four ways to define a Provider. Choose based on your use case:
 
 | Strategy | When to Use | Example |
 | :--- | :--- | :--- |
 | **Simple Value** | Static configuration, primitive types, or simple wrappers. | `Port(i32)`, `Config(String)` |
 | **Async Function** | External systems, database connections, MQTT, heavy initialization. | `MqttBus`, `DatabasePool` |
 | **Built-in template** | Low-level architecture primitives for synchronization, signaling, or networking. | `Notify`, `Listen`, `Queue` |
+| **Provider contract** | A shared crate owns the injectable type, while the final app supplies one or more local implementations. | `#[provider_contract]` + `#[provider_impl]` |
 
 ---
 
@@ -170,7 +171,86 @@ resolution fails as an unlinked target.
 
 ---
 
-## 4. When to use a built-in template
+## 4. Cross-crate provider contracts
+
+Use `#[provider_contract]` when a shared crate defines the type that services
+inject, but a downstream binary must choose the concrete implementation. This
+keeps the dependency key as the shared value type and avoids implementing
+provider traits on a foreign type.
+
+In the shared crate:
+
+```rust
+use service_daemon::{provider_contract, service};
+use std::sync::Arc;
+
+#[derive(Clone)]
+#[provider_contract(eager = true)]
+pub struct SharedSettings {
+    source: &'static str,
+}
+
+#[service]
+pub async fn settings_consumer(settings: Arc<SharedSettings>) -> anyhow::Result<()> {
+    let _ = settings.source;
+    Ok(())
+}
+```
+
+In the final app crate:
+
+```rust
+use service_daemon::{ProviderError, provider_impl};
+use shared::SharedSettings;
+
+#[provider_impl(priority = 80)]
+pub async fn primary_settings() -> Result<SharedSettings, ProviderError> {
+    Err(ProviderError::Unavailable("not configured here".to_owned()))
+}
+
+#[provider_impl(priority = 10)]
+pub async fn fallback_settings() -> SharedSettings {
+    SharedSettings { source: "fallback" }
+}
+```
+
+Rules:
+
+- `#[provider_contract]` is applied to the shared output struct and generates
+  the normal `Provided`, `ManagedProvided`, and `WatchableProvided` capabilities
+  for that type.
+- `#[provider_impl]` is applied to local functions returning the contract type
+  or `Result<T, ProviderError>`. The return type must implement
+  `ProviderContract`, which the contract macro provides.
+- Candidates are tried by descending `priority`; the default priority is `50`.
+  Equal priorities are ordered by module path and function name for stable
+  fallback behavior.
+- Candidate dependencies remain lazy until that candidate is actually attempted.
+  Dependencies from lower-priority candidates cannot block a successful
+  higher-priority candidate. All candidate dependency edges still participate
+  in startup cycle validation.
+- `ProviderError::Unavailable` means "this candidate does not apply in the
+  current deployment" and advances to the next candidate.
+- `ProviderError::Retryable` retries the current candidate until
+  `provider_init_timeout`; timeout advances to the next candidate.
+- `ProviderError::Fatal` stops the whole contract initialization.
+- If no candidate exists, the contract fails provider initialization fatally and
+  emits an error-level log. Ordinary `#[provider]` has no fallback, so returning
+  `Unavailable` there is fatal.
+- `#[provider_contract(eager = true)]` opts a reachable contract into startup
+  initialization; the default and `eager = false` remain lazy.
+- If any candidate uses `service_handle!`, the whole contract is cached per
+  daemon because fallback may select that candidate. Contracts whose candidates
+  do not require daemon-local handles keep the inherited root cache behavior.
+- Fatal errors, panics, cancellation, and retry-timeout facts retain the existing
+  provider-init source diagnostics. If every non-fatal candidate is exhausted,
+  the contract ends through the normal user-provider fatal boundary.
+
+The full runnable reference is `cargo run -p example-provider-contract`.
+
+---
+
+## 5. When to use a built-in template
 
 Built-in templates are hardcoded forms inside the `#[provider]` macro. They generate repeated wrapper code for primitives that many applications need.
 
@@ -373,7 +453,7 @@ The public generated surface is intentionally small: listeners expose
 
 ---
 
-## 4. Initialization Control: The `eager` Flag
+## 6. Initialization Control: The `eager` Flag
 
 By default, providers are **lazy**; they are only initialized when a service first requests them. If you need a provider to start immediately during the daemon's startup phase, use `eager = true`:
 
@@ -387,7 +467,7 @@ pub struct WebListener;
 
 ---
 
-## 5. Choosing `ProviderError::Fatal` vs `ProviderError::Retryable`
+## 7. Choosing `ProviderError::Fatal`, `Retryable`, or `Unavailable`
 
 Use `ProviderError` only from provider functions that intentionally opt into framework-owned initialization semantics by returning `Result<T, ProviderError>`.
 
@@ -405,9 +485,14 @@ Return `ProviderError::Retryable` when the same initialization may succeed soon 
 
 Retryable provider errors are bounded by `RestartPolicy::provider_init_timeout`. Once that timeout expires, the framework reports a `ProviderInitError::Timeout`; it does not convert cancellation or timeout into a generic fatal error. Normal service code should still receive providers through DI rather than catching these initialization errors itself.
 
+Return `ProviderError::Unavailable` only from `#[provider_impl]` candidates when
+the candidate is not applicable and the framework should try the next
+implementation. In an ordinary `#[provider]`, `Unavailable` has no fallback path
+and is treated as fatal.
+
 ---
 
-## 6. Helper APIs Are Usually Not the Main Path
+## 8. Helper APIs Are Usually Not the Main Path
 
 Most applications should not call provider helper methods directly. Declare providers, inject `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` into services or triggers, and let the daemon own initialization, retry, cancellation, and reload behavior.
 
@@ -417,16 +502,17 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 
 ---
 
-## 7. Common Misconceptions
+## 9. Common Misconceptions
 
 * **"I need a built-in template for my DB"**: No. Use an `async fn` provider that returns your connection pool.
 * **"Built-in templates are faster"**: No. They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are shorthand for common primitives.
 * **"Provider overrides should be global"**: No. Test-time overrides belong to a simulation daemon scope so they do not pollute root helper resolution or other daemon instances.
 * **"Can I hand-write `Provided`?"**: No. Provider DI requires registration metadata and a generated single-node constructor. Use `#[provider]`; hand-written capability trait impls are not supported as injection entry points.
+* **"A shared type can be provided from another crate with ordinary `#[provider]`"**: No. Ordinary providers implement DI traits on the output type. Use `#[provider_contract]` on the shared type and `#[provider_impl]` in the app crate.
 
 ---
 
-## 8. Summary Table
+## 10. Summary Table
 
 | Goal | Best Approach |
 | :--- | :--- |
@@ -443,3 +529,4 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 | Windows Named Pipe Listening (lazy) | `#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))] struct ApiPipe;` |
 | Windows Named Pipe Connecting (block startup until peer ready) | `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)] struct PeerPipe;` |
 | Early Background Task | `#[provider(eager = true)] async fn setup() -> () { ... }` |
+| Shared contract implemented by final app | `#[provider_contract] struct SharedSettings;` plus app-local `#[provider_impl(priority = 80)] async fn settings() -> SharedSettings` |

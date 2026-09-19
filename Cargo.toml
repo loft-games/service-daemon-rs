@@ -18,5 +18,7 @@ members = [
     "examples/web-api",
     "examples/controller-bridge",
     "examples/on-demand",
+    "examples/provider-contract/shared",
+    "examples/provider-contract/app",
 ]
 resolver = "2"

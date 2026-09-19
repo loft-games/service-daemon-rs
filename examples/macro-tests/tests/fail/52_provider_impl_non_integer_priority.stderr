@@ -1,0 +1,5 @@
+error: expected integer literal
+ --> tests/fail/52_provider_impl_non_integer_priority.rs:7:28
+  |
+7 | #[provider_impl(priority = "high")]
+  |                            ^^^^^^

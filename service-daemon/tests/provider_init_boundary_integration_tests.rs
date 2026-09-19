@@ -3,7 +3,7 @@ use service_daemon::{
     DaemonInstanceHandle, DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
     DiagnosticProviderFailureKind, DiagnosticProviderFailureRuntimePhase,
     DiagnosticProviderFailureSourceKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
-    ServiceDaemon, TT::*, provider, service, trigger,
+    ServiceDaemon, TT::*, provider, provider_contract, provider_impl, service, trigger,
 };
 use std::any::Any;
 use std::collections::BTreeMap;
@@ -80,6 +80,9 @@ where
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = TraceFieldVisitor::default();
         event.record(&mut visitor);
+        visitor
+            .fields
+            .insert("level".to_owned(), event.metadata().level().to_string());
         self.events
             .lock()
             .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
@@ -152,6 +155,19 @@ fn assert_trace_source(kind: &str) {
             .iter()
             .any(|event| { event.get("provider_init_source_kind") == Some(&kind.to_owned()) }),
         "expected provider_init_source_kind={kind}, got events: {events:?}"
+    );
+}
+
+fn assert_error_log_contains(fragment: &str) {
+    let events = trace_events();
+    assert!(
+        events.iter().any(|event| {
+            event.get("level").is_some_and(|level| level == "ERROR")
+                && event
+                    .get("message")
+                    .is_some_and(|message| message.contains(fragment))
+        }),
+        "expected ERROR log containing {fragment:?}, got events: {events:?}"
     );
 }
 
@@ -238,6 +254,33 @@ pub struct PanicSourceProvider;
 #[provider]
 async fn panic_source_provider() -> PanicSourceProvider {
     panic!("phase16 typed source panic")
+}
+
+#[derive(Clone, Debug)]
+#[provider_contract]
+pub struct MissingCandidateContract;
+
+static RETRY_CONTRACT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+static RETRY_CONTRACT_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Debug)]
+#[provider_contract]
+pub struct RetryExhaustedContract;
+
+#[provider_impl]
+async fn retry_exhausted_contract_impl() -> Result<RetryExhaustedContract, ProviderError> {
+    RETRY_CONTRACT_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+    Err(ProviderError::Retryable(
+        "contract candidate remains unavailable".to_owned(),
+    ))
+}
+
+#[service(tags = ["__provider_contract_retry_exhausted__"])]
+async fn retry_exhausted_contract_service(
+    _contract: Arc<RetryExhaustedContract>,
+) -> anyhow::Result<()> {
+    RETRY_CONTRACT_SERVICE_ENTERED.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 fn phase16_policy() -> RestartPolicy {
@@ -345,6 +388,56 @@ async fn test_provider_panic_emits_panic_source() {
         Err(ProviderInitError::Fatal { provider, .. }) if provider == "PanicSourceProvider"
     ));
     assert_trace_source("panic");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_provider_contract_without_candidates_uses_fatal_boundary_and_error_log() {
+    let _trace_guard = TRACE_LOCK.lock().await;
+    install_trace_capture();
+    clear_trace_events();
+
+    let result = MissingCandidateContract::resolve().await;
+
+    assert!(matches!(result, Err(ProviderInitError::Fatal { .. })));
+    assert_trace_source("user_provider_fatal");
+    assert_error_log_contains("no registered #[provider_impl] candidates");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_provider_contract_retry_timeout_preserves_diagnostics_before_exhaustion() {
+    let _trace_guard = TRACE_LOCK.lock().await;
+    install_trace_capture();
+    clear_trace_events();
+    RETRY_CONTRACT_ATTEMPTS.store(0, Ordering::SeqCst);
+    RETRY_CONTRACT_SERVICE_ENTERED.store(false, Ordering::SeqCst);
+
+    let daemon = run_until_provider_init_shutdown("__provider_contract_retry_exhausted__")
+        .await
+        .expect("retry-exhausted contract daemon should stop at provider boundary");
+
+    assert!(RETRY_CONTRACT_ATTEMPTS.load(Ordering::SeqCst) > 0);
+    assert!(!RETRY_CONTRACT_SERVICE_ENTERED.load(Ordering::SeqCst));
+    let diagnostics = daemon.diagnostics_snapshot();
+    let candidate_failure = diagnostics
+        .provider_failures
+        .iter()
+        .find(|failure| {
+            failure.provider == "retry_exhausted_contract_impl"
+                && failure.source
+                    == DiagnosticProviderFailureSourceKind::UserProviderRetryableTimeout
+        })
+        .expect("candidate retry timeout should retain its source diagnostics");
+    let retry = candidate_failure
+        .retry
+        .as_ref()
+        .expect("candidate retry timeout should retain retry facts");
+    assert!(retry.attempts > 0);
+    assert!(!retry.recent_errors.is_empty());
+    assert!(diagnostics.provider_failures.iter().any(|failure| {
+        failure.provider == "RetryExhaustedContract"
+            && failure.source == DiagnosticProviderFailureSourceKind::UserProviderFatal
+    }));
+    assert_error_log_contains("exhausted all #[provider_impl] candidates");
 }
 
 #[tokio::test(flavor = "current_thread")]

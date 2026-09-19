@@ -41,10 +41,11 @@ pub use runtime::{
     HighPriorityRuntimeShardSnapshot, HighPriorityShardId, HighPriorityShardPressureState,
 };
 pub use service::{
-    PROVIDER_REGISTRY, ProviderEntry, Registry, RegistryBuilder, SERVICE_REGISTRY,
-    ProviderDependencyKind, ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn,
-    ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId,
-    ServiceInvocationContext, ServiceParam, ServiceScheduling, ServiceStatus,
+    PROVIDER_CANDIDATE_REGISTRY, PROVIDER_REGISTRY, ProviderCandidateEntry,
+    ProviderCandidateInitError, ProviderDependencyKind, ProviderEntry, Registry, RegistryBuilder,
+    SERVICE_REGISTRY, ServiceDescription, ServiceEntry, ServiceEntryId, ServiceFn, ServiceHandle,
+    ServiceInputDescriptor, ServiceInstanceHandle, ServiceInstanceId, ServiceInvocationContext,
+    ServiceParam, ServiceScheduling, ServiceStatus,
 };
 pub(crate) use service::{
     ServiceCatalog, ServiceCatalogProjection, ServiceControl, ServiceInputPayload,

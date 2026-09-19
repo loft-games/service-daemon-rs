@@ -99,6 +99,45 @@ Provider macros register a single-node constructor plus dependency metadata. The
 
 Direct provider helper calls use the same executor path before reading the effective slot. Hand-written provider capability trait implementations are not supported as DI entry points because they do not register dependency metadata or a single-node constructor.
 
+### Provider contracts and implementation candidates
+
+`#[provider_contract]` is the explicit cross-crate provider form. It is applied
+to the shared output struct and generates the same `Provided`,
+`ManagedProvided`, `WatchableProvided`, helper methods, root `StateManager<T>`,
+and normal `ProviderEntry` as an ordinary provider, plus the marker
+`ProviderContract` implementation.
+
+`#[provider_impl]` is applied to local functions in the final binary crate. It
+does not implement provider traits on the returned type. Instead, it generates a
+local provider identity type and registers a `ProviderCandidateEntry` in
+`PROVIDER_CANDIDATE_REGISTRY` keyed by the contract output `TypeId`. The entry
+also records the candidate's inferred cache scope. If any candidate body uses
+`service_handle!`, the generated contract bridge chooses daemon-local caching;
+otherwise it preserves inherited root caching.
+
+At resolution time, the contract initializer looks up candidates for the output
+type, orders them by descending priority and then by `(module, function name)`,
+prepares only that candidate's declared dependencies, and invokes the candidate.
+`Unavailable` advances to the next candidate, `Retryable` retries that candidate
+until its provider-init timeout and then advances, `Fatal` stops the contract,
+and cancellation propagates. The selected value is published into the same
+effective provider slot as ordinary providers, so snapshots, managed locks,
+`Watch`, reload, and simulation overrides use the existing state machinery.
+
+Provider graph validation expands candidate dependency edges for contract
+providers so cycles are still detected during startup preflight. The contract
+entry itself remains the dependency key; implementation identity stays internal
+to candidate selection. Runtime dependency preparation and eager reachability do
+not expand all candidate edges: lower-priority dependencies remain untouched
+until fallback reaches that candidate.
+
+Candidate initialization keeps the hidden `ProviderInitFailure` carrier boxed
+inside `ProviderCandidateInitError` until the generated contract provider
+boundary. Terminal fatal, panic, and cancellation sources therefore retain their
+typed diagnostics. A retry timeout is recorded with its attempt history before
+the chain advances; zero candidates and total exhaustion use the normal
+`user_provider_fatal` boundary and emit an error-level log.
+
 Manual `WatchableProvided` implementations should return a `ProviderDependencyWatch` from `watch_dependency()` instead of exposing an async `changed()` method. Generated providers implement this by delegating to the scoped `provider_dependency_watch(...)` bridge, which captures the provider value and binding baselines when the watch handle is constructed.
 
 ### Provider Helper Return Shapes
@@ -117,6 +156,7 @@ Provider helper signatures are part of the macro public contract and depend on d
 | `NamedPipeListen` / `NamedPipeConnect` templates | `Result<Arc<T>, ProviderInitError>` | Windows named pipe listener setup errors and connector configuration errors are provider-init failures. Runtime connector I/O errors are returned by `connect().await?`. |
 | `LocalIpcListen` / `LocalIpcConnect` templates | `Result<Arc<T>, ProviderInitError>` | Logical-name local IPC maps to Unix socket or Windows named pipe listener setup and connector configuration errors at provider init. Runtime connector I/O errors are returned by `connect().await?`. |
 | Function provider returning `Result<T, ProviderError>` | `Result<Arc<T>, ProviderInitError>` | Documented opt-in to retryable/fatal provider-init semantics. |
+| `#[provider_contract]` type | `Result<Arc<T>, ProviderInitError>` | Candidate lookup can fail when no implementation applies or a candidate fails. |
 
 `resolve_managed()` is the low-level managed path and always returns `Result<Arc<T>, ProviderError>` so advanced callers can observe the raw provider error before it is mapped into `ProviderInitError` convenience semantics.
 

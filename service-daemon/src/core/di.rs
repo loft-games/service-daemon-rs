@@ -119,6 +119,18 @@ pub trait ProviderDefinition: ManagedProvided {
     fn ready_mutex() -> std::result::Result<Arc<Mutex<Self>>, ProviderInitError>;
 }
 
+/// Marker trait for a shared provider contract type.
+///
+/// `#[provider_contract]` implements this trait on the shared output type. A
+/// separate crate can then register one or more `#[provider_impl]` candidates
+/// for that output without implementing DI traits on the foreign type.
+#[diagnostic::on_unimplemented(
+    message = "Provider Contract required: `{Self}` must be marked with `#[provider_contract]`.",
+    label = "this provider implementation returns `{Self}`, which is not a provider contract",
+    note = "Add `#[provider_contract]` to the shared output type, then register implementations with `#[provider_impl]`."
+)]
+pub trait ProviderContract: 'static + Send + Sync + Clone {}
+
 /// A trait for provider types that support managed mutable state.
 ///
 /// This capability is required for `Arc<RwLock<T>>` and `Arc<Mutex<T>>`

@@ -1,4 +1,6 @@
 use crate::ProviderDependencyWatchSet;
+use crate::core::provider_init::ProviderInitFailure;
+use crate::core::provider_scope::ProviderCacheScope;
 use crate::models::error::{Result as ServiceResult, ServiceError};
 use crate::models::{
     DaemonInstanceId, ProviderInitError, RestartPolicy, ServiceRuntimeSnapshot,
@@ -1249,6 +1251,15 @@ pub static SERVICE_REGISTRY: [ServiceEntry];
 #[distributed_slice]
 pub static PROVIDER_REGISTRY: [ProviderEntry];
 
+/// Link-time registry for `#[provider_impl]` fallback candidates.
+///
+/// Candidate entries are keyed by the `#[provider_contract]` output type. The
+/// contract itself still owns the normal `ProviderEntry` so dependency
+/// injection remains compile-time gated on the shared output type.
+#[allow(unsafe_code)]
+#[distributed_slice]
+pub static PROVIDER_CANDIDATE_REGISTRY: [ProviderCandidateEntry];
+
 // ---------------------------------------------------------------------------
 // ProviderEntry (static, compile-time) -- provider dependency metadata
 // ---------------------------------------------------------------------------
@@ -1293,6 +1304,45 @@ pub struct ProviderEntry {
         RestartPolicy,
         tokio_util::sync::CancellationToken,
     ) -> futures::future::BoxFuture<'static, Result<(), ProviderInitError>>,
+}
+
+/// Type-erased future returned by a provider contract implementation candidate.
+pub type ProviderCandidateInitFuture = futures::future::BoxFuture<
+    'static,
+    Result<Arc<dyn Any + Send + Sync>, ProviderCandidateInitError>,
+>;
+
+/// Type-erased initializer generated for a provider contract implementation candidate.
+pub type ProviderCandidateInitFn =
+    fn(RestartPolicy, tokio_util::sync::CancellationToken) -> ProviderCandidateInitFuture;
+
+/// A provider implementation candidate for a `#[provider_contract]` output.
+pub struct ProviderCandidateEntry {
+    /// Candidate function or identity name.
+    pub name: &'static str,
+    /// Module path where the candidate is defined.
+    pub module: &'static str,
+    /// `TypeId` of the shared provider contract output.
+    pub output_type_id: TypeId,
+    /// Display name of the shared provider contract output.
+    pub output_type_name: &'static str,
+    /// `TypeId` of the local provider identity generated for this candidate.
+    pub provider_type_id: TypeId,
+    /// Higher priority candidates are attempted first.
+    pub priority: u8,
+    /// Dependencies required by this candidate.
+    pub params: &'static [ServiceParam],
+    /// Cache ownership inferred from candidate implementation requirements.
+    pub cache_scope: ProviderCacheScope,
+    /// Type-erased candidate initializer.
+    pub init: ProviderCandidateInitFn,
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum ProviderCandidateInitError {
+    Unavailable(String),
+    Failed(Box<ProviderInitFailure>),
 }
 
 // ---------------------------------------------------------------------------

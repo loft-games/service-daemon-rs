@@ -1,0 +1,5 @@
+error: Unknown provider_contract attribute. Supported: eager
+ --> tests/fail/48_provider_contract_unknown_attr.rs:4:21
+  |
+4 | #[provider_contract(capacity = 4)]
+  |                     ^^^^^^^^

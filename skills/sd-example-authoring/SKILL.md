@@ -17,6 +17,8 @@ Conventions for adding a new example crate to this repo. Examples demonstrate
   (triggers/web-api add `trigger_handlers.rs`). Use module-level `//!` docs that
   describe the **framework mechanic** the example teaches.
 - Put integration tests under `tests/`.
+- Multi-crate adoption examples need a root `README.md`; their integration tests
+  must start the public service topology instead of validating only a helper call.
 
 ## What an example should (and shouldn't) show
 

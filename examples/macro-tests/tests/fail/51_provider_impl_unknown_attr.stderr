@@ -1,0 +1,5 @@
+error: Unknown provider_impl attribute. Supported: priority
+ --> tests/fail/51_provider_impl_unknown_attr.rs:7:17
+  |
+7 | #[provider_impl(fallback = true)]
+  |                 ^^^^^^^^

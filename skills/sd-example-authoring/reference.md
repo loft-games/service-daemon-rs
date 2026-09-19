@@ -34,9 +34,13 @@ explicit (not a glob), so an unlisted example is invisible to
 | `src/services.rs` | `#[service]` definitions. |
 | `src/trigger_handlers.rs` | `#[trigger]` handlers (triggers/web-api). |
 | `tests/` | Integration tests exercising the example's topology. |
+| `README.md` | The example's crate split, run command, focused test command, and contract boundary. |
 
 Every module opens with a module-level `//!` doc describing the **framework
 mechanic** it teaches, not the pretend domain. See `examples/minimal/src/services.rs:1`.
+An adoption-reference example with multiple crates should place one README at the
+example root and make its integration test start the real service topology, not
+only call a provider helper directly.
 
 ## 3. Error-handling policy
 
@@ -74,7 +78,7 @@ Keep `docs/development/release-validation.md` aligned with this classification:
 | Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket` | Keep non-default or focused framework features compiling and runnable. |
 | Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
 | Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
-| Adoption reference | `web-api`, `controller-bridge`, `on-demand` | Show realistic integration shapes without turning every detail into a framework contract. |
+| Adoption reference | `web-api`, `controller-bridge`, `provider-contract`, `on-demand` | Show realistic integration shapes without turning every detail into a framework contract. |
 
 When adding or reworking an example, update the release-validation map if its
 layer or responsibility changes. Do not treat every example as a production

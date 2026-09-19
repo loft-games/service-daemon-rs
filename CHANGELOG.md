@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Provider Contracts and Fallback Implementations**: Added
+  `#[provider_contract]` for shared injectable output types and
+  `#[provider_impl(priority = N)]` for app-local implementation candidates.
+  Candidates support deterministic priority ordering, `Unavailable` fallback,
+  selected-candidate dependency preparation, retry-timeout advancement, fatal
+  stop behavior, eager startup, daemon-local caching for `service_handle!`,
+  preserved provider failure diagnostics, managed state, watch reloads, and a
+  real cross-crate `example-provider-contract` topology.
+
 - **TCP Listener Port Shorthand**: `Listen(8080)`, `Listen("8080")`, and port-only environment overrides bind to `0.0.0.0:8080`. Full host/port and IPv6 addresses remain supported. String inputs are trimmed, ports are bounded to `0..=65535`, and invalid or empty environment overrides fail initialization.
 
 - **Framework Microbenchmarks**: Added a dev-only Criterion target for observation recording, diagnostic snapshots at multiple instance counts, and warm provider resolution. A dedicated Linux CI job builds, smoke-runs and measures default and HighPriority configurations, publishes statistical summaries, and archives reports and raw results for 30 days.

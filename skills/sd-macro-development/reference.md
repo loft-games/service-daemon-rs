@@ -29,7 +29,7 @@ The runtime validates the supplied type against the descriptor before registerin
 the instance; non-template services accept only unit input for manual dynamic
 creation.
 
-`ProviderEntry` — emitted by `#[provider]`:
+`ProviderEntry` — emitted by `#[provider]` and `#[provider_contract]`:
 
 ```rust
 pub struct ProviderEntry {
@@ -50,9 +50,40 @@ entry owns provider metadata for graph analysis (`type_id`, Provider->Provider
 edges), the eager-init flag, and the type-erased initializer used by startup
 preflight/provider scoping.
 
-Both slices are re-exported for consumers at `service-daemon/src/lib.rs:117` and
+`ProviderCandidateEntry` — emitted by `#[provider_impl]`:
+
+```rust
+pub struct ProviderCandidateEntry {
+    pub name: &'static str,
+    pub module: &'static str,
+    pub output_type_id: TypeId,
+    pub output_type_name: &'static str,
+    pub provider_type_id: TypeId,
+    pub priority: u8,
+    pub params: &'static [ServiceParam],
+    pub cache_scope: ProviderCacheScope,
+    pub init: fn(...) -> BoxFuture<'static, Result<Arc<dyn Any + Send + Sync>, ProviderCandidateInitError>>,
+}
+```
+
+`#[provider_contract]` emits a normal `ProviderEntry` for the shared output type
+and generates `ProviderContract` plus the usual provider capability traits.
+`#[provider_impl]` emits only a candidate entry keyed by the contract output
+`TypeId`; it must not generate `Provided` on the returned type. Candidate scope
+is inferred with the same `service_handle!` block scan used by ordinary function
+providers. The contract cache expression becomes daemon-local when any candidate
+entry is daemon-local.
+
+`ProviderCandidateInitError::Failed` boxes the hidden `ProviderInitFailure`, not
+the public `ProviderInitError`. Keep that carrier intact through candidate
+selection so fatal, panic, cancellation, and retry diagnostics reach the normal
+provider boundary. Candidate timeout may be recorded and then advance; zero
+candidates and exhaustion use `UserProviderFatal`.
+
+These registry entries are re-exported for consumers at `service-daemon/src/lib.rs:117` and
 `service-daemon/src/models/mod.rs:22` (`SERVICE_REGISTRY`, `PROVIDER_REGISTRY`,
-`ServiceEntry`, `ProviderEntry`, `ServiceFn`, `ServiceParam`).
+`PROVIDER_CANDIDATE_REGISTRY`, `ServiceEntry`, `ProviderEntry`,
+`ProviderCandidateEntry`, `ServiceFn`, `ServiceParam`).
 
 ### Linkme platform contract monitoring
 
@@ -94,6 +125,10 @@ When you add or change a compile error, add/update the matching `tests/fail/`
 fixture and refresh its `.stderr` (trybuild can regenerate it; review the diff).
 Run with `cargo test -p example-macro-tests`.
 
+For `#[provider_contract]`, cover default/explicit `eager` parsing in macro unit
+tests and keep pass/fail fixtures for accepted booleans, duplicate keys, unknown
+keys, and malformed values.
+
 ### Scheduling feature contract
 
 Scheduling feature changes additionally require:
@@ -127,7 +162,8 @@ Validate with `listen_port_arguments` macro unit tests, `provider_macro_cases`
 compile tests, and `listen_port_contract_tests` runtime integration tests.
 
 - `docs/architecture/macro-expansion.md` — what `#[service]`/`#[trigger]`/
-  `#[provider]` generate (the authoritative internal explanation).
+  `#[provider]`, `#[provider_contract]`, and `#[provider_impl]` generate (the
+  authoritative internal explanation).
 - `docs/development/extending-framework.md` — maintainer guidance for extending
   the framework, including the macro seams.
 

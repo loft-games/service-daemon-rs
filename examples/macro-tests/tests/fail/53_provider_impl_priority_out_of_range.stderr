@@ -1,0 +1,5 @@
+error: provider_impl priority must be in 0..=255
+ --> tests/fail/53_provider_impl_priority_out_of_range.rs:7:28
+  |
+7 | #[provider_impl(priority = 256)]
+  |                            ^^^

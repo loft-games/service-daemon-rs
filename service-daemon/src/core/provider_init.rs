@@ -4,7 +4,8 @@ use crate::core::diagnostics::{
     ProviderFailureRuntimePhase, ProviderFailureSnapshot, ProviderFailureSourceKind,
 };
 use crate::models::{
-    BackoffController, ProviderError, ProviderInitError, RestartPolicy, ServiceStatus,
+    BackoffController, ProviderCandidateInitError, ProviderError, ProviderInitError,
+    RestartPolicy, ServiceStatus,
 };
 use futures::FutureExt;
 use std::any::Any;
@@ -617,6 +618,17 @@ where
                 error!(provider, "Provider init fatal: {message}");
                 return Err(ProviderInitFailure::fatal(provider, message, fatal_source));
             }
+            Err(ProviderError::Unavailable(message)) => {
+                let message = format!(
+                    "provider returned Unavailable but no fallback provider is available: {message}"
+                );
+                error!(provider, "Provider init unavailable without fallback: {message}");
+                return Err(ProviderInitFailure::fatal(
+                    provider,
+                    message,
+                    ProviderInitSourceKind::UserProviderFatal,
+                ));
+            }
             Err(ProviderError::Retryable(message)) => {
                 retry_attempts = retry_attempts.saturating_add(1);
                 last_retryable_error = Some(message.clone());
@@ -652,6 +664,168 @@ where
                 if !proceed {
                     info!(provider, "Provider init cancelled during backoff wait");
                     return Err(ProviderInitFailure::cancelled(provider));
+                }
+
+                backoff.record_failure();
+            }
+        }
+    }
+}
+
+#[doc(hidden)]
+pub async fn init_provider_candidate<T, Init, Fut>(
+    provider: &'static str,
+    policy: RestartPolicy,
+    cancel: CancellationToken,
+    init: Init,
+) -> Result<Arc<T>, ProviderCandidateInitError>
+where
+    T: Send + Sync + 'static,
+    Init: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, ProviderError>> + Send,
+{
+    init_provider_candidate_with_source(
+        provider,
+        policy,
+        cancel,
+        ProviderInitSourceKind::UserProviderFatal,
+        ProviderInitSourceKind::UserProviderRetryableTimeout,
+        init,
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn init_provider_candidate_with_source<T, Init, Fut>(
+    provider: &'static str,
+    policy: RestartPolicy,
+    cancel: CancellationToken,
+    fatal_source: ProviderInitSourceKind,
+    retryable_timeout_source: ProviderInitSourceKind,
+    mut init: Init,
+) -> Result<Arc<T>, ProviderCandidateInitError>
+where
+    T: Send + Sync + 'static,
+    Init: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, ProviderError>> + Send,
+{
+    let start = Instant::now();
+    let deadline = start + policy.provider_init_timeout;
+    let mut last_retryable_error: Option<String> = None;
+    let mut retry_attempts: u32 = 0;
+    let mut last_retry_delay: Option<Duration> = None;
+    let mut recent_retryable_errors: VecDeque<String> = VecDeque::new();
+
+    let mut backoff = BackoffController::new(policy);
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            let source =
+                provider_init_timeout_source(&last_retryable_error, retryable_timeout_source);
+            return Err(ProviderCandidateInitError::Failed(Box::new(
+                provider_init_timeout_failure(
+                    provider,
+                    policy.provider_init_timeout,
+                    last_retryable_error.clone().unwrap_or_else(|| {
+                        "provider initialization attempt did not complete before timeout".to_owned()
+                    }),
+                    source,
+                    ProviderInitTimeoutFacts {
+                        start,
+                        attempts: retry_attempts,
+                        last_delay: last_retry_delay,
+                        recent_errors: &recent_retryable_errors,
+                    },
+                ),
+            )));
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        let init_result = tokio::select! {
+            _ = cancel.cancelled() => {
+                info!(provider, "Provider candidate init cancelled while attempt was running");
+                return Err(ProviderCandidateInitError::Failed(Box::new(
+                    ProviderInitFailure::cancelled(provider)
+                )));
+            }
+            res = tokio::time::timeout(remaining, init()) => {
+                match res {
+                    Ok(res) => res,
+                    Err(_) => {
+                        let source = provider_init_timeout_source(&last_retryable_error, retryable_timeout_source);
+                        return Err(ProviderCandidateInitError::Failed(Box::new(
+                            provider_init_timeout_failure(
+                                provider,
+                                policy.provider_init_timeout,
+                                last_retryable_error.clone().unwrap_or_else(|| {
+                                    "provider initialization attempt did not complete before timeout".to_owned()
+                                }),
+                                source,
+                                ProviderInitTimeoutFacts {
+                                    start,
+                                    attempts: retry_attempts,
+                                    last_delay: last_retry_delay,
+                                    recent_errors: &recent_retryable_errors,
+                                },
+                            ),
+                        )));
+                    }
+                }
+            }
+        };
+
+        match init_result {
+            Ok(v) => return Ok(Arc::new(v)),
+            Err(ProviderError::Unavailable(message)) => {
+                info!(provider, "Provider candidate unavailable: {message}");
+                return Err(ProviderCandidateInitError::Unavailable(message));
+            }
+            Err(ProviderError::Fatal(message)) => {
+                error!(provider, "Provider candidate init fatal: {message}");
+                return Err(ProviderCandidateInitError::Failed(Box::new(
+                    ProviderInitFailure::fatal(provider, message, fatal_source),
+                )));
+            }
+            Err(ProviderError::Retryable(message)) => {
+                retry_attempts = retry_attempts.saturating_add(1);
+                last_retryable_error = Some(message.clone());
+                push_recent_retryable_error(&mut recent_retryable_errors, message.clone());
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(ProviderCandidateInitError::Failed(Box::new(
+                        provider_init_timeout_failure(
+                            provider,
+                            policy.provider_init_timeout,
+                            message,
+                            retryable_timeout_source,
+                            ProviderInitTimeoutFacts {
+                                start,
+                                attempts: retry_attempts,
+                                last_delay: last_retry_delay,
+                                recent_errors: &recent_retryable_errors,
+                            },
+                        ),
+                    )));
+                }
+
+                warn!(
+                    provider,
+                    attempt = backoff.attempt_count(),
+                    elapsed_ms = now.duration_since(start).as_millis() as u64,
+                    "Provider candidate init retryable error: {message}"
+                );
+
+                let remaining = deadline.saturating_duration_since(now);
+                let sleep_for = std::cmp::min(backoff.current_delay(), remaining);
+                last_retry_delay = Some(sleep_for);
+
+                let proceed = wait_or_cancel_or_timeout(sleep_for, &cancel).await;
+                if !proceed {
+                    info!(provider, "Provider candidate init cancelled during backoff wait");
+                    return Err(ProviderCandidateInitError::Failed(Box::new(
+                        ProviderInitFailure::cancelled(provider),
+                    )));
                 }
 
                 backoff.record_failure();
@@ -1126,6 +1300,111 @@ mod tests {
                 message: "bad config".to_owned(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn init_fallible_treats_unavailable_as_fatal_without_fallback() {
+        let policy = test_policy(Duration::from_millis(50));
+        let cancel = CancellationToken::new();
+
+        let failure = expect_failure(
+            init_fallible::<u32, _, _>("ordinary_provider", policy, cancel, || async {
+                Err::<u32, _>(ProviderError::Unavailable("no adapter".to_owned()))
+            })
+            .await,
+        );
+
+        assert_eq!(failure.source(), ProviderInitSourceKind::UserProviderFatal);
+        match failure.into_error() {
+            ProviderInitError::Fatal { provider, message } => {
+                assert_eq!(provider, "ordinary_provider");
+                assert!(message.contains("no fallback provider is available"));
+            }
+            other => panic!("expected fatal unavailable error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_provider_candidate_preserves_unavailable_for_fallback() {
+        let policy = test_policy(Duration::from_millis(50));
+        let cancel = CancellationToken::new();
+
+        let result = init_provider_candidate::<u32, _, _>(
+            "candidate_provider",
+            policy,
+            cancel,
+            || async { Err::<u32, _>(ProviderError::Unavailable("not here".to_owned())) },
+        )
+        .await;
+
+        match result {
+            Err(ProviderCandidateInitError::Unavailable(message)) => {
+                assert_eq!(message, "not here");
+            }
+            other => panic!("expected candidate unavailable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn init_provider_candidate_preserves_fatal_source() {
+        let result = init_provider_candidate::<u32, _, _>(
+            "fatal_candidate",
+            test_policy(Duration::from_millis(50)),
+            CancellationToken::new(),
+            || async { Err::<u32, _>(ProviderError::Fatal("bad candidate config".to_owned())) },
+        )
+        .await;
+
+        let failure = match result {
+            Err(ProviderCandidateInitError::Failed(failure)) => failure,
+            other => panic!("expected candidate failure, got {other:?}"),
+        };
+        assert_eq!(failure.source(), ProviderInitSourceKind::UserProviderFatal);
+        assert!(failure.retry_diagnostics().is_none());
+    }
+
+    #[tokio::test]
+    async fn init_provider_candidate_preserves_retry_timeout_diagnostics() {
+        let result = init_provider_candidate::<u32, _, _>(
+            "retry_candidate",
+            test_policy(Duration::from_millis(20)),
+            CancellationToken::new(),
+            || async { Err::<u32, _>(ProviderError::Retryable("not ready".to_owned())) },
+        )
+        .await;
+
+        let failure = match result {
+            Err(ProviderCandidateInitError::Failed(failure)) => failure,
+            other => panic!("expected candidate timeout, got {other:?}"),
+        };
+        assert_eq!(
+            failure.source(),
+            ProviderInitSourceKind::UserProviderRetryableTimeout
+        );
+        let diagnostics = failure
+            .retry_diagnostics()
+            .expect("candidate timeout should retain retry diagnostics");
+        assert!(diagnostics.attempts() > 0);
+        assert!(!diagnostics.recent_errors().is_empty());
+    }
+
+    #[tokio::test]
+    async fn init_provider_candidate_preserves_cancelled_source() {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = init_provider_candidate::<u32, _, _>(
+            "cancelled_candidate",
+            test_policy(Duration::from_secs(1)),
+            cancel,
+            || async { std::future::pending::<Result<u32, ProviderError>>().await },
+        )
+        .await;
+
+        let failure = match result {
+            Err(ProviderCandidateInitError::Failed(failure)) => failure,
+            other => panic!("expected candidate cancellation, got {other:?}"),
+        };
+        assert_eq!(failure.source(), ProviderInitSourceKind::Cancelled);
     }
 
     #[tokio::test]

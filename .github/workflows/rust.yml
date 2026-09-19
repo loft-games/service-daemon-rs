@@ -172,6 +172,19 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-linkme-registry-sections "${{ matrix.target }}"
 
+  windows-msvc-general:
+    name: Windows MSVC general tests
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust (x86_64-pc-windows-msvc)
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable x86_64-pc-windows-msvc
+      - name: Run cross-platform workspace tests
+        shell: bash
+        run: bash .github/scripts/cargo-test-windows-msvc-general x86_64-pc-windows-msvc
+
   named-pipe-msvc:
     name: Windows local IPC providers
     runs-on: windows-latest

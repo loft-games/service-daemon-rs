@@ -56,7 +56,8 @@ async fn heartbeat(cfg: Arc<AppConfig>) -> anyhow::Result<()> {
 
 **2. Shared resources become `#[provider]`s** injected as `Arc<T>`. For fallible
 init (sockets, clients), return `Result<T, ProviderError>` and classify failures as
-`Fatal` (no retry, fail fast) vs `Retryable` (retry with backoff). See the
+`Fatal` (no retry, fail fast), `Retryable` (retry with backoff), and
+contract-candidate `Unavailable` fallback. See the
 `sd-provider-author` skill if installed.
 
 **3. Event sources become `#[trigger]`s** — channels/queues (`Queue`), timers
@@ -105,7 +106,7 @@ one and follow the order:
 | :--- | :--- | :--- |
 | Wrap a loop as a service | `sd-service-author` | `#[service]` shape, readiness `done()`, interruptible `sleep`, restart semantics. |
 | Model on-demand workers | `sd-service-author` + `sd-daemon-bootstrap` | `#[input]` service templates, `service_handle!`, and `ServiceHandle::create/start`. |
-| Turn shared resources into providers | `sd-provider-author` | `#[provider]`, lazy vs `eager`, `ProviderError::Fatal` vs `Retryable`, DI forms. |
+| Turn shared resources into providers | `sd-provider-author` | `#[provider]`, `#[provider_contract]`, lazy vs `eager`, `ProviderError` classification, DI forms. |
 | React to events / timers / changes | `sd-trigger-author` | `#[trigger]` host families: `Queue` / `Cron` / `Signal` / `Watch`. |
 | Share mutable state, persist across restart | `sd-state-management` | `Arc<RwLock<T>>`, `Watch` notifications, the keyed Shelf. |
 | Assemble and run `main()` | `sd-daemon-bootstrap` | builder, tag-filtered `Registry`, `run()` vs `wait()`, priority waves. |
