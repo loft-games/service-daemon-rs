@@ -245,7 +245,7 @@ impl MockContextBuilder {
     ///
     /// The override is scoped to this sandbox's daemon resources, so eager
     /// provider initialization and service injection see the fake value without
-    /// writing into the root provider slot.
+    /// affecting any other daemon provider slot.
     pub fn with_provider_override<T>(self, value: T) -> Self
     where
         T: 'static + Send + Sync + Clone,

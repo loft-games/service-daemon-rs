@@ -65,7 +65,7 @@ pub async fn mqtt_provider() -> MqttBus {
 ### Why this works well
 1. **No framework changes**: Application-specific resources stay in application code.
 2. **Full initialization control**: Certificates, retries, and settings stay in the provider body.
-3. **Scoped sharing**: Normal daemons share the root provider slot. Simulation overrides can replace that provider for one daemon without changing the provider definition.
+3. **Scoped sharing**: Services in the same daemon share a provider slot. Other daemons initialize independently; simulation overrides replace only their own daemon slot.
 4. **DI usage**: Inject `Arc<MqttBus>` into any `#[service]` just like a regular provider.
 
 ---
@@ -239,9 +239,8 @@ Rules:
   `Unavailable` there is fatal.
 - `#[provider_contract(eager = true)]` opts a reachable contract into startup
   initialization; the default and `eager = false` remain lazy.
-- If any candidate uses `service_handle!`, the whole contract is cached per
-  daemon because fallback may select that candidate. Contracts whose candidates
-  do not require daemon-local handles keep the inherited root cache behavior.
+- Every contract is cached per daemon, regardless of which candidate is selected
+  or whether its service handle lookup is extracted into a helper.
 - Fatal errors, panics, cancellation, and retry-timeout facts retain the existing
   provider-init source diagnostics. If every non-fatal candidate is exhausted,
   the contract ends through the normal user-provider fatal boundary.
@@ -496,7 +495,7 @@ and is treated as fatal.
 
 Most applications should not call provider helper methods directly. Declare providers, inject `Arc<T>` / `Arc<RwLock<T>>` / `Arc<Mutex<T>>` into services or triggers, and let the daemon own initialization, retry, cancellation, and reload behavior.
 
-When helper methods are called from a service, trigger, watcher, or daemon startup path, they use that daemon's effective provider scope. When helper methods are called outside framework context, they use the root fallback slot. Treat that fallback as a convenience for tests, setup, and diagnostics rather than as a production override mechanism.
+Helper methods require a service, trigger, watcher, or daemon startup context and use that daemon's provider scope. Without context, fallible helpers return an error; direct `Arc` helpers and watch builders panic with diagnostics before initialization. Tests should resolve inside a driver service or use simulation overrides.
 
 If you are writing tests, diagnostics, or macro-level integrations and need the exact helper return shapes, see [Macro Expansion](../architecture/macro-expansion.md#provider-helper-return-shapes).
 
@@ -506,7 +505,7 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 
 * **"I need a built-in template for my DB"**: No. Use an `async fn` provider that returns your connection pool.
 * **"Built-in templates are faster"**: No. They use the same `StateManager` and capability traits (`Provided` / `ManagedProvided` / `WatchableProvided`) under the hood. They are shorthand for common primitives.
-* **"Provider overrides should be global"**: No. Test-time overrides belong to a simulation daemon scope so they do not pollute root helper resolution or other daemon instances.
+* **"Provider overrides should be global"**: No. Test-time overrides belong to one simulation daemon and do not affect other daemon instances.
 * **"Can I hand-write `Provided`?"**: No. Provider DI requires registration metadata and a generated single-node constructor. Use `#[provider]`; hand-written capability trait impls are not supported as injection entry points.
 * **"A shared type can be provided from another crate with ordinary `#[provider]`"**: No. Ordinary providers implement DI traits on the output type. Use `#[provider_contract]` on the shared type and `#[provider_impl]` in the app crate.
 
@@ -530,3 +529,17 @@ If you are writing tests, diagnostics, or macro-level integrations and need the 
 | Windows Named Pipe Connecting (block startup until peer ready) | `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)] struct PeerPipe;` |
 | Early Background Task | `#[provider(eager = true)] async fn setup() -> () { ... }` |
 | Shared contract implemented by final app | `#[provider_contract] struct SharedSettings;` plus app-local `#[provider_impl(priority = 80)] async fn settings() -> SharedSettings` |
+
+## Provider ownership and direct helper calls
+
+Provider instances belong to a daemon, not the process. Services and triggers in
+one daemon share instances across ordinary generation restarts; separate daemons
+initialize independently. `eager = true` only changes initialization timing.
+
+Direct `resolve()`/lock helper return types are unchanged. Without a daemon
+context, fallible helpers return a fatal error; helpers returning `Arc` and
+`watch_dependency()` panic with a missing-context diagnostic before initialization.
+Do not initialize providers in `main()` or test setup expecting subsequent daemons
+to inherit them. Use injected dependencies inside a service or simulation overrides.
+An ingress service may obtain `service_handle!(worker)` and pass that bound handle
+to its router state; consumers need neither a daemon handle nor a global DI lookup.

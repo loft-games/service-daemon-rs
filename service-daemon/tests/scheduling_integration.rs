@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 #[cfg(feature = "high-priority")]
 use service_daemon::SchedulingAdvisoryProfile;
 use service_daemon::{Registry, RestartPolicy, ServiceDaemon, TT::*, provider, service, trigger};
@@ -521,7 +524,9 @@ async fn test_trigger_scheduling_variants_execute_on_declared_lanes() -> anyhow:
     daemon.run().await;
 
     tokio::time::sleep(Duration::from_millis(200)).await;
-    SchedulingSignal::resolve().await.notify();
+    provider_context::published::<SchedulingSignal>(&daemon)
+        .await
+        .notify();
 
     let expected_dispatches = 2 + usize::from(cfg!(feature = "high-priority"));
     let dispatch_result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -723,5 +728,13 @@ async fn test_isolated_generation_panic_restarts_through_bridge() -> anyhow::Res
 
     assert!(ISOLATED_PANIC_STOPPED.load(Ordering::SeqCst));
 
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_trigger_scheduling_lanes__"])]
+async fn publish_scheduling_signal(value: Arc<SchedulingSignal>) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

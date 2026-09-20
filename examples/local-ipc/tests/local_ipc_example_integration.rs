@@ -1,7 +1,10 @@
 //! Integration smoke for the cross-platform local IPC example topology.
 
+#[path = "../../../service-daemon/tests/support/provider_context.rs"]
+mod provider_context;
+
 use example_local_ipc::providers::{EXAMPLE_LOCAL_IPC_ENV, ExampleLocalIpcListener};
-use service_daemon::{ManagedProvided, ServiceDaemon};
+use service_daemon::ServiceDaemon;
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -43,17 +46,22 @@ fn set_example_ipc_name() -> EnvVarGuard {
 async fn local_ipc_example_starts_and_roundtrips() -> anyhow::Result<()> {
     let env_var = set_example_ipc_name();
     let name = std::env::var(EXAMPLE_LOCAL_IPC_ENV)?;
-    let listener = <ExampleLocalIpcListener as ManagedProvided>::resolve_managed()
-        .await
-        .map_err(|error| anyhow::anyhow!("ExampleLocalIpcListener resolve failed: {error:?}"))?;
-    assert_eq!(listener.name(), name);
-
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
+    let listener = provider_context::published::<ExampleLocalIpcListener>(&daemon).await;
+    assert_eq!(listener.name(), name);
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     daemon.shutdown();
     tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await??;
     drop(env_var);
+    Ok(())
+}
+
+#[service_daemon::service]
+async fn publish_listener(listener: std::sync::Arc<ExampleLocalIpcListener>) -> anyhow::Result<()> {
+    provider_context::publish(&listener);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

@@ -16,6 +16,9 @@
 //!
 //! **Run**: `cargo test -p example-triggers --test elastic_scaling_pressure -- --nocapture`
 
+#[path = "../../../service-daemon/tests/support/provider_context.rs"]
+mod provider_context;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -114,9 +117,9 @@ async fn elastic_scaling_increases_concurrency_under_pressure() -> anyhow::Resul
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let queue = provider_context::published::<PressureQueue>(&daemon).await;
     let producer = tokio::spawn(async move {
         for i in 0..50 {
-            let queue = PressureQueue::resolve().await;
             let _ = queue.push(format!("msg-{}", i));
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -155,5 +158,13 @@ async fn elastic_scaling_increases_concurrency_under_pressure() -> anyhow::Resul
     );
     assert!(completed > 0, "expected at least one completed handler");
 
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_queue_concurrency_pressure__"])]
+async fn publish_pressure_queue(queue: std::sync::Arc<PressureQueue>) -> anyhow::Result<()> {
+    provider_context::publish(&queue);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

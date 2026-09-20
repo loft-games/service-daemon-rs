@@ -9,7 +9,7 @@ At a high level, the macros wire user code into five runtime surfaces:
 - **Registry**: the lazy blueprint of service, trigger, and provider entries discovered from link-time slices. It does not start work by itself; it describes what the daemon can create.
 - **Runner / control plane**: the daemon-owned orchestration layer that starts priority waves, supervises generations, bridges bodies onto their declared execution lanes, applies restart policy, and handles graceful shutdown.
 - **Status Plane**: the shared observation map for service lifecycle state. User helpers such as `state()` read from this plane, while reload delivery also uses a companion token/watch path.
-- **Provider Scope**: the daemon-local provider binding layer. Daemons inherit root provider slots by default and can shadow individual provider types with local forks or simulation overrides.
+- **Provider Scope**: the daemon-local provider binding layer. Each daemon owns its provider instances; simulation overrides replace individual bindings locally.
 - **Shelf**: daemon-scoped typed storage for data that should survive a service generation restart or reload, but not the lifetime of the whole daemon process.
 
 The sections below expand each surface into its implementation model and public boundary.
@@ -52,15 +52,11 @@ exist, and `PROVIDER_CANDIDATE_REGISTRY` lists fallback implementations for
 contract outputs. Provider scopes decide which cached instance a daemon
 generation actually receives.
 
-- **Root compatibility slot**: each generated provider still owns a root `StateManager<T>` slot. Helper calls such as `T::resolve()` made outside a daemon context use this root fallback.
-- **Daemon effective scope**: service bodies, trigger bodies, dependency watch construction, and reachable eager initialization resolve through the current daemon's `DaemonResources` provider scope.
-- **Contract candidate scope**: `#[provider_impl]` entries record whether their
-  body uses `service_handle!`. If any fallback candidate requires it, the shared
-  contract uses daemon-local caching; otherwise separate daemons may inherit the
-  same root contract value.
-- **Inherited by default**: a daemon scope normally inherits the root slot, preserving the simple "one shared provider" behavior for ordinary applications.
-- **Local shadowing**: internal forks and simulation overrides install a daemon-local slot for a single provider type. That slot has its own cache, managed locks, watch notification, and binding epoch.
-- **Recursive Resolution**: provider dependencies resolve through the same effective scope, so a provider initialized for a daemon sees the same ownership boundary as the service or trigger that requested it.
+- **Daemon ownership**: each daemon owns one per-type `StateManager<T>` slot, shared across its service generations. There are no generated static provider instance caches.
+- **Scoped resolution**: service bodies, trigger bodies, dependency watch construction, and reachable eager startup resolve through the current daemon's resources. Missing context fails rather than creating a fallback scope.
+- **Contracts**: all candidate implementations resolve into the owning daemon's contract slot; body syntax does not influence ownership.
+- **Overrides**: simulation replaces a local slot and advances its binding epoch, reloading only that daemon's dependents.
+- **Dependency preparation**: the runtime executor prepares the dependency graph in the same daemon scope before ready-only constructor reads.
 
 ### 2.1. Status plane and reload signaling
 The daemon maintains a shared Status Plane for service-observable lifecycle state. A global `STATUS_CHANGED` notification wakes waiters when a service writes a new status, such as the transition from `Initializing` to `Healthy`.
@@ -157,7 +153,7 @@ without changing the trigger's base policy.
 | `DaemonRuntimeSnapshot`, `ReadinessSnapshot`, service runtime snapshots, and trigger runtime snapshots | Public read-only operational facts copied out of runtime state, including HighPriority shard capacity and per-service shard placement facts. |
 | `TriggerContext::pressure()` | Self-scoped read-only trigger pressure facts for the current trigger service. |
 | `TriggerContext::request_policy_overlay(...)` / `clear_policy_overlay(...)` | Temporary trigger policy overlay scoped by the current service generation; overlays require TTL, reason, bounds validation, and generation cleanup. |
-| Provider root fallback | Public helper behavior for `T::resolve()` outside daemon context; it is a convenience path, not the owner of every daemon's effective provider binding. |
+| Provider context boundary | Resolution requires the current daemon. Fallible APIs return a fatal error without context; direct `Arc` helpers and watch builders panic with diagnostics. |
 | Daemon provider scope / slot ids / binding epochs | Internal ownership model used for cache scope and reload propagation. IDs are not exposed as stable public API. |
 | Simulation provider override | Feature-gated testing surface that installs daemon-local provider bindings; no production override API is exposed. |
 | `DiagnosticLifecycleStats::last_restart_decision` | Public read-only restart-path fact; not a restart command and not a policy override. |
@@ -222,7 +218,7 @@ The main internal modules are:
   - **Advanced ScalingPolicy boundary**: normal examples use `ScalingPolicy::builder()`. `ScalingPolicy::try_new(...)` exists for config parsers and integrations that must reject invalid input instead of accepting builder clamping.
 - **`core/context/`**: Task-local storage and status plane interactions.
   - **Simulation helpers**: `MockContext` test utilities are compiled only when the simulation feature is enabled.
-- **`core/provider_scope.rs`**: Internal provider ownership layer for root slots, daemon effective scopes, local forks, simulation overrides, and slot-aware reload propagation.
+- **`core/provider_scope.rs`**: Internal provider ownership layer for daemon slots, simulation overrides, and slot-aware reload propagation.
 - **`core/managed_state.rs`**: Managed state and change tracking.
 
 ## 5. Lifecycle & Status Plane
@@ -261,7 +257,7 @@ graph LR
     end
 ```
 
-Simulation provider overrides install daemon-local provider bindings. They affect only the sandbox daemon that owns those `DaemonResources`; root helper resolution and other daemon instances continue to use their own effective provider slots.
+Simulation provider overrides replace daemon-local provider bindings. They affect only the sandbox daemon that owns those `DaemonResources`; other daemon instances continue to use their own provider slots.
 
 For practical usage and sandbox setup, see **[Testing & Troubleshooting](../guide/testing-troubleshooting.md#unit-testing-with-mockcontext)**.
 

@@ -9,7 +9,7 @@ use crate::core::provider_init::{
     ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
     ProviderInitSourceKind, provider_init_failure_boundary, provider_init_failure_into_error,
 };
-use crate::core::provider_scope::ProviderCacheScope;
+use crate::core::provider_scope::require_provider_context;
 use crate::RestartPolicy;
 use crate::models::{
     PROVIDER_CANDIDATE_REGISTRY, PROVIDER_REGISTRY, ProviderCandidateEntry,
@@ -67,6 +67,9 @@ async fn prepare_provider_params_inner(
     cancel: CancellationToken,
     eager: bool,
 ) -> Result<(), ProviderInitError> {
+    if let Some(param) = params.first() {
+        require_provider_context(param.type_name)?;
+    }
     let providers_by_id = providers_by_id()?;
     let mut demand_by_id: HashMap<TypeId, ProviderDemand> = HashMap::new();
     let mut dependent_by_dependency: HashMap<TypeId, TypeId> = HashMap::new();
@@ -245,6 +248,7 @@ async fn resolve_provider_contract_inner<T>(
 where
     T: 'static + Send + Sync + Clone,
 {
+    require_provider_context(contract_name)?;
     let output_type_id = TypeId::of::<T>();
     let mut candidates: Vec<&'static ProviderCandidateEntry> = PROVIDER_CANDIDATE_REGISTRY
         .iter()
@@ -371,18 +375,6 @@ where
         message,
         ProviderInitSourceKind::UserProviderFatal,
     ))
-}
-
-#[doc(hidden)]
-pub fn provider_contract_cache_scope(output_type_id: TypeId) -> ProviderCacheScope {
-    if PROVIDER_CANDIDATE_REGISTRY.iter().any(|candidate| {
-        candidate.output_type_id == output_type_id
-            && candidate.cache_scope == ProviderCacheScope::DaemonLocal
-    }) {
-        ProviderCacheScope::DaemonLocal
-    } else {
-        ProviderCacheScope::Inherited
-    }
 }
 
 fn providers_by_id() -> Result<HashMap<TypeId, &'static ProviderEntry>, ProviderInitError> {

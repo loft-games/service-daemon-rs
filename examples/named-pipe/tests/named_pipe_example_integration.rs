@@ -2,8 +2,11 @@
 
 #![cfg(windows)]
 
-use example_named_pipe::providers::EXAMPLE_NAMED_PIPE_ENV;
-use service_daemon::{ManagedProvided, ServiceDaemon};
+#[path = "../../../service-daemon/tests/support/provider_context.rs"]
+mod provider_context;
+
+use example_named_pipe::providers::{EXAMPLE_NAMED_PIPE_ENV, ExampleNamedPipeListener};
+use service_daemon::ServiceDaemon;
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -45,20 +48,24 @@ fn set_example_pipe_name() -> EnvVarGuard {
 async fn named_pipe_example_starts_and_roundtrips() -> anyhow::Result<()> {
     let env_var = set_example_pipe_name();
     let pipe_name = std::env::var(EXAMPLE_NAMED_PIPE_ENV)?;
-    let listener =
-        <example_named_pipe::providers::ExampleNamedPipeListener as ManagedProvided>::resolve_managed()
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("ExampleNamedPipeListener resolve_managed failed: {error:?}")
-            })?;
-    assert_eq!(listener.name(), pipe_name);
-
     let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
+    let listener = provider_context::published::<ExampleNamedPipeListener>(&daemon).await;
+    assert_eq!(listener.name(), pipe_name);
 
     tokio::time::sleep(Duration::from_secs(1)).await;
     daemon.shutdown();
     tokio::time::timeout(Duration::from_secs(5), daemon.wait()).await??;
     drop(env_var);
+    Ok(())
+}
+
+#[service_daemon::service]
+async fn publish_listener(
+    listener: std::sync::Arc<ExampleNamedPipeListener>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&listener);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

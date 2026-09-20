@@ -1,10 +1,12 @@
+#![cfg(unix)]
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 // Integration tests for the `#[provider(UnixConnect("..."))]` template.
 //
 // `UnixConnect` is a lightweight endpoint handle. Resolving the provider parses
 // the configured path only; dialing happens when user code calls `connect()` or
 // the lower-level `try_connect()`.
-
-#![cfg(unix)]
 
 use service_daemon::{ManagedProvided, provider};
 use std::ffi::OsString;
@@ -79,13 +81,16 @@ pub struct MissingAtResolveClient;
 
 #[tokio::test]
 async fn test_unix_connect_resolves_without_peer() {
-    let path = "target/sd-uds-connect-resolve-missing.sock";
-    let _guard = prepare_socket_path(path);
+    provider_context::run(async move {
+        let path = "target/sd-uds-connect-resolve-missing.sock";
+        let _guard = prepare_socket_path(path);
 
-    let provider = <MissingAtResolveClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("UnixConnect provider should resolve without dialing the peer");
-    assert_eq!(provider.path(), std::path::Path::new(path));
+        let provider = <MissingAtResolveClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("UnixConnect provider should resolve without dialing the peer");
+        assert_eq!(provider.path(), std::path::Path::new(path));
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -94,18 +99,21 @@ pub struct MissingAtConnectClient;
 
 #[tokio::test]
 async fn test_unix_connect_missing_peer_errors_on_connect_call() {
-    let path = "target/sd-uds-connect-call-missing.sock";
-    let _guard = prepare_socket_path(path);
+    provider_context::run(async move {
+        let path = "target/sd-uds-connect-call-missing.sock";
+        let _guard = prepare_socket_path(path);
 
-    let provider = <MissingAtConnectClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("UnixConnect provider should resolve without dialing the peer");
+        let provider = <MissingAtConnectClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("UnixConnect provider should resolve without dialing the peer");
 
-    let error = provider
-        .connect()
-        .await
-        .expect_err("connect() should report the missing peer at the call site");
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let error = provider
+            .connect()
+            .await
+            .expect_err("connect() should report the missing peer at the call site");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -119,13 +127,16 @@ pub struct EnvOverrideClient;
 #[tokio::test]
 async fn test_unix_connect_env_overrides_fallback_without_peer_probe() {
     let _env_var = set_test_env(ENV_OVERRIDE_ENV_VAR, ENV_OVERRIDE_PATH);
-    let _guard = prepare_socket_path(ENV_OVERRIDE_PATH);
+    provider_context::run(async move {
+        let _guard = prepare_socket_path(ENV_OVERRIDE_PATH);
 
-    let provider = <EnvOverrideClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("env override should resolve without requiring a listening peer");
+        let provider = <EnvOverrideClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("env override should resolve without requiring a listening peer");
 
-    assert_eq!(provider.path(), std::path::Path::new(ENV_OVERRIDE_PATH));
+        assert_eq!(provider.path(), std::path::Path::new(ENV_OVERRIDE_PATH));
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -134,26 +145,29 @@ pub struct IndepClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_provides_independent_raw_streams_per_call() {
-    let path = "target/sd-uds-connect-indep.sock";
-    let _guard = prepare_socket_path(path);
+    provider_context::run(async move {
+        let path = "target/sd-uds-connect-indep.sock";
+        let _guard = prepare_socket_path(path);
 
-    let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
+        let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
 
-    let provider = <IndepClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("resolve_managed failed for IndepClient");
+        let provider = <IndepClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("resolve_managed failed for IndepClient");
 
-    let s1 = provider
-        .try_connect()
-        .await
-        .expect("first try_connect failed");
-    let s2 = provider
-        .try_connect()
-        .await
-        .expect("second try_connect failed");
+        let s1 = provider
+            .try_connect()
+            .await
+            .expect("first try_connect failed");
+        let s2 = provider
+            .try_connect()
+            .await
+            .expect("second try_connect failed");
 
-    drop(s2);
-    drop(s1);
+        drop(s2);
+        drop(s1);
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -162,18 +176,21 @@ pub struct ConvenienceClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_connect_convenience_method_opens_ipc_streams() {
-    let path = "target/sd-uds-connect-convenience.sock";
-    let _guard = prepare_socket_path(path);
+    provider_context::run(async move {
+        let path = "target/sd-uds-connect-convenience.sock";
+        let _guard = prepare_socket_path(path);
 
-    let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
+        let _peer = std::os::unix::net::UnixListener::bind(path).expect("peer bind failed");
 
-    let provider = <ConvenienceClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("resolve_managed failed for ConvenienceClient");
+        let provider = <ConvenienceClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("resolve_managed failed for ConvenienceClient");
 
-    let first_stream = provider.connect().await.expect("first connect failed");
-    let second_stream = provider.connect().await.expect("second connect failed");
+        let first_stream = provider.connect().await.expect("first connect failed");
+        let second_stream = provider.connect().await.expect("second connect failed");
 
-    drop(second_stream);
-    drop(first_stream);
+        drop(second_stream);
+        drop(first_stream);
+    })
+    .await
 }

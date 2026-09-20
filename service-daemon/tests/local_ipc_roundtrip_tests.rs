@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 // End-to-end tests: LocalIpcListen and LocalIpcConnect cooperate through a
 // platform-mapped local IPC endpoint.
 
@@ -82,54 +85,57 @@ mod unix_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unix_local_ipc_listen_connect_roundtrip() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR, "unix-roundtrip");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR, "unix-roundtrip");
 
-        let server = <UnixRoundtripServer as ManagedProvided>::resolve_managed()
-            .await
-            .expect("UnixRoundtripServer resolve failed");
-        assert_eq!(server.name(), logical_name);
-
-        let server_task = tokio::spawn(async move {
-            let mut stream = server
-                .accept()
+            let server = <UnixRoundtripServer as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Failed to accept the real roundtrip connection");
+                .expect("UnixRoundtripServer resolve failed");
+            assert_eq!(server.name(), logical_name);
 
-            let mut buf = [0_u8; REQUEST_PAYLOAD.len()];
-            stream
-                .read_exact(&mut buf)
+            let server_task = tokio::spawn(async move {
+                let mut stream = server
+                    .accept()
+                    .await
+                    .expect("Failed to accept the real roundtrip connection");
+
+                let mut buf = [0_u8; REQUEST_PAYLOAD.len()];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .expect("Server read_exact failed");
+                stream
+                    .write_all(RESPONSE_PAYLOAD)
+                    .await
+                    .expect("Server write_all failed");
+                buf
+            });
+
+            let client = <UnixRoundtripClient as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Server read_exact failed");
-            stream
-                .write_all(RESPONSE_PAYLOAD)
+                .expect("UnixRoundtripClient resolve failed");
+            assert_eq!(client.name(), logical_name);
+
+            let mut conn = client
+                .connect()
                 .await
-                .expect("Server write_all failed");
-            buf
-        });
+                .expect("UnixRoundtripClient.connect failed");
+            conn.write_all(REQUEST_PAYLOAD)
+                .await
+                .expect("Client write_all failed");
 
-        let client = <UnixRoundtripClient as ManagedProvided>::resolve_managed()
-            .await
-            .expect("UnixRoundtripClient resolve failed");
-        assert_eq!(client.name(), logical_name);
+            let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
+            conn.read_exact(&mut response)
+                .await
+                .expect("Client read_exact failed");
 
-        let mut conn = client
-            .connect()
-            .await
-            .expect("UnixRoundtripClient.connect failed");
-        conn.write_all(REQUEST_PAYLOAD)
-            .await
-            .expect("Client write_all failed");
+            assert_eq!(&response, RESPONSE_PAYLOAD);
 
-        let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
-        conn.read_exact(&mut response)
-            .await
-            .expect("Client read_exact failed");
-
-        assert_eq!(&response, RESPONSE_PAYLOAD);
-
-        let received = server_task.await.expect("Server task panicked");
-        assert_eq!(&received, REQUEST_PAYLOAD);
+            let received = server_task.await.expect("Server task panicked");
+            assert_eq!(&received, REQUEST_PAYLOAD);
+        })
+        .await
     }
 
     #[derive(Debug)]
@@ -148,41 +154,44 @@ mod unix_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unix_local_ipc_env_overrides_logical_name() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "unix-override");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "unix-override");
 
-        let server = <UnixOverrideServer as ManagedProvided>::resolve_managed()
-            .await
-            .expect("UnixOverrideServer resolve failed");
-        assert_eq!(server.name(), logical_name);
-
-        let server_task = tokio::spawn(async move {
-            let mut stream = server
-                .accept()
+            let server = <UnixOverrideServer as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Failed to accept the env override business connection");
-            stream
-                .write_all(RESPONSE_PAYLOAD)
+                .expect("UnixOverrideServer resolve failed");
+            assert_eq!(server.name(), logical_name);
+
+            let server_task = tokio::spawn(async move {
+                let mut stream = server
+                    .accept()
+                    .await
+                    .expect("Failed to accept the env override business connection");
+                stream
+                    .write_all(RESPONSE_PAYLOAD)
+                    .await
+                    .expect("Server write_all failed");
+            });
+
+            let client = <UnixOverrideClient as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Server write_all failed");
-        });
+                .expect("UnixOverrideClient resolve failed");
+            assert_eq!(client.name(), logical_name);
 
-        let client = <UnixOverrideClient as ManagedProvided>::resolve_managed()
-            .await
-            .expect("UnixOverrideClient resolve failed");
-        assert_eq!(client.name(), logical_name);
+            let mut conn = client
+                .connect()
+                .await
+                .expect("UnixOverrideClient.connect failed");
+            let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
+            conn.read_exact(&mut response)
+                .await
+                .expect("Client read_exact failed");
+            assert_eq!(&response, RESPONSE_PAYLOAD);
 
-        let mut conn = client
-            .connect()
-            .await
-            .expect("UnixOverrideClient.connect failed");
-        let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
-        conn.read_exact(&mut response)
-            .await
-            .expect("Client read_exact failed");
-        assert_eq!(&response, RESPONSE_PAYLOAD);
-
-        server_task.await.expect("Server task panicked");
+            server_task.await.expect("Server task panicked");
+        })
+        .await
     }
 
     #[derive(Debug)]
@@ -201,30 +210,36 @@ mod unix_tests {
 
     #[tokio::test]
     async fn unix_local_ipc_listen_env_override_invalid_logical_name_is_fatal() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
 
-        match <UnixInvalidEnvServer as ManagedProvided>::resolve_managed().await {
-            Err(ProviderError::Fatal(message)) => {
-                assert!(message.contains("logical name"), "{message}");
-                assert!(message.contains("bad/name"), "{message}");
+            match <UnixInvalidEnvServer as ManagedProvided>::resolve_managed().await {
+                Err(ProviderError::Fatal(message)) => {
+                    assert!(message.contains("logical name"), "{message}");
+                    assert!(message.contains("bad/name"), "{message}");
+                }
+                other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
             }
-            other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
-        }
+        })
+        .await
     }
 
     #[tokio::test]
     async fn unix_local_ipc_connect_env_override_invalid_logical_name_is_fatal() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
 
-        match <UnixInvalidEnvClient as ManagedProvided>::resolve_managed().await {
-            Err(ProviderError::Fatal(message)) => {
-                assert!(message.contains("logical name"), "{message}");
-                assert!(message.contains("bad/name"), "{message}");
+            match <UnixInvalidEnvClient as ManagedProvided>::resolve_managed().await {
+                Err(ProviderError::Fatal(message)) => {
+                    assert!(message.contains("logical name"), "{message}");
+                    assert!(message.contains("bad/name"), "{message}");
+                }
+                other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
             }
-            other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
-        }
+        })
+        .await
     }
 }
 
@@ -268,54 +283,58 @@ mod windows_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_local_ipc_listen_connect_roundtrip() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR, "windows-roundtrip");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let (_env_var, logical_name) =
+                set_local_ipc_name(ROUNDTRIP_ENV_VAR, "windows-roundtrip");
 
-        let server = <WindowsRoundtripServer as ManagedProvided>::resolve_managed()
-            .await
-            .expect("WindowsRoundtripServer resolve failed");
-        assert_eq!(server.name(), logical_name);
-
-        let server_task = tokio::spawn(async move {
-            let mut stream = server
-                .accept()
+            let server = <WindowsRoundtripServer as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Failed to accept the real roundtrip connection");
+                .expect("WindowsRoundtripServer resolve failed");
+            assert_eq!(server.name(), logical_name);
 
-            let mut buf = [0_u8; REQUEST_PAYLOAD.len()];
-            stream
-                .read_exact(&mut buf)
+            let server_task = tokio::spawn(async move {
+                let mut stream = server
+                    .accept()
+                    .await
+                    .expect("Failed to accept the real roundtrip connection");
+
+                let mut buf = [0_u8; REQUEST_PAYLOAD.len()];
+                stream
+                    .read_exact(&mut buf)
+                    .await
+                    .expect("Server read_exact failed");
+                stream
+                    .write_all(RESPONSE_PAYLOAD)
+                    .await
+                    .expect("Server write_all failed");
+                buf
+            });
+
+            let client = <WindowsRoundtripClient as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Server read_exact failed");
-            stream
-                .write_all(RESPONSE_PAYLOAD)
+                .expect("WindowsRoundtripClient resolve failed");
+            assert_eq!(client.name(), logical_name);
+
+            let mut conn = client
+                .connect()
                 .await
-                .expect("Server write_all failed");
-            buf
-        });
+                .expect("WindowsRoundtripClient.connect failed");
+            conn.write_all(REQUEST_PAYLOAD)
+                .await
+                .expect("Client write_all failed");
 
-        let client = <WindowsRoundtripClient as ManagedProvided>::resolve_managed()
-            .await
-            .expect("WindowsRoundtripClient resolve failed");
-        assert_eq!(client.name(), logical_name);
+            let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
+            conn.read_exact(&mut response)
+                .await
+                .expect("Client read_exact failed");
 
-        let mut conn = client
-            .connect()
-            .await
-            .expect("WindowsRoundtripClient.connect failed");
-        conn.write_all(REQUEST_PAYLOAD)
-            .await
-            .expect("Client write_all failed");
+            assert_eq!(&response, RESPONSE_PAYLOAD);
 
-        let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
-        conn.read_exact(&mut response)
-            .await
-            .expect("Client read_exact failed");
-
-        assert_eq!(&response, RESPONSE_PAYLOAD);
-
-        let received = server_task.await.expect("Server task panicked");
-        assert_eq!(&received, REQUEST_PAYLOAD);
+            let received = server_task.await.expect("Server task panicked");
+            assert_eq!(&received, REQUEST_PAYLOAD);
+        })
+        .await
     }
 
     #[derive(Debug)]
@@ -341,77 +360,84 @@ mod windows_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_local_ipc_env_overrides_logical_name() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "windows-override");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "windows-override");
 
-        let server = <WindowsOverrideServer as ManagedProvided>::resolve_managed()
-            .await
-            .expect("WindowsOverrideServer resolve failed");
-        assert_eq!(server.name(), logical_name);
-
-        let server_task = tokio::spawn(async move {
-            let mut stream = server
-                .accept()
+            let server = <WindowsOverrideServer as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Failed to accept the env override business connection");
-            stream
-                .write_all(RESPONSE_PAYLOAD)
+                .expect("WindowsOverrideServer resolve failed");
+            assert_eq!(server.name(), logical_name);
+
+            let server_task = tokio::spawn(async move {
+                let mut stream = server
+                    .accept()
+                    .await
+                    .expect("Failed to accept the env override business connection");
+                stream
+                    .write_all(RESPONSE_PAYLOAD)
+                    .await
+                    .expect("Server write_all failed");
+            });
+
+            let client = <WindowsOverrideClient as ManagedProvided>::resolve_managed()
                 .await
-                .expect("Server write_all failed");
-        });
+                .expect("WindowsOverrideClient resolve failed");
+            assert_eq!(client.name(), logical_name);
 
-        let client = <WindowsOverrideClient as ManagedProvided>::resolve_managed()
-            .await
-            .expect("WindowsOverrideClient resolve failed");
-        assert_eq!(client.name(), logical_name);
+            let mut conn = client
+                .connect()
+                .await
+                .expect("WindowsOverrideClient.connect failed");
+            let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
+            conn.read_exact(&mut response)
+                .await
+                .expect("Client read_exact failed");
+            assert_eq!(&response, RESPONSE_PAYLOAD);
 
-        let mut conn = client
-            .connect()
-            .await
-            .expect("WindowsOverrideClient.connect failed");
-        let mut response = [0_u8; RESPONSE_PAYLOAD.len()];
-        conn.read_exact(&mut response)
-            .await
-            .expect("Client read_exact failed");
-        assert_eq!(&response, RESPONSE_PAYLOAD);
-
-        server_task.await.expect("Server task panicked");
+            server_task.await.expect("Server task panicked");
+        })
+        .await
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn windows_local_ipc_connect_retries_busy_pipe_replacement_gap() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let (_env_var, logical_name) = set_local_ipc_name(BUSY_RETRY_ENV_VAR, "windows-busy-retry");
-        let pipe_name = pipe_name(&logical_name);
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let (_env_var, logical_name) =
+                set_local_ipc_name(BUSY_RETRY_ENV_VAR, "windows-busy-retry");
+            let pipe_name = pipe_name(&logical_name);
 
-        let busy_server =
-            create_single_instance_server(&pipe_name).expect("busy server create failed");
-        let busy_client = tokio::net::windows::named_pipe::ClientOptions::new()
-            .open(&pipe_name)
-            .expect("busy holder client open failed");
+            let busy_server =
+                create_single_instance_server(&pipe_name).expect("busy server create failed");
+            let busy_client = tokio::net::windows::named_pipe::ClientOptions::new()
+                .open(&pipe_name)
+                .expect("busy holder client open failed");
 
-        let provider = <WindowsBusyRetryClient as ManagedProvided>::resolve_managed()
-            .await
-            .expect("WindowsBusyRetryClient resolve failed");
-        assert_eq!(provider.name(), logical_name);
+            let provider = <WindowsBusyRetryClient as ManagedProvided>::resolve_managed()
+                .await
+                .expect("WindowsBusyRetryClient resolve failed");
+            assert_eq!(provider.name(), logical_name);
 
-        let release_name = pipe_name.clone();
-        let release_task = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            drop(busy_client);
-            drop(busy_server);
-            let replacement = create_single_instance_server(&release_name)
-                .expect("replacement server create failed");
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            drop(replacement);
-        });
+            let release_name = pipe_name.clone();
+            let release_task = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                drop(busy_client);
+                drop(busy_server);
+                let replacement = create_single_instance_server(&release_name)
+                    .expect("replacement server create failed");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                drop(replacement);
+            });
 
-        let result = provider.connect().await;
-        assert!(
-            result.is_ok(),
-            "expected LocalIpcConnect busy retry to survive replacement gap, got {result:?}"
-        );
-        release_task.abort();
+            let result = provider.connect().await;
+            assert!(
+                result.is_ok(),
+                "expected LocalIpcConnect busy retry to survive replacement gap, got {result:?}"
+            );
+            release_task.abort();
+        })
+        .await
     }
 
     #[derive(Debug)]
@@ -430,29 +456,35 @@ mod windows_tests {
 
     #[tokio::test]
     async fn windows_local_ipc_listen_env_override_invalid_logical_name_is_fatal() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let _env_var = set_raw_env_value(INVALID_LISTEN_ENV_VAR, "bad/name");
 
-        match <WindowsInvalidEnvServer as ManagedProvided>::resolve_managed().await {
-            Err(ProviderError::Fatal(message)) => {
-                assert!(message.contains("logical name"), "{message}");
-                assert!(message.contains("bad/name"), "{message}");
+            match <WindowsInvalidEnvServer as ManagedProvided>::resolve_managed().await {
+                Err(ProviderError::Fatal(message)) => {
+                    assert!(message.contains("logical name"), "{message}");
+                    assert!(message.contains("bad/name"), "{message}");
+                }
+                other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
             }
-            other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
-        }
+        })
+        .await
     }
 
     #[tokio::test]
     async fn windows_local_ipc_connect_env_override_invalid_logical_name_is_fatal() {
-        let _env_lock = ENV_VAR_LOCK.lock().await;
-        let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
+        crate::provider_context::run(async move {
+            let _env_lock = ENV_VAR_LOCK.lock().await;
+            let _env_var = set_raw_env_value(INVALID_CONNECT_ENV_VAR, "bad/name");
 
-        match <WindowsInvalidEnvClient as ManagedProvided>::resolve_managed().await {
-            Err(ProviderError::Fatal(message)) => {
-                assert!(message.contains("logical name"), "{message}");
-                assert!(message.contains("bad/name"), "{message}");
+            match <WindowsInvalidEnvClient as ManagedProvided>::resolve_managed().await {
+                Err(ProviderError::Fatal(message)) => {
+                    assert!(message.contains("logical name"), "{message}");
+                    assert!(message.contains("bad/name"), "{message}");
+                }
+                other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
             }
-            other => panic!("expected fatal invalid LocalIpc env name error, got {other:?}"),
-        }
+        })
+        .await
     }
 }

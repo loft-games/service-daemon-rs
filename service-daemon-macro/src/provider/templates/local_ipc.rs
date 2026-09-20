@@ -84,10 +84,6 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
     let unix_socket_path = unix_socket_path_expr(&struct_name_str);
     let state_name = format_ident!("__{}LocalIpcListenState", struct_name);
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
 
     let unix_framework_init_fn = quote! {
@@ -111,12 +107,10 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
     let windows_cfg = [quote! { #[cfg(windows)] }];
     let unix_provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &unix_cfg,
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &unix_framework_init_fn,
         managed_init_fn: &unix_managed_init_fn,
         helper_style: HelperStyle::Fallible,
@@ -124,12 +118,10 @@ pub(in crate::provider) fn generate_local_ipc_listen_template(
     });
     let windows_provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &windows_cfg,
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &windows_framework_init_fn,
         managed_init_fn: &windows_managed_init_fn,
         helper_style: HelperStyle::Fallible,
@@ -545,10 +537,6 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
     let validate_logical_name = validate_logical_name_expr(&struct_name_str);
     let unix_socket_path = unix_socket_path_expr(&struct_name_str);
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
 
     let framework_init_fn = quote! {
@@ -569,12 +557,10 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
     let windows_cfg = [quote! { #[cfg(windows)] }];
     let unix_provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &unix_cfg,
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
@@ -582,12 +568,10 @@ pub(in crate::provider) fn generate_local_ipc_connect_template(
     });
     let windows_provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &windows_cfg,
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,

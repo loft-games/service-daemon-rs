@@ -67,7 +67,7 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
 
 ### Watch and reload boundaries
 
-A provider value change belongs to the provider slot that published it. In the default case, daemon scopes inherit the root slot, so a managed value mutation can reload every selected service or trigger that still depends on that root slot. If a simulation daemon or internal fork shadows that provider with a daemon-local slot, local value changes reload only that daemon's dependents.
+A provider value change belongs to the daemon-local slot that published it. Managed value mutations reload only that daemon's dependents. Other daemons have independent slots, and ordinary generation restarts retain the owning daemon's provider instances.
 
 A provider binding change is different: it changes which slot a daemon uses for a provider type. The framework treats that as a generation-boundary reload, so the old generation exits and the next generation resolves the new provider slot.
 

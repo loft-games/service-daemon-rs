@@ -1,10 +1,12 @@
+#![cfg(windows)]
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 // End-to-end test: NamedPipeListen and NamedPipeConnect cooperating on one
 // Windows named pipe.
 //
 // `NamedPipeConnect` resolves as a lightweight endpoint handle. The server-side
 // accept loop expects only the real roundtrip stream.
-
-#![cfg(windows)]
 
 use service_daemon::{ManagedProvided, provider};
 use std::ffi::OsString;
@@ -62,47 +64,50 @@ pub struct RoundtripClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_named_pipe_listen_connect_roundtrip() {
-    let _env_var = set_roundtrip_pipe_name();
+    provider_context::run(async move {
+        let _env_var = set_roundtrip_pipe_name();
 
-    let server = <RoundtripServer as ManagedProvided>::resolve_managed()
-        .await
-        .expect("RoundtripServer resolve failed");
-
-    let server_task = tokio::spawn(async move {
-        let mut pipe = server
-            .accept()
+        let server = <RoundtripServer as ManagedProvided>::resolve_managed()
             .await
-            .expect("Failed to accept the real roundtrip connection");
+            .expect("RoundtripServer resolve failed");
 
-        let mut buf = [0_u8; 5];
-        pipe.read_exact(&mut buf)
+        let server_task = tokio::spawn(async move {
+            let mut pipe = server
+                .accept()
+                .await
+                .expect("Failed to accept the real roundtrip connection");
+
+            let mut buf = [0_u8; 5];
+            pipe.read_exact(&mut buf)
+                .await
+                .expect("Server read_exact failed");
+            pipe.write_all(b"world")
+                .await
+                .expect("Server write_all failed");
+            buf
+        });
+
+        let client = <RoundtripClient as ManagedProvided>::resolve_managed()
             .await
-            .expect("Server read_exact failed");
-        pipe.write_all(b"world")
+            .expect("RoundtripClient resolve failed");
+
+        let mut conn = client
+            .connect()
             .await
-            .expect("Server write_all failed");
-        buf
-    });
+            .expect("RoundtripClient.connect failed");
+        conn.write_all(b"hello")
+            .await
+            .expect("Client write_all failed");
 
-    let client = <RoundtripClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("RoundtripClient resolve failed");
+        let mut response = [0_u8; 5];
+        conn.read_exact(&mut response)
+            .await
+            .expect("Client read_exact failed");
 
-    let mut conn = client
-        .connect()
-        .await
-        .expect("RoundtripClient.connect failed");
-    conn.write_all(b"hello")
-        .await
-        .expect("Client write_all failed");
+        assert_eq!(&response, b"world", "client should receive 'world'");
 
-    let mut response = [0_u8; 5];
-    conn.read_exact(&mut response)
-        .await
-        .expect("Client read_exact failed");
-
-    assert_eq!(&response, b"world", "client should receive 'world'");
-
-    let received = server_task.await.expect("Server task panicked");
-    assert_eq!(&received, b"hello", "server should receive 'hello'");
+        let received = server_task.await.expect("Server task panicked");
+        assert_eq!(&received, b"hello", "server should receive 'hello'");
+    })
+    .await
 }

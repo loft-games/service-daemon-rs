@@ -242,7 +242,7 @@ fn structural_provider_dependencies(
 mod tests {
     use super::validate_dependency_graph_with_candidates;
     use crate::core::provider_init::ProviderInitFailure;
-    use crate::core::provider_scope::ProviderCacheScope;
+
     use crate::models::{
         ProviderCandidateEntry, ProviderCandidateInitError, ProviderDependencyKind,
         ProviderEntry, ProviderInitError, RestartPolicy, ServiceParam,
@@ -335,7 +335,6 @@ mod tests {
             provider_type_id: TypeId::of::<CandidateCycleIdentity>(),
             priority: 50,
             params: b_dependency,
-            cache_scope: ProviderCacheScope::Inherited,
             init: candidate_init,
         };
 

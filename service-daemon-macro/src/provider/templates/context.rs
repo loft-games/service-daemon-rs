@@ -1,6 +1,6 @@
 //! Shared setup for provider templates.
 
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 
@@ -55,11 +55,6 @@ impl<'a> TemplateContext<'a> {
         helper_style: HelperStyle,
         provider_origin: String,
     ) -> Self {
-        let singleton_name = format_ident!(
-            "__PROVIDER_SINGLETON_{}",
-            struct_name.to_string().to_uppercase()
-        );
-
         let clone_derive = if has_clone_derive(attrs) {
             quote! {}
         } else {
@@ -80,12 +75,10 @@ impl<'a> TemplateContext<'a> {
 
         let provided_impl = generate_provided_impl(ProvidedImplConfig {
             type_tokens: &type_tokens,
-            singleton_name: &singleton_name,
             item_attrs: &[],
             user_span: struct_name.span(),
             param_entries: &[],
             eager,
-            cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
             framework_init_fn: &framework_init_fn,
             managed_init_fn: &managed_init_fn,
             helper_style,

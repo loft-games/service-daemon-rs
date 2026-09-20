@@ -1,3 +1,7 @@
+#![cfg(unix)]
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 // End-to-end test: UnixListen and UnixConnect cooperating on the same path.
 //
 // This test exercises the common interaction: the listener accepts one stream
@@ -9,8 +13,6 @@
 // in a separate examples-based smoke test.
 //
 // Windows-handoff note: `#![cfg(unix)]`-gated; not compiled on Windows.
-
-#![cfg(unix)]
 
 use service_daemon::{ManagedProvided, provider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -55,46 +57,49 @@ pub struct RtClient;
 // accept().await while the main task was inside the client's connect().
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_listen_connect_roundtrip() {
-    let path = "target/sd-uds-rt.sock";
-    let _guard = prepare_socket_path(path);
+    provider_context::run(async move {
+        let path = "target/sd-uds-rt.sock";
+        let _guard = prepare_socket_path(path);
 
-    let server = <RtServer as ManagedProvided>::resolve_managed()
-        .await
-        .expect("RtServer resolve failed");
-
-    let server_task = tokio::spawn(async move {
-        let mut sock = server
-            .accept()
+        let server = <RtServer as ManagedProvided>::resolve_managed()
             .await
-            .expect("Failed to accept the real roundtrip connection");
+            .expect("RtServer resolve failed");
 
-        let mut buf = [0u8; 5];
-        sock.read_exact(&mut buf)
+        let server_task = tokio::spawn(async move {
+            let mut sock = server
+                .accept()
+                .await
+                .expect("Failed to accept the real roundtrip connection");
+
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf)
+                .await
+                .expect("Server read_exact failed");
+            sock.write_all(b"world")
+                .await
+                .expect("Server write_all failed");
+            buf
+        });
+
+        let client = <RtClient as ManagedProvided>::resolve_managed()
             .await
-            .expect("Server read_exact failed");
-        sock.write_all(b"world")
+            .expect("RtClient resolve failed");
+
+        let mut conn = client.connect().await.expect("RtClient.connect failed");
+
+        conn.write_all(b"hello")
             .await
-            .expect("Server write_all failed");
-        buf
-    });
+            .expect("Client write_all failed");
 
-    let client = <RtClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("RtClient resolve failed");
+        let mut response = [0u8; 5];
+        conn.read_exact(&mut response)
+            .await
+            .expect("Client read_exact failed");
 
-    let mut conn = client.connect().await.expect("RtClient.connect failed");
+        assert_eq!(&response, b"world", "client should receive 'world'");
 
-    conn.write_all(b"hello")
-        .await
-        .expect("Client write_all failed");
-
-    let mut response = [0u8; 5];
-    conn.read_exact(&mut response)
-        .await
-        .expect("Client read_exact failed");
-
-    assert_eq!(&response, b"world", "client should receive 'world'");
-
-    let received = server_task.await.expect("Server task panicked");
-    assert_eq!(&received, b"hello", "server should receive 'hello'");
+        let received = server_task.await.expect("Server task panicked");
+        assert_eq!(&received, b"hello", "server should receive 'hello'");
+    })
+    .await
 }

@@ -61,7 +61,6 @@ pub struct ProviderCandidateEntry {
     pub provider_type_id: TypeId,
     pub priority: u8,
     pub params: &'static [ServiceParam],
-    pub cache_scope: ProviderCacheScope,
     pub init: fn(...) -> BoxFuture<'static, Result<Arc<dyn Any + Send + Sync>, ProviderCandidateInitError>>,
 }
 ```
@@ -69,10 +68,9 @@ pub struct ProviderCandidateEntry {
 `#[provider_contract]` emits a normal `ProviderEntry` for the shared output type
 and generates `ProviderContract` plus the usual provider capability traits.
 `#[provider_impl]` emits only a candidate entry keyed by the contract output
-`TypeId`; it must not generate `Provided` on the returned type. Candidate scope
-is inferred with the same `service_handle!` block scan used by ordinary function
-providers. The contract cache expression becomes daemon-local when any candidate
-entry is daemon-local.
+`TypeId`; it must not generate `Provided` on the returned type. All provider
+instances are daemon-local. Do not infer ownership from function-body tokens
+or generate a static provider instance cache.
 
 `ProviderCandidateInitError::Failed` boxes the hidden `ProviderInitFailure`, not
 the public `ProviderInitError`. Keep that carrier intact through candidate

@@ -63,10 +63,6 @@ pub(in crate::provider) fn generate_named_pipe_listen_template(
     let compile_error_guard = windows_only_compile_error_guard("NamedPipeListen");
     let state_name = format_ident!("__{}NamedPipeListenState", struct_name);
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
     let windows_cfg = [quote! { #[cfg(windows)] }];
 
@@ -88,12 +84,10 @@ pub(in crate::provider) fn generate_named_pipe_listen_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &windows_cfg,
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
@@ -443,10 +437,6 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
     let name_expr = pipe_name_expr(addr, env);
     let compile_error_guard = windows_only_compile_error_guard("NamedPipeConnect");
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
     let windows_cfg = [quote! { #[cfg(windows)] }];
 
@@ -468,12 +458,10 @@ pub(in crate::provider) fn generate_named_pipe_connect_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &windows_cfg,
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,

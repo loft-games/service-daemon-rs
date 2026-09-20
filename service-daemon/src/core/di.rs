@@ -85,7 +85,7 @@ impl ProviderDependencyWatchSet {
 ///
 /// Generated providers resolve through the current daemon's effective provider
 /// scope when called from a service, trigger, watcher, or daemon startup path.
-/// Calls made outside a daemon context fall back to the root provider scope.
+/// Calls made outside a daemon context fail before initialization.
 ///
 /// If you see a compile error about this trait not being implemented, it means
 /// you forgot to add `#[provider]` for that type.
@@ -98,7 +98,7 @@ pub trait Provided: 'static + Send + Sync + Clone + Sized {
     /// Resolves a read-only snapshot from the current effective provider slot.
     ///
     /// In service/trigger/daemon contexts this uses the daemon's provider scope;
-    /// outside those contexts it uses the root provider scope fallback.
+    /// outside those contexts it returns a fatal missing-context error.
     /// If the provider has been promoted to managed state, this returns the
     /// latest published snapshot for that slot.
     fn resolve()
@@ -137,10 +137,8 @@ pub trait ProviderContract: 'static + Send + Sync + Clone {}
 /// injection. The `#[provider]` macro auto-generates this impl by delegating to
 /// the effective provider slot's `StateManager`.
 ///
-/// In a daemon context, managed state belongs to that daemon's effective slot:
-/// usually the inherited root slot, or a daemon-local slot after simulation
-/// override/internal fork. Outside a daemon context, helper calls use the root
-/// slot fallback.
+/// Managed state belongs to the current daemon's slot, including after a
+/// simulation override. Resolution without a daemon context returns an error.
 ///
 /// Provider injection is defined by `#[provider]`; direct hand-written provider
 /// capability impls do not register dependency metadata and are not supported
@@ -172,7 +170,7 @@ pub trait ManagedProvided: Provided {
 /// current effective provider slot's value epoch and binding snapshot when the
 /// watch handle is created. A watch therefore wakes when a managed snapshot is
 /// published, or when the daemon switches that provider type to a local
-/// override/fork.
+/// override.
 ///
 /// Current pre-release behavior: `#[provider]` owns this implementation. Direct
 /// hand-written provider capability impls are not supported as DI entry points.

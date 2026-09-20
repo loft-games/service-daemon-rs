@@ -63,8 +63,8 @@ sequenceDiagram
     Super->>Super: Spawn Generation N+1
 ```
 
-- **Value mutation**: Managed providers publish through the effective slot's `StateManager` and advance its value epoch. Root slot changes reload daemons that still inherit root; daemon-local slot changes stay inside that daemon.
-- **Binding mutation**: A daemon-local fork or simulation override changes which slot a provider type resolves to for that daemon. The binding epoch changes and dependent generations reload so the next generation resolves the new slot.
+- **Value mutation**: Managed providers publish through the effective slot's `StateManager` and advance its value epoch. Value changes stay inside the owning daemon.
+- **Binding mutation**: A simulation override changes which slot a provider type resolves to for that daemon. The binding epoch changes and dependent generations reload so the next generation resolves the new slot.
 - **Baseline capture**: Each generation constructs its `ProviderDependencyWatchSet` before the service or trigger body can become externally observable. This makes already-published changes level-triggered instead of relying on a retained notification edge.
 - **Dirty tracking**: Acquiring and releasing a write lock without mutating the value does not publish a value change.
 - **Race Safety**: Provider value watches use epoch check / notification arm / re-check loops, and the supervisor races the generation body directly against the dependency watch set. A change published between startup and the first async poll is still observed.
@@ -213,7 +213,7 @@ A provider may opt into **eager** initialization via an explicit macro parameter
 - `#[provider(..., eager = true)]`
 - `#[provider_contract(eager = true)]`
 
-Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers and their dependencies are prepared through that daemon's provider scope, not by bypassing the scoped bridge. By default the daemon inherits the root provider slot; simulation overrides or internal forks can install a daemon-local slot before eager initialization, so startup seeds the local slot without polluting root state.
+Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers and their dependencies are prepared through that daemon's provider scope, not by bypassing the scoped bridge. All providers are daemon-local. A pre-start simulation override seeds its daemon slot and suppresses the overridden constructor; eager does not imply process-wide sharing.
 
 For provider contracts, eager reachability follows the contract's normal
 `ProviderEntry.params`. Candidate dependencies are prepared only after candidate
@@ -238,7 +238,9 @@ Generated provider helpers expose a low-level `resolve_managed()` path for tests
 
 ### 5.7. Provider ownership boundary
 
-Generated provider resolution uses a root scope plus daemon effective scopes. Calls made outside framework context fall back to the root scope, which preserves convenient helper usage in tests and setup code. Calls made while a daemon is starting or while a service, trigger, or watcher is running use that daemon's effective provider scope.
+Generated provider resolution requires a daemon context and uses only that daemon's per-type slots. No process-wide instance cache exists. Provider definitions remain globally registered, but their instances are isolated across daemon creation and simulation runs. Ordinary generation restarts reuse the owning daemon's provider instances.
+
+Outside daemon context, fallible resolution returns a fatal missing-context error before constructing dependencies. Direct `Arc` helpers and `watch_dependency()` panic with explicit diagnostics; their signatures are unchanged. Tests should resolve inside a test driver service or preinstall simulation overrides, rather than resolving in setup and expecting another daemon to inherit the result. Externally retained `Arc` values can outlive daemon shutdown; there is no forced destruction of caller-owned references.
 
 The effective binding is generation-sensitive: if a daemon-local binding changes, dependent services and triggers reload at a generation boundary. Existing generations are not silently mutated in place; the next generation resolves the new provider slot.
 

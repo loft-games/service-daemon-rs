@@ -363,8 +363,8 @@ pub fn wait_shutdown() -> impl Future<Output = ()> + Send + 'static {
 ///
 /// Inside a `#[service]` / `#[trigger]` scope, this derives a child token from the
 /// current service cancellation token. Outside a managed service scope, it returns
-/// a fresh standalone token so framework-external `resolve()` calls are not bound
-/// to daemon/process lifecycle management.
+/// a fresh standalone token. Provider resolution separately requires a daemon
+/// context; obtaining a cancellation token does not establish one.
 #[doc(hidden)]
 pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
     CURRENT_SERVICE
@@ -372,10 +372,10 @@ pub fn current_cancellation_token() -> tokio_util::sync::CancellationToken {
         .unwrap_or_else(|_| tokio_util::sync::CancellationToken::new())
 }
 
-pub(crate) fn current_provider_scope() -> Arc<ProviderScope> {
+pub(crate) fn current_provider_scope() -> Option<Arc<ProviderScope>> {
     CURRENT_RESOURCES
         .try_with(|resources| resources.provider_scope.clone())
-        .unwrap_or_else(|_| ProviderScope::root())
+        .ok()
 }
 
 /// An interruptible sleep that returns early if a shutdown or reload signal is received.
@@ -638,14 +638,13 @@ pub fn current_service_instance_id() -> ServiceInstanceId {
 mod tests {
     use super::*;
     use crate::core::diagnostics::{DiagnosticsStore, RuntimeLane};
-    use crate::core::provider_scope::ProviderScopeId;
     use tokio_util::sync::CancellationToken;
 
     #[tokio::test]
-    async fn current_provider_scope_falls_back_to_root_outside_service_scope() {
+    async fn current_provider_scope_is_absent_outside_service_scope() {
         let scope = current_provider_scope();
 
-        assert_eq!(scope.id(), ProviderScopeId::root());
+        assert!(scope.is_none());
     }
 
     #[tokio::test]
@@ -654,11 +653,10 @@ mod tests {
         let expected_scope_id = resources.provider_scope.id();
 
         let actual_scope_id =
-            __run_daemon_resources_scope(resources, || async { current_provider_scope().id() })
+            __run_daemon_resources_scope(resources, || async { current_provider_scope().unwrap().id() })
                 .await;
 
         assert_eq!(actual_scope_id, expected_scope_id);
-        assert_ne!(actual_scope_id, ProviderScopeId::root());
     }
 
     #[tokio::test]
@@ -673,12 +671,11 @@ mod tests {
         );
 
         let actual_scope_id = __run_service_scope(identity, resources, || async {
-            current_provider_scope().id()
+            current_provider_scope().unwrap().id()
         })
         .await;
 
         assert_eq!(actual_scope_id, expected_scope_id);
-        assert_ne!(actual_scope_id, ProviderScopeId::root());
     }
 
     #[tokio::test]

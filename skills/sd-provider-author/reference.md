@@ -164,9 +164,8 @@ traits on the returned type. Candidates are tried by descending priority, with a
 default priority of `50` and stable equal-priority ordering by module path and
 function name. Only the attempted candidate's dependencies are initialized;
 every candidate edge still participates in structural cycle detection. A
-contract is daemon-local when any candidate body uses `service_handle!`, because
-fallback may select that implementation. Otherwise it keeps inherited root
-caching.
+contract is always daemon-local, including when candidates obtain service handles
+through helper functions. Eager initialization changes timing, not ownership.
 
 ## 2. Attributes
 

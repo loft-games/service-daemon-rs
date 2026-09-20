@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{ProviderError, provider};
 use std::{net::Ipv4Addr, process::Command, time::Duration};
 
@@ -45,23 +48,26 @@ async fn literals_bind_and_accept_connections() {
 
 #[tokio::test]
 async fn env_child() {
-    let Ok(expected) = std::env::var("SD_LISTEN_EXPECTED") else {
-        return;
-    };
-    let result = <EnvListener as service_daemon::ManagedProvided>::resolve_managed().await;
-    if expected == "invalid" {
-        assert!(matches!(result, Err(ProviderError::Fatal(_))), "{result:?}");
-    } else if expected == "conflict" {
-        assert!(
-            matches!(result, Err(ProviderError::Retryable(_))),
-            "{result:?}"
-        );
-    } else {
-        let listener = result.unwrap();
-        let addr = listener.get().unwrap().local_addr().unwrap();
-        assert_eq!(addr.ip().to_string(), expected);
-        assert_ne!(addr.port(), 0);
-    }
+    provider_context::run(async move {
+        let Ok(expected) = std::env::var("SD_LISTEN_EXPECTED") else {
+            return;
+        };
+        let result = <EnvListener as service_daemon::ManagedProvided>::resolve_managed().await;
+        if expected == "invalid" {
+            assert!(matches!(result, Err(ProviderError::Fatal(_))), "{result:?}");
+        } else if expected == "conflict" {
+            assert!(
+                matches!(result, Err(ProviderError::Retryable(_))),
+                "{result:?}"
+            );
+        } else {
+            let listener = result.unwrap();
+            let addr = listener.get().unwrap().local_addr().unwrap();
+            assert_eq!(addr.ip().to_string(), expected);
+            assert_ne!(addr.port(), 0);
+        }
+    })
+    .await
 }
 
 #[test]

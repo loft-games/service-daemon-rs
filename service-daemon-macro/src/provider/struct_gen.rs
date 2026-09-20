@@ -3,7 +3,7 @@
 //! This module generates providers for structs with automatic field injection.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote, quote_spanned};
+use quote::{quote, quote_spanned};
 use syn::ItemStruct;
 use syn::parse::Parser;
 use syn::spanned::Spanned;
@@ -425,10 +425,6 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> syn::Re
     // two structs with the same name in different modules produce separate
     // statics. Within a single module, Rust forbids duplicate type names,
     // making name collisions impossible under normal usage.
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
 
     let type_tokens = quote! { #struct_name };
     let eager = args.named.eager;
@@ -436,12 +432,10 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> syn::Re
     let provider_origin = format!("#[provider] struct {struct_name}");
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &param_entries,
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style,

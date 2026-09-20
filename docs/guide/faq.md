@@ -65,8 +65,8 @@ This page explains common behaviors that are easy to misread when first using th
 ### Simulation is NOT a separate engine
 **Reality**: `MockContext` still runs the real `ServiceDaemon` and real service/trigger code. It swaps the daemon-owned resources under that run: isolated shelf/status state plus optional daemon-local provider overrides.
 
-### Avoid root provider pollution in tests
-**Problem**: A test calls `T::resolve()` or mutates a root provider and assumes a later daemon will see that exact test value.
+### Resolve providers inside a daemon
+**Problem**: A test calls `T::resolve()` without a daemon context. There is no process-wide provider cache: fallible APIs return a missing-context error, while direct `Arc` helpers panic with diagnostics.
 **The Fix**: Prefer `MockContext::builder().with_provider_override(...)` before startup or `SimulationHandle::override_provider(...)` during a run. Provider overrides are scoped to one simulation daemon and reload dependent generations through the normal provider watch path.
 
 ### Registry Isolation 

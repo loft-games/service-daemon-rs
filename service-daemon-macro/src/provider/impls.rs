@@ -11,12 +11,10 @@ pub(super) enum HelperStyle {
 
 pub(super) struct ProvidedImplConfig<'a> {
     pub type_tokens: &'a proc_macro2::TokenStream,
-    pub singleton_name: &'a syn::Ident,
     pub item_attrs: &'a [proc_macro2::TokenStream],
     pub user_span: proc_macro2::Span,
     pub param_entries: &'a [proc_macro2::TokenStream],
     pub eager: bool,
-    pub cache_scope: proc_macro2::TokenStream,
     pub framework_init_fn: &'a proc_macro2::TokenStream,
     pub managed_init_fn: &'a proc_macro2::TokenStream,
     pub helper_style: HelperStyle,
@@ -29,12 +27,10 @@ pub(super) struct ProvidedImplConfig<'a> {
 pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_macro2::TokenStream {
     let ProvidedImplConfig {
         type_tokens,
-        singleton_name,
         item_attrs,
         user_span,
         param_entries,
         eager,
-        cache_scope,
         framework_init_fn,
         managed_init_fn,
         helper_style,
@@ -54,7 +50,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         #(#item_attrs)*
         impl service_daemon::WatchableProvided for #type_tokens {
             fn watch_dependency() -> service_daemon::ProviderDependencyWatch {
-                service_daemon::__private::provider_dependency_watch(&#singleton_name)
+                service_daemon::__private::provider_dependency_watch::<Self>()
             }
         }
     };
@@ -101,7 +97,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         quote! {
             |error| {
                 panic!(
-                    "service-daemon provider `{}` failed in direct helper `{}`. provider_origin={}, provider_defined_at={}:{}:{}, helper_called_at={}:{}:{}, module={}, error={}. Direct helpers are generated only for providers with no declared fallible initialization path; use `Result<T, service_daemon::ProviderError>` if initialization can fail.",
+                    "service-daemon provider `{}` failed in direct helper `{}`. provider_origin={}, provider_defined_at={}:{}:{}, helper_called_at={}:{}:{}, module={}, error={}. Direct helpers require a daemon context and a provider with no declared fallible initialization path; resolve inside a daemon-managed service or declare `Result<T, service_daemon::ProviderError>` for fallible initialization.",
                     #type_name_str,
                     #helper_name,
                     #provider_origin_lit,
@@ -202,11 +198,9 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         #bounds_assertion
 
         #(#item_attrs)*
-        static #singleton_name: service_daemon::__private::StateManager<#type_tokens> = service_daemon::__private::StateManager::new();
-
-        #(#item_attrs)*
         impl service_daemon::Provided for #type_tokens {
             async fn resolve() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
+                service_daemon::__private::require_provider_context(#type_name_str)?;
                 let policy = service_daemon::RestartPolicy::default();
                 let cancel = service_daemon::__private::current_cancellation_token();
                 service_daemon::__private::prepare_provider_type(
@@ -223,6 +217,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         #(#item_attrs)*
         impl service_daemon::ManagedProvided for #type_tokens {
             async fn resolve_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
+                service_daemon::__private::require_provider_context(#type_name_str)?;
                 let policy = service_daemon::RestartPolicy::default();
                 let cancel = service_daemon::__private::current_cancellation_token();
                 service_daemon::__private::prepare_provider_type(
@@ -236,6 +231,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             }
 
             async fn resolve_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
+                service_daemon::__private::require_provider_context(#type_name_str)?;
                 let policy = service_daemon::RestartPolicy::default();
                 let cancel = service_daemon::__private::current_cancellation_token();
                 service_daemon::__private::prepare_provider_type(
@@ -249,6 +245,8 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             }
 
             async fn resolve_managed() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderError> {
+                service_daemon::__private::require_provider_context(#type_name_str)
+                    .map_err(|error| service_daemon::ProviderError::Fatal(error.to_string()))?;
                 let policy = service_daemon::RestartPolicy::default();
                 let cancel = service_daemon::__private::current_cancellation_token();
                 service_daemon::__private::prepare_provider_params(
@@ -258,7 +256,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
                 )
                 .await
                 .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?;
-                service_daemon::__private::resolve_provider_managed_with_scope(&#singleton_name, #cache_scope, || async {
+                service_daemon::__private::resolve_provider_managed(|| async {
                     #managed_init_fn
                 })
                 .await
@@ -268,17 +266,17 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
         #(#item_attrs)*
         impl service_daemon::__private::ProviderDefinition for #type_tokens {
             fn ready_snapshot() -> std::result::Result<std::sync::Arc<Self>, service_daemon::ProviderInitError> {
-                service_daemon::__private::ready_provider_snapshot_with_scope(&#singleton_name, #cache_scope)
+                service_daemon::__private::ready_provider_snapshot::<Self>()?
                     .ok_or_else(|| service_daemon::__private::missing_prepared_provider_error(#type_name_str, #type_name_str))
             }
 
             fn ready_rwlock() -> std::result::Result<std::sync::Arc<service_daemon::RwLock<Self>>, service_daemon::ProviderInitError> {
-                service_daemon::__private::ready_provider_rwlock_with_scope(&#singleton_name, #cache_scope)
+                service_daemon::__private::ready_provider_rwlock::<Self>()?
                     .ok_or_else(|| service_daemon::__private::missing_prepared_provider_error(#type_name_str, #type_name_str))
             }
 
             fn ready_mutex() -> std::result::Result<std::sync::Arc<service_daemon::Mutex<Self>>, service_daemon::ProviderInitError> {
-                service_daemon::__private::ready_provider_mutex_with_scope(&#singleton_name, #cache_scope)
+                service_daemon::__private::ready_provider_mutex::<Self>()?
                     .ok_or_else(|| service_daemon::__private::missing_prepared_provider_error(#type_name_str, #type_name_str))
             }
         }
@@ -293,7 +291,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                service_daemon::__private::resolve_provider_snapshot_with_scope(&#singleton_name, #cache_scope, || async {
+                service_daemon::__private::resolve_provider_snapshot(|| async {
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
                         service_daemon::__private::ProviderInitBoundaryKind::SnapshotResolve,
@@ -325,7 +323,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                service_daemon::__private::resolve_provider_snapshot_with_scope(&#singleton_name, #cache_scope, || async {
+                service_daemon::__private::resolve_provider_snapshot(|| async {
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
                         service_daemon::__private::ProviderInitBoundaryKind::EagerInit,
@@ -357,7 +355,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                service_daemon::__private::resolve_provider_rwlock_with_scope(&#singleton_name, #cache_scope, || async {
+                service_daemon::__private::resolve_provider_rwlock(|| async {
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
                         service_daemon::__private::ProviderInitBoundaryKind::RwLockResolve,
@@ -389,7 +387,7 @@ pub(super) fn generate_provided_impl(config: ProvidedImplConfig<'_>) -> proc_mac
             cancel: service_daemon::__private::tokio_util::sync::CancellationToken,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, std::result::Result<(), service_daemon::ProviderInitError>> {
             Box::pin(async move {
-                service_daemon::__private::resolve_provider_mutex_with_scope(&#singleton_name, #cache_scope, || async {
+                service_daemon::__private::resolve_provider_mutex(|| async {
                     let provider_init_context = service_daemon::__private::ProviderInitBoundaryContext::new(
                         #type_name_str,
                         service_daemon::__private::ProviderInitBoundaryKind::MutexResolve,

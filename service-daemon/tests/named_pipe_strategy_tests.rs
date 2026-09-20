@@ -1,11 +1,12 @@
+#![cfg(windows)]
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 // Windows-only integration tests for the `#[provider(NamedPipeListen(...))]`
 // and `#[provider(NamedPipeConnect(...))]` templates.
 //
-// Each test uses its own provider type because generated provider root slots
-// are per-type statics. Env overrides provide per-process unique pipe names
-// while preserving string-literal macro syntax.
-
-#![cfg(windows)]
+// Each test uses its own daemon scope and provider type. Env overrides provide
+// per-process unique pipe names while preserving string-literal macro syntax.
 
 use service_daemon::{ManagedProvided, ProviderError, provider};
 use std::ffi::OsString;
@@ -99,16 +100,19 @@ pub struct NamedPipeServerProvider;
 
 #[tokio::test]
 async fn named_pipe_listen_creates_server_and_exposes_name() {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("server-name");
-    let _env = set_test_env(SERVER_NAME_ENV, &name);
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("server-name");
+        let _env = set_test_env(SERVER_NAME_ENV, &name);
 
-    let provider = <NamedPipeServerProvider as ManagedProvided>::resolve_managed()
-        .await
-        .expect("NamedPipeServerProvider resolve failed");
+        let provider = <NamedPipeServerProvider as ManagedProvided>::resolve_managed()
+            .await
+            .expect("NamedPipeServerProvider resolve failed");
 
-    assert_eq!(provider.name(), name);
-    assert_eq!(provider.to_string(), name);
+        assert_eq!(provider.name(), name);
+        assert_eq!(provider.to_string(), name);
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -126,35 +130,38 @@ pub struct AcceptReplacementFailureServer;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_pipe_listen_recovers_after_cancelled_accept_wait() -> anyhow::Result<()> {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("accept-cancel");
-    let _env = set_test_env(ACCEPT_CANCEL_NAME_ENV, &name);
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("accept-cancel");
+        let _env = set_test_env(ACCEPT_CANCEL_NAME_ENV, &name);
 
-    let provider = <AcceptCancellationServer as ManagedProvided>::resolve_managed()
-        .await
-        .expect("AcceptCancellationServer resolve failed");
-
-    let first_accept = tokio::time::timeout(Duration::from_millis(20), provider.accept()).await;
-    assert!(
-        first_accept.is_err(),
-        "first accept should be cancelled by timeout"
-    );
-
-    let accept_provider = std::sync::Arc::clone(&provider);
-    let accept_task = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(5), accept_provider.accept())
+        let provider = <AcceptCancellationServer as ManagedProvided>::resolve_managed()
             .await
-            .expect("second accept timed out")
-            .expect("second accept failed")
-    });
+            .expect("AcceptCancellationServer resolve failed");
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    let client = ClientOptions::new().open(&name)?;
-    let server = accept_task.await.expect("accept task panicked");
+        let first_accept = tokio::time::timeout(Duration::from_millis(20), provider.accept()).await;
+        assert!(
+            first_accept.is_err(),
+            "first accept should be cancelled by timeout"
+        );
 
-    drop(client);
-    drop(server);
-    Ok(())
+        let accept_provider = std::sync::Arc::clone(&provider);
+        let accept_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_secs(5), accept_provider.accept())
+                .await
+                .expect("second accept timed out")
+                .expect("second accept failed")
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let client = ClientOptions::new().open(&name)?;
+        let server = accept_task.await.expect("accept task panicked");
+
+        drop(client);
+        drop(server);
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -205,21 +212,24 @@ pub struct OwnershipCollisionServer;
 
 #[tokio::test]
 async fn named_pipe_listen_first_instance_collision_is_fatal() {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("ownership-collision");
-    let _env = set_test_env(OWNERSHIP_NAME_ENV, &name);
-    let _existing = create_server(&name).expect("pre-existing server create failed");
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("ownership-collision");
+        let _env = set_test_env(OWNERSHIP_NAME_ENV, &name);
+        let _existing = create_server(&name).expect("pre-existing server create failed");
 
-    let result = <OwnershipCollisionServer as ManagedProvided>::resolve_managed().await;
-    match result {
-        Err(ProviderError::Fatal(message)) => {
-            assert!(
-                message.contains("first Windows named pipe server instance"),
-                "unexpected fatal message: {message}"
-            );
+        let result = <OwnershipCollisionServer as ManagedProvided>::resolve_managed().await;
+        match result {
+            Err(ProviderError::Fatal(message)) => {
+                assert!(
+                    message.contains("first Windows named pipe server instance"),
+                    "unexpected fatal message: {message}"
+                );
+            }
+            other => panic!("expected fatal first-instance collision, got {other:?}"),
         }
-        other => panic!("expected fatal first-instance collision, got {other:?}"),
-    }
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -252,14 +262,17 @@ pub struct ReadyClient;
 
 #[tokio::test]
 async fn named_pipe_connect_resolves_without_peer() {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("resolve-without-peer");
-    let _env = set_test_env(OK_CLIENT_NAME_ENV, &name);
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("resolve-without-peer");
+        let _env = set_test_env(OK_CLIENT_NAME_ENV, &name);
 
-    let provider = <ReadyClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("NamedPipeConnect provider should resolve without dialing the peer");
-    assert_eq!(provider.name(), name);
+        let provider = <ReadyClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("NamedPipeConnect provider should resolve without dialing the peer");
+        assert_eq!(provider.name(), name);
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -271,36 +284,39 @@ pub struct BusyRetryClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_pipe_connect_retries_busy_pipe_until_instance_available() {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("busy-retry");
-    let _env = set_test_env(BUSY_RETRY_NAME_ENV, &name);
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("busy-retry");
+        let _env = set_test_env(BUSY_RETRY_NAME_ENV, &name);
 
-    let busy_server = create_single_instance_server(&name).expect("busy server create failed");
-    let busy_client = ClientOptions::new()
-        .open(&name)
-        .expect("busy holder client open failed");
+        let busy_server = create_single_instance_server(&name).expect("busy server create failed");
+        let busy_client = ClientOptions::new()
+            .open(&name)
+            .expect("busy holder client open failed");
 
-    let provider = <BusyRetryClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("NamedPipeConnect provider should resolve without dialing the peer");
+        let provider = <BusyRetryClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("NamedPipeConnect provider should resolve without dialing the peer");
 
-    let release_name = name.clone();
-    let release_task = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        drop(busy_client);
-        drop(busy_server);
-        let replacement =
-            create_single_instance_server(&release_name).expect("replacement server create failed");
-        tokio::time::sleep(Duration::from_secs(5)).await;
-        drop(replacement);
-    });
+        let release_name = name.clone();
+        let release_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            drop(busy_client);
+            drop(busy_server);
+            let replacement = create_single_instance_server(&release_name)
+                .expect("replacement server create failed");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            drop(replacement);
+        });
 
-    let result = provider.connect().await;
-    assert!(
-        result.is_ok(),
-        "expected runtime busy retry to recover, got {result:?}"
-    );
-    release_task.abort();
+        let result = provider.connect().await;
+        assert!(
+            result.is_ok(),
+            "expected runtime busy retry to recover, got {result:?}"
+        );
+        release_task.abort();
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -313,19 +329,22 @@ pub struct MissingPeerClient;
 
 #[tokio::test]
 async fn named_pipe_missing_peer_errors_on_connect_call() {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("missing-peer");
-    let _env = set_test_env(MISSING_PEER_NAME_ENV, &name);
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("missing-peer");
+        let _env = set_test_env(MISSING_PEER_NAME_ENV, &name);
 
-    let provider = <MissingPeerClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("NamedPipeConnect provider should resolve without dialing the peer");
+        let provider = <MissingPeerClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("NamedPipeConnect provider should resolve without dialing the peer");
 
-    let error = provider
-        .connect()
-        .await
-        .expect_err("connect() should report the missing peer at the call site");
-    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        let error = provider
+            .connect()
+            .await
+            .expect_err("connect() should report the missing peer at the call site");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -338,13 +357,16 @@ pub struct EnvEagerClient;
 
 #[tokio::test]
 async fn named_pipe_env_overrides_fallback_without_peer_probe() {
-    let _env_lock = ENV_VAR_LOCK.lock().await;
-    let name = unique_pipe_name("env-eager");
-    let _env = set_test_env(ENV_EAGER_NAME_ENV, &name);
+    provider_context::run(async move {
+        let _env_lock = ENV_VAR_LOCK.lock().await;
+        let name = unique_pipe_name("env-eager");
+        let _env = set_test_env(ENV_EAGER_NAME_ENV, &name);
 
-    let provider = <EnvEagerClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("env override should resolve without requiring a listening peer");
+        let provider = <EnvEagerClient as ManagedProvided>::resolve_managed()
+            .await
+            .expect("env override should resolve without requiring a listening peer");
 
-    assert_eq!(provider.name(), name);
+        assert_eq!(provider.name(), name);
+    })
+    .await
 }

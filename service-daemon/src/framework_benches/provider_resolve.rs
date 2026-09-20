@@ -1,10 +1,12 @@
-use std::{hint::black_box, sync::Arc};
+use std::{hint::black_box, sync::Arc, time::Instant};
 
 use criterion::Criterion;
 
-use crate::core::managed_state::StateManager;
+use crate::ProviderInitError;
+use crate::core::context::{__run_daemon_resources_scope, DaemonResources};
+use crate::core::provider_scope::{resolve_provider_rwlock, resolve_provider_snapshot};
 
-fn unexpected_init() -> std::future::Ready<Arc<u64>> {
+fn unexpected_init() -> std::future::Ready<Result<Arc<u64>, ProviderInitError>> {
     panic!("a warm provider must not invoke its initializer")
 }
 
@@ -13,63 +15,50 @@ pub(super) fn run(criterion: &mut Criterion) {
         .build()
         .unwrap();
     let expected = Arc::new(42u64);
-    let immutable = StateManager::new();
-    let managed = StateManager::new();
+    let immutable = DaemonResources::new();
+    let managed = DaemonResources::new();
 
     runtime.block_on(async {
-        let initial = immutable
-            .resolve_snapshot(|| async { Arc::clone(&expected) })
+        for resources in [&immutable, &managed] {
+            __run_daemon_resources_scope(resources.clone(), || async {
+                let initial = resolve_provider_snapshot(|| async { Ok(expected.clone()) })
+                    .await
+                    .unwrap();
+                assert!(Arc::ptr_eq(&initial, &expected));
+            })
             .await;
-        assert!(Arc::ptr_eq(&initial, &expected));
-        let initial = managed
-            .resolve_snapshot(|| async { Arc::clone(&expected) })
-            .await;
-        assert!(Arc::ptr_eq(&initial, &expected));
-        let tracked = managed.resolve_rwlock(unexpected_init).await;
-        // Verify the promoted managed path, not just the immutable cache: publish
-        // another Arc and require resolution to see it, then restore the fixture.
-        let replacement = Arc::new(43u64);
-        {
-            let mut writer = tracked.write().await;
-            writer.publish(Arc::clone(&replacement));
         }
-        assert!(Arc::ptr_eq(
-            &managed.resolve_snapshot(unexpected_init).await,
-            &replacement
-        ));
-        {
-            let mut writer = tracked.write().await;
-            writer.publish(Arc::clone(&expected));
-        }
-        assert!(Arc::ptr_eq(
-            &immutable.resolve_snapshot(unexpected_init).await,
-            &expected
-        ));
-        assert!(Arc::ptr_eq(
-            &managed.resolve_snapshot(unexpected_init).await,
-            &expected
-        ));
+        __run_daemon_resources_scope(managed.clone(), || async {
+            let tracked = resolve_provider_rwlock(unexpected_init).await.unwrap();
+            let replacement = Arc::new(43u64);
+            tracked.write().await.publish(replacement.clone());
+            assert!(Arc::ptr_eq(
+                &resolve_provider_snapshot(unexpected_init).await.unwrap(),
+                &replacement
+            ));
+            tracked.write().await.publish(expected.clone());
+        })
+        .await;
     });
 
     let mut group = criterion.benchmark_group("provider_resolve");
-    group.bench_function("immutable_warm", |b| {
-        b.to_async(&runtime).iter(|| async {
-            drop(black_box(
-                black_box(&immutable)
-                    .resolve_snapshot(unexpected_init)
-                    .await,
-            ));
+    for (name, resources) in [("immutable_warm", immutable), ("managed_warm", managed)] {
+        group.bench_function(name, |bench| {
+            bench.iter_custom(|iterations| {
+                runtime.block_on(__run_daemon_resources_scope(resources.clone(), || async {
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        drop(black_box(
+                            resolve_provider_snapshot(unexpected_init).await.unwrap(),
+                        ));
+                    }
+                    start.elapsed()
+                }))
+            });
         });
-    });
-    group.bench_function("managed_warm", |b| {
-        b.to_async(&runtime).iter(|| async {
-            drop(black_box(
-                black_box(&managed).resolve_snapshot(unexpected_init).await,
-            ));
-        });
-    });
-    group.bench_function("arc_clone_drop_reference", |b| {
-        b.to_async(&runtime).iter(|| async {
+    }
+    group.bench_function("arc_clone_drop_reference", |bench| {
+        bench.to_async(&runtime).iter(|| async {
             drop(black_box(Arc::clone(black_box(&expected))));
         });
     });

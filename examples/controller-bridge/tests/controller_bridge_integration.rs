@@ -1,5 +1,8 @@
 //! Integration tests for the Controller Bridge example.
 
+#[path = "../../../service-daemon/tests/support/provider_context.rs"]
+mod provider_context;
+
 use example_controller_bridge as _;
 use example_controller_bridge::adapter::connection::{
     ConnectionHandle, ConnectionState, DeviceCommand, DeviceConnection, DeviceEvent, DeviceReply,
@@ -10,28 +13,13 @@ use example_controller_bridge::models::controller::{
 };
 use example_controller_bridge::providers::ControllerCommandQueue;
 use example_controller_bridge::services::controller::{
-    controller_event_stats_snapshot, reset_controller_event_stats, send_controller_command,
-    send_controller_command_with_timeout,
+    ControllerEventStatsSnapshot, send_controller_command, send_controller_command_with_timeout,
 };
 use service_daemon::{RestartPolicy, ServiceDaemon};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 static INTEGRATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-async fn reset_shared_controller_state() -> anyhow::Result<()> {
-    reset_controller_event_stats().await?;
-    {
-        let lock = ControllerStatus::resolve_rwlock().await;
-        let mut guard = lock.write().await;
-        *guard = ControllerStatus::default();
-    }
-    ConnectionHandle::resolve()
-        .await
-        .replace_connection(DeviceConnection::scripted())
-        .await;
-    Ok(())
-}
 
 async fn wait_until<F, Fut>(
     description: &str,
@@ -58,7 +46,6 @@ where
 async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::Result<()> {
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     let _ = service_daemon::try_init_logging();
-    reset_shared_controller_state().await?;
 
     let daemon = ServiceDaemon::builder()
         .with_restart_policy(RestartPolicy::for_testing())
@@ -66,11 +53,18 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
     let cancel = daemon.cancel_token();
 
     daemon.run().await;
+    let stats_state = provider_context::published::<
+        service_daemon::RwLock<ControllerEventStatsSnapshot>,
+    >(&daemon)
+    .await;
+    let status_state =
+        provider_context::published::<service_daemon::RwLock<ControllerStatus>>(&daemon).await;
+    let connection = provider_context::published::<ConnectionHandle>(&daemon).await;
     wait_until(
         "completed controller script",
         Duration::from_secs(2),
         || async {
-            let stats = controller_event_stats_snapshot().await?;
+            let stats = stats_state.read().await.clone();
             Ok(stats.measurements == 3
                 && stats.interruptions == 1
                 && stats.recoveries == 1
@@ -83,8 +77,8 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
         "closed controller status watch",
         Duration::from_secs(2),
         || async {
-            let stats = controller_event_stats_snapshot().await?;
-            let status = ControllerStatus::resolve().await;
+            let stats = stats_state.read().await.clone();
+            let status = status_state.read().await.clone();
             let last_status = stats.last_status.as_ref();
             Ok(status.state == ConnectionState::Closed
                 && last_status.is_some_and(|snapshot| snapshot.state == ConnectionState::Closed))
@@ -95,7 +89,7 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
     cancel.cancel();
     daemon.wait().await?;
 
-    let stats = controller_event_stats_snapshot().await?;
+    let stats = stats_state.read().await.clone();
     assert_eq!(stats.measurements, 3);
     assert_eq!(stats.interruptions, 1);
     assert_eq!(stats.recoveries, 1);
@@ -109,14 +103,11 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
         "watch trigger should observe the final closed status snapshot"
     );
 
-    let snapshot = ControllerStatus::resolve().await;
+    let snapshot = status_state.read().await.clone();
     assert_eq!(snapshot.reconnects, 1);
     assert_eq!(snapshot.updated_count, 7);
     assert_eq!(snapshot.state, ConnectionState::Closed);
-    assert_eq!(
-        ConnectionHandle::resolve().await.state().await,
-        ConnectionState::Closed
-    );
+    assert_eq!(connection.state().await, ConnectionState::Closed);
 
     Ok(())
 }
@@ -125,21 +116,21 @@ async fn daemon_dispatches_full_controller_script_and_status_watch() -> anyhow::
 async fn command_queue_correlates_reply_through_daemon_topology() -> anyhow::Result<()> {
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     let _ = service_daemon::try_init_logging();
-    reset_shared_controller_state().await?;
-    ConnectionHandle::resolve()
-        .await
-        .replace_connection(DeviceConnection::new(Default::default()))
-        .await;
+    EMPTY_CONNECTION.store(true, std::sync::atomic::Ordering::SeqCst);
 
     let daemon = ServiceDaemon::builder()
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
     let cancel = daemon.cancel_token();
     daemon.run().await;
+    let stats_state = provider_context::published::<
+        service_daemon::RwLock<ControllerEventStatsSnapshot>,
+    >(&daemon)
+    .await;
 
-    let connection = ConnectionHandle::resolve().await;
+    let connection = provider_context::published::<ConnectionHandle>(&daemon).await;
     connection.connect().await;
-    let command_queue = ControllerCommandQueue::resolve().await;
+    let command_queue = provider_context::published::<ControllerCommandQueue>(&daemon).await;
     wait_until("command queue subscriber", Duration::from_secs(2), || {
         let command_queue = command_queue.clone();
         async move { Ok(command_queue.receiver_count() > 0) }
@@ -174,7 +165,7 @@ async fn command_queue_correlates_reply_through_daemon_topology() -> anyhow::Res
         }))
         .await;
     wait_until("command reply stat", Duration::from_secs(2), || async {
-        let stats = controller_event_stats_snapshot().await?;
+        let stats = stats_state.read().await.clone();
         Ok(stats.command_replies == 1)
     })
     .await?;
@@ -324,24 +315,50 @@ async fn connection_layer_handles_split_frames_and_reconnect_observability() -> 
 async fn repeated_daemon_runs_start_from_fresh_scripted_connection() -> anyhow::Result<()> {
     let _guard = INTEGRATION_TEST_LOCK.lock().await;
     for _ in 0..2 {
-        reset_shared_controller_state().await?;
         let daemon = ServiceDaemon::builder()
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         let cancel = daemon.cancel_token();
         daemon.run().await;
+        let stats_state = provider_context::published::<
+            service_daemon::RwLock<ControllerEventStatsSnapshot>,
+        >(&daemon)
+        .await;
         wait_until("completed repeated run", Duration::from_secs(2), || async {
-            let stats = controller_event_stats_snapshot().await?;
+            let stats = stats_state.read().await.clone();
             Ok(stats.completions == 1)
         })
         .await?;
         cancel.cancel();
         daemon.wait().await?;
 
-        let stats = controller_event_stats_snapshot().await?;
+        let stats = stats_state.read().await.clone();
         assert_eq!(stats.measurements, 3);
         assert_eq!(stats.completions, 1);
     }
 
+    Ok(())
+}
+
+static EMPTY_CONNECTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[service_daemon::service(priority = 255)]
+async fn publish_controller_resources(
+    connection: Arc<ConnectionHandle>,
+    stats: Arc<service_daemon::RwLock<ControllerEventStatsSnapshot>>,
+    status: Arc<service_daemon::RwLock<ControllerStatus>>,
+    queue: Arc<ControllerCommandQueue>,
+) -> anyhow::Result<()> {
+    if EMPTY_CONNECTION.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        connection
+            .replace_connection(DeviceConnection::new(Default::default()))
+            .await;
+    }
+    provider_context::publish(&connection);
+    provider_context::publish(&stats);
+    provider_context::publish(&status);
+    provider_context::publish(&queue);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

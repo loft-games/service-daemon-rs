@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
     ProviderDependencyChangeReason, ServiceDaemon, WatchableProvided, provider, service,
 };
@@ -8,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
 
-static EXTERNAL_ROOT_PROVIDER_INITS: AtomicUsize = AtomicUsize::new(0);
+static EXTERNAL_PEER_PROVIDER_INITS: AtomicUsize = AtomicUsize::new(0);
 static DAEMON_SHARED_PROVIDER_INITS: AtomicUsize = AtomicUsize::new(0);
 static DAEMON_SHARED_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 static DAEMON_SHARED_FIRST_VALUE: AtomicUsize = AtomicUsize::new(0);
@@ -39,25 +42,25 @@ static SIMULATION_RUNTIME_OVERRIDE_FIRST_VALUE: AtomicUsize = AtomicUsize::new(0
 #[cfg(feature = "simulation")]
 static SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
-static SIMULATION_FORK_ROOT_INITS: AtomicUsize = AtomicUsize::new(0);
+static SIMULATION_OVERRIDE_BOUNDARY_PEER_INITS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
-static SIMULATION_FORK_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+static SIMULATION_OVERRIDE_BOUNDARY_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
-static SIMULATION_FORK_FIRST_VALUE: AtomicUsize = AtomicUsize::new(0);
+static SIMULATION_OVERRIDE_BOUNDARY_FIRST_VALUE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
-static SIMULATION_FORK_SECOND_VALUE: AtomicUsize = AtomicUsize::new(0);
+static SIMULATION_OVERRIDE_BOUNDARY_SECOND_VALUE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
 static SIMULATION_LOCAL_VALUE_INITS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
 static SIMULATION_LOCAL_VALUE_LOCAL_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
-static SIMULATION_LOCAL_VALUE_ROOT_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
+static SIMULATION_LOCAL_VALUE_PEER_OBSERVATIONS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
 static SIMULATION_LOCAL_VALUE_FIRST_VALUE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
 static SIMULATION_LOCAL_VALUE_SECOND_VALUE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
-static SIMULATION_LOCAL_VALUE_ROOT_VALUE: AtomicUsize = AtomicUsize::new(0);
+static SIMULATION_LOCAL_VALUE_PEER_VALUE: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
 static SIMULATION_LOCAL_VALUE_MUTATIONS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(feature = "simulation")]
@@ -80,11 +83,11 @@ static SIMULATION_WATCH_EXTRA_FIRST_DEP_VALUE: AtomicUsize = AtomicUsize::new(0)
 static SIMULATION_WATCH_EXTRA_SECOND_DEP_VALUE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone)]
-pub struct ExternalRootProvider(pub usize);
+pub struct ExternalPeerProvider(pub usize);
 
 #[provider]
-async fn external_root_provider() -> ExternalRootProvider {
-    ExternalRootProvider(EXTERNAL_ROOT_PROVIDER_INITS.fetch_add(1, Ordering::SeqCst) + 1)
+async fn external_peer_provider() -> ExternalPeerProvider {
+    ExternalPeerProvider(EXTERNAL_PEER_PROVIDER_INITS.fetch_add(1, Ordering::SeqCst) + 1)
 }
 
 #[derive(Clone)]
@@ -121,6 +124,7 @@ async fn eager_seed_provider() -> EagerSeedProvider {
 
 #[service(tags = ["provider_scope_eager_seed_cache"])]
 async fn eager_seed_cache_service(provider: Arc<EagerSeedProvider>) -> anyhow::Result<()> {
+    assert!(Arc::ptr_eq(&provider, &EagerSeedProvider::resolve().await));
     EAGER_SEED_SERVICE_VALUE.store(provider.0, Ordering::SeqCst);
     service_daemon::done();
     while !service_daemon::is_shutdown() {
@@ -226,24 +230,26 @@ async fn simulation_runtime_override_service(
 
 #[cfg(feature = "simulation")]
 #[derive(Clone)]
-pub struct SimulationForkBoundaryProvider(pub usize);
+pub struct SimulationOverrideBoundaryProvider(pub usize);
 
 #[cfg(feature = "simulation")]
 #[provider]
-async fn simulation_fork_boundary_provider() -> SimulationForkBoundaryProvider {
-    SimulationForkBoundaryProvider(SIMULATION_FORK_ROOT_INITS.fetch_add(1, Ordering::SeqCst) + 1)
+async fn simulation_override_boundary_provider() -> SimulationOverrideBoundaryProvider {
+    SimulationOverrideBoundaryProvider(
+        SIMULATION_OVERRIDE_BOUNDARY_PEER_INITS.fetch_add(1, Ordering::SeqCst) + 1,
+    )
 }
 
 #[cfg(feature = "simulation")]
-#[service(tags = ["simulation_fork_boundary"])]
-async fn simulation_fork_boundary_service(
-    provider: Arc<SimulationForkBoundaryProvider>,
+#[service(tags = ["simulation_override_boundary"])]
+async fn simulation_override_boundary_service(
+    provider: Arc<SimulationOverrideBoundaryProvider>,
 ) -> anyhow::Result<()> {
-    let observation = SIMULATION_FORK_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
+    let observation = SIMULATION_OVERRIDE_BOUNDARY_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
     if observation == 0 {
-        SIMULATION_FORK_FIRST_VALUE.store(provider.0, Ordering::SeqCst);
+        SIMULATION_OVERRIDE_BOUNDARY_FIRST_VALUE.store(provider.0, Ordering::SeqCst);
     } else if observation == 1 {
-        SIMULATION_FORK_SECOND_VALUE.store(provider.0, Ordering::SeqCst);
+        SIMULATION_OVERRIDE_BOUNDARY_SECOND_VALUE.store(provider.0, Ordering::SeqCst);
     }
 
     service_daemon::done();
@@ -277,8 +283,8 @@ async fn simulation_local_value_service(
             SIMULATION_LOCAL_VALUE_SECOND_VALUE.store(value, Ordering::SeqCst);
         }
     } else {
-        SIMULATION_LOCAL_VALUE_ROOT_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
-        SIMULATION_LOCAL_VALUE_ROOT_VALUE.store(value, Ordering::SeqCst);
+        SIMULATION_LOCAL_VALUE_PEER_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
+        SIMULATION_LOCAL_VALUE_PEER_VALUE.store(value, Ordering::SeqCst);
     }
 
     service_daemon::done();
@@ -411,19 +417,22 @@ async fn run_tagged_daemon_until_observed(tag: &'static str, observed: &AtomicUs
 }
 
 #[tokio::test]
-async fn external_provider_resolve_uses_one_root_static_cache() -> anyhow::Result<()> {
-    let first = ExternalRootProvider::resolve().await;
-    let second = ExternalRootProvider::resolve().await;
+async fn daemon_provider_resolutions_share_one_local_cache() -> anyhow::Result<()> {
+    provider_context::run(async move {
+        let first = ExternalPeerProvider::resolve().await;
+        let second = ExternalPeerProvider::resolve().await;
 
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(first.0, 1);
-    assert_eq!(second.0, 1);
-    assert_eq!(EXTERNAL_ROOT_PROVIDER_INITS.load(Ordering::SeqCst), 1);
-    Ok(())
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.0, 1);
+        assert_eq!(second.0, 1);
+        assert_eq!(EXTERNAL_PEER_PROVIDER_INITS.load(Ordering::SeqCst), 1);
+        Ok(())
+    })
+    .await
 }
 
 #[tokio::test]
-async fn separate_daemons_share_root_provider_cache_by_default() {
+async fn separate_daemons_isolate_provider_cache_by_default() {
     run_tagged_daemon_until_observed(
         "provider_scope_daemon_static_cache",
         &DAEMON_SHARED_OBSERVATIONS,
@@ -437,9 +446,9 @@ async fn separate_daemons_share_root_provider_cache_by_default() {
     )
     .await;
 
-    assert_eq!(DAEMON_SHARED_PROVIDER_INITS.load(Ordering::SeqCst), 1);
+    assert_eq!(DAEMON_SHARED_PROVIDER_INITS.load(Ordering::SeqCst), 2);
     assert_eq!(DAEMON_SHARED_FIRST_VALUE.load(Ordering::SeqCst), 1);
-    assert_eq!(DAEMON_SHARED_SECOND_VALUE.load(Ordering::SeqCst), 1);
+    assert_eq!(DAEMON_SHARED_SECOND_VALUE.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -453,28 +462,38 @@ async fn eager_provider_initialization_seeds_the_generated_provider_cache() {
 
     assert_eq!(EAGER_SEED_PROVIDER_INITS.load(Ordering::SeqCst), 1);
     assert_eq!(EAGER_SEED_SERVICE_VALUE.load(Ordering::SeqCst), 1);
+    run_tagged_daemon_until_observed(
+        "provider_scope_eager_seed_cache",
+        &EAGER_SEED_SERVICE_VALUE,
+        2,
+    )
+    .await;
+    assert_eq!(EAGER_SEED_PROVIDER_INITS.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn watchable_provider_dependency_watch_tracks_root_slot() -> anyhow::Result<()> {
-    let lock = WatchCharacterizationProvider::resolve_rwlock().await;
-    let watch = WatchCharacterizationProvider::watch_dependency();
-    let changed = tokio::spawn(async move { watch.changed().await });
-    tokio::time::sleep(Duration::from_millis(50)).await;
+async fn watchable_provider_dependency_watch_tracks_daemon_slot() -> anyhow::Result<()> {
+    provider_context::run(async move {
+        let lock = WatchCharacterizationProvider::resolve_rwlock().await;
+        let watch = WatchCharacterizationProvider::watch_dependency();
+        let changed = tokio::spawn(async move { watch.changed().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-    {
-        let mut guard = lock.write().await;
-        guard.0 = 2;
-    }
+        {
+            let mut guard = lock.write().await;
+            guard.0 = 2;
+        }
 
-    let change = timeout(Duration::from_secs(5), changed).await??;
-    assert_eq!(change.reason, ProviderDependencyChangeReason::Value);
-    Ok(())
+        let change = timeout(Duration::from_secs(5), changed).await??;
+        assert_eq!(change.reason, ProviderDependencyChangeReason::Value);
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
-async fn simulation_daemons_share_root_provider_cache_by_default() {
+async fn simulation_daemons_isolate_provider_cache_by_default() {
     use service_daemon::{MockContext, Registry};
 
     async fn run_simulation_until_observed(count: usize) {
@@ -503,194 +522,212 @@ async fn simulation_daemons_share_root_provider_cache_by_default() {
     run_simulation_until_observed(1).await;
     run_simulation_until_observed(2).await;
 
-    assert_eq!(SIMULATION_PROVIDER_INITS.load(Ordering::SeqCst), 1);
+    assert_eq!(SIMULATION_PROVIDER_INITS.load(Ordering::SeqCst), 2);
     assert_eq!(SIMULATION_PROVIDER_FIRST_VALUE.load(Ordering::SeqCst), 1);
-    assert_eq!(SIMULATION_PROVIDER_SECOND_VALUE.load(Ordering::SeqCst), 1);
+    assert_eq!(SIMULATION_PROVIDER_SECOND_VALUE.load(Ordering::SeqCst), 2);
 }
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
 async fn simulation_pre_run_provider_override_is_daemon_local() -> anyhow::Result<()> {
-    use service_daemon::{MockContext, Registry};
+    provider_context::run(async move {
+        use service_daemon::{MockContext, Registry};
 
-    SIMULATION_PRE_RUN_OVERRIDE_INITS.store(0, Ordering::SeqCst);
-    SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS.store(0, Ordering::SeqCst);
-    SIMULATION_PRE_RUN_OVERRIDE_VALUE.store(0, Ordering::SeqCst);
+        SIMULATION_PRE_RUN_OVERRIDE_INITS.store(0, Ordering::SeqCst);
+        SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS.store(0, Ordering::SeqCst);
+        SIMULATION_PRE_RUN_OVERRIDE_VALUE.store(0, Ordering::SeqCst);
 
-    let simulation = MockContext::builder()
-        .with_logging(false)
-        .with_provider_override(SimulationPreRunOverrideProvider(42))
-        .with_registry(
-            Registry::builder()
-                .with_tag("simulation_pre_run_provider_override")
-                .build(),
+        let simulation = MockContext::builder()
+            .with_logging(false)
+            .with_provider_override(SimulationPreRunOverrideProvider(42))
+            .with_registry(
+                Registry::builder()
+                    .with_tag("simulation_pre_run_provider_override")
+                    .build(),
+            )
+            .build();
+
+        simulation
+            .run_for_duration(Duration::from_millis(200))
+            .await
+            .expect("simulation daemon should run for duration");
+
+        wait_for_observations(
+            "pre-run override service should report observation before timeout",
+            &SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS,
+            1,
         )
-        .build();
+        .await;
 
-    simulation
-        .run_for_duration(Duration::from_millis(200))
-        .await
-        .expect("simulation daemon should run for duration");
+        assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 42);
+        assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_INITS.load(Ordering::SeqCst), 0);
 
-    wait_for_observations(
-        "pre-run override service should report observation before timeout",
-        &SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS,
-        1,
-    )
-    .await;
+        let peer = SimulationPreRunOverrideProvider::resolve().await;
+        assert_eq!(peer.0, 1);
+        assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_INITS.load(Ordering::SeqCst), 1);
 
-    assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 42);
-    assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_INITS.load(Ordering::SeqCst), 0);
-
-    let root = SimulationPreRunOverrideProvider::resolve().await;
-    assert_eq!(root.0, 1);
-    assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_INITS.load(Ordering::SeqCst), 1);
-
-    let simulation = MockContext::builder()
-        .with_logging(false)
-        .with_registry(
-            Registry::builder()
-                .with_tag("simulation_pre_run_provider_override")
-                .build(),
+        let simulation = MockContext::builder()
+            .with_logging(false)
+            .with_registry(
+                Registry::builder()
+                    .with_tag("simulation_pre_run_provider_override")
+                    .build(),
+            )
+            .build();
+        simulation
+            .run_for_duration(Duration::from_millis(200))
+            .await
+            .expect("second simulation daemon should run for duration");
+        wait_for_observations(
+            "second simulation daemon should report observation before timeout",
+            &SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS,
+            2,
         )
-        .build();
-    simulation
-        .run_for_duration(Duration::from_millis(200))
-        .await
-        .expect("second simulation daemon should run for duration");
-    wait_for_observations(
-        "second simulation daemon should report observation before timeout",
-        &SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS,
-        2,
-    )
-    .await;
-    assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 1);
+        .await;
+        assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 2);
 
-    run_tagged_daemon_until_observed(
-        "simulation_pre_run_provider_override",
-        &SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS,
-        3,
-    )
-    .await;
-    assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 1);
-    Ok(())
+        run_tagged_daemon_until_observed(
+            "simulation_pre_run_provider_override",
+            &SIMULATION_PRE_RUN_OVERRIDE_OBSERVATIONS,
+            3,
+        )
+        .await;
+        assert_eq!(SIMULATION_PRE_RUN_OVERRIDE_VALUE.load(Ordering::SeqCst), 3);
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
 async fn simulation_runtime_provider_override_reloads_dependent_service() -> anyhow::Result<()> {
-    use service_daemon::{MockContext, Registry};
+    provider_context::run(async move {
+        use service_daemon::{MockContext, Registry};
 
-    SIMULATION_RUNTIME_OVERRIDE_INITS.store(0, Ordering::SeqCst);
-    SIMULATION_RUNTIME_OVERRIDE_OBSERVATIONS.store(0, Ordering::SeqCst);
-    SIMULATION_RUNTIME_OVERRIDE_FIRST_VALUE.store(0, Ordering::SeqCst);
-    SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE.store(0, Ordering::SeqCst);
+        SIMULATION_RUNTIME_OVERRIDE_INITS.store(0, Ordering::SeqCst);
+        SIMULATION_RUNTIME_OVERRIDE_OBSERVATIONS.store(0, Ordering::SeqCst);
+        SIMULATION_RUNTIME_OVERRIDE_FIRST_VALUE.store(0, Ordering::SeqCst);
+        SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE.store(0, Ordering::SeqCst);
 
-    let simulation = MockContext::builder()
-        .with_logging(false)
-        .with_registry(
-            Registry::builder()
-                .with_tag("simulation_runtime_provider_override")
-                .build(),
+        let simulation = MockContext::builder()
+            .with_logging(false)
+            .with_registry(
+                Registry::builder()
+                    .with_tag("simulation_runtime_provider_override")
+                    .build(),
+            )
+            .build();
+        let cancel = simulation.cancel_token();
+        let runner = simulation.clone();
+        let daemon_task = tokio::spawn(async move {
+            runner.run().await;
+            runner.wait().await.expect("daemon wait should succeed");
+        });
+
+        wait_for_observations(
+            "runtime override service should report first observation before timeout",
+            &SIMULATION_RUNTIME_OVERRIDE_OBSERVATIONS,
+            1,
         )
-        .build();
-    let cancel = simulation.cancel_token();
-    let runner = simulation.clone();
-    let daemon_task = tokio::spawn(async move {
-        runner.run().await;
-        runner.wait().await.expect("daemon wait should succeed");
-    });
+        .await;
+        simulation.override_provider(SimulationRuntimeOverrideProvider(42));
 
-    wait_for_observations(
-        "runtime override service should report first observation before timeout",
-        &SIMULATION_RUNTIME_OVERRIDE_OBSERVATIONS,
-        1,
-    )
-    .await;
-    simulation.override_provider(SimulationRuntimeOverrideProvider(42));
+        wait_for_observations(
+            "runtime override should trigger reload and second observation",
+            &SIMULATION_RUNTIME_OVERRIDE_OBSERVATIONS,
+            2,
+        )
+        .await;
 
-    wait_for_observations(
-        "runtime override should trigger reload and second observation",
-        &SIMULATION_RUNTIME_OVERRIDE_OBSERVATIONS,
-        2,
-    )
-    .await;
+        cancel.cancel();
+        daemon_task
+            .await
+            .expect("daemon task should join after cancellation");
 
-    cancel.cancel();
-    daemon_task
-        .await
-        .expect("daemon task should join after cancellation");
+        assert_eq!(
+            SIMULATION_RUNTIME_OVERRIDE_FIRST_VALUE.load(Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE.load(Ordering::SeqCst),
+            42
+        );
+        assert_eq!(SIMULATION_RUNTIME_OVERRIDE_INITS.load(Ordering::SeqCst), 1);
 
-    assert_eq!(
-        SIMULATION_RUNTIME_OVERRIDE_FIRST_VALUE.load(Ordering::SeqCst),
-        1
-    );
-    assert_eq!(
-        SIMULATION_RUNTIME_OVERRIDE_SECOND_VALUE.load(Ordering::SeqCst),
-        42
-    );
-    assert_eq!(SIMULATION_RUNTIME_OVERRIDE_INITS.load(Ordering::SeqCst), 1);
-
-    let root = SimulationRuntimeOverrideProvider::resolve().await;
-    assert_eq!(root.0, 1);
-    Ok(())
+        let other = SimulationRuntimeOverrideProvider::resolve().await;
+        assert_eq!(other.0, 2);
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(feature = "simulation")]
 #[tokio::test]
-async fn root_value_mutation_does_not_reload_daemon_after_local_override() -> anyhow::Result<()> {
-    use service_daemon::{MockContext, Registry};
+async fn other_daemon_value_mutation_does_not_reload_local_override() -> anyhow::Result<()> {
+    provider_context::run(async move {
+        use service_daemon::{MockContext, Registry};
 
-    SIMULATION_FORK_ROOT_INITS.store(0, Ordering::SeqCst);
-    SIMULATION_FORK_OBSERVATIONS.store(0, Ordering::SeqCst);
-    SIMULATION_FORK_FIRST_VALUE.store(0, Ordering::SeqCst);
-    SIMULATION_FORK_SECOND_VALUE.store(0, Ordering::SeqCst);
+        SIMULATION_OVERRIDE_BOUNDARY_PEER_INITS.store(0, Ordering::SeqCst);
+        SIMULATION_OVERRIDE_BOUNDARY_OBSERVATIONS.store(0, Ordering::SeqCst);
+        SIMULATION_OVERRIDE_BOUNDARY_FIRST_VALUE.store(0, Ordering::SeqCst);
+        SIMULATION_OVERRIDE_BOUNDARY_SECOND_VALUE.store(0, Ordering::SeqCst);
 
-    let simulation = MockContext::builder()
-        .with_logging(false)
-        .with_provider_override(SimulationForkBoundaryProvider(42))
-        .with_registry(
-            Registry::builder()
-                .with_tag("simulation_fork_boundary")
-                .build(),
+        let simulation = MockContext::builder()
+            .with_logging(false)
+            .with_provider_override(SimulationOverrideBoundaryProvider(42))
+            .with_registry(
+                Registry::builder()
+                    .with_tag("simulation_override_boundary")
+                    .build(),
+            )
+            .build();
+        let cancel = simulation.cancel_token();
+        let runner = simulation.clone();
+        let daemon_task = tokio::spawn(async move {
+            runner.run().await;
+            runner.wait().await.expect("daemon wait should succeed");
+        });
+
+        wait_for_observations(
+            "local override service should report first observation",
+            &SIMULATION_OVERRIDE_BOUNDARY_OBSERVATIONS,
+            1,
         )
-        .build();
-    let cancel = simulation.cancel_token();
-    let runner = simulation.clone();
-    let daemon_task = tokio::spawn(async move {
-        runner.run().await;
-        runner.wait().await.expect("daemon wait should succeed");
-    });
+        .await;
 
-    wait_for_observations(
-        "local override service should report first observation",
-        &SIMULATION_FORK_OBSERVATIONS,
-        1,
-    )
-    .await;
+        {
+            let lock = SimulationOverrideBoundaryProvider::resolve_rwlock().await;
+            let mut guard = lock.write().await;
+            guard.0 = 7;
+        }
 
-    {
-        let lock = SimulationForkBoundaryProvider::resolve_rwlock().await;
-        let mut guard = lock.write().await;
-        guard.0 = 7;
-    }
+        assert_observations_hold(
+            "peer mutation should not reload daemon after local override",
+            &SIMULATION_OVERRIDE_BOUNDARY_OBSERVATIONS,
+            1,
+            Duration::from_millis(300),
+        )
+        .await;
+        cancel.cancel();
+        daemon_task
+            .await
+            .expect("daemon task should join after cancellation");
 
-    assert_observations_hold(
-        "root mutation should not reload daemon after local override",
-        &SIMULATION_FORK_OBSERVATIONS,
-        1,
-        Duration::from_millis(300),
-    )
-    .await;
-    cancel.cancel();
-    daemon_task
-        .await
-        .expect("daemon task should join after cancellation");
-
-    assert_eq!(SIMULATION_FORK_FIRST_VALUE.load(Ordering::SeqCst), 42);
-    assert_eq!(SIMULATION_FORK_SECOND_VALUE.load(Ordering::SeqCst), 0);
-    assert_eq!(SIMULATION_FORK_OBSERVATIONS.load(Ordering::SeqCst), 1);
-    Ok(())
+        assert_eq!(
+            SIMULATION_OVERRIDE_BOUNDARY_FIRST_VALUE.load(Ordering::SeqCst),
+            42
+        );
+        assert_eq!(
+            SIMULATION_OVERRIDE_BOUNDARY_SECOND_VALUE.load(Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            SIMULATION_OVERRIDE_BOUNDARY_OBSERVATIONS.load(Ordering::SeqCst),
+            1
+        );
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(feature = "simulation")]
@@ -700,10 +737,10 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
 
     SIMULATION_LOCAL_VALUE_INITS.store(0, Ordering::SeqCst);
     SIMULATION_LOCAL_VALUE_LOCAL_OBSERVATIONS.store(0, Ordering::SeqCst);
-    SIMULATION_LOCAL_VALUE_ROOT_OBSERVATIONS.store(0, Ordering::SeqCst);
+    SIMULATION_LOCAL_VALUE_PEER_OBSERVATIONS.store(0, Ordering::SeqCst);
     SIMULATION_LOCAL_VALUE_FIRST_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_LOCAL_VALUE_SECOND_VALUE.store(0, Ordering::SeqCst);
-    SIMULATION_LOCAL_VALUE_ROOT_VALUE.store(0, Ordering::SeqCst);
+    SIMULATION_LOCAL_VALUE_PEER_VALUE.store(0, Ordering::SeqCst);
     SIMULATION_LOCAL_VALUE_MUTATIONS.store(0, Ordering::SeqCst);
 
     let local_simulation = MockContext::builder()
@@ -725,7 +762,7 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
             .expect("local daemon wait should succeed");
     });
 
-    let root_simulation = MockContext::builder()
+    let peer_simulation = MockContext::builder()
         .with_logging(false)
         .with_registry(
             Registry::builder()
@@ -733,21 +770,21 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
                 .build(),
         )
         .build();
-    let root_cancel = root_simulation.cancel_token();
-    let root_runner = root_simulation.clone();
-    let root_task = tokio::spawn(async move {
-        root_runner.run().await;
-        root_runner
+    let peer_cancel = peer_simulation.cancel_token();
+    let peer_runner = peer_simulation.clone();
+    let peer_task = tokio::spawn(async move {
+        peer_runner.run().await;
+        peer_runner
             .wait()
             .await
-            .expect("root daemon wait should succeed");
+            .expect("peer daemon wait should succeed");
     });
 
     wait_until(
-        "both local and root daemons should report first observation",
+        "both local and peer daemons should report first observation",
         || {
             SIMULATION_LOCAL_VALUE_LOCAL_OBSERVATIONS.load(Ordering::SeqCst) >= 1
-                && SIMULATION_LOCAL_VALUE_ROOT_OBSERVATIONS.load(Ordering::SeqCst) >= 1
+                && SIMULATION_LOCAL_VALUE_PEER_OBSERVATIONS.load(Ordering::SeqCst) >= 1
         },
     )
     .await;
@@ -759,21 +796,21 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
     )
     .await;
     assert_observations_hold(
-        "local mutation should not reload the root daemon",
-        &SIMULATION_LOCAL_VALUE_ROOT_OBSERVATIONS,
+        "local mutation should not reload the peer daemon",
+        &SIMULATION_LOCAL_VALUE_PEER_OBSERVATIONS,
         1,
         Duration::from_millis(200),
     )
     .await;
 
     local_cancel.cancel();
-    root_cancel.cancel();
+    peer_cancel.cancel();
     local_task
         .await
         .expect("local daemon task should join after cancellation");
-    root_task
+    peer_task
         .await
-        .expect("root daemon task should join after cancellation");
+        .expect("peer daemon task should join after cancellation");
 
     assert_eq!(
         SIMULATION_LOCAL_VALUE_FIRST_VALUE.load(Ordering::SeqCst),
@@ -783,9 +820,9 @@ async fn daemon_local_value_mutation_reloads_only_that_daemon() {
         SIMULATION_LOCAL_VALUE_SECOND_VALUE.load(Ordering::SeqCst),
         43
     );
-    assert_eq!(SIMULATION_LOCAL_VALUE_ROOT_VALUE.load(Ordering::SeqCst), 1);
+    assert_eq!(SIMULATION_LOCAL_VALUE_PEER_VALUE.load(Ordering::SeqCst), 1);
     assert_eq!(
-        SIMULATION_LOCAL_VALUE_ROOT_OBSERVATIONS.load(Ordering::SeqCst),
+        SIMULATION_LOCAL_VALUE_PEER_OBSERVATIONS.load(Ordering::SeqCst),
         1
     );
 }
@@ -816,7 +853,7 @@ async fn watch_trigger_target_resolution_uses_daemon_local_override() {
     });
 
     wait_for_observations(
-        "watch trigger should report root snapshot",
+        "watch trigger should report peer snapshot",
         &SIMULATION_WATCH_TARGET_OBSERVATIONS,
         1,
     )
@@ -873,7 +910,7 @@ async fn watch_trigger_extra_dependency_resolution_uses_daemon_local_override() 
     });
 
     wait_for_observations(
-        "watch trigger should report root dependency",
+        "watch trigger should report peer dependency",
         &SIMULATION_WATCH_EXTRA_OBSERVATIONS,
         1,
     )

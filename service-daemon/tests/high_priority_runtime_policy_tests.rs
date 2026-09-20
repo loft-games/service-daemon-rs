@@ -1,5 +1,8 @@
 #![cfg(feature = "high-priority")]
 
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
     DiagnosticHighPriorityPlacementDecisionKind, Registry, SchedulingAdvisoryProfile,
     ServiceDaemon, ServiceHandle, ServiceStatus, done, provider, service, service_handle,
@@ -403,7 +406,7 @@ async fn high_priority_policy_rollover_replaces_existing_generation_without_fail
 mod timeout_reload {
     use super::*;
     use futures::FutureExt;
-    use service_daemon::{DaemonInstanceHandle, ManagedProvided, ServiceInstanceId};
+    use service_daemon::{DaemonInstanceHandle, ServiceInstanceId};
     use std::collections::BTreeMap;
     use std::panic::AssertUnwindSafe;
     use std::sync::{Arc, Once};
@@ -428,6 +431,8 @@ mod timeout_reload {
 
     #[service(tags = ["__high_priority_timeout_reload__"], scheduling = HighPriority)]
     async fn timeout_reload_worker(_config: Arc<TimeoutReloadConfig>) -> anyhow::Result<()> {
+        let lock = TimeoutReloadConfig::resolve_rwlock().await;
+        provider_context::publish(&lock);
         let generation = STARTS.fetch_add(1, Ordering::SeqCst) + 1;
         done();
         loop {
@@ -580,8 +585,7 @@ mod timeout_reload {
                 "a nominal alternative shard must exist so capacity cannot mask an unintended rollover");
 
             {
-                let config = <TimeoutReloadConfig as ManagedProvided>::resolve_rwlock().await
-                    .expect("resolve external reload config");
+                let config = provider_context::published::<service_daemon::RwLock<TimeoutReloadConfig>>(&daemon).await;
                 config.write().await.revision += 1;
             }
             wait_until(|| STARTS.load(Ordering::SeqCst) >= 3,

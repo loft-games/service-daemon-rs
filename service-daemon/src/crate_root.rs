@@ -79,17 +79,14 @@ pub mod __private {
         with_provider_runtime_phase,
     };
     pub use crate::core::provider_executor::{
-        prepare_provider_params, prepare_provider_type, provider_contract_cache_scope,
+        prepare_provider_params, prepare_provider_type,
         resolve_provider_contract, resolve_provider_contract_managed,
     };
     pub use crate::core::provider_scope::{
-        ProviderCacheScope, missing_prepared_provider_error, provider_changed,
-        provider_dependency_watch, ready_provider_mutex_with_scope,
-        ready_provider_rwlock_with_scope, ready_provider_snapshot_with_scope,
-        resolve_provider_managed, resolve_provider_managed_with_scope, resolve_provider_mutex,
-        resolve_provider_mutex_with_scope, resolve_provider_rwlock,
-        resolve_provider_rwlock_with_scope, resolve_provider_snapshot,
-        resolve_provider_snapshot_with_scope,
+        missing_prepared_provider_error, provider_dependency_watch,
+        ready_provider_mutex, ready_provider_rwlock, ready_provider_snapshot,
+        require_provider_context, resolve_provider_managed, resolve_provider_mutex,
+        resolve_provider_rwlock, resolve_provider_snapshot,
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{

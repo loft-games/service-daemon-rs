@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
     DiagnosticRestartDecisionKind, Registry, RestartPolicy, ServiceDaemon, ServiceStatus, provider,
     service,
@@ -244,9 +247,8 @@ async fn test_dependency_reload_transitions_through_need_reload_and_restoring() 
     .await;
 
     {
-        let lock = <ReloadConfig as service_daemon::ManagedProvided>::resolve_rwlock()
-            .await
-            .expect("reload config should resolve");
+        let lock =
+            provider_context::published::<service_daemon::RwLock<ReloadConfig>>(&daemon).await;
         let mut guard = lock.write().await;
         guard.version += 1;
     }
@@ -334,9 +336,10 @@ async fn test_high_priority_dependency_reload_crosses_body_lane() -> anyhow::Res
     .await;
 
     {
-        let lock = <HighPriorityReloadConfig as service_daemon::ManagedProvided>::resolve_rwlock()
-            .await
-            .expect("high-priority reload config should resolve");
+        let lock = provider_context::published::<service_daemon::RwLock<HighPriorityReloadConfig>>(
+            &daemon,
+        )
+        .await;
         let mut guard = lock.write().await;
         guard.version += 1;
     }
@@ -411,9 +414,9 @@ async fn test_isolated_dependency_reload_crosses_generation_bridge() -> anyhow::
     .await;
 
     {
-        let lock = <IsolatedReloadConfig as service_daemon::ManagedProvided>::resolve_rwlock()
-            .await
-            .expect("isolated reload config should resolve");
+        let lock =
+            provider_context::published::<service_daemon::RwLock<IsolatedReloadConfig>>(&daemon)
+                .await;
         let mut guard = lock.write().await;
         guard.version += 1;
     }
@@ -488,9 +491,8 @@ async fn write_lock_without_mutation_does_not_trigger_reload() -> anyhow::Result
     .await;
 
     {
-        let lock = <NoopReloadConfig as service_daemon::ManagedProvided>::resolve_rwlock()
-            .await
-            .expect("noop reload config should resolve");
+        let lock =
+            provider_context::published::<service_daemon::RwLock<NoopReloadConfig>>(&daemon).await;
         let guard = lock.write().await;
         let _version = guard.version;
     }
@@ -527,5 +529,46 @@ async fn write_lock_without_mutation_does_not_trigger_reload() -> anyhow::Result
         "no-op write lock should not start a second generation"
     );
 
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_reload_contract__"])]
+async fn publish_reloadconfig(
+    value: Arc<service_daemon::RwLock<ReloadConfig>>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[cfg(feature = "high-priority")]
+#[service_daemon::service(tags = ["__test_high_priority_reload_contract__"])]
+async fn publish_highpriorityreloadconfig(
+    value: Arc<service_daemon::RwLock<HighPriorityReloadConfig>>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_isolated_reload_contract__"])]
+async fn publish_isolatedreloadconfig(
+    value: Arc<service_daemon::RwLock<IsolatedReloadConfig>>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_noop_reload_contract__"])]
+async fn publish_noopreloadconfig(
+    value: Arc<service_daemon::RwLock<NoopReloadConfig>>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

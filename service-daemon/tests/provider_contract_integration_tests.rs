@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
     ProviderError, ProviderInitError, Registry, RestartPolicy, ServiceDaemon, done, provider,
     provider_contract, provider_impl, service, service_handle,
@@ -38,11 +41,14 @@ async fn high_priority_contract() -> PriorityContract {
 
 #[tokio::test]
 async fn provider_contract_uses_highest_priority_candidate() {
-    let value = PriorityContract::resolve()
-        .await
-        .expect("contract should resolve");
+    provider_context::run(async move {
+        let value = PriorityContract::resolve()
+            .await
+            .expect("contract should resolve");
 
-    assert_eq!(value.0, "high");
+        assert_eq!(value.0, "high");
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,12 +72,15 @@ async fn available_fallback_contract() -> FallbackContract {
 
 #[tokio::test]
 async fn provider_contract_advances_after_unavailable_candidate() {
-    let value = FallbackContract::resolve()
-        .await
-        .expect("fallback contract should resolve");
+    provider_context::run(async move {
+        let value = FallbackContract::resolve()
+            .await
+            .expect("fallback contract should resolve");
 
-    assert_eq!(value.0, "fallback");
-    assert_eq!(FALLBACK_UNAVAILABLE_CALLS.load(Ordering::SeqCst), 1);
+        assert_eq!(value.0, "fallback");
+        assert_eq!(FALLBACK_UNAVAILABLE_CALLS.load(Ordering::SeqCst), 1);
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,16 +104,20 @@ async fn timeout_fallback_contract() -> TimeoutFallbackContract {
 
 #[tokio::test]
 async fn provider_contract_advances_after_candidate_retry_timeout() {
-    let value = service_daemon::__private::resolve_provider_contract::<TimeoutFallbackContract>(
-        "TimeoutFallbackContract",
-        short_policy(),
-        CancellationToken::new(),
-    )
-    .await
-    .expect("timeout fallback contract should resolve");
+    provider_context::run(async move {
+        let value =
+            service_daemon::__private::resolve_provider_contract::<TimeoutFallbackContract>(
+                "TimeoutFallbackContract",
+                short_policy(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("timeout fallback contract should resolve");
 
-    assert_eq!(value.0, "after-timeout");
-    assert!(TIMEOUT_CANDIDATE_CALLS.load(Ordering::SeqCst) > 0);
+        assert_eq!(value.0, "after-timeout");
+        assert!(TIMEOUT_CANDIDATE_CALLS.load(Ordering::SeqCst) > 0);
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,29 +136,32 @@ async fn ignored_after_fatal_contract() -> FatalContract {
 
 #[tokio::test]
 async fn provider_contract_stops_after_fatal_candidate() {
-    let result = service_daemon::__private::resolve_provider_contract::<FatalContract>(
-        "FatalContract",
-        short_policy(),
-        CancellationToken::new(),
-    )
-    .await;
+    provider_context::run(async move {
+        let result = service_daemon::__private::resolve_provider_contract::<FatalContract>(
+            "FatalContract",
+            short_policy(),
+            CancellationToken::new(),
+        )
+        .await;
 
-    match result {
-        Err(failure) => {
-            assert_eq!(
-                failure.source(),
-                service_daemon::__private::ProviderInitSourceKind::UserProviderFatal
-            );
-            match failure.into_error() {
-                ProviderInitError::Fatal { provider, message } => {
-                    assert_eq!(provider, "fatal_candidate_contract");
-                    assert!(message.contains("bad local configuration"));
+        match result {
+            Err(failure) => {
+                assert_eq!(
+                    failure.source(),
+                    service_daemon::__private::ProviderInitSourceKind::UserProviderFatal
+                );
+                match failure.into_error() {
+                    ProviderInitError::Fatal { provider, message } => {
+                        assert_eq!(provider, "fatal_candidate_contract");
+                        assert!(message.contains("bad local configuration"));
+                    }
+                    other => panic!("expected fatal provider error, got {other:?}"),
                 }
-                other => panic!("expected fatal provider error, got {other:?}"),
             }
+            Ok(_) => panic!("fatal candidate should stop contract resolution"),
         }
-        Ok(_) => panic!("fatal candidate should stop contract resolution"),
-    }
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
@@ -159,18 +175,21 @@ async fn panic_contract_impl() -> PanicContract {
 
 #[tokio::test]
 async fn provider_contract_preserves_candidate_panic_source() {
-    let result = service_daemon::__private::resolve_provider_contract::<PanicContract>(
-        "PanicContract",
-        short_policy(),
-        CancellationToken::new(),
-    )
-    .await;
+    provider_context::run(async move {
+        let result = service_daemon::__private::resolve_provider_contract::<PanicContract>(
+            "PanicContract",
+            short_policy(),
+            CancellationToken::new(),
+        )
+        .await;
 
-    let failure = result.expect_err("panicking candidate should fail");
-    assert_eq!(
-        failure.source(),
-        service_daemon::__private::ProviderInitSourceKind::Panic
-    );
+        let failure = result.expect_err("panicking candidate should fail");
+        assert_eq!(
+            failure.source(),
+            service_daemon::__private::ProviderInitSourceKind::Panic
+        );
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
@@ -184,20 +203,23 @@ async fn cancellation_contract_impl() -> CancellationContract {
 
 #[tokio::test]
 async fn provider_contract_preserves_candidate_cancellation_source() {
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    let result = service_daemon::__private::resolve_provider_contract::<CancellationContract>(
-        "CancellationContract",
-        short_policy(),
-        cancel,
-    )
-    .await;
+    provider_context::run(async move {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = service_daemon::__private::resolve_provider_contract::<CancellationContract>(
+            "CancellationContract",
+            short_policy(),
+            cancel,
+        )
+        .await;
 
-    let failure = result.expect_err("cancelled candidate chain should fail");
-    assert_eq!(
-        failure.source(),
-        service_daemon::__private::ProviderInitSourceKind::Cancelled
-    );
+        let failure = result.expect_err("cancelled candidate chain should fail");
+        assert_eq!(
+            failure.source(),
+            service_daemon::__private::ProviderInitSourceKind::Cancelled
+        );
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,15 +228,18 @@ struct NoCandidateContract;
 
 #[tokio::test]
 async fn provider_contract_without_candidates_is_fatal() {
-    let result = NoCandidateContract::resolve().await;
+    provider_context::run(async move {
+        let result = NoCandidateContract::resolve().await;
 
-    match result {
-        Err(ProviderInitError::Fatal { provider, message }) => {
-            assert_eq!(provider, "NoCandidateContract");
-            assert!(message.contains("no registered #[provider_impl] candidates"));
+        match result {
+            Err(ProviderInitError::Fatal { provider, message }) => {
+                assert_eq!(provider, "NoCandidateContract");
+                assert!(message.contains("no registered #[provider_impl] candidates"));
+            }
+            other => panic!("expected no-candidate fatal, got {other:?}"),
         }
-        other => panic!("expected no-candidate fatal, got {other:?}"),
-    }
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,28 +253,31 @@ async fn managed_contract_impl() -> ManagedContract {
 
 #[tokio::test]
 async fn provider_contract_supports_managed_state_and_watch() {
-    let watch = <ManagedContract as service_daemon::WatchableProvided>::watch_dependency();
-    let lock = ManagedContract::resolve_rwlock()
-        .await
-        .expect("managed contract should resolve");
+    provider_context::run(async move {
+        let watch = <ManagedContract as service_daemon::WatchableProvided>::watch_dependency();
+        let lock = ManagedContract::resolve_rwlock()
+            .await
+            .expect("managed contract should resolve");
 
-    {
-        let mut guard = lock.write().await;
-        *guard = ManagedContract(11);
-    }
+        {
+            let mut guard = lock.write().await;
+            *guard = ManagedContract(11);
+        }
 
-    let change = tokio::time::timeout(Duration::from_secs(1), watch.changed())
-        .await
-        .expect("watch should observe managed contract mutation");
-    assert_eq!(
-        change.reason,
-        service_daemon::ProviderDependencyChangeReason::Value
-    );
+        let change = tokio::time::timeout(Duration::from_secs(1), watch.changed())
+            .await
+            .expect("watch should observe managed contract mutation");
+        assert_eq!(
+            change.reason,
+            service_daemon::ProviderDependencyChangeReason::Value
+        );
 
-    let snapshot = ManagedContract::resolve()
-        .await
-        .expect("managed contract snapshot should resolve");
-    assert_eq!(snapshot.0, 11);
+        let snapshot = ManagedContract::resolve()
+            .await
+            .expect("managed contract snapshot should resolve");
+        assert_eq!(snapshot.0, 11);
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,11 +300,14 @@ async fn dependency_parent_impl(leaf: Arc<DependencyLeaf>) -> DependencyParent {
 
 #[tokio::test]
 async fn provider_contract_candidate_dependencies_are_resolved() {
-    let value = DependencyParent::resolve()
-        .await
-        .expect("candidate dependency should resolve");
+    provider_context::run(async move {
+        let value = DependencyParent::resolve()
+            .await
+            .expect("candidate dependency should resolve");
 
-    assert_eq!(value.0, 7);
+        assert_eq!(value.0, 7);
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
@@ -310,12 +341,15 @@ async fn unselected_candidate_with_fatal_dependency(
 
 #[tokio::test]
 async fn provider_contract_does_not_initialize_unselected_candidate_dependencies() {
-    let value = LazyCandidateDependencyContract::resolve()
-        .await
-        .expect("higher-priority candidate should resolve without preparing fallback dependencies");
+    provider_context::run(async move {
+        let value = LazyCandidateDependencyContract::resolve().await.expect(
+            "higher-priority candidate should resolve without preparing fallback dependencies",
+        );
 
-    assert_eq!(value.0, "selected");
-    assert_eq!(UNSELECTED_FATAL_DEPENDENCY_INITS.load(Ordering::SeqCst), 0);
+        assert_eq!(value.0, "selected");
+        assert_eq!(UNSELECTED_FATAL_DEPENDENCY_INITS.load(Ordering::SeqCst), 0);
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
@@ -354,12 +388,15 @@ async fn deferred_fallback_with_dependency(
 
 #[tokio::test]
 async fn provider_contract_initializes_fallback_dependencies_only_after_unavailable() {
-    let value = DeferredFallbackContract::resolve()
-        .await
-        .expect("fallback candidate should resolve after primary is unavailable");
+    provider_context::run(async move {
+        let value = DeferredFallbackContract::resolve()
+            .await
+            .expect("fallback candidate should resolve after primary is unavailable");
 
-    assert_eq!(value.0, "fallback");
-    assert_eq!(DEFERRED_FALLBACK_DEPENDENCY_INITS.load(Ordering::SeqCst), 1);
+        assert_eq!(value.0, "fallback");
+        assert_eq!(DEFERRED_FALLBACK_DEPENDENCY_INITS.load(Ordering::SeqCst), 1);
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -378,11 +415,14 @@ async fn equal_priority_beta() -> EqualPriorityContract {
 
 #[tokio::test]
 async fn provider_contract_breaks_equal_priority_ties_by_module_and_name() {
-    let value = EqualPriorityContract::resolve()
-        .await
-        .expect("equal-priority candidates should resolve deterministically");
+    provider_context::run(async move {
+        let value = EqualPriorityContract::resolve()
+            .await
+            .expect("equal-priority candidates should resolve deterministically");
 
-    assert_eq!(value.0, "alpha");
+        assert_eq!(value.0, "alpha");
+    })
+    .await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -396,13 +436,16 @@ async fn mutex_contract_impl() -> MutexContract {
 
 #[tokio::test]
 async fn provider_contract_supports_mutex_managed_state() {
-    let lock = MutexContract::resolve_mutex()
-        .await
-        .expect("provider contract should resolve as managed Mutex state");
+    provider_context::run(async move {
+        let lock = MutexContract::resolve_mutex()
+            .await
+            .expect("provider contract should resolve as managed Mutex state");
 
-    let mut guard = lock.lock().await;
-    assert_eq!(guard.0, 13);
-    guard.0 = 21;
+        let mut guard = lock.lock().await;
+        assert_eq!(guard.0, 13);
+        guard.0 = 21;
+    })
+    .await
 }
 
 static DAEMON_LOCAL_CONTRACT_INITS: AtomicU32 = AtomicU32::new(0);
@@ -451,26 +494,26 @@ async fn daemon_local_contract_consumer(contract: Arc<DaemonLocalContract>) -> a
     Ok(())
 }
 
-static INHERITED_CONTRACT_INITS: AtomicU32 = AtomicU32::new(0);
-static INHERITED_CONTRACT_OBSERVATIONS: AtomicU32 = AtomicU32::new(0);
-static INHERITED_CONTRACT_FIRST_VALUE: AtomicU32 = AtomicU32::new(0);
-static INHERITED_CONTRACT_SECOND_VALUE: AtomicU32 = AtomicU32::new(0);
+static ISOLATED_CONTRACT_INITS: AtomicU32 = AtomicU32::new(0);
+static ISOLATED_CONTRACT_OBSERVATIONS: AtomicU32 = AtomicU32::new(0);
+static ISOLATED_CONTRACT_FIRST_VALUE: AtomicU32 = AtomicU32::new(0);
+static ISOLATED_CONTRACT_SECOND_VALUE: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone)]
 #[provider_contract]
-struct InheritedContract(u32);
+struct IsolatedContract(u32);
 
 #[provider_impl]
-async fn inherited_contract_impl() -> InheritedContract {
-    InheritedContract(INHERITED_CONTRACT_INITS.fetch_add(1, Ordering::SeqCst) + 1)
+async fn isolated_contract_impl() -> IsolatedContract {
+    IsolatedContract(ISOLATED_CONTRACT_INITS.fetch_add(1, Ordering::SeqCst) + 1)
 }
 
-#[service(tags = ["provider_contract_inherited"])]
-async fn inherited_contract_consumer(contract: Arc<InheritedContract>) -> anyhow::Result<()> {
-    let observation = INHERITED_CONTRACT_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
+#[service(tags = ["provider_contract_isolated"])]
+async fn isolated_contract_consumer(contract: Arc<IsolatedContract>) -> anyhow::Result<()> {
+    let observation = ISOLATED_CONTRACT_OBSERVATIONS.fetch_add(1, Ordering::SeqCst);
     match observation {
-        0 => INHERITED_CONTRACT_FIRST_VALUE.store(contract.0, Ordering::SeqCst),
-        1 => INHERITED_CONTRACT_SECOND_VALUE.store(contract.0, Ordering::SeqCst),
+        0 => ISOLATED_CONTRACT_FIRST_VALUE.store(contract.0, Ordering::SeqCst),
+        1 => ISOLATED_CONTRACT_SECOND_VALUE.store(contract.0, Ordering::SeqCst),
         _ => {}
     }
     done();
@@ -524,23 +567,23 @@ async fn service_handle_contract_isolated_between_daemons() {
 }
 
 #[tokio::test]
-async fn contract_without_service_handle_shares_root_between_daemons() {
+async fn contract_without_service_handle_isolated_between_daemons() {
     run_tagged_daemon_until_observed(
-        "provider_contract_inherited",
-        &INHERITED_CONTRACT_OBSERVATIONS,
+        "provider_contract_isolated",
+        &ISOLATED_CONTRACT_OBSERVATIONS,
         1,
     )
     .await;
     run_tagged_daemon_until_observed(
-        "provider_contract_inherited",
-        &INHERITED_CONTRACT_OBSERVATIONS,
+        "provider_contract_isolated",
+        &ISOLATED_CONTRACT_OBSERVATIONS,
         2,
     )
     .await;
 
-    assert_eq!(INHERITED_CONTRACT_INITS.load(Ordering::SeqCst), 1);
-    assert_eq!(INHERITED_CONTRACT_FIRST_VALUE.load(Ordering::SeqCst), 1);
-    assert_eq!(INHERITED_CONTRACT_SECOND_VALUE.load(Ordering::SeqCst), 1);
+    assert_eq!(ISOLATED_CONTRACT_INITS.load(Ordering::SeqCst), 2);
+    assert_eq!(ISOLATED_CONTRACT_FIRST_VALUE.load(Ordering::SeqCst), 1);
+    assert_eq!(ISOLATED_CONTRACT_SECOND_VALUE.load(Ordering::SeqCst), 2);
 }
 
 static REACHABLE_EAGER_CONTRACT_INITS: AtomicU32 = AtomicU32::new(0);

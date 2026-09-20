@@ -1,7 +1,7 @@
 //! TCP listener provider template.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 use super::super::parser::StringTemplateArg;
@@ -56,11 +56,6 @@ pub(in crate::provider) fn generate_listen_template(
         quote! { #addr.to_owned() }
     };
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
-
     let type_tokens = quote! { #struct_name };
     let framework_init_fn = quote! {
         service_daemon::__private::init_fallible_with_source(
@@ -79,12 +74,10 @@ pub(in crate::provider) fn generate_listen_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,

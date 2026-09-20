@@ -60,8 +60,8 @@ Add `eager = true` only when a failure must abort startup before dependents run
   and `#[provider_impl(priority = N)]` on app-local functions. Do not use
   ordinary `#[provider]` to implement DI traits for a foreign type.
 - Candidate dependencies initialize only when fallback reaches that candidate.
-  If any candidate uses `service_handle!`, the contract is daemon-local; do not
-  assume it shares the root cache. Use `#[provider_contract(eager = true)]` only
+  Every contract is cached per daemon, regardless of candidate code shape.
+  Use `#[provider_contract(eager = true)]` only
   when a reachable contract must resolve during startup.
 - Don't read a managed provider's snapshot before it is initialized (it panics by
   design — see `pitfalls.md`).

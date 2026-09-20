@@ -1,6 +1,9 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
-    ManagedProvided, ProviderError, Registry, RestartPolicy, ServiceDaemon, ServiceHandle,
-    ServiceStatus, done, provider, service, service_handle, sleep, wait_shutdown,
+    ProviderError, Registry, RestartPolicy, ServiceDaemon, ServiceHandle, ServiceStatus, done,
+    provider, service, service_handle, sleep, wait_shutdown,
 };
 use std::collections::HashSet;
 use std::future::pending;
@@ -172,6 +175,10 @@ async fn repeated_worker() -> anyhow::Result<()> {
 #[provider]
 fn repeated_worker_handle() -> Result<RepeatedWorkerHandle, ProviderError> {
     REPEATED_HANDLE_PROVIDER_INITS.fetch_add(1, Ordering::SeqCst);
+    repeated_worker_handle_helper()
+}
+
+fn repeated_worker_handle_helper() -> Result<RepeatedWorkerHandle, ProviderError> {
     service_handle!(repeated_worker).map(RepeatedWorkerHandle)
 }
 
@@ -179,6 +186,10 @@ fn repeated_worker_handle() -> Result<RepeatedWorkerHandle, ProviderError> {
 async fn repeated_handle_consumer(
     handle: std::sync::Arc<RepeatedWorkerHandle>,
 ) -> anyhow::Result<()> {
+    assert_eq!(
+        handle.0.daemon_id(),
+        service_handle!(repeated_worker).unwrap().daemon_id()
+    );
     assert!(
         wait_for_service_handle_instance(&handle.0, "repeated_worker").await,
         "service handle provider should resolve a daemon-local handle"
@@ -487,6 +498,7 @@ async fn reload_restart_worker(
     #[input] input: &LifecycleInput,
     _config: std::sync::Arc<RwLock<LifecycleReloadConfig>>,
 ) -> anyhow::Result<()> {
+    provider_context::publish(&_config);
     RELOAD_INPUT_GENERATIONS.fetch_add(1, Ordering::SeqCst);
     RELOAD_INPUT_PTRS
         .lock()
@@ -909,9 +921,9 @@ async fn input_service_instances_reuse_input_across_restart_reload_and_isolate_i
     )
     .await;
     {
-        let config = <LifecycleReloadConfig as ManagedProvided>::resolve_rwlock()
-            .await
-            .expect("lifecycle reload config should resolve");
+        let config =
+            provider_context::published::<service_daemon::RwLock<LifecycleReloadConfig>>(&daemon)
+                .await;
         let mut guard = config.write().await;
         guard.version += 1;
     }

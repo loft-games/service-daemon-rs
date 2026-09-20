@@ -120,7 +120,7 @@ async fn test_two_phase_simulation() {
 | **Handle** | `trigger_reload` | Sends a reload signal for a service. |
 | **Handle** | `override_provider` | Replaces a provider for this simulation daemon and reloads dependent generations through the provider watch path. |
 
-Provider overrides are scoped to the simulation daemon. They do not write into the root provider slot and do not affect another simulation or production daemon in the same process.
+Provider overrides are scoped to the simulation daemon. All providers are daemon-local by default; overrides do not affect another simulation or production daemon in the same process.
 
 `ServiceInstanceHandle` values returned by simulation APIs are daemon-bound operation tokens, not daemon owners. They can be cloned and passed through test helpers without keeping the sandbox daemon alive. After the simulation daemon has been unregistered, stale instance handles keep their IDs and static metadata, but status reads report `Terminated`, runtime snapshots return `None`, and stop/reload/shelf operations fail without mutating daemon state.
 

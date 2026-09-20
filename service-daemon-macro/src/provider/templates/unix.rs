@@ -1,7 +1,7 @@
 //! Unix domain socket provider templates.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
 use super::super::parser::StringTemplateArg;
@@ -84,10 +84,6 @@ pub(in crate::provider) fn generate_unix_listen_template(
     let addr_expr = unix_path_addr_expr(addr, env);
     let compile_error_guard = unix_only_compile_error_guard("UnixListen");
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
 
     // Detect-and-unlink preamble + bind + set_nonblocking. Used by both the
@@ -205,12 +201,10 @@ pub(in crate::provider) fn generate_unix_listen_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
@@ -337,10 +331,6 @@ pub(in crate::provider) fn generate_unix_connect_template(
     let addr_expr = unix_path_addr_expr(addr, env);
     let compile_error_guard = unix_only_compile_error_guard("UnixConnect");
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
 
     // Framework path: init_fallible provides retry/backoff/timeout. The
@@ -364,12 +354,10 @@ pub(in crate::provider) fn generate_unix_connect_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
-        cache_scope: quote! { service_daemon::__private::ProviderCacheScope::Inherited },
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,

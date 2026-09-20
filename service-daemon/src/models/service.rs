@@ -1,6 +1,6 @@
 use crate::ProviderDependencyWatchSet;
 use crate::core::provider_init::ProviderInitFailure;
-use crate::core::provider_scope::ProviderCacheScope;
+
 use crate::models::error::{Result as ServiceResult, ServiceError};
 use crate::models::{
     DaemonInstanceId, ProviderInitError, RestartPolicy, ServiceRuntimeSnapshot,
@@ -1286,8 +1286,7 @@ pub struct ProviderEntry {
     ///
     /// Implementations are macro-generated and are expected to call into the
     /// scoped provider bridge so daemon startup initializes the current daemon's
-    /// effective slot, falling back to the generated root slot when no daemon
-    /// scope is active.
+    /// effective slot. Initialization without a daemon scope returns an error.
     pub init: fn(
         RestartPolicy,
         tokio_util::sync::CancellationToken,
@@ -1332,8 +1331,6 @@ pub struct ProviderCandidateEntry {
     pub priority: u8,
     /// Dependencies required by this candidate.
     pub params: &'static [ServiceParam],
-    /// Cache ownership inferred from candidate implementation requirements.
-    pub cache_scope: ProviderCacheScope,
     /// Type-erased candidate initializer.
     pub init: ProviderCandidateInitFn,
 }

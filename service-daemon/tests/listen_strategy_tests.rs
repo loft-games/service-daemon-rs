@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{ManagedProvided, ProviderError, provider};
 
 #[derive(Debug)]
@@ -6,16 +9,20 @@ pub struct ConflictListener;
 
 #[tokio::test]
 async fn test_listen_addr_resolution() {
-    // Direct test: resolve the provider and check success.
-    // By using a free high port, we ensure no fatal provider error is returned.
-    let result = <ConflictListener as ManagedProvided>::resolve_managed().await;
+    provider_context::run(async move {
+        // Direct test: resolve the provider and check success.
+        // By using a free high port, we ensure no fatal provider error is returned.
+        let result = <ConflictListener as ManagedProvided>::resolve_managed().await;
 
-    let provider = result
-        .unwrap_or_else(|err| panic!("Expected successful resolution on high port, got {err:?}"));
-    let listener = provider
-        .get()
-        .expect("expected cloned TCP listener to convert into tokio listener");
-    assert!(listener.local_addr().is_ok());
+        let provider = result.unwrap_or_else(|err| {
+            panic!("Expected successful resolution on high port, got {err:?}")
+        });
+        let listener = provider
+            .get()
+            .expect("expected cloned TCP listener to convert into tokio listener");
+        assert!(listener.local_addr().is_ok());
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -24,16 +31,19 @@ pub struct RootListener;
 
 #[tokio::test]
 async fn test_listen_permission_denied_fatal() {
-    // Guard: if running with root privileges, port 80 binds successfully.
-    // We skip the test in this case as the Fatal path won't trigger.
-    if std::net::TcpListener::bind("127.0.0.1:80").is_ok() {
-        return;
-    }
+    provider_context::run(async move {
+        // Guard: if running with root privileges, port 80 binds successfully.
+        // We skip the test in this case as the Fatal path won't trigger.
+        if std::net::TcpListener::bind("127.0.0.1:80").is_ok() {
+            return;
+        }
 
-    let result = <RootListener as ManagedProvided>::resolve_managed().await;
-    assert!(
-        matches!(result, Err(ProviderError::Fatal(_))),
-        "Expected fatal provider error on privileged port 80, got {:?}",
-        result
-    );
+        let result = <RootListener as ManagedProvided>::resolve_managed().await;
+        assert!(
+            matches!(result, Err(ProviderError::Fatal(_))),
+            "Expected fatal provider error on privileged port 80, got {:?}",
+            result
+        );
+    })
+    .await
 }

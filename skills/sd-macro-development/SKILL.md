@@ -65,7 +65,7 @@ pub static PROVIDER_CANDIDATE_REGISTRY: [ProviderCandidateEntry];
 on-demand service templates, and generated wrappers now receive a
 `ServiceInvocationContext` rather than a bare cancellation token.
 
-Provider candidates carry inferred cache scope and boxed `ProviderInitFailure`
+Provider candidates carry boxed `ProviderInitFailure`
 facts. Keep runtime dependency preparation limited to the attempted candidate,
 while the structural graph still includes every candidate edge for cycle checks.
 

@@ -62,3 +62,11 @@ value is optional.
 `false`, `off`, `no` (ASCII case-insensitive), and `0` mean false after trimming.
 Every other nonempty string means true. Empty
 or whitespace-only bool input uses the default, or fails if no default exists.
+
+## Missing daemon context
+
+There is no root provider cache. Resolve through injected service/trigger
+parameters or from a daemon-scoped body. Fallible helpers report missing context;
+direct `Arc` helpers and watch builders panic before provider initialization.
+`eager` changes startup timing only. Never infer ownership from `service_handle!`
+tokens; a helper extraction must not affect provider lifetime.

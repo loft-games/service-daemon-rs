@@ -197,38 +197,6 @@ fn provider_help_note_error(
     )
 }
 
-fn block_uses_service_handle_macro(block: &syn::Block) -> bool {
-    token_stream_uses_service_handle_macro(block.to_token_stream())
-}
-
-fn token_stream_uses_service_handle_macro(tokens: proc_macro2::TokenStream) -> bool {
-    let mut service_handle_ident_seen = false;
-
-    for token in tokens {
-        match token {
-            proc_macro2::TokenTree::Ident(ident) => {
-                service_handle_ident_seen = ident == "service_handle";
-            }
-            proc_macro2::TokenTree::Punct(punct)
-                if service_handle_ident_seen && punct.as_char() == '!' =>
-            {
-                return true;
-            }
-            proc_macro2::TokenTree::Group(group) => {
-                if token_stream_uses_service_handle_macro(group.stream()) {
-                    return true;
-                }
-                service_handle_ident_seen = false;
-            }
-            _ => {
-                service_handle_ident_seen = false;
-            }
-        }
-    }
-
-    false
-}
-
 pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let parsed_item = parse_macro_input!(item as Item);
     let args = parse_macro_input!(attr as ProviderArgs);
@@ -302,10 +270,6 @@ fn generate_provider_contract(
     }
 
     let struct_def = quote! { #item_struct };
-    let singleton_name = format_ident!(
-        "__PROVIDER_CONTRACT_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
     let type_name_str = quote!(#struct_name).to_string().replace(' ', "");
     let framework_init_fn = quote! {
@@ -325,19 +289,12 @@ fn generate_provider_contract(
         .await
     };
     let provider_origin = format!("#[provider_contract] struct {struct_name}");
-    let cache_scope = quote! {
-        service_daemon::__private::provider_contract_cache_scope(
-            std::any::TypeId::of::<#type_tokens>(),
-        )
-    };
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager: args.eager,
-        cache_scope,
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style: HelperStyle::Fallible,
@@ -552,11 +509,6 @@ fn generate_provider_impl_candidate(
         fn_name.to_string().to_uppercase()
     );
     let priority = args.priority;
-    let cache_scope = if block_uses_service_handle_macro(fn_block) {
-        quote! { service_daemon::__private::ProviderCacheScope::DaemonLocal }
-    } else {
-        quote! { service_daemon::__private::ProviderCacheScope::Inherited }
-    };
 
     Ok(TokenStream::from(quote! {
         #(#cleaned_attrs)*
@@ -608,7 +560,7 @@ fn generate_provider_impl_candidate(
             provider_type_id: std::any::TypeId::of::<#identity_name>(),
             priority: #priority,
             params: &[#(#param_entries),*],
-            cache_scope: #cache_scope,
+
             init: #init_fn_name,
         };
     }))
@@ -766,11 +718,6 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
         }
     };
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        fn_name.to_string().to_uppercase()
-    );
-
     let framework_init_fn = if is_fallible {
         quote! {
             #(#framework_resolve_tokens)*
@@ -814,19 +761,12 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
         HelperStyle::Infallible
     };
     let provider_origin = format!("#[provider] function {fn_name_str}");
-    let cache_scope = if block_uses_service_handle_macro(fn_block) {
-        quote! { service_daemon::__private::ProviderCacheScope::DaemonLocal }
-    } else {
-        quote! { service_daemon::__private::ProviderCacheScope::Inherited }
-    };
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
         item_attrs: &[],
         user_span: return_type.span(),
         param_entries: &param_entries,
         eager,
-        cache_scope,
         framework_init_fn: &framework_init_fn,
         managed_init_fn: &managed_init_fn,
         helper_style,
@@ -847,25 +787,7 @@ fn generate_async_fn_provider(item_fn: ItemFn, eager: bool) -> syn::Result<Token
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderContractArgs, ProviderImplArgs, block_uses_service_handle_macro};
-
-    #[test]
-    fn detects_service_handle_macro_in_provider_block() {
-        let block: syn::Block =
-            syn::parse_quote!({ service_daemon::service_handle!(worker).map(WorkerHandle) });
-
-        assert!(block_uses_service_handle_macro(&block));
-    }
-
-    #[test]
-    fn ignores_service_handle_identifier_without_macro_call() {
-        let block: syn::Block = syn::parse_quote!({
-            let service_handle = WorkerHandle::default();
-            service_handle
-        });
-
-        assert!(!block_uses_service_handle_macro(&block));
-    }
+    use super::{ProviderContractArgs, ProviderImplArgs};
 
     #[test]
     fn provider_contract_args_default_to_lazy() {

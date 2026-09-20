@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `#[provider_impl(priority = N)]` for app-local implementation candidates.
   Candidates support deterministic priority ordering, `Unavailable` fallback,
   selected-candidate dependency preparation, retry-timeout advancement, fatal
-  stop behavior, eager startup, daemon-local caching for `service_handle!`,
+  stop behavior, eager startup, daemon-local caching for every provider,
   preserved provider failure diagnostics, managed state, watch reloads, and a
   real cross-crate `example-provider-contract` topology.
 
@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only validation, first-instance ownership checks, busy-pipe retry, listener-replacement handling, and focused Windows MSVC validation coverage. Like LocalIpc providers, their `accept().await?` / `connect().await?` helpers return `IpcStream`; connector providers defer dialing until `connect()`, and name arguments accept string literals or paths to `const`/`static &'static str` values.
 
 ### Changed
+
+- **Daemon-local Provider Ownership (breaking)**: All generated provider instances,
+  including eager providers and provider contracts, now belong to the current
+  daemon. Removed root instance caches and syntax-based `service_handle!` scope
+  inference. Separate daemons and simulations initialize independently; ordinary
+  service generation restarts reuse the same daemon slots. Direct helper return
+  types are unchanged: outside daemon context, fallible resolution returns a
+  fatal error, while `Arc` helpers and watch builders panic before initialization.
+  Move provider access into daemon-managed services or use simulation overrides
+  instead of initializing a process-global provider during setup.
 
 - **Value Provider Environment Conversion**: Non-string env values are now trimmed before parsing. Bool values accept case-insensitive `false`/`off`/`no` and exactly `0` as false, with every other nonempty value treated as true. Empty input uses the declared default or fails as missing required configuration; strings preserve whitespace. Applies consistently to snapshot and managed initialization, including type aliases; socket/address templates are unchanged.
 

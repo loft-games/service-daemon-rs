@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
     DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
     DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind, ProviderError,
@@ -303,67 +306,72 @@ async fn test_async_fn_eager_init_failure_triggers_shutdown() {
 
 #[tokio::test]
 async fn test_missing_env_public_helper_returns_fatal_error() {
-    assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
+    provider_context::run(async move {
+        assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
 
-    let result = MissingEnvToken::resolve().await;
-    match result {
-        Err(ProviderInitError::Fatal { provider, message }) => {
-            assert_eq!(provider, "MissingEnvToken");
-            assert!(
-                message.contains("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A"),
-                "expected missing env name in Fatal message, got: {}",
-                message
-            );
+        let result = MissingEnvToken::resolve().await;
+        match result {
+            Err(ProviderInitError::Fatal { provider, message }) => {
+                assert_eq!(provider, "MissingEnvToken");
+                assert!(
+                    message.contains("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A"),
+                    "expected missing env name in Fatal message, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected missing env Fatal, got {:?}", other),
         }
-        other => panic!("Expected missing env Fatal, got {:?}", other),
-    }
+    })
+    .await
 }
 
 #[tokio::test]
 async fn test_parse_env_public_helpers_preserve_error_boundary() {
     let _guard = set_test_env(PARSE_ENV_NAME, "not-a-u16");
-
-    let snapshot_result = ParseEnvToken::resolve().await;
-    match snapshot_result {
-        Err(ProviderInitError::Fatal { provider, message }) => {
-            assert_eq!(provider, "ParseEnvToken");
-            assert!(
-                message.contains(PARSE_ENV_NAME),
-                "expected parse env name in Fatal message, got: {}",
-                message
-            );
-            assert!(
-                message.contains("cannot be parsed"),
-                "expected parse failure in Fatal message, got: {}",
-                message
-            );
+    provider_context::run(async move {
+        let snapshot_result = ParseEnvToken::resolve().await;
+        match snapshot_result {
+            Err(ProviderInitError::Fatal { provider, message }) => {
+                assert_eq!(provider, "ParseEnvToken");
+                assert!(
+                    message.contains(PARSE_ENV_NAME),
+                    "expected parse env name in Fatal message, got: {}",
+                    message
+                );
+                assert!(
+                    message.contains("cannot be parsed"),
+                    "expected parse failure in Fatal message, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected parse env Fatal, got {:?}", other),
         }
-        other => panic!("Expected parse env Fatal, got {:?}", other),
-    }
 
-    let rwlock_result = ParseEnvToken::resolve_rwlock().await;
-    assert!(matches!(
-        rwlock_result,
-        Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
-    ));
+        let rwlock_result = ParseEnvToken::resolve_rwlock().await;
+        assert!(matches!(
+            rwlock_result,
+            Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
+        ));
 
-    let mutex_result = ParseEnvToken::resolve_mutex().await;
-    assert!(matches!(
-        mutex_result,
-        Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
-    ));
+        let mutex_result = ParseEnvToken::resolve_mutex().await;
+        assert!(matches!(
+            mutex_result,
+            Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
+        ));
 
-    let managed_result = ParseEnvToken::resolve_managed().await;
-    match managed_result {
-        Err(ProviderError::Fatal(message)) => {
-            assert!(
-                message.contains(PARSE_ENV_NAME),
-                "expected parse env name in raw ProviderError, got: {}",
-                message
-            );
+        let managed_result = ParseEnvToken::resolve_managed().await;
+        match managed_result {
+            Err(ProviderError::Fatal(message)) => {
+                assert!(
+                    message.contains(PARSE_ENV_NAME),
+                    "expected parse env name in raw ProviderError, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected raw managed ProviderError::Fatal, got {:?}", other),
         }
-        other => panic!("Expected raw managed ProviderError::Fatal, got {:?}", other),
-    }
+    })
+    .await
 }
 
 #[tokio::test]

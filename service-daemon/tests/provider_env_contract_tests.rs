@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{ManagedProvided, Provided, provider};
 use std::process::Command;
 
@@ -127,85 +130,88 @@ fn unreadable_env_preserves_fallback_and_required_failure() {
 
 #[tokio::test]
 async fn env_contract_child() {
-    let Ok(mode) = std::env::var(CHILD) else {
-        return;
-    };
-    let raw = std::env::var(KEY).ok();
-    let trimmed = raw.as_deref().map(str::trim).filter(|v| !v.is_empty());
-    let boolean = trimmed.map(|v| {
-        !(v.eq_ignore_ascii_case("false")
-            || v.eq_ignore_ascii_case("off")
-            || v.eq_ignore_ascii_case("no")
-            || v == "0")
-    });
-    assert_eq!(DefaultTrue::default().0, boolean.unwrap_or(true));
-    assert_eq!(DefaultFalse::default().0, boolean.unwrap_or(false));
-    let number = trimmed.and_then(|v| v.parse::<u16>().ok());
-    assert_eq!(DefaultNumber::default().0, number.unwrap_or(7));
-    let string = raw.as_deref().filter(|v| !v.is_empty());
-    assert_eq!(DefaultString::default().0, string.unwrap_or("fallback"));
-    assert_eq!(AliasedString::default().0, string.unwrap_or("fallback"));
-    assert_eq!(
-        DefaultCustom::default().0,
-        CustomNumber(number.unwrap_or(7))
-    );
-    assert_eq!(
-        DefaultFloat::default().0,
-        trimmed.and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.5)
-    );
-
-    // Separate subprocesses exercise both constructors without cached snapshots.
-    macro_rules! resolve {
-        ($ty:ty) => {
-            if mode == "managed" {
-                <$ty>::resolve_managed().await.map_err(|e| format!("{e:?}"))
-            } else if mode == "rwlock" {
-                match <$ty as ManagedProvided>::resolve_rwlock().await {
-                    Ok(value) => Ok(std::sync::Arc::new(value.read().await.clone())),
-                    Err(error) => Err(error.to_string()),
-                }
-            } else if mode == "mutex" {
-                match <$ty as ManagedProvided>::resolve_mutex().await {
-                    Ok(value) => Ok(std::sync::Arc::new(value.lock().await.clone())),
-                    Err(error) => Err(error.to_string()),
-                }
-            } else {
-                <$ty as Provided>::resolve()
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+    provider_context::run(async move {
+        let Ok(mode) = std::env::var(CHILD) else {
+            return;
         };
-    }
-    assert_eq!(resolve!(DefaultTrue).unwrap().0, boolean.unwrap_or(true));
-    assert_eq!(resolve!(DefaultFalse).unwrap().0, boolean.unwrap_or(false));
-    assert_eq!(resolve!(DefaultNumber).unwrap().0, number.unwrap_or(7));
-    assert_eq!(
-        resolve!(DefaultString).unwrap().0,
-        string.unwrap_or("fallback")
-    );
-    assert_eq!(resolve!(AliasedBool).ok().map(|v| v.0), boolean);
-    assert_eq!(resolve!(QualifiedBool).ok().map(|v| v.0), boolean);
-    assert_eq!(
-        resolve!(RequiredCustom).ok().map(|v| v.0.clone()),
-        number.map(CustomNumber)
-    );
-    let result = resolve!(RequiredBool);
-    match boolean {
-        Some(value) => assert_eq!(result.unwrap().0, value),
-        None => assert!(result.err().unwrap().contains("not set")),
-    }
-    let result = resolve!(RequiredNumber);
-    match number {
-        Some(value) => assert_eq!(result.unwrap().0, value),
-        None => assert!(result.err().unwrap().contains(if trimmed.is_none() {
-            "not set"
-        } else {
-            "cannot be parsed"
-        })),
-    }
-    let result = resolve!(RequiredString);
-    match string {
-        Some(value) => assert_eq!(result.unwrap().0, value),
-        None => assert!(result.err().unwrap().contains("not set")),
-    }
+        let raw = std::env::var(KEY).ok();
+        let trimmed = raw.as_deref().map(str::trim).filter(|v| !v.is_empty());
+        let boolean = trimmed.map(|v| {
+            !(v.eq_ignore_ascii_case("false")
+                || v.eq_ignore_ascii_case("off")
+                || v.eq_ignore_ascii_case("no")
+                || v == "0")
+        });
+        assert_eq!(DefaultTrue::default().0, boolean.unwrap_or(true));
+        assert_eq!(DefaultFalse::default().0, boolean.unwrap_or(false));
+        let number = trimmed.and_then(|v| v.parse::<u16>().ok());
+        assert_eq!(DefaultNumber::default().0, number.unwrap_or(7));
+        let string = raw.as_deref().filter(|v| !v.is_empty());
+        assert_eq!(DefaultString::default().0, string.unwrap_or("fallback"));
+        assert_eq!(AliasedString::default().0, string.unwrap_or("fallback"));
+        assert_eq!(
+            DefaultCustom::default().0,
+            CustomNumber(number.unwrap_or(7))
+        );
+        assert_eq!(
+            DefaultFloat::default().0,
+            trimmed.and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.5)
+        );
+
+        // Separate subprocesses exercise both constructors without cached snapshots.
+        macro_rules! resolve {
+            ($ty:ty) => {
+                if mode == "managed" {
+                    <$ty>::resolve_managed().await.map_err(|e| format!("{e:?}"))
+                } else if mode == "rwlock" {
+                    match <$ty as ManagedProvided>::resolve_rwlock().await {
+                        Ok(value) => Ok(std::sync::Arc::new(value.read().await.clone())),
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else if mode == "mutex" {
+                    match <$ty as ManagedProvided>::resolve_mutex().await {
+                        Ok(value) => Ok(std::sync::Arc::new(value.lock().await.clone())),
+                        Err(error) => Err(error.to_string()),
+                    }
+                } else {
+                    <$ty as Provided>::resolve()
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+            };
+        }
+        assert_eq!(resolve!(DefaultTrue).unwrap().0, boolean.unwrap_or(true));
+        assert_eq!(resolve!(DefaultFalse).unwrap().0, boolean.unwrap_or(false));
+        assert_eq!(resolve!(DefaultNumber).unwrap().0, number.unwrap_or(7));
+        assert_eq!(
+            resolve!(DefaultString).unwrap().0,
+            string.unwrap_or("fallback")
+        );
+        assert_eq!(resolve!(AliasedBool).ok().map(|v| v.0), boolean);
+        assert_eq!(resolve!(QualifiedBool).ok().map(|v| v.0), boolean);
+        assert_eq!(
+            resolve!(RequiredCustom).ok().map(|v| v.0.clone()),
+            number.map(CustomNumber)
+        );
+        let result = resolve!(RequiredBool);
+        match boolean {
+            Some(value) => assert_eq!(result.unwrap().0, value),
+            None => assert!(result.err().unwrap().contains("not set")),
+        }
+        let result = resolve!(RequiredNumber);
+        match number {
+            Some(value) => assert_eq!(result.unwrap().0, value),
+            None => assert!(result.err().unwrap().contains(if trimmed.is_none() {
+                "not set"
+            } else {
+                "cannot be parsed"
+            })),
+        }
+        let result = resolve!(RequiredString);
+        match string {
+            Some(value) => assert_eq!(result.unwrap().0, value),
+            None => assert!(result.err().unwrap().contains("not set")),
+        }
+    })
+    .await
 }
