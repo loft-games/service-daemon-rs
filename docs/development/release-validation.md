@@ -60,7 +60,9 @@ for compile-time acceptance and rejection of `#[provider_contract]` /
 `#[provider_impl]` syntax, including the contract `eager` attribute. Run
 `cargo test -p example-provider-contract` for the real cross-crate topology where
 the shared crate owns both the injectable type and consuming service while the
-app crate supplies local implementation candidates.
+app library supplies implementation candidates. Its integration test verifies
+that an explicit `use example_provider_contract as _;` retains those candidates
+across the final test-target link without candidate-function references.
 
 ### Framework operation benchmarks
 

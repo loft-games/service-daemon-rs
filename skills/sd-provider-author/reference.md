@@ -167,6 +167,16 @@ every candidate edge still participates in structural cycle detection. A
 contract is always daemon-local, including when candidates obtain service handles
 through helper functions. Eager initialization changes timing, not ownership.
 
+If the candidate functions live in a library crate and the final binary or test
+does not otherwise reference that crate, explicitly link it for registration:
+
+```rust
+use implementation_crate as _;
+```
+
+A `Cargo.toml` dependency alone does not make an otherwise unused library part of
+the final target. The underscore import is the explicit linkage declaration.
+
 ## 2. Attributes
 
 | Attribute | Applies to | Meaning |

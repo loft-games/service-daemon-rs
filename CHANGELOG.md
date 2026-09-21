@@ -16,7 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selected-candidate dependency preparation, retry-timeout advancement, fatal
   stop behavior, eager startup, daemon-local caching for every provider,
   preserved provider failure diagnostics, managed state, watch reloads, and a
-  real cross-crate `example-provider-contract` topology.
+  real cross-crate `example-provider-contract` topology with library-owned
+  implementation candidates.
 
 - **TCP Listener Port Shorthand**: `Listen(8080)`, `Listen("8080")`, and port-only environment overrides bind to `0.0.0.0:8080`. Full host/port and IPv6 addresses remain supported. String inputs are trimmed, ports are bounded to `0..=65535`, and invalid or empty environment overrides fail initialization.
 

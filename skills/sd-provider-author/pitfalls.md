@@ -70,3 +70,10 @@ parameters or from a daemon-scoped body. Fallible helpers report missing context
 direct `Arc` helpers and watch builders panic before provider initialization.
 `eager` changes startup timing only. Never infer ownership from `service_handle!`
 tokens; a helper extraction must not affect provider lifetime.
+
+## Candidate library not linked into the final target
+
+`#[provider_impl]` emits a link-time registry entry, but Rust does not link a
+library target that the final binary or integration test never references. A
+`Cargo.toml` dependency is not enough. Add `use implementation_crate as _;` to
+each final target that relies on those candidates.

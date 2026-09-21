@@ -108,11 +108,18 @@ to the shared output struct and generates the same `Provided`,
 and normal `ProviderEntry` as an ordinary provider, plus the marker
 `ProviderContract` implementation.
 
-`#[provider_impl]` is applied to local functions in the final binary crate. It
-does not implement provider traits on the returned type. Instead, it generates a
-local provider identity type and registers a `ProviderCandidateEntry` in
-`PROVIDER_CANDIDATE_REGISTRY` keyed by the contract output `TypeId`. Every contract uses daemon-local caching, independent of candidate body tokens.
+`#[provider_impl]` is applied to local functions in the final binary crate or an
+explicitly linked implementation library. It does not implement provider traits
+on the returned type. Instead, it generates a local provider identity type and
+registers a `ProviderCandidateEntry` in `PROVIDER_CANDIDATE_REGISTRY` keyed by the
+contract output `TypeId`. Every contract uses daemon-local caching, independent
+of candidate body tokens.
 Service handle lookups may be extracted into helpers without changing ownership.
+
+The registry entry can only participate if its crate enters the final link. A
+binary or integration-test target that has no ordinary reference to an
+implementation library must add `use implementation_crate as _;` as an explicit
+crate-linkage declaration.
 
 At resolution time, the contract initializer looks up candidates for the output
 type, orders them by descending priority and then by `(module, function name)`,

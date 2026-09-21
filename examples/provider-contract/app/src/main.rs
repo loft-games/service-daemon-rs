@@ -2,24 +2,9 @@
 //!
 //! Run with `cargo run -p example-provider-contract`.
 
-use example_provider_contract_shared as shared;
-use service_daemon::{
-    ProviderError, Registry, RestartPolicy, ServiceDaemon, ServiceError, provider_impl,
-};
-use shared::SharedSettings;
+use example_provider_contract as _;
+use service_daemon::{Registry, RestartPolicy, ServiceDaemon, ServiceError};
 use tracing::{error, info};
-
-#[provider_impl(priority = 80)]
-async fn primary_settings() -> Result<SharedSettings, ProviderError> {
-    Err(ProviderError::Unavailable(
-        "primary candidate is unavailable in this example".to_owned(),
-    ))
-}
-
-#[provider_impl(priority = 10)]
-async fn fallback_settings() -> SharedSettings {
-    SharedSettings::new("example fallback")
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

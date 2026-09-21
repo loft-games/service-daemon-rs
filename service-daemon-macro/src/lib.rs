@@ -150,6 +150,10 @@ pub fn provider_contract(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Registers a local implementation candidate for a `#[provider_contract]`.
+///
+/// This macro emits a link-time registry entry. If candidates live in a library
+/// crate that the final binary or integration-test target does not otherwise
+/// reference, explicitly link that crate with `use implementation_crate as _;`.
 #[proc_macro_attribute]
 pub fn provider_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     provider::provider_candidate_impl(attr, item)

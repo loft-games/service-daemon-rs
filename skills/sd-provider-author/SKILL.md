@@ -59,6 +59,9 @@ Add `eager = true` only when a failure must abort startup before dependents run
 - For cross-crate providers, put `#[provider_contract]` on the shared output type
   and `#[provider_impl(priority = N)]` on app-local functions. Do not use
   ordinary `#[provider]` to implement DI traits for a foreign type.
+- If implementation candidates live in a library that the final target does not
+  otherwise reference, add `use implementation_crate as _;` to that binary or
+  integration test.
 - Candidate dependencies initialize only when fallback reaches that candidate.
   Every contract is cached per daemon, regardless of candidate code shape.
   Use `#[provider_contract(eager = true)]` only

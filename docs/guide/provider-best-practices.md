@@ -214,6 +214,18 @@ pub async fn fallback_settings() -> SharedSettings {
 }
 ```
 
+If these implementation functions are compiled into a library target and the
+final binary or integration test has no other reference to that library, link it
+for its registration side effects:
+
+```rust
+use implementation_crate as _;
+```
+
+Rust does not link an otherwise unused library merely because it appears in
+`Cargo.toml`. The underscore import makes the target boundary explicit while the
+candidate functions remain private.
+
 Rules:
 
 - `#[provider_contract]` is applied to the shared output struct and generates
@@ -222,6 +234,9 @@ Rules:
 - `#[provider_impl]` is applied to local functions returning the contract type
   or `Result<T, ProviderError>`. The return type must implement
   `ProviderContract`, which the contract macro provides.
+- A library containing candidates must be referenced by every final binary or
+  integration-test target that expects those registrations. Use
+  `use implementation_crate as _;` when no ordinary symbol is needed.
 - Candidates are tried by descending `priority`; the default priority is `50`.
   Equal priorities are ordered by module path and function name for stable
   fallback behavior.
