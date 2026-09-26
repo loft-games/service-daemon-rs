@@ -115,11 +115,12 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 * Keep network and disk initialization in `async` provider functions.
 * Return `ProviderError::Retryable` for transient startup failures so the daemon can retry within the configured provider initialization timeout.
 * When a shared library owns the injectable type but the final application must
-  supply the concrete implementation, use the advanced
-  `#[provider_contract]` / `#[provider_impl]` pattern from the
-  [Provider Strategy](../provider-best-practices.md#cross-crate-provider-contracts).
-  That reference also covers candidate priority, fallback, daemon-local handles,
-  and optional eager startup.
+  choose how to construct it, use the advanced cross-crate provider pattern:
+  the shared crate marks the injectable type with `#[provider_contract]`, and
+  the application supplies one or more `#[provider_impl]` candidates. This is
+  useful for shared service libraries that should not own deployment-specific
+  connections or configuration. Follow the [cross-crate provider tutorial](./cross-crate-provider-contracts.md)
+  for a complete setup guide, or see the [runnable example](../../../examples/provider-contract/README.md).
 
 > [!TIP]
 > For naming conventions and lifecycle patterns, see the [Provider Strategy](../provider-best-practices.md) guide.

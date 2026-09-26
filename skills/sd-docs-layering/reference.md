@@ -16,6 +16,10 @@ ordered lessons. A new beginner lesson goes here **and** is linked from
 - `priority-orchestration.md` — priority waves + runtime scheduling.
 - `error-handling.md` — fallible flows.
 - `custom-providers.md` — provider authoring on the learning path.
+- `cross-crate-provider-contracts.md` — advanced, standalone walkthrough for
+  shared `#[provider_contract]` types and application `#[provider_impl]`
+  candidates; linked from `custom-providers.md`, but intentionally excluded from
+  the beginner `quick-start.md` sequence.
 - `custom-trigger-hosts.md`, `advanced-macros.md`, `unit-testing.md` — later,
   more advanced chapters.
 

@@ -58,6 +58,14 @@ This page explains common behaviors that are easy to misread when first using th
 **Problem**: Trying to modify the macro system to add a new default provider type such as MQTT.
 **Solution**: Use the `#[provider]` attribute on an `async fn`. Built-in templates are for low-level primitives such as signaling, queues, and socket listeners. See the [Provider Strategy Guide](provider-best-practices.md).
 
+### How can a shared crate leave provider construction to the application?
+Mark the shared injectable type with `#[provider_contract]`, then define one or
+more application-local `#[provider_impl]` candidates. The
+[cross-crate provider tutorial](tutorial/cross-crate-provider-contracts.md)
+walks through the setup; the
+[provider-contract example](../../examples/provider-contract/README.md) shows
+the complete crate layout.
+
 ---
 
 ## 4. Testing & Simulation

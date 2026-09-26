@@ -178,6 +178,9 @@ inject, but a downstream binary must choose the concrete implementation. This
 keeps the dependency key as the shared value type and avoids implementing
 provider traits on a foreign type.
 
+For a step-by-step setup across a shared crate, application crate, and final
+binary, see the [cross-crate provider tutorial](tutorial/cross-crate-provider-contracts.md).
+
 In the shared crate:
 
 ```rust
