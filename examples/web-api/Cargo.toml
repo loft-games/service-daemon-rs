@@ -8,7 +8,7 @@ description = "Neutral Web API example: Axum service, listener provider, and mai
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.53.0", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 axum = "0.8.9"
 tower-http = { version = "0.6.11", features = ["cors"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -25,4 +25,4 @@ docs = ["devtools"]
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"

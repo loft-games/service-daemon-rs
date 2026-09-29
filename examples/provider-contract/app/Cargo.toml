@@ -10,5 +10,5 @@ description = "Provider contract example: shared type with app-local fallback im
 anyhow = "1.0.104"
 example-provider-contract-shared = { path = "../shared" }
 service-daemon = { path = "../../../service-daemon" }
-tokio = { version = "1.53.0", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"

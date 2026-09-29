@@ -8,6 +8,6 @@ description = "On-demand example: periodically start, stop, and remove service i
 
 [dependencies]
 service-daemon = { path = "../../service-daemon" }
-tokio = { version = "1.53.0", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
 anyhow = "1.0.104"
