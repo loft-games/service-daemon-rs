@@ -1,3 +1,5 @@
 /target
 *.sh
 *.log
+/Cargo.lock
+.devcontainer/devcontainer-lock.json
