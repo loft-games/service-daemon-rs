@@ -33,7 +33,7 @@ note: `service_daemon::ProviderError` is defined in crate `service_daemon`
    | pub enum ProviderError {
    | ^^^^^^^^^^^^^^^^^^^^^^
 
-error[E0271]: expected `{async block@$DIR/tests/fail/23_provider_custom_provider_error.rs:9:1: 9:12}` to be a future that resolves to `Result<_, ProviderError>`, but it resolves to `Result<FallibleConfig, ProviderError>`
+error[E0271]: expected `{async block@23_provider_custom_provider_error.rs:9:1}` to be a future that resolves to `Result<_, ProviderError>`, but it resolves to `Result<FallibleConfig, ProviderError>`
  --> tests/fail/23_provider_custom_provider_error.rs:9:1
   |
 9 | #[provider]
