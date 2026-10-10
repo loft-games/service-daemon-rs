@@ -1,8 +1,5 @@
 [advisories]
 unused-ignored-advisory = "deny"
-ignore = [
-  { id = "RUSTSEC-2024-0436", reason = "paste is pulled only through example-web-api -> utoipa-axum 0.2.0, with no patched utoipa-axum release currently available; temporary example-only exception." },
-]
 
 [bans]
 multiple-versions = "warn"
