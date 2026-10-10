@@ -348,11 +348,8 @@ mod tests {
     where
         P: Clone + Send + Sync + 'static,
     {
-        fn resolve()
-        -> impl std::future::Future<
-            Output = std::result::Result<Arc<Self>, crate::ProviderInitError>,
-        > + Send {
-            async { unreachable!("TopicHost unit tests pass constructed targets directly") }
+        async fn resolve() -> std::result::Result<Arc<Self>, crate::ProviderInitError> {
+            unreachable!("TopicHost unit tests pass constructed targets directly")
         }
     }
 
