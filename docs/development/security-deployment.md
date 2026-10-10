@@ -38,6 +38,8 @@ a strong audit trail:
   and continues with console logging only;
 - if a file-log consumer lags behind the broadcast queue, some events may not be
   persisted to file;
+- if the background file queue drops lines or the appender reports write errors,
+  the sink reports cumulative health counters on stderr;
 - file ownership, directory permissions, disk retention, backup, shipping, and
   tamper resistance are deployment responsibilities.
 

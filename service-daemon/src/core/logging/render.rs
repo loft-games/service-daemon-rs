@@ -106,8 +106,11 @@ pub(super) fn render_to_stderr(event: &LogEvent) {
 
 /// Formats a `LogEvent` as a structured JSON string for file persistence.
 ///
-/// Output includes `level`, `time` (ISO 8601), `target`,
-/// `msg`, `caller` (file:line), and `module_path`.
+/// The JSON keys are the serialized `LogEvent` field names: `timestamp`,
+/// `level`, `target`, `message`, `module_path`, `file`, `line`, and the
+/// optional correlation fields (`service_instance_id`,
+/// `source_service_instance_id`, `message_id`, `trigger_instance_id`, and
+/// `error_chain`).
 #[cfg(feature = "file-logging")]
 pub(super) fn format_event_json(event: &LogEvent) -> String {
     // Primary path: use serde_json for correct, structured JSON output.

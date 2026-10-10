@@ -12,7 +12,7 @@ dependency baselines.
 | `simulation` | Test-only sandbox utilities. | `cargo check -p example-simulation`, `cargo test --workspace --all-features`, `cargo clippy --workspace --all-features`. | `example-simulation`. |
 | `diagnostics` | Diagnostic topology collection, independent of HighPriority. | `cargo check -p example-diagnostics`, `cargo test --workspace --all-features`, diagnostics unit coverage for shutdown topology tracing. | `example-diagnostics`. |
 | `high-priority` | Opt-in execution mode, probes, advisory and feedback-driven intervention. | `cargo test -p service-daemon --features high-priority`, `cargo test -p service-daemon --test high_priority_feature_contract_tests`; independent downstream off/on compile matrix. | Scheduling and macro-test examples. |
-| `file-logging` | Production-capable JSON file persistence. | `cargo check -p example-logging`, `cargo test --workspace --all-features`, `cargo test -p service-daemon --features file-logging`. | `example-logging`. |
+| `file-logging` | Best-effort JSON file persistence with rotation. | `cargo check -p example-logging`, `cargo test --workspace --all-features`, `cargo test -p service-daemon --features file-logging`. | `example-logging`. |
 
 Do not expand this into a full pairwise feature matrix unless a real
 combination-specific gap appears. The current release baseline is default,

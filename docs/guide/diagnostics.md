@@ -31,7 +31,7 @@ Maintainers can find the internal contract in
 `DaemonLayer` is a `tracing::Layer` that captures tracing events, extracts service and trigger IDs from the current span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
-- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
+- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time-based rotation policy.
 - **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
 Both logging consumers drain events in batches, with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
@@ -92,6 +92,31 @@ warning and degrades to console logging only. It does not fail daemon startup
 and does not hot-restart the SYSTEM logging service. Deployments that require
 audit-grade file persistence should validate the log directory with an external
 startup check or operational probe.
+
+The console and file sinks intentionally use different presentations of the same
+`LogEvent`. Console output is a human-oriented line: it uses the local timezone,
+ANSI level colors, and flattened `key=value` fields. File output is a machine
+oriented JSON serialization and keeps the event timestamp in UTC. Removing ANSI
+codes from the console line would still leave a display format rather than a
+stable JSON schema, so the two sinks share the captured event but not the final
+renderer.
+
+Each file contains one JSON object per line with these keys:
+
+| Key | JSON shape | Presence |
+| :--- | :--- | :--- |
+| `timestamp` | RFC 3339 UTC string | always |
+| `level` | `"Error"`, `"Warn"`, `"Info"`, `"Debug"`, or `"Trace"` | always |
+| `target` | string | always |
+| `message` | string | always |
+| `module_path` | string or `null` | always |
+| `file` | string or `null` | always |
+| `line` | integer or `null` | always |
+| `service_instance_id`, `source_service_instance_id`, `message_id`, `trigger_instance_id`, `error_chain` | typed JSON value | omitted when unavailable |
+
+The file sink remains best-effort. It does not block tracing producers when its
+background queue is full; dropped lines, background file-write errors, and
+broadcast lag are reported on stderr with cumulative counters where available.
 
 Custom rotation and retention can be configured via the struct fields:
 

@@ -1,8 +1,10 @@
-use std::io::Write as _;
+use std::io::{self, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
-use tracing_appender::non_blocking;
+use tracing_appender::non_blocking::NonBlockingBuilder;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 use crate::ServicePriority;
@@ -89,6 +91,95 @@ impl Default for FileLogConfig {
 /// When `None`, file logging is disabled even if the feature is compiled in.
 static FILE_LOG_CONFIG: tokio::sync::OnceCell<FileLogConfig> = tokio::sync::OnceCell::const_new();
 
+/// Counts errors returned by the rolling appender's background worker.
+///
+/// `tracing-appender` intentionally keeps the worker thread detached from the
+/// caller and does not expose its I/O errors. The file service polls this
+/// counter so a failed disk write remains visible on stderr.
+struct ErrorTrackingWriter<W> {
+    inner: W,
+    errors: Arc<AtomicUsize>,
+}
+
+impl<W> ErrorTrackingWriter<W> {
+    fn new(inner: W, errors: Arc<AtomicUsize>) -> Self {
+        Self { inner, errors }
+    }
+
+    fn record_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl<W: Write> Write for ErrorTrackingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.inner.write(buf) {
+            Ok(written) => Ok(written),
+            Err(error) => {
+                self.record_error();
+                Err(error)
+            }
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        match self.inner.write_all(buf) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.record_error();
+                Err(error)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.inner.flush() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.record_error();
+                Err(error)
+            }
+        }
+    }
+}
+
+struct FileLogHealthReporter {
+    last_report_at: Option<Instant>,
+    last_dropped_lines: usize,
+    last_io_errors: usize,
+}
+
+impl FileLogHealthReporter {
+    fn new() -> Self {
+        Self {
+            last_report_at: None,
+            last_dropped_lines: 0,
+            last_io_errors: 0,
+        }
+    }
+
+    fn report(&mut self, dropped_lines: usize, io_errors: usize, force: bool) {
+        let changed = dropped_lines != self.last_dropped_lines || io_errors != self.last_io_errors;
+        self.last_dropped_lines = dropped_lines;
+        self.last_io_errors = io_errors;
+
+        if !changed {
+            return;
+        }
+
+        let can_report = force
+            || self
+                .last_report_at
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1));
+        if can_report {
+            eprintln!(
+                "service-daemon file logging health: dropped_lines={dropped_lines}, io_errors={io_errors}"
+            );
+            self.last_report_at = Some(Instant::now());
+        }
+    }
+}
+
 /// Enables file-based log persistence with the given configuration.
 ///
 /// Must be called **before** the daemon handle's `run()` to take effect.
@@ -116,7 +207,7 @@ pub fn enable_file_logging(config: FileLogConfig) {
 /// ## Activation
 /// Only runs when `enable_file_logging()` has been called before daemon start
 /// AND the `file-logging` Cargo feature is enabled at compile time.
-/// When `FILE_LOG_CONFIG` is not set, this service exits immediately.
+/// When `FILE_LOG_CONFIG` is not set, this service stays idle until shutdown.
 ///
 /// ## Output Format
 /// JSON lines (one JSON object per line), written to daily-rotating files
@@ -162,7 +253,17 @@ pub async fn file_log_service() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let (mut writer, _guard) = non_blocking(file_appender);
+    let io_errors = Arc::new(AtomicUsize::new(0));
+    let tracked_appender = ErrorTrackingWriter::new(file_appender, io_errors.clone());
+    let (mut writer, guard) = NonBlockingBuilder::default()
+        // Keep file I/O off the tracing producer path. Losses are surfaced by
+        // the error counter and reported on stderr instead of blocking a Tokio
+        // runtime worker when the disk is slow or unavailable.
+        .lossy(true)
+        .thread_name("service-daemon-file-log")
+        .finish(tracked_appender);
+    let dropped_lines = writer.error_counter();
+    let mut health = FileLogHealthReporter::new();
 
     let mut rx = get_log_queue().tx.subscribe();
     let batch_size = effective_batch_size();
@@ -193,11 +294,15 @@ pub async fn file_log_service() -> anyhow::Result<()> {
                                 let _ = writeln!(writer, "{}", json_line);
                             }
                         }
+                        health.report(
+                            dropped_lines.dropped_lines(),
+                            io_errors.load(Ordering::Relaxed),
+                            false,
+                        );
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(
-                            skipped = n,
-                            "FileLogService lagged, some messages were not persisted to file"
+                        eprintln!(
+                            "service-daemon file logging lagged; skipped_broadcast_events={n}"
                         );
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -218,5 +323,58 @@ pub async fn file_log_service() -> anyhow::Result<()> {
     }
 
     tracing::info!("FileLogService shutting down (Priority: SYSTEM)");
+    drop(guard);
+    health.report(
+        dropped_lines.dropped_lines(),
+        io_errors.load(Ordering::Relaxed),
+        true,
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ErrorTrackingWriter;
+    use std::io::{self, Write};
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("simulated file write failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("simulated file flush failure"))
+        }
+    }
+
+    #[test]
+    fn tracked_writer_counts_write_and_flush_errors() {
+        let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut writer = ErrorTrackingWriter::new(FailingWriter, errors.clone());
+
+        assert!(writer.write_all(b"event").is_err());
+        assert!(writer.flush().is_err());
+        assert_eq!(errors.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn non_blocking_file_writer_reports_background_errors() {
+        let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tracked_writer = ErrorTrackingWriter::new(FailingWriter, errors.clone());
+        let (mut writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(true)
+            .finish(tracked_writer);
+
+        writer.write_all(b"event").unwrap();
+        drop(guard);
+
+        assert!(
+            errors.load(Ordering::Relaxed) > 0,
+            "background file writer errors should be observable"
+        );
+    }
 }
