@@ -31,7 +31,7 @@ Maintainers can find the internal contract in
 `DaemonLayer` is a `tracing::Layer` that captures tracing events, extracts service and trigger IDs from the current span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
-- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time-based rotation policy.
+- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time-based rotation policy and optional background gzip archiving.
 - **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
 Both logging consumers drain events in batches, with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
@@ -82,9 +82,52 @@ tracing_subscriber::registry()
 ```rust
 use service_daemon::{FileLogConfig, enable_file_logging};
 
-// Daily rotation, retains last 30 log files (defaults)
-enable_file_logging(FileLogConfig::new("logs", "my-app"));
+// Daily rotation, gzip archives, and the default `latest.log` prefix.
+enable_file_logging(FileLogConfig::default());
 ```
+
+The file sink contains both framework and application events. The default daily
+file is `logs/latest.log.YYYY-MM-DD`; rotated files are compressed in the
+background as `latest.log.YYYY-MM-DD.gz`. Explicit prefixes are preserved
+verbatim, so `FileLogConfig::new("logs", "my-app")` produces
+`my-app.YYYY-MM-DD` and its `.gz` archives.
+
+Compression can be disabled when an external log pipeline owns archival:
+
+```rust
+use service_daemon::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
+
+let config = FileLogConfig {
+    rotation: RotationPolicy::Hourly,
+    compression: FileLogCompression::None,
+    ..FileLogConfig::new("logs", "my-app")
+};
+enable_file_logging(config);
+```
+
+`FileLogCompression::Gzip` is the default. Rotation boundaries use UTC. With
+hourly rotation, closed files become `latest.log.YYYY-MM-DD-HH.gz`. At least
+three same-day gzip fragments whose modification times are more than 24 hours
+old are combined into `latest.log.YYYY-MM-DD.merged.gz`. Daily rotation normally
+produces one fragment per date, so it does not reach this merge threshold.
+
+Merging concatenates gzip members and creates
+`latest.log.YYYY-MM-DD.merged.gz.needs-repack`. Once the marker is more than
+30 days old, repacking recompresses the merged contents into one gzip stream
+and removes the marker. Use a decoder that reads all gzip members when
+extracting an archive that has not yet been repacked.
+
+The writer hands off a rotation only after closing it. Archive work is retried
+at startup and during background maintenance, and shutdown allows a bounded
+drain. Failed or unfinished work keeps recoverable inputs for the next run.
+There is currently no automatic age- or count-based retention deletion.
+
+`RotationPolicy::Never` keeps one file and performs no archive work. When
+multiple processes share a directory, configure distinct directories or
+prefixes explicitly; the default `latest.log` is intended for one process per
+log directory. External compression or rotation deployments can select
+`FileLogCompression::None`; the sink does not automatically reopen a file
+renamed by external `logrotate`.
 
 If the file appender cannot be initialized, for example because the configured
 path is not writable or is not a directory, the file logging service logs a
@@ -118,14 +161,14 @@ The file sink remains best-effort. It does not block tracing producers when its
 background queue is full; dropped lines, background file-write errors, and
 broadcast lag are reported on stderr with cumulative counters where available.
 
-Custom rotation and retention can be configured via the struct fields:
+Custom rotation and compression can be configured via the struct fields:
 
 ```rust
-use service_daemon::{FileLogConfig, RotationPolicy, enable_file_logging};
+use service_daemon::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
 
 let config = FileLogConfig {
     rotation: RotationPolicy::Hourly,
-    max_log_files: Some(48), // keep last 48 hourly files (2 days)
+    compression: FileLogCompression::Gzip,
     ..FileLogConfig::new("logs", "my-app")
 };
 enable_file_logging(config);

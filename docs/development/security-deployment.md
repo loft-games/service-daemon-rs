@@ -34,14 +34,23 @@ it through an error path that may be recorded.
 The `file-logging` feature is best-effort persistence for operational logs, not
 a strong audit trail:
 
-- if the rolling file appender cannot initialize, the framework logs a warning
+- if the file writer cannot initialize, the framework logs a warning
   and continues with console logging only;
 - if a file-log consumer lags behind the broadcast queue, some events may not be
   persisted to file;
 - if the background file queue drops lines or the appender reports write errors,
   the sink reports cumulative health counters on stderr;
+- rotation archives are compressed in a bounded background queue; if an archive
+  attempt fails, the source rotation remains available for retry;
 - file ownership, directory permissions, disk retention, backup, shipping, and
-  tamper resistance are deployment responsibilities.
+  tamper resistance are deployment responsibilities. The framework does not
+  delete old archives by count or age.
+
+The default file prefix is `latest.log`, and the sink writes both framework and
+application events. `FileLogCompression::None` leaves rotated files uncompressed
+for deployments that delegate archival to an external tool. `RotationPolicy::Never`
+does not create rotated archives. If several processes share one directory,
+configure distinct prefixes or directories to avoid competing for the same files.
 
 For audit-grade logging, deploy an external log pipeline with explicit
 durability, access control, retention, and monitoring guarantees.

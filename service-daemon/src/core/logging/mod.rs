@@ -4,13 +4,16 @@ mod render;
 mod services;
 
 #[cfg(feature = "file-logging")]
+mod archive;
+
+#[cfg(feature = "file-logging")]
 mod file;
 
 pub use layer::DaemonLayer;
 pub use model::{LogBatchSizeError, MAX_LOG_BATCH_SIZE, set_log_batch_size};
 
 #[cfg(feature = "file-logging")]
-pub use file::{FileLogConfig, RotationPolicy, enable_file_logging};
+pub use file::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
 
 use tracing_subscriber::prelude::*;
 

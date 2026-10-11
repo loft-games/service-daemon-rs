@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **File Log Compression and Archive Chain**: Added `FileLogCompression::Gzip`
+  (the default) and `FileLogCompression::None`, background gzip archiving for
+  closed rotations, same-day fragment compaction after three fragments older
+  than 24 hours, and delayed `.needs-repack` maintenance for merged archives.
+  The default file prefix is `latest.log`, shared by framework and application
+  logs, and archive failures preserve the source rotation for retry.
+
 - **Provider Contracts and Fallback Implementations**: Added
   `#[provider_contract]` for shared injectable output types and
   `#[provider_impl(priority = N)]` for app-local implementation candidates.
@@ -41,6 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only validation, first-instance ownership checks, busy-pipe retry, listener-replacement handling, and focused Windows MSVC validation coverage. Like LocalIpc providers, their `accept().await?` / `connect().await?` helpers return `IpcStream`; connector providers defer dialing until `connect()`, and name arguments accept string literals or paths to `const`/`static &'static str` values.
 
 ### Changed
+
+- **File Logging Configuration**: Removed the `max_log_files` count-based
+  cleanup setting. `RotationPolicy::Never` performs no archive maintenance, and
+  file logging no longer promises automatic retention deletion; retention and
+  multi-process directory separation remain deployment responsibilities.
 
 - **Daemon-local Provider Ownership (breaking)**: All generated provider instances,
   including eager providers and provider contracts, now belong to the current

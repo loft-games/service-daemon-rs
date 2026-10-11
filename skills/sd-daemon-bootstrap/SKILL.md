@@ -74,6 +74,17 @@ per generation; HighPriority permits automatic resource intervention and reload.
 The mode is not a hard real-time guarantee. Its thresholds are internal, not
 global public builder settings. See the reference's HighPriority section.
 
+## File logging
+
+When the `file-logging` feature is enabled, call `init_logging()` and then
+`enable_file_logging(...)` before `run()`. `FileLogConfig::default()` writes
+framework and application events to daily `latest.log.YYYY-MM-DD` files and
+compresses closed rotations in the background as `.gz` archives. Use
+`FileLogCompression::None` when an external archive pipeline owns compression;
+`RotationPolicy::Never` disables rotation and archive maintenance. The framework
+does not delete old archives by count or age. Processes sharing a directory must
+choose distinct directories or explicit prefixes.
+
 ## Companions
 
 - `reference.md` — full builder method list, `run` vs `wait` vs `shutdown`,

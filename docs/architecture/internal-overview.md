@@ -199,7 +199,12 @@ The main internal modules are:
   - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUIDv7 message IDs, UUID-backed service instance IDs, and trigger instance IDs) for asynchronous tracing.
   - `render.rs`: Console and feature-gated JSON rendering. Console timestamps convert the captured UTC instant to the process-local timezone and include its numeric offset; the event model and JSON serialization remain UTC.
   - `services.rs`: Console log drain service.
-  - `file.rs`: Feature-gated file logging configuration and drain service.
+  - `file.rs`: Feature-gated file logging configuration, JSON drain, and
+    rotation handoff to the bounded archive worker.
+  - `archive.rs`: Closed-file gzip archiving, same-day fragment compaction,
+    delayed `.needs-repack` maintenance, startup recovery, and source-preserving
+    retry handling. Archive maintenance is internal and has no retention-delete
+    policy.
   - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID-backed service instance fields and numeric sequence fields instead of heap-allocated composite strings.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
 - **`core/diagnostics.rs`**: Internal observation store for generation, service, and lane aggregates. Public APIs receive only distilled read-only snapshots.

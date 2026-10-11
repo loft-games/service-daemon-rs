@@ -12,7 +12,7 @@ dependency baselines.
 | `simulation` | Test-only sandbox utilities. | `cargo check -p example-simulation`, `cargo test --workspace --all-features`, `cargo clippy --workspace --all-features`. | `example-simulation`. |
 | `diagnostics` | Diagnostic topology collection, independent of HighPriority. | `cargo check -p example-diagnostics`, `cargo test --workspace --all-features`, diagnostics unit coverage for shutdown topology tracing. | `example-diagnostics`. |
 | `high-priority` | Opt-in execution mode, probes, advisory and feedback-driven intervention. | `cargo test -p service-daemon --features high-priority`, `cargo test -p service-daemon --test high_priority_feature_contract_tests`; independent downstream off/on compile matrix. | Scheduling and macro-test examples. |
-| `file-logging` | Best-effort JSON file persistence with rotation. | `cargo check -p example-logging`, `cargo test --workspace --all-features`, `cargo test -p service-daemon --features file-logging`. | `example-logging`. |
+| `file-logging` | Best-effort JSON file persistence, time rotation, and feature-gated gzip archive maintenance. | `cargo check -p example-logging`, `cargo test --workspace --all-features`, `cargo test -p service-daemon --features file-logging`. | `example-logging`. |
 
 Do not expand this into a full pairwise feature matrix unless a real
 combination-specific gap appears. The current release baseline is default,
@@ -556,9 +556,9 @@ Current baseline notes:
 - Default features include `cron`, which enables `tokio-cron-scheduler`.
 - No-default-features removes `tokio-cron-scheduler` but still uses `tokio`
   with `full` and `tracing`.
-- All-features adds `tracing-appender` and `serde_json` through
-  `file-logging`; `simulation` and `diagnostics` do not currently add external
-  dependencies.
+- All-features adds `tracing-appender`, `serde_json`, and the pure-Rust `flate2`
+  gzip backend through `file-logging`; `simulation` and `diagnostics` do not
+  currently add external dependencies.
 - `cargo deny --locked check` is the CI dependency-policy gate.
 - `cargo audit` is retained as a maintainer comparison signal. Use
   `cargo audit -D warnings` only when no reviewed temporary advisory exceptions
@@ -701,6 +701,22 @@ cargo deny --locked check
 cargo audit
 ```
 
+For archive changes, run the focused filesystem and child-process suites as
+well:
+
+```bash
+cargo test -p service-daemon --features file-logging --lib core::logging::
+cargo test -p service-daemon --features file-logging --test file_logging_archive_tests
+```
+
+These cover actual writer ownership across rotation, gzip round trips, the
+three-fragment threshold, strict 24-hour/30-day age boundaries, failed
+publication and recovery, queue saturation, and bounded shutdown. Integration
+tests launch independent daemon processes to verify startup maintenance,
+repacking, repeat startup, custom prefixes, `None`, and `Never`. Windows MSVC
+CI runs the same integration target plus Windows-specific file-sharing tests
+from the library suite; a Linux pass does not establish Windows behavior.
+
 Also confirm that the linkme platform smoke jobs are either green or, for the
 Windows GNU XFAIL job, still failing in the expected no-workaround direction.
 
@@ -712,6 +728,10 @@ Before cutting a release that changes deployment-facing behavior, review
 - framework logs still do not promise automatic secret redaction;
 - file logging still degrades to console-only when the appender cannot
   initialize, and remains documented as best-effort operational logging;
+- file logging defaults to `latest.log` with gzip archive maintenance; closed
+  rotations are source-preserving on failure, same-day compaction uses the
+  fixed three-fragment/24-hour threshold, and no automatic retention deletion
+  is promised;
 - Unix socket examples and docs do not present shared `/tmp` paths as
   production-safe;
 - TCP listener examples default to loopback unless the text explicitly discusses

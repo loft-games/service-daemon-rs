@@ -41,6 +41,7 @@ cargo test "${cargo_flags[@]}" -p service-daemon --all-features --doc
 feature_integration_tests=(
   eager_integration_tests
   file_logging_degrade_tests
+  file_logging_archive_tests
   high_priority_runtime_policy_tests
   provider_contract_integration_tests
   provider_ownership_characterization

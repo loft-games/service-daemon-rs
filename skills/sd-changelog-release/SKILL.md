@@ -59,6 +59,12 @@ maintainer release gates. Record diagnostics output contract changes, file
 logging failure semantics, linkme platform smoke coverage, and new release
 validation documentation under `[Unreleased]`.
 
+For file logging changes, describe the user-visible contract rather than the
+implementation sequence: default `latest.log` naming, `FileLogCompression` and
+rotation behavior, source preservation on archive failure, fixed compaction and
+repack thresholds, and the absence of automatic retention deletion. Keep the
+entry under `[Unreleased]` until the next tagged release.
+
 ## Cutting a release
 
 1. Decide the version from the accumulated `[Unreleased]` entries (SemVer; pre-1.0
