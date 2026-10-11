@@ -7,7 +7,7 @@
 //! process so that the scenarios remain independent when the test harness
 //! executes them in parallel.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -47,7 +47,7 @@ fn write_old_fragment(path: &Path, body: &str) -> std::io::Result<()> {
     let old = SystemTime::now()
         .checked_sub(Duration::from_secs(31 * 24 * 60 * 60))
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    File::open(path)?.set_modified(old)
+    OpenOptions::new().write(true).open(path)?.set_modified(old)
 }
 
 fn write_old_gzip_fragment(path: &Path, body: &str) -> std::io::Result<()> {
@@ -58,7 +58,7 @@ fn write_old_gzip_fragment(path: &Path, body: &str) -> std::io::Result<()> {
     let old = SystemTime::now()
         .checked_sub(Duration::from_secs(31 * 24 * 60 * 60))
         .unwrap_or(SystemTime::UNIX_EPOCH);
-    File::open(path)?.set_modified(old)
+    OpenOptions::new().write(true).open(path)?.set_modified(old)
 }
 
 fn assert_child_success(output: &Output) {

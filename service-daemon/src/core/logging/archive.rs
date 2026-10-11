@@ -1160,6 +1160,13 @@ mod tests {
         encoder.finish().expect("finish gzip");
     }
 
+    fn set_file_modified(path: &Path, modified: SystemTime) -> io::Result<()> {
+        OpenOptions::new()
+            .write(true)
+            .open(path)?
+            .set_modified(modified)
+    }
+
     fn cleanup(path: &Path) {
         let _ = fs::remove_dir_all(path);
     }
@@ -1343,9 +1350,7 @@ mod tests {
         for index in 0..3 {
             let path = directory.join(format!("latest.log.2026-01-01-0{index}.gz"));
             write_gzip(&path, format!("{index}\n").as_bytes());
-            File::open(&path)
-                .expect("fragment")
-                .set_modified(now.checked_sub(just_under).expect("age"))
+            set_file_modified(&path, now.checked_sub(just_under).expect("age"))
                 .expect("set fragment time");
         }
         let store = ArchiveStore::new(
@@ -1364,9 +1369,7 @@ mod tests {
         for index in 0..3 {
             let path = directory.join(format!("latest.log.2026-01-01-0{index}.gz"));
             write_gzip(&path, format!("{index}\n").as_bytes());
-            File::open(&path)
-                .expect("fragment")
-                .set_modified(now.checked_sub(just_over).expect("age"))
+            set_file_modified(&path, now.checked_sub(just_over).expect("age"))
                 .expect("set fragment time");
         }
         let store = ArchiveStore::new(
@@ -1393,9 +1396,7 @@ mod tests {
         let just_under = age
             .checked_sub(Duration::from_secs(2))
             .expect("boundary margin");
-        File::open(&marker)
-            .expect("marker")
-            .set_modified(now.checked_sub(just_under).expect("age"))
+        set_file_modified(&marker, now.checked_sub(just_under).expect("age"))
             .expect("set marker time");
         let store = ArchiveStore::new(
             directory.clone(),
@@ -1414,9 +1415,10 @@ mod tests {
         write_gzip(&archive, b"merged\n");
         let marker = directory.join("latest.log.2026-01-01.merged.gz.needs-repack");
         fs::write(&marker, b"needs repack\n").expect("marker");
-        File::open(&marker)
-            .expect("marker")
-            .set_modified(now.checked_sub(age + Duration::from_secs(2)).expect("age"))
+        set_file_modified(
+            &marker,
+            now.checked_sub(age + Duration::from_secs(2)).expect("age"),
+        )
             .expect("set marker time");
         let store = ArchiveStore::new(
             directory.clone(),
@@ -1508,17 +1510,13 @@ mod tests {
             } else {
                 write_gzip(&path, format!("bad-{index}\n").as_bytes());
             }
-            File::open(&path)
-                .expect("fragment")
-                .set_modified(old)
+            set_file_modified(&path, old)
                 .expect("set fragment time");
         }
         for index in 0..3 {
             let path = directory.join(format!("latest.log.2026-01-02-0{index}.gz"));
             write_gzip(&path, format!("good-{index}\n").as_bytes());
-            File::open(&path)
-                .expect("fragment")
-                .set_modified(old)
+            set_file_modified(&path, old)
                 .expect("set fragment time");
         }
 
@@ -1569,18 +1567,14 @@ mod tests {
         let corrupt_marker = directory.join("latest.log.2026-01-01.merged.gz.needs-repack");
         fs::write(&corrupt_archive, b"not gzip").expect("corrupt archive");
         fs::write(&corrupt_marker, b"needs repack\n").expect("corrupt marker");
-        File::open(&corrupt_marker)
-            .expect("corrupt marker")
-            .set_modified(old)
+        set_file_modified(&corrupt_marker, old)
             .expect("set marker time");
 
         let valid_archive = directory.join("latest.log.2026-01-02.merged.gz");
         let valid_marker = directory.join("latest.log.2026-01-02.merged.gz.needs-repack");
         write_gzip(&valid_archive, b"valid merged\n");
         fs::write(&valid_marker, b"needs repack\n").expect("valid marker");
-        File::open(&valid_marker)
-            .expect("valid marker")
-            .set_modified(old)
+        set_file_modified(&valid_marker, old)
             .expect("set marker time");
 
         let store = ArchiveStore::new(
@@ -1814,12 +1808,11 @@ mod tests {
         let marker = directory.join("latest.log.2026-01-01.merged.gz.needs-repack");
         fs::write(&marker, b"needs repack\n").expect("marker");
         let now = SystemTime::now();
-        File::open(&marker)
-            .expect("marker")
-            .set_modified(
-                now.checked_sub(REPACK_MIN_AGE + Duration::from_secs(2))
-                    .expect("age"),
-            )
+        set_file_modified(
+            &marker,
+            now.checked_sub(REPACK_MIN_AGE + Duration::from_secs(2))
+                .expect("age"),
+        )
             .expect("set marker time");
 
         let lock = OpenOptions::new()
