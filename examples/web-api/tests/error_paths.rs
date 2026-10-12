@@ -271,9 +271,10 @@ async fn error_envelopes_match_golden_fixture() -> anyhow::Result<()> {
             "data": quota.data,
         }),
     ];
-    assert_eq!(
-        serde_json::to_string_pretty(&snapshots)?,
-        include_str!("fixtures/error-envelopes.json").trim()
-    );
+    let fixture = include_str!("fixtures/error-envelopes.json").replace("\r\n", "\n");
+    for fixture in [fixture.clone(), fixture.replace('\n', "\r\n")] {
+        let expected: serde_json::Value = serde_json::from_str(&fixture)?;
+        assert_eq!(serde_json::to_value(&snapshots)?, expected);
+    }
     Ok(())
 }

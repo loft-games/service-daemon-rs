@@ -35,12 +35,10 @@ impl Drop for EnvVarGuard {
     }
 }
 
-fn set_local_ipc_name(key: &'static str, label: &str) -> (EnvVarGuard, String) {
+fn set_local_ipc_name(key: &'static str) -> (EnvVarGuard, String) {
     let counter = IPC_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = format!(
-        "service-daemon-rs-local-ipc-{label}-{}-{counter}",
-        std::process::id()
-    );
+    // Keep unique names short enough for macOS's long temporary directory.
+    let name = format!("sdt-{:x}-{counter:x}", std::process::id());
     let previous = std::env::var_os(key);
     // Rust 2024 marks environment mutation unsafe because it is process-global.
     unsafe {
@@ -87,7 +85,7 @@ mod unix_tests {
     async fn unix_local_ipc_listen_connect_roundtrip() {
         crate::provider_context::run(async move {
             let _env_lock = ENV_VAR_LOCK.lock().await;
-            let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR, "unix-roundtrip");
+            let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR);
 
             let server = <UnixRoundtripServer as ManagedProvided>::resolve_managed()
                 .await
@@ -156,7 +154,7 @@ mod unix_tests {
     async fn unix_local_ipc_env_overrides_logical_name() {
         crate::provider_context::run(async move {
             let _env_lock = ENV_VAR_LOCK.lock().await;
-            let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "unix-override");
+            let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR);
 
             let server = <UnixOverrideServer as ManagedProvided>::resolve_managed()
                 .await
@@ -285,8 +283,7 @@ mod windows_tests {
     async fn windows_local_ipc_listen_connect_roundtrip() {
         crate::provider_context::run(async move {
             let _env_lock = ENV_VAR_LOCK.lock().await;
-            let (_env_var, logical_name) =
-                set_local_ipc_name(ROUNDTRIP_ENV_VAR, "windows-roundtrip");
+            let (_env_var, logical_name) = set_local_ipc_name(ROUNDTRIP_ENV_VAR);
 
             let server = <WindowsRoundtripServer as ManagedProvided>::resolve_managed()
                 .await
@@ -362,7 +359,7 @@ mod windows_tests {
     async fn windows_local_ipc_env_overrides_logical_name() {
         crate::provider_context::run(async move {
             let _env_lock = ENV_VAR_LOCK.lock().await;
-            let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR, "windows-override");
+            let (_env_var, logical_name) = set_local_ipc_name(OVERRIDE_ENV_VAR);
 
             let server = <WindowsOverrideServer as ManagedProvided>::resolve_managed()
                 .await
@@ -404,8 +401,7 @@ mod windows_tests {
     async fn windows_local_ipc_connect_retries_busy_pipe_replacement_gap() {
         crate::provider_context::run(async move {
             let _env_lock = ENV_VAR_LOCK.lock().await;
-            let (_env_var, logical_name) =
-                set_local_ipc_name(BUSY_RETRY_ENV_VAR, "windows-busy-retry");
+            let (_env_var, logical_name) = set_local_ipc_name(BUSY_RETRY_ENV_VAR);
             let pipe_name = pipe_name(&logical_name);
 
             let busy_server =

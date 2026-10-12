@@ -25,6 +25,10 @@ and archive filename/manifest helpers without depending on wall-clock pressure,
 CPU affinity, RSS, or generated machine archives. The calibration tests remain
 `#[ignore]` and keep their existing evidence boundaries.
 
+Golden fixtures compare JSON values or logical text lines, not checkout line
+endings. The Web API and HighPriority fixtures exercise both LF and CRLF on every
+platform while preserving checks on fields, values, and record order.
+
 ## General Platform CI
 
 ### Value provider environment contract
@@ -632,6 +636,17 @@ Required platform signals:
 
 Do not mirror every Rust target triple. CPU architecture is not the primary
 release-validation risk; prefer OS/linker/object-format coverage families.
+
+## Local IPC Endpoint Portability
+
+Local IPC runtime tests use short, process-unique logical names so the generated
+Unix socket paths fit under macOS's long per-user temporary directory. The
+`example-local-ipc` integration suite also runs its daemon smoke in a child process
+with a 50-byte `TMPDIR` and an empty `XDG_RUNTIME_DIR`, exercising the fallback
+path without changing the parent process environment. Run it with
+`cargo test -p example-local-ipc --test local_ipc_example_integration` on Unix.
+This validates test endpoint portability; production Unix socket paths still
+have the operating system's length limit.
 
 ## Windows Local IPC Provider Gate
 

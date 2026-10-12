@@ -547,10 +547,10 @@ mod tests {
                 .expect("expected timeout effect"),
         ));
 
-        assert_eq!(
-            snapshots.join("\n"),
-            include_str!("testdata/feedback-effects.golden").trim()
-        );
+        let fixture = include_str!("testdata/feedback-effects.golden").replace("\r\n", "\n");
+        for fixture in [fixture.clone(), fixture.replace('\n', "\r\n")] {
+            assert_eq!(snapshots, fixture.lines().collect::<Vec<_>>());
+        }
     }
 
     #[test]
