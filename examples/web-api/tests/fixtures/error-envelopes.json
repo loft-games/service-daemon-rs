@@ -1,0 +1,20 @@
+[
+  {
+    "case": "empty-label",
+    "code": 400,
+    "data": null,
+    "message": "label must not be empty"
+  },
+  {
+    "case": "missing-item",
+    "code": 404,
+    "data": null,
+    "message": "not found"
+  },
+  {
+    "case": "quota",
+    "code": 429,
+    "data": null,
+    "message": "item limit reached"
+  }
+]

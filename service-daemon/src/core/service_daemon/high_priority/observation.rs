@@ -77,6 +77,7 @@ impl SleepWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn sleep_window_excludes_interruptions_stale_and_pre_boundary_sleeps() {
@@ -123,5 +124,49 @@ mod tests {
         assert_eq!(first.completed, 128);
         assert_eq!(first.sequence, 300);
         assert_eq!(window.snapshot(now, now), first);
+    }
+
+    proptest! {
+        #[test]
+        fn generated_completed_samples_keep_the_window_bounded(
+            records in prop::collection::vec((0u64..=u64::MAX, 0u64..=u64::MAX, any::<bool>()), 0..=512)
+        ) {
+            let now = Instant::now();
+            let mut window = SleepWindow::default();
+
+            for (requested_ns, elapsed_ns, completed) in records {
+                window.record(
+                    now,
+                    Duration::from_nanos(requested_ns),
+                    Duration::from_nanos(elapsed_ns),
+                    completed,
+                );
+            }
+
+            let snapshot = window.snapshot(now, now);
+            prop_assert!(snapshot.completed <= 128);
+            prop_assert!(snapshot.mean_drift_ns <= u64::MAX);
+            prop_assert!(snapshot.mean_requested_ns <= u64::MAX);
+        }
+
+        #[test]
+        fn generated_durations_never_make_means_overflow(
+            samples in prop::collection::vec((0u64..=u64::MAX, 0u64..=u64::MAX), 1..=128)
+        ) {
+            let now = Instant::now();
+            let mut window = SleepWindow::default();
+            for (requested_ns, elapsed_ns) in samples {
+                window.record(
+                    now,
+                    Duration::from_nanos(requested_ns),
+                    Duration::from_nanos(elapsed_ns),
+                    true,
+                );
+            }
+
+            let snapshot = window.snapshot(now, now);
+            prop_assert!(snapshot.mean_requested_ns <= u64::MAX);
+            prop_assert!(snapshot.mean_drift_ns <= u64::MAX);
+        }
     }
 }

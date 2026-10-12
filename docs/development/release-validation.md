@@ -19,6 +19,12 @@ combination-specific gap appears. The current release baseline is default,
 all-features, and no-default-features, plus the examples that exercise the
 non-default features.
 
+The fast regression layer complements the long-running calibration tests. It
+covers deterministic Web API error envelopes, HighPriority feedback decisions,
+and archive filename/manifest helpers without depending on wall-clock pressure,
+CPU affinity, RSS, or generated machine archives. The calibration tests remain
+`#[ignore]` and keep their existing evidence boundaries.
+
 ## General Platform CI
 
 ### Value provider environment contract
@@ -535,6 +541,10 @@ and scheduling. It also checks that `service-daemon` compiles without default
 features on Windows.
 
 Windows Clippy is not part of this job; the Linux jobs own all Clippy gates.
+The `Workspace tests` matrix also runs the complete default-feature,
+all-features, and service-daemon no-default-feature passes on macOS host and
+Linux musl. The existing `Linkme platform smoke` matrix remains a smaller
+release/linker/object-format check and does not replace these workspace tests.
 The dedicated Windows local IPC job owns NamedPipe runtime tests and the
 Windows-only NamedPipe trybuild fixtures. Keep OS-specific IPC checks separate
 from the general baseline so generic runtime regressions, Unix-socket

@@ -176,6 +176,46 @@ jobs:
         shell: bash
         run: bash .github/scripts/check-linkme-registry-sections "${{ matrix.target }}"
 
+  workspace-platforms:
+    name: Workspace tests (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: host
+            target_arg: ""
+            label: macOS host
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            target_arg: --target x86_64-unknown-linux-musl
+            label: Linux musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install musl C toolchain
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools
+          command -v musl-gcc
+          musl-gcc --version
+          {
+            echo 'CC_x86_64_unknown_linux_musl=musl-gcc'
+            echo 'CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc'
+          } >> "$GITHUB_ENV"
+      - name: Install Rust (${{ matrix.target }})
+        shell: bash
+        run: bash .github/scripts/install-rust-toolchain stable "${{ matrix.target }}"
+      - name: Run workspace tests (${{ matrix.label }})
+        run: cargo test ${{ matrix.target_arg }} --workspace
+      - name: Run workspace tests with all features (${{ matrix.label }})
+        run: cargo test ${{ matrix.target_arg }} --workspace --all-features
+      - name: Run service-daemon tests without default features (${{ matrix.label }})
+        run: cargo test ${{ matrix.target_arg }} -p service-daemon --no-default-features
+
   windows-msvc-general:
     name: Windows MSVC general tests
     runs-on: windows-latest

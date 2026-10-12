@@ -48,3 +48,38 @@ async fn cors_preflight_exposes_explicit_policy() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn cors_actual_requests_reflect_only_the_configured_origin() -> anyhow::Result<()> {
+    let app = build_router(support::api_state());
+
+    let allowed = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/items")
+                .header("origin", "http://localhost:3000")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert!(allowed.status().is_success());
+    assert_eq!(
+        allowed
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+            .and_then(|value| value.to_str().ok()),
+        Some("http://localhost:3000")
+    );
+
+    let denied = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/items")
+                .header("origin", "https://untrusted.example")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert!(denied.status().is_success());
+    assert!(denied.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
+    Ok(())
+}

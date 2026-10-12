@@ -1,6 +1,6 @@
 use axum::Router;
 use axum::http::{Method, header};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::providers::ExampleConfig;
@@ -32,8 +32,11 @@ fn api_router() -> OpenApiRouter<HttpApiState> {
 }
 
 fn cors_layer(config: &ExampleConfig) -> CorsLayer {
+    let allowed_origin = config.cors_allowed_origin.clone();
     CorsLayer::new()
-        .allow_origin(config.cors_allowed_origin.clone())
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin == allowed_origin
+        }))
         .allow_methods([Method::GET, Method::POST, Method::PATCH])
         .allow_headers([header::CONTENT_TYPE])
 }

@@ -15,7 +15,20 @@ To develop the core framework or macros, you need:
 ### Standard Workflow
 
 1. **Modify Core/Macro**: Make changes in `service-daemon` or `service-daemon-macro`.
-2. **Run Tests**: Use `cargo test --workspace` to ensure no regressions.
+2. **Run Tests**: Use `cargo test --workspace` to ensure no regressions. For
+   the complete feature baseline and fast regression fixtures, also run:
+
+   ```bash
+   cargo test --workspace --all-features
+   cargo test -p service-daemon --no-default-features
+   cargo test -p example-web-api --test error_paths --test cors_policy
+   cargo test -p service-daemon --all-features --lib feedback_effects_match_golden_fixture
+   cargo test -p service-daemon --all-features --lib archive_filename_encoding_matches_golden_fixture
+   ```
+
+   The property tests use `proptest` as a direct development dependency. Keep
+   long HighPriority calibration and resource experiments ignored; use their
+   documented replay entrypoints when validating machine-specific evidence.
 3. **Verify Expansion**: Use `cargo expand -p example-complete` to see how changes affect user code.
 4. **Linting**: Follow the suggestions of `cargo clippy --workspace -- -D warnings`.
 

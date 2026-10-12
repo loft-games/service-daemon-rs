@@ -1144,6 +1144,7 @@ fn decode_filename(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::time::SystemTime;
 
     fn test_directory(name: &str) -> PathBuf {
@@ -1169,6 +1170,46 @@ mod tests {
 
     fn cleanup(path: &Path) {
         let _ = fs::remove_dir_all(path);
+    }
+
+    proptest! {
+        #[test]
+        fn encoded_filenames_round_trip(
+            characters in prop::collection::vec(any::<char>(), 0..=64)
+        ) {
+            let value: String = characters.into_iter().collect();
+            prop_assert_eq!(decode(&encode(&value)), Ok(value));
+        }
+
+        #[test]
+        fn arbitrary_manifest_values_do_not_panic(value in any::<String>()) {
+            let _ = decode(&value);
+            let _ = decode_filename(&value);
+        }
+
+        #[test]
+        fn unsafe_manifest_filenames_are_rejected(
+            value in prop_oneof![
+                Just("".to_owned()),
+                Just(".".to_owned()),
+                Just("..".to_owned()),
+                Just("nested/name".to_owned()),
+                Just(r"nested\\name".to_owned()),
+                Just("drive:name".to_owned()),
+                Just("nul\0name".to_owned()),
+            ]
+        ) {
+            prop_assert!(decode_filename(&encode(&value)).is_none());
+        }
+    }
+
+    #[test]
+    fn archive_filename_encoding_matches_golden_fixture() {
+        for line in include_str!("testdata/archive-filename.golden").lines() {
+            let (plain, encoded) = line.split_once('=').expect("valid archive fixture line");
+            assert_eq!(encode(plain), encoded);
+            assert_eq!(decode_filename(encoded).as_deref(), Some(plain));
+        }
     }
 
     #[test]

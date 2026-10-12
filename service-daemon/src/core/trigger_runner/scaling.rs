@@ -296,6 +296,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::Arc;
 
     use crate::models::policy::RestartPolicy;
@@ -527,6 +528,31 @@ mod tests {
             TriggerRunner::<()>::next_scaled_limit(usize::MAX - 1, &scaling),
             usize::MAX
         );
+    }
+
+    proptest! {
+        #[test]
+        fn pressure_limit_is_bounded_for_all_inputs(limit: usize, threshold: usize) {
+            let pressure = TriggerRunner::<()>::pressure_limit_for(limit, threshold);
+            prop_assert!(pressure <= limit);
+        }
+
+        #[test]
+        fn scaled_limit_never_exceeds_policy_max(
+            limit in 0usize..=usize::MAX,
+            scale_factor in 1usize..=usize::MAX,
+            max_concurrency in 1usize..=usize::MAX,
+        ) {
+            let scaling = ScalingPolicy::try_new(
+                1,
+                max_concurrency,
+                scale_factor,
+                1,
+                Duration::ZERO,
+            ).expect("positive scaling policy values are valid");
+            let next = TriggerRunner::<()>::next_scaled_limit(limit, &scaling);
+            prop_assert!(next <= max_concurrency);
+        }
     }
 
     #[test]

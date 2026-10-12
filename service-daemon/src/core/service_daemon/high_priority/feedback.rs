@@ -234,6 +234,7 @@ impl FeedbackController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn sample(now: Instant, generation: u64, drift: u64) -> ServiceSample {
         ServiceSample {
@@ -273,6 +274,58 @@ mod tests {
                 Decision::Wait
             ));
             assert!(controller.expire(late).is_none());
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn retaining_an_instance_clears_its_pending_intervention(
+            generation in 1u64..=u64::MAX - 1,
+            threshold in 1u64..=u64::MAX,
+            minimum_samples in 1u64..=8,
+        ) {
+            let now = Instant::now();
+            let mut controller = FeedbackController::default();
+            let mut baseline = sample(now, generation, threshold.saturating_add(1));
+            baseline.window.completed = minimum_samples;
+            baseline.window.sequence = minimum_samples;
+            assert!(matches!(
+                controller.observe(baseline, minimum_samples, threshold, 1),
+                Decision::Candidate(_)
+            ));
+            controller.start(baseline, HighPriorityShardId(generation), 1, now);
+            controller.retain(|_| false);
+
+            let mut next = sample(now, generation + 1, threshold.saturating_add(1));
+            next.window.completed = minimum_samples;
+            next.window.sequence = minimum_samples;
+            prop_assert!(matches!(
+                controller.observe(next, minimum_samples, threshold, 1),
+                Decision::Candidate(_)
+            ));
+        }
+
+        #[test]
+        fn external_reload_clears_pending_intervention(
+            generation in 1u64..=u64::MAX - 1,
+            threshold in 1u64..=u64::MAX,
+        ) {
+            let now = Instant::now();
+            let mut controller = FeedbackController::default();
+            let baseline = sample(now, generation, threshold.saturating_add(1));
+            assert!(matches!(
+                controller.observe(baseline, 8, threshold, 1),
+                Decision::Candidate(_)
+            ));
+            controller.start(baseline, HighPriorityShardId(generation), 1, now);
+            controller.external_reload(baseline.instance);
+
+            let mut next = sample(now, generation + 1, threshold.saturating_add(1));
+            next.window.sequence = 8;
+            prop_assert!(matches!(
+                controller.observe(next, 8, threshold, 1),
+                Decision::Candidate(_)
+            ));
         }
     }
 
@@ -431,6 +484,73 @@ mod tests {
                 matches!(controller.observe(after, 8, 100, 1), Decision::Evaluated(effect) if effect.kind == kind)
             );
         }
+    }
+
+    fn effect_snapshot(effect: Effect) -> String {
+        let kind = match effect.kind {
+            EffectKind::Improved => "improved",
+            EffectKind::PressureCleared => "pressure-cleared",
+            EffectKind::LowBenefit => "low-benefit",
+            EffectKind::PausedLowBenefit => "paused-low-benefit",
+            EffectKind::PlacementUnchanged => "placement-unchanged",
+            EffectKind::TimedOut => "timed-out",
+        };
+        let after_generation = effect.after.map_or(0, |sample| sample.generation);
+        format!(
+            "{kind}|before={}|after={after_generation}|target={}|workers={}",
+            effect.before.generation, effect.target.0, effect.worker_threads
+        )
+    }
+
+    #[test]
+    fn feedback_effects_match_golden_fixture() {
+        let now = Instant::now();
+        let mut snapshots = Vec::new();
+
+        for (after_drift, expected) in [
+            (150, EffectKind::Improved),
+            (50, EffectKind::PressureCleared),
+            (195, EffectKind::LowBenefit),
+        ] {
+            let mut controller = FeedbackController::default();
+            let baseline = sample(now, 1, 200);
+            controller.start(baseline, HighPriorityShardId(1), 2, now);
+            let after = sample(now, 2, after_drift);
+            let Decision::Evaluated(effect) = controller.observe(after, 8, 100, 1) else {
+                panic!("expected evaluated feedback effect");
+            };
+            assert_eq!(effect.kind, expected);
+            snapshots.push(effect_snapshot(effect));
+        }
+
+        let mut paused = FeedbackController::default();
+        let first = sample(now, 1, 200);
+        paused.start(first, HighPriorityShardId(1), 2, now);
+        let second = sample(now, 2, 195);
+        let Decision::Evaluated(first_effect) = paused.observe(second, 8, 100, 1) else {
+            panic!("expected first low-benefit effect");
+        };
+        snapshots.push(effect_snapshot(first_effect));
+        paused.start(second, HighPriorityShardId(2), 3, now);
+        let third = sample(now, 3, 194);
+        let Decision::Evaluated(second_effect) = paused.observe(third, 8, 100, 1) else {
+            panic!("expected paused low-benefit effect");
+        };
+        snapshots.push(effect_snapshot(second_effect));
+
+        let mut timed_out = FeedbackController::default();
+        let baseline = sample(now, 1, 200);
+        timed_out.start(baseline, HighPriorityShardId(1), 2, now);
+        snapshots.push(effect_snapshot(
+            timed_out
+                .expire(now + Duration::from_secs(120))
+                .expect("expected timeout effect"),
+        ));
+
+        assert_eq!(
+            snapshots.join("\n"),
+            include_str!("testdata/feedback-effects.golden").trim()
+        );
     }
 
     #[test]
