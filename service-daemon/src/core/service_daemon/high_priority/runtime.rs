@@ -9,8 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::adaptive_scheduling::run_adaptive_scheduling_recommendations;
 use crate::core::diagnostics::{
-    DiagnosticsSnapshot, ObservationStatsSnapshot, RuntimeLane,
-    run_high_priority_shard_runtime_probe, run_lane_runtime_probe,
+    DiagnosticsStore, RuntimeLane, run_high_priority_shard_runtime_probe, run_lane_runtime_probe,
 };
 use crate::core::service_daemon::high_priority::{
     HighPriorityPlacementDecision, HighPriorityPlacementDecisionKind, HighPriorityPlacementReason,
@@ -283,14 +282,10 @@ impl DaemonInstanceInner {
         }
 
         let policy = self.high_priority_runtime_pool.policy();
-        let snapshot = self.diagnostics.snapshot();
+        let mut shards = self.high_priority_runtime_pool.snapshot();
         let mut pressured_shards = Vec::new();
-        for shard in self.high_priority_runtime_pool.snapshot() {
-            let observation = snapshot
-                .high_priority_shards
-                .iter()
-                .find(|observed| observed.shard_id == shard.shard_id)
-                .map(|observed| &observed.recent_runtime_probe);
+        for shard in &mut shards {
+            let observation = self.diagnostics.high_priority_shard_probe(shard.shard_id);
             let pressure_state = match observation {
                 Some(observation)
                     if observation.completed >= policy.minimum_completed_samples()
@@ -315,13 +310,11 @@ impl DaemonInstanceInner {
                 .record_pressure(shard.shard_id, pressure_state);
             self.diagnostics
                 .record_high_priority_shard_pressure_state(shard.shard_id, pressure_state);
+            shard.pressure_state = pressure_state;
         }
 
         self.high_priority_runtime_pool.feedback.retain(|instance| {
-            snapshot
-                .services
-                .iter()
-                .any(|service| service.service_instance_id == instance)
+            self.diagnostics.contains_service(instance)
                 && !self
                     .resources
                     .status_plane
@@ -334,6 +327,13 @@ impl DaemonInstanceInner {
                         )
                     })
         });
+        if self
+            .high_priority_runtime_pool
+            .last_policy_suppression
+            .is_some_and(|(instance, _)| !self.diagnostics.contains_service(instance))
+        {
+            self.high_priority_runtime_pool.last_policy_suppression = None;
+        }
         if let Some(effect) = self.high_priority_runtime_pool.feedback.expire(now) {
             self.high_priority_runtime_pool
                 .state()
@@ -341,65 +341,86 @@ impl DaemonInstanceInner {
             log_effect(effect);
         }
         let mut candidate = None;
-        for shard in self.high_priority_runtime_pool.snapshot() {
-            for (instance, generation) in self
+        for (_, instance, generation) in
+            self.high_priority_runtime_pool.state().active_generations()
+        {
+            if self.is_lifecycle_operation_pending(instance) {
+                continue;
+            }
+            if self
                 .high_priority_runtime_pool
                 .state()
-                .active_on_shard(shard.shard_id)
+                .take_external_reload(instance, generation)
             {
-                if self.is_lifecycle_operation_pending(instance) {
-                    continue;
-                }
-                if self
-                    .high_priority_runtime_pool
-                    .state()
-                    .take_external_reload(instance, generation)
-                {
-                    self.high_priority_runtime_pool
-                        .feedback
-                        .external_reload(instance);
-                }
-                let since = self
-                    .high_priority_runtime_pool
+                self.high_priority_runtime_pool
                     .feedback
-                    .since(instance, generation);
-                let Some(sample) = self
-                    .diagnostics
-                    .high_priority_sleep_sample(instance, generation, now, since, settling)
-                else {
-                    continue;
-                };
-                match self.high_priority_runtime_pool.feedback.observe(
-                    sample,
-                    policy.minimum_completed_samples(),
-                    policy.high_avg_drift_ms().saturating_mul(1_000_000),
-                    policy.pressure_windows(),
-                ) {
-                    Decision::Candidate(sample) if pressured_shards.contains(&sample.shard) => {
-                        if candidate.is_none() {
-                            candidate = Some(sample);
-                        }
+                    .external_reload(instance);
+            }
+            let since = self
+                .high_priority_runtime_pool
+                .feedback
+                .since(instance, generation);
+            let minimum_sequence = self
+                .high_priority_runtime_pool
+                .feedback
+                .sequence(instance, generation)
+                .saturating_add(policy.minimum_completed_samples());
+            let Some(sample) = self.diagnostics.high_priority_sleep_sample(
+                instance,
+                generation,
+                now,
+                since,
+                settling,
+                minimum_sequence,
+            ) else {
+                continue;
+            };
+            if sample.window.completed >= policy.minimum_completed_samples()
+                && sample.window.mean_drift_ns
+                    < policy.high_avg_drift_ms().saturating_mul(1_000_000)
+                && self
+                    .high_priority_runtime_pool
+                    .last_policy_suppression
+                    .is_some_and(|(subject, _)| subject == instance)
+            {
+                self.high_priority_runtime_pool.last_policy_suppression = None;
+            }
+            match self.high_priority_runtime_pool.feedback.observe(
+                sample,
+                policy.minimum_completed_samples(),
+                policy.high_avg_drift_ms().saturating_mul(1_000_000),
+                policy.pressure_windows(),
+            ) {
+                Decision::Candidate(sample) if pressured_shards.contains(&sample.shard) => {
+                    if candidate.is_none() {
+                        candidate = Some(sample);
                     }
-                    Decision::Evaluated(effect) => log_effect(effect),
-                    _ => {}
                 }
+                Decision::Evaluated(effect) => log_effect(effect),
+                _ => {}
             }
         }
-        self.sync_high_priority_runtime_facts();
+        self.resources
+            .runtime_facts
+            .record_high_priority_shards(shards);
         let Some(candidate) = candidate else {
-            self.record_high_priority_policy_suppressed(
-                HighPriorityPlacementReason::InsufficientSamples,
+            tracing::trace!(
+                "HighPriority policy evaluation completed without an intervention candidate"
             );
             return;
         };
-        if global_runtime_pressure(&snapshot, policy) {
+        if global_runtime_pressure(&self.diagnostics, policy) {
             self.record_high_priority_policy_suppressed(
+                candidate.instance,
                 HighPriorityPlacementReason::GlobalPressure,
             );
             return;
         }
         if !self.high_priority_runtime_pool.rollover_allowed(now) {
-            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::Cooldown);
+            self.record_high_priority_policy_suppressed(
+                candidate.instance,
+                HighPriorityPlacementReason::Cooldown,
+            );
             return;
         }
         let Some(signal) = self
@@ -410,15 +431,22 @@ impl DaemonInstanceInner {
         else {
             return;
         };
-        let target =
-            self.select_high_priority_intervention_target(candidate.shard, candidate.instance, now);
-        if let Some(target) = target
-            && self.high_priority_runtime_pool.state().request_rollover(
-                candidate.instance,
-                candidate.generation,
-                target,
-            )
-        {
+        let target = match self.select_high_priority_intervention_target(
+            candidate.shard,
+            candidate.instance,
+            now,
+        ) {
+            Ok(target) => target,
+            Err(reason) => {
+                self.record_high_priority_policy_suppressed(candidate.instance, reason);
+                return;
+            }
+        };
+        if self.high_priority_runtime_pool.state().request_rollover(
+            candidate.instance,
+            candidate.generation,
+            target,
+        ) {
             let workers = self.high_priority_runtime_pool.total_worker_threads();
             self.high_priority_runtime_pool
                 .feedback
@@ -432,7 +460,10 @@ impl DaemonInstanceInner {
             tracing::info!(service_instance_id = %candidate.instance, generation = candidate.generation, source_shard = %candidate.shard, target_shard = %target, metric = "service_sleep.mean_drift_ns", baseline = candidate.window.mean_drift_ns, samples = candidate.window.completed, workers, "HighPriority resource intervention requested");
             signal.notify_one();
         } else {
-            self.record_high_priority_policy_suppressed(HighPriorityPlacementReason::NoBetterShard);
+            self.record_high_priority_policy_suppressed(
+                candidate.instance,
+                HighPriorityPlacementReason::NoBetterShard,
+            );
         }
         self.sync_high_priority_runtime_facts();
     }
@@ -442,7 +473,7 @@ impl DaemonInstanceInner {
         source: HighPriorityShardId,
         instance: crate::models::ServiceInstanceId,
         now: Instant,
-    ) -> Option<HighPriorityShardId> {
+    ) -> Result<HighPriorityShardId, HighPriorityPlacementReason> {
         // Experimental preference is absent from non-test builds. All pressure,
         // cooldown, rollover and benefit gates remain shared with production.
         #[cfg(test)]
@@ -450,7 +481,7 @@ impl DaemonInstanceInner {
             .high_priority_runtime_pool
             .experiment_idle_target(source)
         {
-            return Some(target);
+            return Ok(target);
         }
         match self.high_priority_runtime_pool.scale_out(now) {
             Ok(Some(shard_id)) => {
@@ -473,10 +504,16 @@ impl DaemonInstanceInner {
                         self.cancellation_token.clone(),
                     );
                 }
-                Some(shard_id)
+                Ok(shard_id)
             }
             Ok(None) => {
-                self.sync_scale_out_suppression_to_diagnostics(now);
+                let reason = if self.high_priority_runtime_pool.total_worker_threads()
+                    >= self.high_priority_runtime_pool.max_worker_threads()
+                {
+                    HighPriorityPlacementReason::MaxCapacity
+                } else {
+                    HighPriorityPlacementReason::Cooldown
+                };
                 self.high_priority_runtime_pool
                     .snapshot()
                     .into_iter()
@@ -486,34 +523,36 @@ impl DaemonInstanceInner {
                     })
                     .min_by_key(|shard| (shard.active_generations, shard.shard_id))
                     .map(|shard| shard.shard_id)
+                    .ok_or(reason)
             }
             Err(error) => {
                 tracing::warn!(%error, service_instance_id = %instance, "HighPriority shard allocation failed; intervention was not started");
-                None
+                Err(HighPriorityPlacementReason::NoBetterShard)
             }
         }
     }
 
-    fn sync_scale_out_suppression_to_diagnostics(&self, _now: Instant) {
-        let reason = if self.high_priority_runtime_pool.total_worker_threads()
-            >= self.high_priority_runtime_pool.max_worker_threads()
-        {
-            HighPriorityPlacementReason::MaxCapacity
-        } else {
-            HighPriorityPlacementReason::Cooldown
-        };
-        self.record_high_priority_policy_suppressed(reason);
+    fn record_high_priority_policy_suppressed(
+        &mut self,
+        instance: crate::models::ServiceInstanceId,
+        reason: HighPriorityPlacementReason,
+    ) {
+        if self.high_priority_runtime_pool.last_policy_suppression == Some((instance, reason)) {
+            tracing::trace!(service_instance_id = %instance, decision_reason = ?reason, "HighPriority intervention remains suppressed");
+            return;
+        }
+        self.high_priority_runtime_pool.last_policy_suppression = Some((instance, reason));
+        self.diagnostics
+            .record_high_priority_placement_decision(HighPriorityPlacementDecision {
+                shard_id: None,
+                kind: HighPriorityPlacementDecisionKind::Suppressed,
+                reason,
+            });
+        tracing::debug!(service_instance_id = %instance, decision_reason = ?reason, "HighPriority intervention suppressed");
     }
 
-    fn record_high_priority_policy_suppressed(&self, reason: HighPriorityPlacementReason) {
-        self.record_high_priority_policy_decision(HighPriorityPlacementDecision {
-            shard_id: None,
-            kind: HighPriorityPlacementDecisionKind::Suppressed,
-            reason,
-        });
-    }
-
-    fn record_high_priority_policy_decision(&self, decision: HighPriorityPlacementDecision) {
+    fn record_high_priority_policy_decision(&mut self, decision: HighPriorityPlacementDecision) {
+        self.high_priority_runtime_pool.last_policy_suppression = None;
         self.diagnostics
             .record_high_priority_placement_decision(decision);
         tracing::debug!(
@@ -532,30 +571,15 @@ impl DaemonInstanceInner {
 }
 
 fn global_runtime_pressure(
-    snapshot: &DiagnosticsSnapshot,
+    diagnostics: &DiagnosticsStore,
     policy: crate::models::policy::HighPriorityRuntimeControl,
 ) -> bool {
-    lane_runtime_probe_pressure(snapshot, RuntimeLane::Control, policy)
-        && lane_runtime_probe_pressure(snapshot, RuntimeLane::Standard, policy)
-}
-
-fn lane_runtime_probe_pressure(
-    snapshot: &DiagnosticsSnapshot,
-    lane: RuntimeLane,
-    policy: crate::models::policy::HighPriorityRuntimeControl,
-) -> bool {
-    snapshot
-        .lanes
-        .iter()
-        .find(|snapshot| snapshot.runtime_lane == lane)
-        .is_some_and(|snapshot| observation_pressure(&snapshot.recent_runtime_probe, policy))
-}
-
-fn observation_pressure(
-    observation: &ObservationStatsSnapshot,
-    policy: crate::models::policy::HighPriorityRuntimeControl,
-) -> bool {
-    observation_has_pressure(observation.completed, observation.avg_drift_ms, policy)
+    [RuntimeLane::Control, RuntimeLane::Standard]
+        .into_iter()
+        .all(|lane| {
+            let observation = diagnostics.lane_runtime_probe(lane);
+            observation_has_pressure(observation.completed, observation.avg_drift_ms, policy)
+        })
 }
 
 fn settle_time() -> Duration {

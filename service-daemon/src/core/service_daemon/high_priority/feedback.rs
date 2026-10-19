@@ -84,6 +84,13 @@ impl FeedbackController {
             .and_then(|cursor| cursor.since)
     }
 
+    pub(crate) fn sequence(&self, instance: ServiceInstanceId, generation: u64) -> u64 {
+        self.cursors
+            .get(&instance)
+            .filter(|cursor| cursor.generation == generation)
+            .map_or(0, |cursor| cursor.sequence)
+    }
+
     pub(crate) fn retain(&mut self, mut exists: impl FnMut(ServiceInstanceId) -> bool) {
         self.cursors.retain(|instance, _| exists(*instance));
         if self

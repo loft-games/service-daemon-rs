@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -20,6 +21,8 @@ mod benchmark;
 mod calibration;
 pub(crate) mod feedback;
 pub(crate) mod observation;
+#[cfg(test)]
+mod policy_tests;
 pub(super) mod runtime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +38,6 @@ pub(crate) enum HighPriorityPlacementReason {
     LeastLoadedShard,
     PressureScaleOut,
     PolicyRollover,
-    InsufficientSamples,
     Cooldown,
     MaxCapacity,
     GlobalPressure,
@@ -98,19 +100,18 @@ impl HighPriorityRuntimePoolState {
 
     pub(super) fn snapshot(&self) -> Vec<HighPriorityRuntimeShardSnapshot> {
         let shards = self.shards.read().unwrap_or_else(|err| err.into_inner());
+        let mut loads = HashMap::<HighPriorityShardId, (usize, usize)>::new();
+        for entry in &self.active_generations {
+            loads.entry(*entry.value()).or_default().0 += 1;
+        }
+        for entry in &self.assignments {
+            loads.entry(*entry.value()).or_default().1 += 1;
+        }
         let mut snapshots: Vec<_> = shards
             .iter()
             .map(|shard| {
-                let active_generations = self
-                    .active_generations
-                    .iter()
-                    .filter(|entry| *entry.value() == shard.shard_id)
-                    .count();
-                let assigned_instances = self
-                    .assignments
-                    .iter()
-                    .filter(|entry| *entry.value() == shard.shard_id)
-                    .count();
+                let (active_generations, assigned_instances) =
+                    loads.get(&shard.shard_id).copied().unwrap_or_default();
                 HighPriorityRuntimeShardSnapshot {
                     shard_id: shard.shard_id,
                     worker_threads: shard.worker_threads,
@@ -274,6 +275,7 @@ impl HighPriorityRuntimePoolState {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn active_on_shard(
         &self,
         shard_id: HighPriorityShardId,
@@ -283,6 +285,17 @@ impl HighPriorityRuntimePoolState {
             .iter()
             .filter_map(|entry| (*entry.value() == shard_id).then_some(*entry.key()))
             .collect();
+        active.sort_unstable();
+        active
+    }
+
+    pub(super) fn active_generations(&self) -> Vec<(HighPriorityShardId, ServiceInstanceId, u64)> {
+        let mut active: Vec<_> = self
+            .active_generations
+            .iter()
+            .map(|entry| (*entry.value(), entry.key().0, entry.key().1))
+            .collect();
+        // Keep candidate selection in the same shard/instance/generation order.
         active.sort_unstable();
         active
     }
@@ -307,6 +320,7 @@ pub(super) struct HighPriorityRuntimePool {
     total_worker_threads: usize,
     last_scale_at: Option<Instant>,
     last_rollover_at: Option<Instant>,
+    last_policy_suppression: Option<(ServiceInstanceId, HighPriorityPlacementReason)>,
     #[cfg(test)]
     experiment_prefer_idle: bool,
     #[cfg(test)]
@@ -344,6 +358,7 @@ impl HighPriorityRuntimePool {
             total_worker_threads: 0,
             last_scale_at: None,
             last_rollover_at: None,
+            last_policy_suppression: None,
             #[cfg(test)]
             experiment_prefer_idle: false,
             #[cfg(test)]

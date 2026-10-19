@@ -1216,9 +1216,14 @@ impl DiagnosticsStore {
         now: Instant,
         since: Option<Instant>,
         settle_time: Duration,
+        minimum_sequence: u64,
     ) -> Option<crate::core::service_daemon::high_priority::feedback::ServiceSample> {
         let record = self.generations.get(&(instance, generation))?;
         let window = record.service_sleep_window.as_ref()?;
+        let window = lock_or_recover(window);
+        if window.sequence() < minimum_sequence {
+            return None;
+        }
         let stable_at = record.started_at + settle_time;
         let since = since.map_or(stable_at, |since| since.max(stable_at));
         Some(
@@ -1226,13 +1231,40 @@ impl DiagnosticsStore {
                 instance,
                 generation,
                 shard: record.high_priority_shard_id?,
-                window: lock_or_recover(window).snapshot(now, since),
+                window: window.snapshot(now, since),
                 at: now,
             },
         )
     }
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(feature = "high-priority")]
+    pub(crate) fn contains_service(&self, instance: ServiceInstanceId) -> bool {
+        self.services.contains_key(&instance)
+    }
+
+    #[cfg(feature = "high-priority")]
+    pub(crate) fn high_priority_shard_probe(
+        &self,
+        shard: HighPriorityShardId,
+    ) -> Option<ObservationStatsSnapshot> {
+        let record = self.high_priority_shards.get(&shard)?;
+        Some(ObservationStatsSnapshot::from_observations(
+            lock_or_recover(&record.recent_runtime_probe)
+                .iter()
+                .copied(),
+        ))
+    }
+
+    #[cfg(feature = "high-priority")]
+    pub(crate) fn lane_runtime_probe(&self, lane: RuntimeLane) -> ObservationStatsSnapshot {
+        ObservationStatsSnapshot::from_observations(
+            lock_or_recover(&self.lane_diagnostics(lane).recent_runtime_probe)
+                .iter()
+                .copied(),
+        )
     }
 
     #[cfg(test)]
@@ -1535,6 +1567,156 @@ mod tests {
 
     #[test]
     #[cfg(feature = "high-priority")]
+    fn feedback_sampling_requires_three_new_samples_and_resets_on_generation_change() {
+        use crate::core::service_daemon::high_priority::feedback::{Decision, FeedbackController};
+        use crate::models::policy::HighPriorityRuntimeControl;
+
+        let store = DiagnosticsStore::new();
+        let instance = ServiceInstanceId::new(uuid::Uuid::from_u128(8802));
+        let register = |generation| {
+            store.register_generation_with_placement(GenerationRegistration {
+                service_instance_id: instance,
+                service_name: "fresh_samples",
+                generation,
+                declared_scheduling: ServiceScheduling::HighPriority,
+                lane: RuntimeLane::HighPriority,
+                high_priority_shard_id: Some(HighPriorityShardId(0)),
+                placement_decision: None,
+            })
+        };
+        let policy = HighPriorityRuntimeControl::automatic();
+        let minimum_samples = policy.minimum_completed_samples();
+        assert_eq!(minimum_samples, 3);
+        let threshold_ns = policy.high_avg_drift_ms() * 1_000_000;
+        let settle = Duration::from_secs(2);
+        let first = register(1);
+        let base = first.generation.started_at;
+        for second in [1, 3, 4, 5] {
+            store.record_high_priority_sleep_for_test(
+                instance,
+                1,
+                base + Duration::from_secs(second),
+                Duration::from_millis(200),
+            );
+        }
+        let mut feedback = FeedbackController::default();
+        let sample = store
+            .high_priority_sleep_sample(
+                instance,
+                1,
+                base + Duration::from_secs(5),
+                feedback.since(instance, 1),
+                settle,
+                feedback.sequence(instance, 1) + minimum_samples,
+            )
+            .unwrap();
+        assert_eq!(sample.window.sequence, 4);
+        assert_eq!(
+            sample.window.completed, 3,
+            "the pre-settling sample is excluded"
+        );
+        assert!(matches!(
+            feedback.observe(
+                sample,
+                minimum_samples,
+                threshold_ns,
+                policy.pressure_windows()
+            ),
+            Decision::Wait
+        ));
+        assert_eq!(feedback.sequence(instance, 1), 4);
+
+        for second in [6, 7] {
+            store.record_high_priority_sleep_for_test(
+                instance,
+                1,
+                base + Duration::from_secs(second),
+                Duration::from_millis(200),
+            );
+        }
+        assert!(
+            store
+                .high_priority_sleep_sample(
+                    instance,
+                    1,
+                    base + Duration::from_secs(7),
+                    feedback.since(instance, 1),
+                    settle,
+                    feedback.sequence(instance, 1) + minimum_samples,
+                )
+                .is_none(),
+            "two new samples must not reuse an already-consumed sample"
+        );
+        store.record_high_priority_sleep_for_test(
+            instance,
+            1,
+            base + Duration::from_secs(8),
+            Duration::from_millis(200),
+        );
+        let sample = store
+            .high_priority_sleep_sample(
+                instance,
+                1,
+                base + Duration::from_secs(8),
+                feedback.since(instance, 1),
+                settle,
+                feedback.sequence(instance, 1) + minimum_samples,
+            )
+            .unwrap();
+        assert_eq!(sample.window.completed, 3);
+        assert!(matches!(
+            feedback.observe(
+                sample,
+                minimum_samples,
+                threshold_ns,
+                policy.pressure_windows()
+            ),
+            Decision::Candidate(_)
+        ));
+        assert_eq!(feedback.sequence(instance, 1), 7);
+
+        first.record_exit(GenerationExitKind::Reload);
+        let second = register(2);
+        let base = second.generation.started_at;
+        assert_eq!(feedback.sequence(instance, 2), 0);
+        assert!(feedback.since(instance, 2).is_none());
+        for offset in 3..=5 {
+            store.record_high_priority_sleep_for_test(
+                instance,
+                2,
+                base + Duration::from_secs(offset),
+                Duration::from_millis(200),
+            );
+        }
+        let sample = store
+            .high_priority_sleep_sample(
+                instance,
+                2,
+                base + Duration::from_secs(5),
+                feedback.since(instance, 2),
+                settle,
+                feedback.sequence(instance, 2) + minimum_samples,
+            )
+            .unwrap();
+        assert_eq!(sample.window.sequence, 3);
+        assert_eq!(sample.window.completed, 3);
+        assert!(
+            matches!(
+                feedback.observe(
+                    sample,
+                    minimum_samples,
+                    threshold_ns,
+                    policy.pressure_windows()
+                ),
+                Decision::Wait
+            ),
+            "the new generation starts a fresh sustained-pressure window"
+        );
+        assert_eq!(feedback.sequence(instance, 2), 3);
+    }
+
+    #[test]
+    #[cfg(feature = "high-priority")]
     fn feedback_sampling_honors_nonzero_settle_time_and_releases_finished_windows() {
         let store = DiagnosticsStore::new();
         let instance = ServiceInstanceId::new(uuid::Uuid::from_u128(8801));
@@ -1567,6 +1749,7 @@ mod tests {
                 now + Duration::from_secs(3),
                 None,
                 Duration::from_secs(2),
+                0,
             )
             .unwrap();
         assert_eq!(sample.window.completed, 1);
@@ -1579,7 +1762,8 @@ mod tests {
                     1,
                     now + Duration::from_secs(3),
                     None,
-                    Duration::from_secs(2)
+                    Duration::from_secs(2),
+                    0,
                 )
                 .unwrap()
                 .window

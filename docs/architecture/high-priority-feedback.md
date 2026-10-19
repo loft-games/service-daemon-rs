@@ -17,6 +17,21 @@ samples. Post-start sampling begins after a two-second settling period. Each
 accepted window advances a cursor, so unchanged data cannot establish sustained
 pressure or validate an intervention.
 
+The daemon checks policy every 250 ms after the previous evaluation finishes.
+This is separate from the shard probe cadence and the intervention cooldowns.
+Each check reads recent shard probes and active HighPriority generation windows;
+it does not build the public diagnostic snapshot or traverse retained generation
+history. Window aggregation waits for enough new completed samples. Pending
+intervention timeouts and external reload evidence are processed even when
+sample aggregation is skipped.
+
+Ticks without an intervention candidate emit only TRACE and do not append to
+placement history. A real suppression records its instance and reason at DEBUG
+once until the subject or reason changes, a fresh healthy window clears that
+subject's pressure, or an intervention proceeds. Waiting for more samples does
+not reset this deduplication. Allocation and rollover decisions remain in the
+history; successful reuse is not recorded as a suppressed intervention.
+
 The controller uses mean sleep drift for both triggering and benefit evaluation.
 Shard probe pressure is supporting execution-contention evidence, not CPU or IO
 attribution. This metric is not business-cycle latency or a unified workload

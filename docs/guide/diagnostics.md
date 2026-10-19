@@ -25,6 +25,11 @@ placement, resource count, and reason. Insufficient evidence is not low benefit.
 A timed-out policy generation arriving late does not rearm expansion; fresh
 healthy evidence or an explicitly observed external reload can permit evaluation
 again. These are resource-management semantics, not a lossless reload promise.
+Routine HighPriority polling is TRACE-only. DEBUG reports changes in actual
+intervention suppression, such as cooldown or the worker cap; normal operation
+and waiting for samples do not fill the placement decision history. Intervention
+requests and benefit evaluations remain at INFO, with pause and allocation
+failures at WARN.
 Maintainers can find the internal contract in
 [HighPriority feedback control](../architecture/high-priority-feedback.md).
 

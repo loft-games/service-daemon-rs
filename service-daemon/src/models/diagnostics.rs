@@ -71,7 +71,8 @@ pub enum DiagnosticHighPriorityPlacementReason {
     PressureScaleOut,
     /// The policy requested cooperative rollover to improve placement.
     PolicyRollover,
-    /// The controller did not have enough completed samples.
+    /// Insufficient completed samples. Retained for compatibility; routine
+    /// sampling waits no longer append a placement decision.
     InsufficientSamples,
     /// A policy cooldown suppressed action.
     Cooldown,
@@ -99,9 +100,6 @@ impl From<internal_high_priority::HighPriorityPlacementReason>
             }
             internal_high_priority::HighPriorityPlacementReason::PolicyRollover => {
                 Self::PolicyRollover
-            }
-            internal_high_priority::HighPriorityPlacementReason::InsufficientSamples => {
-                Self::InsufficientSamples
             }
             internal_high_priority::HighPriorityPlacementReason::Cooldown => Self::Cooldown,
             internal_high_priority::HighPriorityPlacementReason::MaxCapacity => Self::MaxCapacity,

@@ -23,6 +23,10 @@ pub(crate) struct SleepWindow {
 }
 
 impl SleepWindow {
+    pub(crate) fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
     pub(crate) fn record(
         &mut self,
         now: Instant,
@@ -133,7 +137,7 @@ mod tests {
         ) {
             let now = Instant::now();
             let mut window = SleepWindow::default();
-
+            let expected_count = records.iter().filter(|sample| sample.2).count().min(128);
             for (requested_ns, elapsed_ns, completed) in records {
                 window.record(
                     now,
@@ -143,10 +147,12 @@ mod tests {
                 );
             }
 
-            let snapshot = window.snapshot(now, now);
-            prop_assert!(snapshot.completed <= 128);
-            prop_assert!(snapshot.mean_drift_ns <= u64::MAX);
-            prop_assert!(snapshot.mean_requested_ns <= u64::MAX);
+            let since = window.samples.iter()
+                .map(|sample| sample.started_at)
+                .min()
+                .unwrap_or(now);
+            let snapshot = window.snapshot(now, since);
+            prop_assert_eq!(snapshot.completed, expected_count as u64);
         }
 
         #[test]
@@ -155,6 +161,13 @@ mod tests {
         ) {
             let now = Instant::now();
             let mut window = SleepWindow::default();
+            let count = samples.len() as u128;
+            let expected_requested = samples.iter()
+                .map(|sample| u128::from(sample.0))
+                .sum::<u128>() / count;
+            let expected_drift = samples.iter()
+                .map(|sample| u128::from(sample.1.saturating_sub(sample.0)))
+                .sum::<u128>() / count;
             for (requested_ns, elapsed_ns) in samples {
                 window.record(
                     now,
@@ -164,9 +177,14 @@ mod tests {
                 );
             }
 
-            let snapshot = window.snapshot(now, now);
-            prop_assert!(snapshot.mean_requested_ns <= u64::MAX);
-            prop_assert!(snapshot.mean_drift_ns <= u64::MAX);
+            let since = window.samples.iter()
+                .map(|sample| sample.started_at)
+                .min()
+                .unwrap();
+            let snapshot = window.snapshot(now, since);
+            prop_assert_eq!(u128::from(snapshot.completed), count);
+            prop_assert_eq!(u128::from(snapshot.mean_requested_ns), expected_requested);
+            prop_assert_eq!(u128::from(snapshot.mean_drift_ns), expected_drift);
         }
     }
 }

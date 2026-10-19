@@ -101,6 +101,11 @@ The daemon uses conservative HighPriority runtime control:
 `SchedulingAdvisoryProfile` is separate: disabling advisory logs does not disable
 HighPriority scale-out or rollover.
 
+Routine HighPriority polling is TRACE-only. DEBUG records changes in actual
+intervention suppression; waiting for samples does not fill decision history.
+Keep intervention requests/evaluations and pause warnings visible when adjusting
+log filters. The 250 ms policy interval is not an expansion or reload frequency.
+
 All services may reload; authors own business continuity. The mode provides no
 hard latency SLA. Normal framework-aware sleep supplies observations, with no
 mandatory business instrumentation. Trigger concurrency scaling and the

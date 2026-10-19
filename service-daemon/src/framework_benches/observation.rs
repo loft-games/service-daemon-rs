@@ -86,6 +86,7 @@ pub(super) fn run(criterion: &mut Criterion) {
                         std::time::Instant::now(),
                         None,
                         Duration::ZERO,
+                        0,
                     )
                     .unwrap()
                     .window
