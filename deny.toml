@@ -1,3 +1,7 @@
+[graph]
+# Temporary until https://github.com/juhaku/utoipa/issues/1644 is released.
+exclude = ["example-web-api"]
+
 [advisories]
 unused-ignored-advisory = "deny"
 

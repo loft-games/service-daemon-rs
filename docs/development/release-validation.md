@@ -632,11 +632,7 @@ Known temporary advisory exceptions:
 | Advisory | Path | Release stance | Removal condition |
 | :--- | :--- | :--- | :--- |
 | `RUSTSEC-2024-0436` | `example-web-api -> utoipa-axum -> paste` | Example-only unmaintained dependency, allowed by `deny.toml`. | Remove the ignore when `utoipa-axum` no longer pulls `paste`, or replace the example dependency path. |
-
-As of the current baseline, `cargo audit` reports the example-only advisory as
-a warning, while `cargo audit -D warnings` fails until the temporary exception
-above is removed. Treat that failure as expected and documented, not as a
-separate release blocker while `cargo deny --locked check` remains green.
+| `RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`, `RUSTSEC-2026-0369` | `example-web-api -> utoipa-swagger-ui -> zip` (build dependency) | Temporary exclusion of `example-web-api` from `cargo-deny`; these advisories enter through an upstream build dependency, not `service-daemon`. | Remove the exclusion when the fix tracked by [utoipa issue #1644](https://github.com/juhaku/utoipa/issues/1644) is released. |
 
 ## Linkme Platform Contract Monitoring
 
