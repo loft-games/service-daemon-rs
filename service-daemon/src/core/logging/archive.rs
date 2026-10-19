@@ -26,6 +26,22 @@ const COPY_BUFFER_SIZE: usize = 64 * 1024;
 const TRANSACTION_DIRECTORY: &str = ".service-daemon-archive-transactions";
 const TRANSACTION_SUFFIX: &str = ".manifest";
 
+/// Inserts a closed file's period and optional collision suffix before its extension.
+pub(super) fn rotated_log_name(prefix: &str, period: &str, sequence: Option<u32>) -> String {
+    let (stem, extension) = split_log_extension(prefix);
+    match sequence {
+        Some(sequence) => format!("{stem}.{period}.{sequence}{extension}"),
+        None => format!("{stem}.{period}{extension}"),
+    }
+}
+
+fn split_log_extension(prefix: &str) -> (&str, &str) {
+    match prefix.rfind('.') {
+        Some(index) if index > 0 && index + 1 < prefix.len() => prefix.split_at(index),
+        _ => (prefix, ""),
+    }
+}
+
 /// Filesystem archive state for one rolling file appender.
 pub(super) struct ArchiveStore {
     directory: PathBuf,
@@ -126,7 +142,7 @@ impl ArchiveStore {
             )?;
         }
 
-        let mut groups: Vec<(NaiveDate, Vec<Fragment>)> = Vec::new();
+        let mut groups: Vec<(NaiveDate, NamingStyle, Vec<Fragment>)> = Vec::new();
         for (path, fragment) in fragments {
             let old_enough = match is_old_enough(&path, now, COMPACTION_MIN_AGE) {
                 Ok(old_enough) => old_enough,
@@ -143,29 +159,40 @@ impl ArchiveStore {
                 continue;
             }
             let day = fragment.period.date();
-            let Some((_, group)) = groups.iter_mut().find(|(group_day, _)| *group_day == day)
+            let Some((_, _, group)) = groups
+                .iter_mut()
+                .find(|(group_day, style, _)| *group_day == day && *style == fragment.style)
             else {
-                groups.push((day, Vec::new()));
+                groups.push((day, fragment.style, Vec::new()));
                 let index = groups.len() - 1;
-                groups[index].1.push(Fragment { path });
+                groups[index].2.push(Fragment { path });
                 continue;
             };
             group.push(Fragment { path });
         }
 
-        groups.sort_by_key(|left| left.0);
-        for (day, mut group) in groups {
+        groups.sort_by_key(|left| (left.0, left.1));
+        for (day, style, mut group) in groups {
             if cancel.load(AtomicOrdering::Acquire) {
                 return Ok(());
             }
             if group.len() < COMPACTION_MIN_FRAGMENTS {
                 continue;
             }
-            group.sort_by(|left, right| left.path.cmp(&right.path));
+            // Numbered collisions belong after the original fragment, and 10
+            // follows 2. Lexical filename order would scramble those records.
+            group.sort_by_cached_key(|fragment| {
+                fragment
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| self.parse_fragment_name(name))
+                    .map(|name| (name.period, name.sequence))
+            });
             record_maintenance_result(
                 &mut maintenance_error,
                 format!("compacting {day}"),
-                self.compact(day, &group, cancel),
+                self.compact(day, style, &group, cancel),
                 cancel,
             )?;
         }
@@ -181,24 +208,46 @@ impl ArchiveStore {
     }
 
     fn parse_plain_name(&self, name: &str) -> Option<Period> {
-        let suffix = name.strip_prefix(&format!("{}.", self.prefix))?;
-        if suffix.ends_with(".gz") || suffix.ends_with(".merged.gz") {
-            return None;
-        }
-        parse_period(suffix, self.rotation)
+        self.parse_rotated_name(name).map(|name| name.period)
     }
 
     fn parse_fragment_name(&self, name: &str) -> Option<FragmentName> {
-        let suffix = name.strip_prefix(&format!("{}.", self.prefix))?;
-        let suffix = suffix.strip_suffix(".gz")?;
-        if suffix.ends_with(".merged") {
-            return None;
+        self.parse_rotated_name(name.strip_suffix(".gz")?)
+    }
+
+    fn parse_rotated_name(&self, name: &str) -> Option<FragmentName> {
+        if let Some(suffix) = self.new_name_suffix(name)
+            && let Some((period, sequence)) = parse_period_with_sequence(suffix, self.rotation)
+        {
+            return Some(FragmentName {
+                period,
+                sequence,
+                style: NamingStyle::ExtensionLast,
+            });
         }
+        let suffix = name.strip_prefix(&format!("{}.", self.prefix))?;
         let period = parse_period(suffix, self.rotation)?;
-        Some(FragmentName { period })
+        Some(FragmentName {
+            period,
+            sequence: 0,
+            style: NamingStyle::Legacy,
+        })
+    }
+
+    fn new_name_suffix<'a>(&self, name: &'a str) -> Option<&'a str> {
+        let (stem, extension) = split_log_extension(&self.prefix);
+        name.strip_prefix(stem)?
+            .strip_prefix('.')?
+            .strip_suffix(extension)
     }
 
     fn parse_merged_name(&self, name: &str) -> Option<NaiveDate> {
+        if let Some(suffix) = self.new_name_suffix(name.strip_suffix(".gz")?)
+            && let Some(day) = suffix.strip_suffix(".merged")
+            && let Ok(day) = NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        {
+            return Some(day);
+        }
         let suffix = name.strip_prefix(&format!("{}.", self.prefix))?;
         let suffix = suffix.strip_suffix(".merged.gz")?;
         NaiveDate::parse_from_str(suffix, "%Y-%m-%d").ok()
@@ -261,14 +310,21 @@ impl ArchiveStore {
     fn compact(
         &self,
         day: NaiveDate,
+        style: NamingStyle,
         fragments: &[Fragment],
         cancel: &AtomicBool,
     ) -> io::Result<()> {
-        let destination = self.directory.join(format!(
-            "{}.{}.merged.gz",
-            self.prefix,
-            day.format("%Y-%m-%d")
-        ));
+        let day = day.format("%Y-%m-%d");
+        let name = match style {
+            NamingStyle::ExtensionLast => {
+                format!(
+                    "{}.gz",
+                    rotated_log_name(&self.prefix, &format!("{day}.merged"), None)
+                )
+            }
+            NamingStyle::Legacy => format!("{}.{day}.merged.gz", self.prefix),
+        };
+        let destination = self.directory.join(name);
         let marker = PathBuf::from(format!("{}.needs-repack", destination.display()));
         let transaction = self.create_transaction(&destination, fragments)?;
         let result = (|| {
@@ -345,13 +401,10 @@ impl ArchiveStore {
             let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
                 continue;
             };
-            let Some(marker_name) = name.strip_prefix(&format!("{}.", self.prefix)) else {
+            let Some(archive_name) = name.strip_suffix(".needs-repack") else {
                 continue;
             };
-            let Some(archive_name) = marker_name.strip_suffix(".needs-repack") else {
-                continue;
-            };
-            if !archive_name.ends_with(".merged.gz") {
+            if self.parse_merged_name(archive_name).is_none() {
                 continue;
             }
             let old_enough = match is_old_enough(&path, now, REPACK_MIN_AGE) {
@@ -368,9 +421,7 @@ impl ArchiveStore {
             if !old_enough {
                 continue;
             }
-            let archive = self
-                .directory
-                .join(format!("{}.{}", self.prefix, archive_name));
+            let archive = self.directory.join(archive_name);
             match is_valid_gzip_with_cancel(&archive, cancel) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -652,6 +703,14 @@ impl Period {
 #[derive(Clone, Copy, Debug)]
 struct FragmentName {
     period: Period,
+    sequence: u32,
+    style: NamingStyle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum NamingStyle {
+    ExtensionLast,
+    Legacy,
 }
 
 #[derive(Debug)]
@@ -705,6 +764,17 @@ impl Transaction {
         let _ = fs::remove_file(&self.temporary);
         Ok(())
     }
+}
+
+fn parse_period_with_sequence(value: &str, rotation: RotationPolicy) -> Option<(Period, u32)> {
+    let (value, sequence) = match value.rsplit_once('.') {
+        Some((period, sequence)) => {
+            let sequence = sequence.parse::<u32>().ok().filter(|value| *value > 0)?;
+            (period, sequence)
+        }
+        None => (value, 0),
+    };
+    Some((parse_period(value, rotation)?, sequence))
 }
 
 fn parse_period(value: &str, rotation: RotationPolicy) -> Option<Period> {
@@ -1213,6 +1283,273 @@ mod tests {
     }
 
     #[test]
+    fn rotation_name_inserts_period_and_collision_suffix_before_last_extension() {
+        for (prefix, period, sequence, expected) in [
+            ("latest.log", "2026-10-19", None, "latest.2026-10-19.log"),
+            (
+                "latest.log",
+                "2026-10-19-09",
+                Some(1),
+                "latest.2026-10-19-09.1.log",
+            ),
+            (
+                "application.jsonl",
+                "2026-10-19",
+                Some(12),
+                "application.2026-10-19.12.jsonl",
+            ),
+            (
+                "my.application.log",
+                "2026-10-19",
+                None,
+                "my.application.2026-10-19.log",
+            ),
+            ("app", "2026-10-19", Some(1), "app.2026-10-19.1"),
+            (".log", "2026-10-19", None, ".log.2026-10-19"),
+        ] {
+            assert_eq!(rotated_log_name(prefix, period, sequence), expected);
+        }
+    }
+
+    #[test]
+    fn custom_prefix_rotation_names_are_recognized_without_archiving_active_file() {
+        for prefix in ["application.jsonl", "my.application.log", "app", ".log"] {
+            let directory = test_directory("custom-new-prefix");
+            let active = directory.join(prefix);
+            fs::write(&active, b"active\n").expect("write active");
+            let rotated_name = rotated_log_name(prefix, "2026-01-01-09", Some(2));
+            let source = directory.join(&rotated_name);
+            fs::write(&source, b"closed\n").expect("write closed");
+            let store = ArchiveStore::new(directory.clone(), prefix.into(), RotationPolicy::Hourly);
+            store
+                .maintain(None, SystemTime::now(), &AtomicBool::new(false))
+                .expect("maintain");
+            assert_eq!(fs::read(&active).expect("active file"), b"active\n");
+            assert!(!source.exists());
+            let mut decoded = String::new();
+            MultiGzDecoder::new(
+                File::open(directory.join(format!("{rotated_name}.gz"))).expect("archive"),
+            )
+            .read_to_string(&mut decoded)
+            .expect("decode");
+            assert_eq!(decoded, "closed\n");
+            cleanup(&directory);
+        }
+    }
+
+    #[test]
+    fn rotation_name_parser_rejects_active_and_unrelated_files() {
+        let store = ArchiveStore::new(PathBuf::new(), "latest.log".into(), RotationPolicy::Daily);
+        for name in [
+            "latest.log",
+            "latest.2026-01-01.merged.log",
+            "latest.2026-01-01.log.gz",
+            "latest.2026-01-01.0.log",
+            "latest.2026-01-01.backup.log",
+            "latest.2026-01-01.1.log.other",
+            "latest.log.2026-01-01.gz",
+            "latest-other.2026-01-01.log",
+        ] {
+            assert!(store.parse_plain_name(name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn new_rotation_names_compress_without_touching_fixed_active_file() {
+        let directory = test_directory("new-rotation-names");
+        let active = directory.join("latest.log");
+        fs::write(&active, b"still active\n").expect("write active");
+        let sources = ["latest.2026-01-01.log", "latest.2026-01-01.1.log"];
+        for name in sources {
+            fs::write(directory.join(name), name.as_bytes()).expect("write source");
+        }
+        let store = ArchiveStore::new(
+            directory.clone(),
+            "latest.log".into(),
+            RotationPolicy::Daily,
+        );
+        store
+            .maintain(Some(&active), SystemTime::now(), &AtomicBool::new(false))
+            .expect("compress closed files");
+        assert_eq!(
+            fs::read(&active).expect("active survives"),
+            b"still active\n"
+        );
+        assert!(!directory.join("latest.log.gz").exists());
+        for name in sources {
+            assert!(!directory.join(name).exists());
+            let mut decoded = String::new();
+            MultiGzDecoder::new(File::open(directory.join(format!("{name}.gz"))).expect("archive"))
+                .read_to_string(&mut decoded)
+                .expect("decode");
+            assert_eq!(decoded, name);
+        }
+        cleanup(&directory);
+    }
+
+    #[test]
+    fn new_daily_fragments_compact_and_repack_with_extension_last() {
+        let directory = test_directory("new-compact-repack");
+        let names = [
+            "latest.2026-01-01.log.gz",
+            "latest.2026-01-01.1.log.gz",
+            "latest.2026-01-01.2.log.gz",
+        ];
+        for name in names {
+            write_gzip(&directory.join(name), b"fragment\n");
+        }
+        let store = ArchiveStore::new(
+            directory.clone(),
+            "latest.log".into(),
+            RotationPolicy::Daily,
+        );
+        let now = SystemTime::now() + Duration::from_secs(2 * 86_400);
+        store
+            .maintain(None, now, &AtomicBool::new(false))
+            .expect("compact");
+        let merged = directory.join("latest.2026-01-01.merged.log.gz");
+        let marker = directory.join("latest.2026-01-01.merged.log.gz.needs-repack");
+        assert!(merged.is_file());
+        assert!(marker.is_file());
+        for name in names {
+            assert!(!directory.join(name).exists());
+        }
+        store
+            .maintain(
+                None,
+                now + Duration::from_secs(31 * 86_400),
+                &AtomicBool::new(false),
+            )
+            .expect("repack");
+        assert!(!marker.exists());
+        let mut decoded = String::new();
+        MultiGzDecoder::new(File::open(&merged).expect("merged"))
+            .read_to_string(&mut decoded)
+            .expect("decode");
+        assert_eq!(decoded, "fragment\nfragment\nfragment\n");
+        cleanup(&directory);
+    }
+
+    #[test]
+    fn colliding_fragments_merge_in_period_and_numeric_sequence_order() {
+        let directory = test_directory("fragment-sequence-order");
+        for (sequence, body) in [
+            (None, "base\n"),
+            (Some(1), "one\n"),
+            (Some(2), "two\n"),
+            (Some(10), "ten\n"),
+        ] {
+            let name = rotated_log_name("latest.log", "2026-01-01-00", sequence);
+            write_gzip(&directory.join(format!("{name}.gz")), body.as_bytes());
+        }
+        write_gzip(
+            &directory.join("latest.2026-01-01-01.log.gz"),
+            b"next hour\n",
+        );
+        let store = ArchiveStore::new(
+            directory.clone(),
+            "latest.log".into(),
+            RotationPolicy::Hourly,
+        );
+        store
+            .maintain(
+                None,
+                SystemTime::now() + Duration::from_secs(2 * 86_400),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        let mut contents = String::new();
+        MultiGzDecoder::new(File::open(directory.join("latest.2026-01-01.merged.log.gz")).unwrap())
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert_eq!(contents, "base\none\ntwo\nten\nnext hour\n");
+        cleanup(&directory);
+    }
+
+    #[test]
+    fn new_and_legacy_hourly_fragments_keep_independent_merged_archives() {
+        let directory = test_directory("mixed-naming");
+        for index in 0..3 {
+            write_gzip(
+                &directory.join(format!("latest.2026-01-01-0{index}.log.gz")),
+                b"new\n",
+            );
+            write_gzip(
+                &directory.join(format!("latest.log.2026-01-01-0{index}.gz")),
+                b"old\n",
+            );
+        }
+        let store = ArchiveStore::new(
+            directory.clone(),
+            "latest.log".into(),
+            RotationPolicy::Hourly,
+        );
+        store
+            .maintain(
+                None,
+                SystemTime::now() + Duration::from_secs(2 * 86_400),
+                &AtomicBool::new(false),
+            )
+            .expect("compact both naming styles");
+        for (name, expected) in [
+            ("latest.2026-01-01.merged.log.gz", "new\nnew\nnew\n"),
+            ("latest.log.2026-01-01.merged.gz", "old\nold\nold\n"),
+        ] {
+            let mut decoded = String::new();
+            MultiGzDecoder::new(File::open(directory.join(name)).expect("merged"))
+                .read_to_string(&mut decoded)
+                .expect("decode");
+            assert_eq!(decoded, expected);
+        }
+        cleanup(&directory);
+    }
+
+    #[test]
+    fn new_archive_transaction_recovers_missing_staged_fragments() {
+        let directory = test_directory("new-naming-recovery");
+        let store = ArchiveStore::new(
+            directory.clone(),
+            "latest.log".into(),
+            RotationPolicy::Daily,
+        );
+        let fragments = (1..=3)
+            .map(|index| Fragment {
+                path: directory.join(format!("latest.2026-01-01.{index}.log.gz")),
+            })
+            .collect::<Vec<_>>();
+        for fragment in &fragments {
+            write_gzip(&fragment.path, b"recoverable\n");
+        }
+        let transaction = store
+            .create_transaction(
+                &directory.join("latest.2026-01-01.merged.log.gz"),
+                &fragments,
+            )
+            .expect("transaction");
+        fs::create_dir_all(&transaction.staging).expect("staging");
+        for (index, fragment) in fragments.iter().enumerate() {
+            fs::copy(
+                &fragment.path,
+                staged_fragment_path(&transaction.staging, index),
+            )
+            .expect("stage");
+            fs::remove_file(&fragment.path).expect("remove source");
+        }
+        store
+            .recover_transactions(&AtomicBool::new(false))
+            .expect("recover");
+        for fragment in &fragments {
+            let mut decoded = String::new();
+            MultiGzDecoder::new(File::open(&fragment.path).expect("recovered"))
+                .read_to_string(&mut decoded)
+                .expect("decode");
+            assert_eq!(decoded, "recoverable\n");
+        }
+        assert!(!transaction.manifest.exists());
+        cleanup(&directory);
+    }
+
+    #[test]
     fn compresses_closed_plain_file_and_round_trips() {
         let directory = test_directory("compress");
         let source = directory.join("latest.log.2026-01-01");
@@ -1460,7 +1797,7 @@ mod tests {
             &marker,
             now.checked_sub(age + Duration::from_secs(2)).expect("age"),
         )
-            .expect("set marker time");
+        .expect("set marker time");
         let store = ArchiveStore::new(
             directory.clone(),
             "latest.log".into(),
@@ -1551,14 +1888,12 @@ mod tests {
             } else {
                 write_gzip(&path, format!("bad-{index}\n").as_bytes());
             }
-            set_file_modified(&path, old)
-                .expect("set fragment time");
+            set_file_modified(&path, old).expect("set fragment time");
         }
         for index in 0..3 {
             let path = directory.join(format!("latest.log.2026-01-02-0{index}.gz"));
             write_gzip(&path, format!("good-{index}\n").as_bytes());
-            set_file_modified(&path, old)
-                .expect("set fragment time");
+            set_file_modified(&path, old).expect("set fragment time");
         }
 
         let store = ArchiveStore::new(
@@ -1608,15 +1943,13 @@ mod tests {
         let corrupt_marker = directory.join("latest.log.2026-01-01.merged.gz.needs-repack");
         fs::write(&corrupt_archive, b"not gzip").expect("corrupt archive");
         fs::write(&corrupt_marker, b"needs repack\n").expect("corrupt marker");
-        set_file_modified(&corrupt_marker, old)
-            .expect("set marker time");
+        set_file_modified(&corrupt_marker, old).expect("set marker time");
 
         let valid_archive = directory.join("latest.log.2026-01-02.merged.gz");
         let valid_marker = directory.join("latest.log.2026-01-02.merged.gz.needs-repack");
         write_gzip(&valid_archive, b"valid merged\n");
         fs::write(&valid_marker, b"needs repack\n").expect("valid marker");
-        set_file_modified(&valid_marker, old)
-            .expect("set marker time");
+        set_file_modified(&valid_marker, old).expect("set marker time");
 
         let store = ArchiveStore::new(
             directory.clone(),
@@ -1854,7 +2187,7 @@ mod tests {
             now.checked_sub(REPACK_MIN_AGE + Duration::from_secs(2))
                 .expect("age"),
         )
-            .expect("set marker time");
+        .expect("set marker time");
 
         let lock = OpenOptions::new()
             .read(true)

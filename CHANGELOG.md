@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the default) and `FileLogCompression::None`, background gzip archiving for
   closed rotations, same-day fragment compaction after three fragments older
   than 24 hours, and delayed `.needs-repack` maintenance for merged archives.
-  The default file prefix is `latest.log`, shared by framework and application
-  logs, and archive failures preserve the source rotation for retry.
+  Archives use `latest.YYYY-MM-DD.log.gz` and
+  `latest.YYYY-MM-DD.merged.log.gz` by default, contain framework and application
+  logs, and preserve the source rotation for retry on failure.
 
 - **Provider Contracts and Fallback Implementations**: Added
   `#[provider_contract]` for shared injectable output types and
@@ -53,6 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cleanup setting. `RotationPolicy::Never` performs no archive maintenance, and
   file logging no longer promises automatic retention deletion; retention and
   multi-process directory separation remain deployment responsibilities.
+
+- **File Logging Rotation**: Log events now append to a fixed active file,
+  `logs/latest.log` by default. The first write in a new UTC day or hour closes
+  and renames the previous file with the period before its extension, such as
+  `latest.2026-10-19.log`; same-period collisions use numbered filenames.
+  Custom prefixes are complete active filenames. Shutdown preserves the active
+  file, restart identifies its period from its modification time, and archive
+  maintenance recognizes older filenames without renaming existing archives.
 
 - **Daemon-local Provider Ownership (breaking)**: All generated provider instances,
   including eager providers and provider contracts, now belong to the current

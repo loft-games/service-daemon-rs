@@ -60,9 +60,12 @@ logging failure semantics, linkme platform smoke coverage, and new release
 validation documentation under `[Unreleased]`.
 
 For file logging changes, describe the user-visible contract rather than the
-implementation sequence: default `latest.log` naming, `FileLogCompression` and
-rotation behavior, source preservation on archive failure, fixed compaction and
-repack thresholds, and the absence of automatic retention deletion. Keep the
+implementation sequence: fixed active `latest.log`, dated
+`latest.YYYY-MM-DD.log` rotations, `.log.gz` / `.merged.log.gz` archives,
+`FileLogCompression`, closing before rename, collision preservation, restart
+period recovery, legacy archive discovery, source preservation on archive
+failure, fixed compaction and repack thresholds, and the absence of automatic
+retention deletion. Keep the
 entry under `[Unreleased]` until the next tagged release.
 
 ## Cutting a release

@@ -734,12 +734,16 @@ cargo test -p service-daemon --features file-logging --lib core::logging::
 cargo test -p service-daemon --features file-logging --test file_logging_archive_tests
 ```
 
-These cover actual writer ownership across rotation, gzip round trips, the
-three-fragment threshold, strict 24-hour/30-day age boundaries, failed
-publication and recovery, queue saturation, and bounded shutdown. Integration
-tests launch independent daemon processes to verify startup maintenance,
-repacking, repeat startup, custom prefixes, `None`, and `Never`. Windows MSVC
-CI runs the same integration target plus Windows-specific file-sharing tests
+These cover fixed active filenames, the first write after UTC daily/hourly
+boundaries, closing before rename and archive handoff, collision-safe rotated
+names, restart period inference from modification time, and shutdown preserving
+the active file. Archive checks cover gzip round trips, the three-fragment
+threshold, strict 24-hour/30-day age boundaries, failed publication and recovery,
+queue saturation, and bounded shutdown. Integration tests launch independent
+daemon processes to verify startup maintenance, repacking, repeat startup,
+custom prefixes with and without extensions, legacy archive compatibility,
+`None`, and `Never`. Windows MSVC CI runs the same integration target plus
+Windows-specific file-sharing tests
 from the library suite; a Linux pass does not establish Windows behavior.
 
 Also confirm that the linkme platform smoke jobs are either green or, for the
@@ -753,8 +757,10 @@ Before cutting a release that changes deployment-facing behavior, review
 - framework logs still do not promise automatic secret redaction;
 - file logging still degrades to console-only when the appender cannot
   initialize, and remains documented as best-effort operational logging;
-- file logging defaults to `latest.log` with gzip archive maintenance; closed
-  rotations are source-preserving on failure, same-day compaction uses the
+- file logging writes to `latest.log` and rotates to `latest.YYYY-MM-DD.log`
+  before background gzip; shutdown preserves the active file, existing rotations
+  are not overwritten, and legacy archives remain discoverable;
+- closed rotations are source-preserving on failure, same-day compaction uses the
   fixed three-fragment/24-hour threshold, and no automatic retention deletion
   is promised;
 - Unix socket examples and docs do not present shared `/tmp` paths as

@@ -8,8 +8,9 @@
 //!
 //! **Run**: `cargo run -p example-logging`
 //!
-//! After running, check the `logs/` directory for `latest.log.YYYY-MM-DD`
-//! and its `.gz` archives containing JSON-structured log lines.
+//! While running or after shutdown, read `logs/latest.log` for JSON log lines.
+//! The first write after a UTC day boundary rotates the previous file to
+//! `latest.YYYY-MM-DD.log`, then compresses it as `latest.YYYY-MM-DD.log.gz`.
 
 use example_logging as _;
 use service_daemon::{FileLogConfig, ServiceDaemon, ServiceError, enable_file_logging};
@@ -19,7 +20,7 @@ use tracing::{error, info};
 async fn main() -> anyhow::Result<()> {
     service_daemon::init_logging();
 
-    // Enable file-based JSON log persistence with the default latest.log prefix
+    // Enable file-based JSON log persistence in the active latest.log file
     // and background gzip archiving (consumed by file_log_service).
     enable_file_logging(FileLogConfig::default());
 

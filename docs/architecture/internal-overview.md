@@ -199,12 +199,21 @@ The main internal modules are:
   - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUIDv7 message IDs, UUID-backed service instance IDs, and trigger instance IDs) for asynchronous tracing.
   - `render.rs`: Console and feature-gated JSON rendering. Console timestamps convert the captured UTC instant to the process-local timezone and include its numeric offset; the event model and JSON serialization remain UTC.
   - `services.rs`: Console log drain service.
-  - `file.rs`: Feature-gated file logging configuration, JSON drain, and
-    rotation handoff to the bounded archive worker.
+  - `file.rs`: Feature-gated file logging configuration and JSON drain. The writer
+    owns one fixed active filename (`latest.log` by default); the first write in
+    a new UTC period closes and renames it before opening the next active file.
+    Rotation inserts the period before the extension (`latest.YYYY-MM-DD.log`),
+    with numbered collisions rather than overwrites. Restart recovers the active
+    period from a nonempty file's modification time; shutdown keeps that file
+    unarchived. Only closed rotations are handed to the bounded archive worker.
   - `archive.rs`: Closed-file gzip archiving, same-day fragment compaction,
     delayed `.needs-repack` maintenance, startup recovery, and source-preserving
-    retry handling. Archive maintenance is internal and has no retention-delete
-    policy.
+    retry handling. New archives append `.gz` to a rotation and use
+    `latest.YYYY-MM-DD.merged.log.gz` for same-day merges. Startup maintenance
+    also recognizes the previous `latest.log.YYYY-MM-DD` naming layout without
+    renaming existing archives. Legacy and new-format fragments compact
+    separately; each group is ordered by period and numeric collision sequence.
+    Archive maintenance is internal and has no retention-delete policy.
   - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID-backed service instance fields and numeric sequence fields instead of heap-allocated composite strings.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
 - **`core/diagnostics.rs`**: Internal observation store for generation, service, and lane aggregates. Public APIs receive only distilled read-only snapshots.

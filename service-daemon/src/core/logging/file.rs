@@ -1,6 +1,5 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,7 +19,7 @@ use crate::service;
 use super::model::{LogEvent, effective_batch_size, get_log_queue};
 use super::render::format_event_json;
 
-use super::archive::ArchiveStore;
+use super::archive::{ArchiveStore, rotated_log_name};
 
 /// Time-based log rotation strategy.
 ///
@@ -28,7 +27,7 @@ use super::archive::ArchiveStore;
 /// Only available when the `file-logging` feature is enabled.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum RotationPolicy {
-    /// Rotate daily (default). Produces files like `prefix.2026-03-03`.
+    /// Rotate daily at UTC boundaries (default), e.g. `latest.2026-03-03.log`.
     #[default]
     Daily,
     /// Rotate hourly. Suitable for high-volume services.
@@ -53,9 +52,9 @@ pub enum FileLogCompression {
 /// compression strategy. Only available when the `file-logging` feature is enabled.
 ///
 /// # Rotation Strategy
-/// Uses daily rotation by default. Log files are named with the pattern:
-/// `{prefix}.YYYY-MM-DD` and stored in the configured directory. The default
-/// prefix is `latest.log`.
+/// Writes to the configured file name, `latest.log` by default. On the first
+/// write in a later UTC period, the closed file is renamed with its period
+/// before the last extension, e.g. `latest.2026-10-19.log`.
 ///
 /// # Example
 /// ```rust,ignore
@@ -67,7 +66,7 @@ pub enum FileLogCompression {
 pub struct FileLogConfig {
     /// Directory where log files are stored (e.g., "logs").
     pub directory: String,
-    /// File name prefix (e.g., "app" produces "app.2026-02-24").
+    /// Active file name (e.g., "app.log" rotates to "app.2026-02-24.log").
     pub file_prefix: String,
     /// Time-based rotation strategy. Default: `RotationPolicy::Daily`.
     pub rotation: RotationPolicy,
@@ -82,7 +81,7 @@ impl FileLogConfig {
     ///
     /// # Arguments
     /// * `directory` - Path to the log output directory (created if missing).
-    /// * `file_prefix` - Prefix for rotated log file names.
+    /// * `file_prefix` - Active file name, preserved exactly as supplied.
     #[must_use]
     pub fn new(directory: impl Into<String>, file_prefix: impl Into<String>) -> Self {
         Self {
@@ -249,16 +248,8 @@ fn run_archive_worker(
     }
 }
 
-fn active_log_path(config: &FileLogConfig, now: SystemTime) -> PathBuf {
-    let timestamp = chrono::DateTime::<chrono::Utc>::from(now);
-    let filename = match config.rotation {
-        RotationPolicy::Daily => format!("{}.{}", config.file_prefix, timestamp.format("%Y-%m-%d")),
-        RotationPolicy::Hourly => {
-            format!("{}.{}", config.file_prefix, timestamp.format("%Y-%m-%d-%H"))
-        }
-        RotationPolicy::Never => config.file_prefix.clone(),
-    };
-    PathBuf::from(&config.directory).join(filename)
+fn active_log_path(config: &FileLogConfig) -> PathBuf {
+    PathBuf::from(&config.directory).join(&config.file_prefix)
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -277,16 +268,25 @@ impl WriterPeriod {
             RotationPolicy::Never => Self::Never,
         }
     }
+
+    fn suffix(self) -> String {
+        match self {
+            Self::Daily(day) => day.format("%Y-%m-%d").to_string(),
+            Self::Hourly(day, hour) => format!("{}-{hour:02}", day.format("%Y-%m-%d")),
+            Self::Never => String::new(),
+        }
+    }
 }
 
 struct RotatingFileWriter {
     directory: PathBuf,
     prefix: String,
     rotation: RotationPolicy,
-    active_path: Arc<ParkingMutex<Option<PathBuf>>>,
     period: WriterPeriod,
     errors: Arc<AtomicUsize>,
-    file: File,
+    // Rotation closes the old handle before renaming it on Windows. If opening
+    // the next active file fails, a later write retries without touching archives.
+    file: Option<File>,
 }
 
 impl RotatingFileWriter {
@@ -296,19 +296,29 @@ impl RotatingFileWriter {
         errors: Arc<AtomicUsize>,
         now: SystemTime,
     ) -> io::Result<Self> {
-        let path = active_log_path(config, now);
+        let path = active_log_path(config);
         fs::create_dir_all(&config.directory)?;
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        *active_path.lock() = Some(path.clone());
-        Ok(Self {
+        let metadata = file.metadata()?;
+        let period = WriterPeriod::at(
+            config.rotation,
+            if metadata.len() == 0 {
+                now
+            } else {
+                metadata.modified()?
+            },
+        );
+        *active_path.lock() = Some(path);
+        let mut writer = Self {
             directory: PathBuf::from(&config.directory),
             prefix: config.file_prefix.clone(),
             rotation: config.rotation,
-            active_path,
-            period: WriterPeriod::at(config.rotation, now),
+            period,
             errors,
-            file,
-        })
+            file: Some(file),
+        };
+        writer.rotate(now);
+        Ok(writer)
     }
 
     fn try_rotate(&mut self, now: SystemTime) -> io::Result<()> {
@@ -316,26 +326,92 @@ impl RotatingFileWriter {
         if next_period <= self.period || next_period == WriterPeriod::Never {
             return Ok(());
         }
-        let next_path = path_for_period(&self.directory, &self.prefix, self.rotation, now);
-        let next_file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&next_path)?;
-        self.file.flush()?;
-        let old_file = std::mem::replace(&mut self.file, next_file);
-        drop(old_file);
+        let file = self.current_file()?;
+        if file.metadata()?.len() == 0 {
+            self.period = next_period;
+            return Ok(());
+        }
+        file.flush()?;
+        file.sync_all()?;
+        let destination = self.rotation_destination()?;
+        let active = self.directory.join(&self.prefix);
+        drop(self.file.take());
+        // Each directory/prefix has a single writer. The destination is chosen
+        // without replacing an existing plain file or compressed archive.
+        // On failure the next write reopens the unchanged active file.
+        fs::rename(&active, &destination)?;
         self.period = next_period;
-        *self.active_path.lock() = Some(next_path);
+        self.file = Some(
+            OpenOptions::new()
+                .create_new(true)
+                .append(true)
+                .open(active)?,
+        );
         Ok(())
     }
 
-    fn write_at(&mut self, buffer: &[u8], now: SystemTime) -> io::Result<usize> {
-        if self.try_rotate(now).is_err() {
-            // Failed rotation keeps the old open file protected and usable.
-            // The service's health reporter surfaces the failure count.
-            self.errors.fetch_add(1, Ordering::Relaxed);
+    fn rotation_destination(&self) -> io::Result<PathBuf> {
+        let suffix = self.period.suffix();
+        let mut sequence = None;
+        loop {
+            let name = rotated_log_name(&self.prefix, &suffix, sequence);
+            let path = self.directory.join(&name);
+            let gzip = self.directory.join(format!("{name}.gz"));
+            let mut occupied = false;
+            for candidate in [&path, &gzip] {
+                match fs::symlink_metadata(candidate) {
+                    Ok(metadata) if metadata.is_file() => occupied = true,
+                    Ok(_) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!(
+                                "log rotation destination is not a regular file: {}",
+                                candidate.display()
+                            ),
+                        ));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if !occupied {
+                return Ok(path);
+            }
+            sequence = Some(
+                sequence
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .ok_or_else(|| io::Error::other("log rotation fragment sequence exhausted"))?,
+            );
         }
-        self.file.write(buffer)
+    }
+
+    fn current_file(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            self.file = Some(
+                OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(self.directory.join(&self.prefix))?,
+            );
+        }
+        self.file
+            .as_mut()
+            .ok_or_else(|| io::Error::other("active log file is unavailable"))
+    }
+
+    fn rotate(&mut self, now: SystemTime) {
+        if let Err(error) = self.try_rotate(now) {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "service-daemon file log rotation failed: {error}; retrying on the next write"
+            );
+        }
+    }
+
+    fn write_at(&mut self, buffer: &[u8], now: SystemTime) -> io::Result<usize> {
+        self.rotate(now);
+        self.current_file()?.write(buffer)
     }
 }
 
@@ -345,26 +421,10 @@ impl Write for RotatingFileWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
-    }
-}
-
-fn path_for_period(
-    directory: &Path,
-    prefix: &str,
-    rotation: RotationPolicy,
-    now: SystemTime,
-) -> PathBuf {
-    let timestamp = chrono::DateTime::<chrono::Utc>::from(now);
-    let suffix = match rotation {
-        RotationPolicy::Daily => timestamp.format("%Y-%m-%d").to_string(),
-        RotationPolicy::Hourly => timestamp.format("%Y-%m-%d-%H").to_string(),
-        RotationPolicy::Never => String::new(),
-    };
-    if suffix.is_empty() {
-        directory.join(prefix)
-    } else {
-        directory.join(format!("{prefix}.{suffix}"))
+        match self.file.as_mut() {
+            Some(file) => file.flush(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -486,12 +546,11 @@ pub fn enable_file_logging(config: FileLogConfig) {
 /// When `FILE_LOG_CONFIG` is not set, this service stays idle until shutdown.
 ///
 /// ## Output Format
-/// JSON lines (one JSON object per line), written to the configured rotation
-/// files. Daily files use `{prefix}.YYYY-MM-DD`; hourly files use
-/// `{prefix}.YYYY-MM-DD-HH`. With gzip compression, closed files are archived
-/// asynchronously as `{prefix}.<period>.gz`, with same-day compaction and
-/// delayed repack handled by the archive worker. The active file is never
-/// submitted while it is still open.
+/// JSON lines (one JSON object per line), written to the configured active
+/// file, `latest.log` by default. After closing a period, rotation produces
+/// `latest.YYYY-MM-DD.log` or `latest.YYYY-MM-DD-HH.log`. With gzip compression,
+/// `.gz` is appended asynchronously, with same-day compaction and delayed
+/// repack handled by the archive worker. The active file is never archived.
 #[service(priority = ServicePriority::SYSTEM, tags = ["__file_log__"])]
 pub async fn file_log_service() -> anyhow::Result<()> {
     // If file logging is not configured, stay idle until shutdown instead of
@@ -634,6 +693,7 @@ pub async fn file_log_service() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::io::{self, Write};
+    use std::path::Path;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
@@ -694,6 +754,208 @@ mod tests {
     }
 
     #[test]
+    fn current_events_use_fixed_name_until_rotation() {
+        let directory = TestDirectory::new();
+        let config = directory.config();
+        let active = Arc::new(ParkingMutex::new(None));
+        let mut writer = RotatingFileWriter::new(
+            &config,
+            active.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            day(1),
+        )
+        .unwrap();
+        writer.write_at(b"first day\n", day(1)).unwrap();
+        assert_eq!(
+            fs::read(directory.0.join("latest.log")).unwrap(),
+            b"first day\n"
+        );
+        assert!(!directory.0.join("latest.2026-01-01.log").exists());
+
+        writer.write_at(b"second day\n", day(2)).unwrap();
+        assert_eq!(
+            fs::read(directory.0.join("latest.log")).unwrap(),
+            b"second day\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("latest.2026-01-01.log")).unwrap(),
+            b"first day\n"
+        );
+        assert_eq!(*active.lock(), Some(directory.0.join("latest.log")));
+    }
+
+    #[test]
+    fn restart_rotates_previous_period_before_appending() {
+        let directory = TestDirectory::new();
+        let config = directory.config();
+        let current = directory.0.join("latest.log");
+        fs::write(&current, b"previous process\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&current)
+            .unwrap()
+            .set_modified(day(1))
+            .unwrap();
+        let mut writer = RotatingFileWriter::new(
+            &config,
+            Arc::new(ParkingMutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+            day(3),
+        )
+        .unwrap();
+        writer.write_at(b"new process\n", day(3)).unwrap();
+        assert_eq!(fs::read(&current).unwrap(), b"new process\n");
+        assert_eq!(
+            fs::read(directory.0.join("latest.2026-01-01.log")).unwrap(),
+            b"previous process\n"
+        );
+        assert!(!directory.0.join("latest.2026-01-02.log").exists());
+    }
+
+    #[test]
+    fn restart_within_period_appends_to_fixed_name() {
+        let directory = TestDirectory::new();
+        let config = directory.config();
+        let current = directory.0.join("latest.log");
+        fs::write(&current, b"first process\n").unwrap();
+        File::options()
+            .write(true)
+            .open(&current)
+            .unwrap()
+            .set_modified(day(1))
+            .unwrap();
+        let mut writer = RotatingFileWriter::new(
+            &config,
+            Arc::new(ParkingMutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+            day(1),
+        )
+        .unwrap();
+        writer.write_at(b"second process\n", day(1)).unwrap();
+        assert_eq!(
+            fs::read(&current).unwrap(),
+            b"first process\nsecond process\n"
+        );
+        assert!(!directory.0.join("latest.2026-01-01.log").exists());
+    }
+
+    #[test]
+    fn rotation_preserves_existing_plain_and_gzip_archives() {
+        let directory = TestDirectory::new();
+        let config = directory.config();
+        let plain = directory.0.join("latest.2026-01-01.log");
+        let gzip = directory.0.join("latest.2026-01-01.1.log.gz");
+        fs::write(&plain, b"existing plain\n").unwrap();
+        fs::write(&gzip, b"existing gzip\n").unwrap();
+        let mut writer = RotatingFileWriter::new(
+            &config,
+            Arc::new(ParkingMutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+            day(1),
+        )
+        .unwrap();
+        writer.write_at(b"new fragment\n", day(1)).unwrap();
+        writer.write_at(b"next period\n", day(2)).unwrap();
+        assert_eq!(fs::read(&plain).unwrap(), b"existing plain\n");
+        assert_eq!(fs::read(&gzip).unwrap(), b"existing gzip\n");
+        assert_eq!(
+            fs::read(directory.0.join("latest.2026-01-01.2.log")).unwrap(),
+            b"new fragment\n"
+        );
+    }
+
+    #[test]
+    fn hourly_rotation_names_the_closed_hour_and_preserves_custom_extension() {
+        let directory = TestDirectory::new();
+        let config = FileLogConfig {
+            rotation: RotationPolicy::Hourly,
+            ..FileLogConfig::new(directory.0.to_string_lossy(), "application.jsonl")
+        };
+        let mut writer = RotatingFileWriter::new(
+            &config,
+            Arc::new(ParkingMutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+            day(1),
+        )
+        .unwrap();
+        writer
+            .write_at(b"first hour\n", day(1) + Duration::from_secs(3599))
+            .unwrap();
+        assert!(!directory.0.join("application.2026-01-01-00.jsonl").exists());
+        writer
+            .write_at(b"later hour\n", day(1) + Duration::from_secs(7200))
+            .unwrap();
+        assert_eq!(
+            fs::read(directory.0.join("application.2026-01-01-00.jsonl")).unwrap(),
+            b"first hour\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("application.jsonl")).unwrap(),
+            b"later hour\n"
+        );
+        assert!(!directory.0.join("application.2026-01-01-01.jsonl").exists());
+    }
+
+    #[test]
+    fn empty_active_file_does_not_create_an_empty_archive() {
+        let directory = TestDirectory::new();
+        let config = directory.config();
+        let mut writer = RotatingFileWriter::new(
+            &config,
+            Arc::new(ParkingMutex::new(None)),
+            Arc::new(AtomicUsize::new(0)),
+            day(1),
+        )
+        .unwrap();
+        writer.write_at(b"first event\n", day(3)).unwrap();
+        assert_eq!(
+            fs::read(directory.0.join("latest.log")).unwrap(),
+            b"first event\n"
+        );
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_sharing_violation_preserves_active_file_and_retries_rotation() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = TestDirectory::new();
+        let config = directory.config();
+        let active = Arc::new(ParkingMutex::new(None));
+        let errors = Arc::new(AtomicUsize::new(0));
+        let mut writer =
+            RotatingFileWriter::new(&config, active.clone(), errors.clone(), day(1)).unwrap();
+        writer.write_at(b"first\n", day(1)).unwrap();
+        // Permit reads/writes but deny delete sharing, as a log reader may do.
+        let reader = OpenOptions::new()
+            .read(true)
+            .share_mode(0x0000_0003)
+            .open(directory.0.join("latest.log"))
+            .unwrap();
+        writer.write_at(b"rename blocked\n", day(2)).unwrap();
+        assert_eq!(errors.load(Ordering::Relaxed), 1);
+        maintain(&config, &active, day(3));
+        assert_eq!(
+            fs::read(directory.0.join("latest.log")).unwrap(),
+            b"first\nrename blocked\n"
+        );
+        assert!(!directory.0.join("latest.2026-01-01.log.gz").exists());
+
+        drop(reader);
+        writer.write_at(b"recovered\n", day(2)).unwrap();
+        maintain(&config, &active, day(3));
+        assert_eq!(
+            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
+            "first\nrename blocked\n"
+        );
+        assert_eq!(
+            fs::read(directory.0.join("latest.log")).unwrap(),
+            b"recovered\n"
+        );
+    }
+
+    #[test]
     fn idle_period_boundary_preserves_actual_open_file() {
         let directory = TestDirectory::new();
         let config = directory.config();
@@ -707,10 +969,10 @@ mod tests {
         .unwrap();
         writer.write_at(b"before boundary\n", day(1)).unwrap();
         maintain(&config, &active, day(2));
-        let old = active_log_path(&config, day(1));
+        let old = active_log_path(&config);
         assert_eq!(*active.lock(), Some(old.clone()));
         assert_eq!(fs::read_to_string(old).unwrap(), "before boundary\n");
-        assert!(!directory.0.join("latest.log.2026-01-01.gz").exists());
+        assert!(!directory.0.join("latest.2026-01-01.log.gz").exists());
     }
 
     #[test]
@@ -727,24 +989,24 @@ mod tests {
         .unwrap();
         writer.write_at(b"first\n", day(1)).unwrap();
         writer.write_at(b"second\n", day(2)).unwrap();
-        assert_eq!(*active.lock(), Some(active_log_path(&config, day(2))));
+        assert_eq!(*active.lock(), Some(active_log_path(&config)));
         maintain(&config, &active, day(3));
-        assert!(!active_log_path(&config, day(1)).exists());
+        assert!(!directory.0.join("latest.2026-01-01.log").exists());
         assert_eq!(
-            decompress(&directory.0.join("latest.log.2026-01-01.gz")),
+            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
             "first\n"
         );
         // The still-open second file is protected even though the maintenance
         // clock has advanced past its period.
         writer.write_at(b"still open\n", day(2)).unwrap();
         assert_eq!(
-            fs::read_to_string(active_log_path(&config, day(2))).unwrap(),
+            fs::read_to_string(active_log_path(&config)).unwrap(),
             "second\nstill open\n"
         );
     }
 
     #[test]
-    fn rotation_open_failure_keeps_old_file_usable_and_protected() {
+    fn rotation_destination_failure_keeps_old_file_usable_and_protected() {
         let directory = TestDirectory::new();
         let config = directory.config();
         let active = Arc::new(ParkingMutex::new(None));
@@ -752,20 +1014,21 @@ mod tests {
         let mut writer =
             RotatingFileWriter::new(&config, active.clone(), errors.clone(), day(1)).unwrap();
         writer.write_at(b"first\n", day(1)).unwrap();
-        fs::create_dir(active_log_path(&config, day(2))).unwrap();
+        let blocked = directory.0.join("latest.2026-01-01.log");
+        fs::create_dir(&blocked).unwrap();
         writer.write_at(b"fallback\n", day(2)).unwrap();
         assert_eq!(errors.load(Ordering::Relaxed), 1);
-        assert_eq!(*active.lock(), Some(active_log_path(&config, day(1))));
+        assert_eq!(*active.lock(), Some(active_log_path(&config)));
         maintain(&config, &active, day(3));
         assert_eq!(
-            fs::read_to_string(active_log_path(&config, day(1))).unwrap(),
+            fs::read_to_string(active_log_path(&config)).unwrap(),
             "first\nfallback\n"
         );
-        fs::remove_dir(active_log_path(&config, day(2))).unwrap();
+        fs::remove_dir(blocked).unwrap();
         writer.write_at(b"recovered\n", day(2)).unwrap();
         maintain(&config, &active, day(3));
         assert_eq!(
-            decompress(&directory.0.join("latest.log.2026-01-01.gz")),
+            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
             "first\nfallback\n"
         );
     }
@@ -786,10 +1049,10 @@ mod tests {
         writer.write_at(b"second\n", day(2)).unwrap();
         maintain(&config, &active, day(3));
         writer.write_at(b"clock moved back\n", day(1)).unwrap();
-        assert_eq!(*active.lock(), Some(active_log_path(&config, day(2))));
-        assert!(!active_log_path(&config, day(1)).exists());
+        assert_eq!(*active.lock(), Some(active_log_path(&config)));
+        assert!(!directory.0.join("latest.2026-01-01.log").exists());
         assert_eq!(
-            fs::read_to_string(active_log_path(&config, day(2))).unwrap(),
+            fs::read_to_string(active_log_path(&config)).unwrap(),
             "second\nclock moved back\n"
         );
     }
@@ -821,7 +1084,7 @@ mod tests {
         worker.request();
         writer.write_at(b"active data\n", day(2)).unwrap();
         worker.request();
-        assert!(active_log_path(&config, day(1)).is_file());
+        assert!(directory.0.join("latest.2026-01-01.log").is_file());
 
         let store = ArchiveStore::new(
             PathBuf::from(&config.directory),
@@ -833,11 +1096,11 @@ mod tests {
         }));
         worker.shutdown().await;
         assert_eq!(
-            decompress(&directory.0.join("latest.log.2026-01-01.gz")),
+            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
             "old data\n"
         );
         assert_eq!(
-            fs::read_to_string(active_log_path(&config, day(2))).unwrap(),
+            fs::read_to_string(active_log_path(&config)).unwrap(),
             "active data\n"
         );
     }
@@ -868,17 +1131,15 @@ mod tests {
             config.file_prefix.clone(),
             config.rotation,
         );
-        let join = thread::spawn(move || {
-            run_archive_worker(store, rx, cancel, stopping, active)
-        });
+        let join = thread::spawn(move || run_archive_worker(store, rx, cancel, stopping, active));
         join.join().expect("archive worker");
 
         assert_eq!(
-            decompress(&directory.0.join("latest.log.2026-01-01.gz")),
+            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
             "old data\n"
         );
         assert_eq!(
-            fs::read_to_string(active_log_path(&config, day(2))).unwrap(),
+            fs::read_to_string(active_log_path(&config)).unwrap(),
             "active data\n"
         );
     }

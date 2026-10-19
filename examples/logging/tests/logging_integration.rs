@@ -15,7 +15,7 @@ async fn wait_for_file(directory: &Path, prefix: &str) -> anyhow::Result<PathBuf
                 let matches_prefix = path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(prefix));
+                    .is_some_and(|name| name == prefix);
                 if matches_prefix {
                     return Ok(path);
                 }
@@ -35,7 +35,7 @@ async fn wait_for_marker(directory: &Path, prefix: &str, marker: &str) -> anyhow
                 let matches_prefix = path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.starts_with(prefix));
+                    .is_some_and(|name| name == prefix);
                 if matches_prefix
                     && std::fs::read_to_string(&path)
                         .map(|contents| contents.contains(marker))
@@ -76,11 +76,11 @@ async fn test_file_logging_initialization() -> anyhow::Result<()> {
         .build();
 
     daemon.run().await;
-    let _log_path = wait_for_file(&temp_dir, "test-app.").await?;
+    let _log_path = wait_for_file(&temp_dir, "test-app").await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     tracing::info!(target: "example_logging.integration", "file_logging_test_marker");
 
-    let log_path = wait_for_marker(&temp_dir, "test-app.", "file_logging_test_marker").await?;
+    let log_path = wait_for_marker(&temp_dir, "test-app", "file_logging_test_marker").await?;
     let contents = std::fs::read_to_string(&log_path)?;
     let marker_event = contents
         .lines()

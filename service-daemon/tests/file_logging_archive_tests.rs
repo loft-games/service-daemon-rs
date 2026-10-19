@@ -22,6 +22,9 @@ use tracing_subscriber::prelude::*;
 const CHILD_MODE: &str = "SD_FILE_LOG_ARCHIVE_CHILD";
 const CHILD_DIR: &str = "SD_FILE_LOG_ARCHIVE_DIR";
 const TEST_NAME: &str = "file_logging_archive_lifecycle";
+const SERVICE_INSTANCE_ID: &str = "019fe746-6158-7403-82c9-ac72cad515ec";
+const SOURCE_SERVICE_INSTANCE_ID: &str = "019fe746-6158-7403-82c9-ac6ccaa91ef5";
+const MESSAGE_ID: &str = "019fe746-6158-7403-82c9-ac8b7e502cb3";
 
 fn temporary_directory(label: &str) -> PathBuf {
     let nonce = SystemTime::now()
@@ -74,6 +77,39 @@ fn read_gzip(path: &Path) -> std::io::Result<String> {
     let mut contents = String::new();
     flate2::read::MultiGzDecoder::new(File::open(path)?).read_to_string(&mut contents)?;
     Ok(contents)
+}
+
+fn write_historical_active(path: &Path, body: &str) -> std::io::Result<()> {
+    fs::write(path, body)?;
+    // 2020-01-01 01:00 UTC gives a deterministic closed daily/hourly period.
+    OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_840_400))
+}
+
+fn assert_active_markers(path: &Path, expected_count: usize) -> anyhow::Result<()> {
+    let contents = fs::read_to_string(path)?;
+    let markers = contents
+        .lines()
+        .filter(|line| line.contains("archive_test_marker"))
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(markers.len(), expected_count, "{contents}");
+    for marker in markers {
+        assert_eq!(marker["service_instance_id"], SERVICE_INSTANCE_ID);
+        assert_eq!(
+            marker["source_service_instance_id"],
+            SOURCE_SERVICE_INSTANCE_ID
+        );
+        assert_eq!(marker["message_id"], MESSAGE_ID);
+        assert_eq!(
+            marker["trigger_instance_id"]["service_instance_id"],
+            SERVICE_INSTANCE_ID
+        );
+        assert_eq!(marker["trigger_instance_id"]["seq"], 42);
+    }
+    Ok(())
 }
 
 #[test]
@@ -169,14 +205,13 @@ fn file_logging_archive_lifecycle() -> anyhow::Result<()> {
 
     let active_names = names
         .iter()
-        .filter(|name| {
-            name.starts_with("latest.log.") && !name.ends_with(".gz") && !name.contains(".merged")
-        })
+        .filter(|name| *name == "latest.log")
         .collect::<Vec<_>>();
     assert!(
         active_names.len() == 1,
-        "exactly one current period file must remain uncompressed: {names:?}"
+        "exactly one fixed active file must remain uncompressed: {names:?}"
     );
+    assert_active_markers(&archive_dir.join("latest.log"), 1)?;
 
     // A second independent process exercises startup recovery and idempotency.
     let merged_before = fs::read(archive_dir.join("latest.log.2020-01-01.merged.gz"))?;
@@ -185,6 +220,7 @@ fn file_logging_archive_lifecycle() -> anyhow::Result<()> {
         fs::read(archive_dir.join("latest.log.2020-01-01.merged.gz"))?,
         merged_before
     );
+    assert_active_markers(&archive_dir.join("latest.log"), 2)?;
 
     let custom_dir = temporary_directory("custom");
     fs::create_dir_all(&custom_dir)?;
@@ -201,6 +237,131 @@ fn file_logging_archive_lifecycle() -> anyhow::Result<()> {
 
     fs::remove_dir_all(&archive_dir)?;
     fs::remove_dir_all(&custom_dir)?;
+    Ok(())
+}
+
+#[test]
+fn fixed_active_file_rotates_on_startup_and_appends_on_same_period_restart() -> anyhow::Result<()> {
+    let directory = temporary_directory("fixed-active");
+    fs::create_dir_all(&directory)?;
+    let active = directory.join("latest.log");
+    write_historical_active(&active, "previous period\n")?;
+
+    assert_child_success(&run_child("default", &directory));
+    let archive = directory.join("latest.2020-01-01.log.gz");
+    assert_eq!(read_gzip(&archive)?, "previous period\n");
+    assert_active_markers(&active, 1)?;
+    let archive_before = fs::read(&archive)?;
+    let active_before = fs::read(&active)?;
+    let names_before = fs::read_dir(&directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+
+    assert_child_success(&run_child("default", &directory));
+    assert_eq!(fs::read(&archive)?, archive_before);
+    assert!(fs::read(&active)?.starts_with(&active_before));
+    assert_active_markers(&active, 2)?;
+    let names_after = fs::read_dir(&directory)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
+    assert_eq!(
+        names_after, names_before,
+        "same-period restart must only append"
+    );
+    fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[test]
+fn new_archive_names_merge_repack_and_preserve_custom_active_names() -> anyhow::Result<()> {
+    let directory = temporary_directory("new-archive-names");
+    fs::create_dir_all(&directory)?;
+    for hour in 1..=3 {
+        write_old_gzip_fragment(
+            &directory.join(format!("latest.2020-01-01-{hour:02}.log.gz")),
+            &format!("fragment {hour}\n"),
+        )?;
+    }
+    let plain = directory.join("latest.2019-12-31-23.log");
+    write_old_fragment(&plain, "closed plain file\n")?;
+    let repack = directory.join("latest.2019-12-30.merged.log.gz");
+    write_old_gzip_fragment(&repack, "first member\n")?;
+    let mut encoder = flate2::write::GzEncoder::new(
+        OpenOptions::new().append(true).open(&repack)?,
+        flate2::Compression::default(),
+    );
+    encoder.write_all(b"second member\n")?;
+    drop(encoder.finish()?);
+    let marker = directory.join("latest.2019-12-30.merged.log.gz.needs-repack");
+    write_old_fragment(&marker, "needs repack\n")?;
+
+    assert_child_success(&run_child("archive", &directory));
+    assert_active_markers(&directory.join("latest.log"), 1)?;
+    assert_eq!(
+        read_gzip(&directory.join("latest.2020-01-01.merged.log.gz"))?,
+        "fragment 1\nfragment 2\nfragment 3\n"
+    );
+    for hour in 1..=3 {
+        assert!(
+            !directory
+                .join(format!("latest.2020-01-01-{hour:02}.log.gz"))
+                .exists()
+        );
+    }
+    assert!(!plain.exists());
+    assert_eq!(
+        read_gzip(&directory.join("latest.2019-12-31-23.log.gz"))?,
+        "closed plain file\n"
+    );
+    assert!(!marker.exists());
+    let mut single_member = String::new();
+    flate2::read::GzDecoder::new(File::open(&repack)?).read_to_string(&mut single_member)?;
+    assert_eq!(single_member, "first member\nsecond member\n");
+    fs::remove_dir_all(directory)?;
+
+    for (mode, active_name, archive_name) in [
+        ("custom", "application.log", "application.2020-01-01.log.gz"),
+        ("custom-bare", "app", "app.2020-01-01.gz"),
+    ] {
+        let directory = temporary_directory(mode);
+        fs::create_dir_all(&directory)?;
+        let active = directory.join(active_name);
+        write_historical_active(&active, "custom previous period\n")?;
+        assert_child_success(&run_child(mode, &directory));
+        assert_eq!(
+            read_gzip(&directory.join(archive_name))?,
+            "custom previous period\n"
+        );
+        assert_active_markers(&active, 1)?;
+        assert!(!directory.join("latest.log").exists());
+        fs::remove_dir_all(directory)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn startup_rotation_preserves_existing_plain_and_gzip_archives() -> anyhow::Result<()> {
+    let directory = temporary_directory("collision");
+    fs::create_dir_all(&directory)?;
+    let plain = directory.join("latest.2020-01-01.log");
+    let compressed = directory.join("latest.2020-01-01.1.log.gz");
+    fs::write(&plain, "original closed file\n")?;
+    write_old_gzip_fragment(&compressed, "existing archive\n")?;
+    let compressed_before = fs::read(&compressed)?;
+    write_historical_active(&directory.join("latest.log"), "previous active file\n")?;
+
+    assert_child_success(&run_child("default", &directory));
+    assert_eq!(
+        read_gzip(&directory.join("latest.2020-01-01.log.gz"))?,
+        "original closed file\n"
+    );
+    assert_eq!(fs::read(compressed)?, compressed_before);
+    assert_eq!(
+        read_gzip(&directory.join("latest.2020-01-01.2.log.gz"))?,
+        "previous active file\n"
+    );
+    assert_active_markers(&directory.join("latest.log"), 1)?;
+    fs::remove_dir_all(directory)?;
     Ok(())
 }
 
@@ -364,9 +525,18 @@ fn file_logging_none_and_never_leave_plain_files() -> anyhow::Result<()> {
     fs::create_dir_all(&none_dir)?;
     let plain_none = none_dir.join("custom.log.2020-01-01-01");
     write_old_fragment(&plain_none, "leave uncompressed\n")?;
+    write_historical_active(
+        &none_dir.join("custom.log"),
+        "previous active stays plain\n",
+    )?;
     let output = run_child("none", &none_dir);
     assert_child_success(&output);
     assert_eq!(fs::read_to_string(&plain_none)?, "leave uncompressed\n");
+    assert_eq!(
+        fs::read_to_string(none_dir.join("custom.2020-01-01-01.log"))?,
+        "previous active stays plain\n"
+    );
+    assert_active_markers(&none_dir.join("custom.log"), 1)?;
     let none_names = fs::read_dir(&none_dir)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
@@ -374,8 +544,8 @@ fn file_logging_none_and_never_leave_plain_files() -> anyhow::Result<()> {
     assert!(
         none_names
             .iter()
-            .any(|name| name.starts_with("custom.log.")),
-        "None compression must still write a rotated file: {none_names:?}"
+            .any(|name| name == "custom.2020-01-01-01.log"),
+        "None compression must still rename the closed active file: {none_names:?}"
     );
     assert!(
         none_names.iter().all(|name| !name.ends_with(".gz")),
@@ -386,12 +556,17 @@ fn file_logging_none_and_never_leave_plain_files() -> anyhow::Result<()> {
     fs::create_dir_all(&never_dir)?;
     let plain_never = never_dir.join("never.log.2020-01-01");
     write_old_fragment(&plain_never, "leave historical files\n")?;
+    write_historical_active(&never_dir.join("never.log"), "never rotate this prefix\n")?;
     let output = run_child("never", &never_dir);
     assert_child_success(&output);
     assert_eq!(
         fs::read_to_string(&plain_never)?,
         "leave historical files\n"
     );
+    assert!(
+        fs::read_to_string(never_dir.join("never.log"))?.starts_with("never rotate this prefix\n")
+    );
+    assert_active_markers(&never_dir.join("never.log"), 1)?;
     let never_names = fs::read_dir(&never_dir)?
         .filter_map(Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
@@ -404,6 +579,11 @@ fn file_logging_none_and_never_leave_plain_files() -> anyhow::Result<()> {
         never_names.iter().all(|name| !name.ends_with(".gz")),
         "Never rotation must not create archives: {never_names:?}"
     );
+    assert_eq!(
+        never_names.len(),
+        2,
+        "Never must not create rotated or maintenance files"
+    );
 
     fs::remove_dir_all(&none_dir)?;
     fs::remove_dir_all(&never_dir)?;
@@ -412,7 +592,12 @@ fn file_logging_none_and_never_leave_plain_files() -> anyhow::Result<()> {
 
 fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
     let config = match mode {
+        "default" => FileLogConfig {
+            directory: directory.to_string_lossy().into_owned(),
+            ..FileLogConfig::default()
+        },
         "custom" => FileLogConfig::new(directory.to_string_lossy(), "application.log"),
+        "custom-bare" => FileLogConfig::new(directory.to_string_lossy(), "app"),
         "archive" => FileLogConfig {
             directory: directory.to_string_lossy().into_owned(),
             file_prefix: "latest.log".to_string(),
@@ -446,7 +631,17 @@ fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
             .with_restart_policy(RestartPolicy::for_testing())
             .build();
         daemon.run().await;
-        tracing::info!(target: "file_logging.archive.integration", "archive_test_marker");
+        {
+            let span = tracing::info_span!(
+                "archive_identity",
+                service_instance_id = SERVICE_INSTANCE_ID,
+                source_service_instance_id = SOURCE_SERVICE_INSTANCE_ID,
+                message_id = MESSAGE_ID,
+                instance_seq = 42_u64,
+            );
+            let _entered = span.enter();
+            tracing::info!(target: "file_logging.archive.integration", "archive_test_marker");
+        }
         tokio::time::sleep(Duration::from_millis(150)).await;
         daemon.shutdown();
         daemon.wait().await?;

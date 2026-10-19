@@ -46,11 +46,24 @@ a strong audit trail:
   tamper resistance are deployment responsibilities. The framework does not
   delete old archives by count or age.
 
-The default file prefix is `latest.log`, and the sink writes both framework and
-application events. `FileLogCompression::None` leaves rotated files uncompressed
+The default active file is `logs/latest.log`, and the sink writes both framework
+and application events. The first write after a UTC day boundary renames the
+closed file to `latest.YYYY-MM-DD.log`; background gzip adds `.gz`. Shutdown
+leaves the active file in place, and restart identifies its period from the
+nonempty file's modification time. Preserve that timestamp when restoring the
+active file. Custom prefixes are complete active filenames, and rotation inserts
+the timestamp before their extension. Existing rotations are kept, with numbered
+names for subsequent files from the same period.
+
+`FileLogCompression::None` leaves rotated files uncompressed
 for deployments that delegate archival to an external tool. `RotationPolicy::Never`
 does not create rotated archives. If several processes share one directory,
 configure distinct prefixes or directories to avoid competing for the same files.
+Startup archive maintenance still recognizes the previous `latest.log.YYYY-MM-DD`
+layout; deployments may contain both layouts during migration. Update file
+shipping globs to include `latest.log` and the new `latest.*.log` / `latest.*.log.gz`
+names while retaining any legacy globs for existing archives. The writer does
+not automatically reopen a file renamed by an external rotation tool.
 
 For audit-grade logging, deploy an external log pipeline with explicit
 durability, access control, retention, and monitoring guarantees.

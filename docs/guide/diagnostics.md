@@ -82,15 +82,29 @@ tracing_subscriber::registry()
 ```rust
 use service_daemon::{FileLogConfig, enable_file_logging};
 
-// Daily rotation, gzip archives, and the default `latest.log` prefix.
+// Write to latest.log, with daily rotation and background gzip archives.
 enable_file_logging(FileLogConfig::default());
 ```
 
-The file sink contains both framework and application events. The default daily
-file is `logs/latest.log.YYYY-MM-DD`; rotated files are compressed in the
-background as `latest.log.YYYY-MM-DD.gz`. Explicit prefixes are preserved
-verbatim, so `FileLogConfig::new("logs", "my-app")` produces
-`my-app.YYYY-MM-DD` and its `.gz` archives.
+The file sink contains both framework and application events. It writes to
+`logs/latest.log`. On the first write after a UTC day boundary, it closes that
+file, renames it to the period it belonged to (for example,
+`latest.2026-10-19.log`), and opens a new `latest.log`. The closed file is then
+compressed in the background as `latest.2026-10-19.log.gz`. Crossing a time
+boundary without another write does not rotate the file; shutdown also leaves
+the active `latest.log` in place.
+
+`file_prefix` is the complete active filename. For example,
+`FileLogConfig::new("logs", "application.log")` writes to `application.log` and
+rotates to `application.YYYY-MM-DD.log`. A name without an extension, such as
+`my-app`, rotates to `my-app.YYYY-MM-DD`. Existing rotations are never
+overwritten: another rotation for the same period uses a numbered name such as
+`latest.2026-10-19.1.log`.
+
+On restart, the writer uses a nonempty active file's modification time to
+identify its UTC period. It appends to the same-period file, or rotates an older
+file before writing new events. Avoid changing the active file's modification
+time when preserving logs across restarts.
 
 Compression can be disabled when an external log pipeline owns archival:
 
@@ -105,14 +119,15 @@ let config = FileLogConfig {
 enable_file_logging(config);
 ```
 
-`FileLogCompression::Gzip` is the default. Rotation boundaries use UTC. With
-hourly rotation, closed files become `latest.log.YYYY-MM-DD-HH.gz`. At least
-three same-day gzip fragments whose modification times are more than 24 hours
-old are combined into `latest.log.YYYY-MM-DD.merged.gz`. Daily rotation normally
-produces one fragment per date, so it does not reach this merge threshold.
+`FileLogCompression::Gzip` is the default. With hourly rotation, the first write
+after a UTC hour boundary rotates to `latest.YYYY-MM-DD-HH.log`; compression
+adds `.gz`. At least three same-day gzip fragments whose modification times are
+more than 24 hours old are combined into `latest.YYYY-MM-DD.merged.log.gz`.
+Daily rotation normally produces one fragment per date, so it does not reach
+this merge threshold.
 
 Merging concatenates gzip members and creates
-`latest.log.YYYY-MM-DD.merged.gz.needs-repack`. Once the marker is more than
+`latest.YYYY-MM-DD.merged.log.gz.needs-repack`. Once the marker is more than
 30 days old, repacking recompresses the merged contents into one gzip stream
 and removes the marker. Use a decoder that reads all gzip members when
 extracting an archive that has not yet been repacked.
@@ -121,6 +136,10 @@ The writer hands off a rotation only after closing it. Archive work is retried
 at startup and during background maintenance, and shutdown allows a bounded
 drain. Failed or unfinished work keeps recoverable inputs for the next run.
 There is currently no automatic age- or count-based retention deletion.
+
+Startup maintenance also recognizes older `latest.log.YYYY-MM-DD` rotations
+and their `.gz` / `.merged.gz` archives. It can resume their archive maintenance
+without renaming existing archives to the new filename layout.
 
 `RotationPolicy::Never` keeps one file and performs no archive work. When
 multiple processes share a directory, configure distinct directories or
