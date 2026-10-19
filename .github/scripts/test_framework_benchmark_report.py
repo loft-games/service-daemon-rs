@@ -16,6 +16,11 @@ CASES = [
     "provider_resolve/immutable_warm", "provider_resolve/managed_warm",
     "provider_resolve/arc_clone_drop_reference",
 ]
+POLICY_CASES = [
+    f"high_priority_policy/{case}/{level}"
+    for case in ("idle", "active_1", "active_32", "active_256", "active_1_standard_history_256x8")
+    for level in ("info", "debug")
+]
 
 
 class ReportTests(unittest.TestCase):
@@ -26,7 +31,7 @@ class ReportTests(unittest.TestCase):
         self.summary = self.root / "summary.md"
         self.write(self.root / "metadata.json", {"commit": "fixture-commit"})
         for config in ("default", "high-priority"):
-            cases = CASES + (["observation/high_priority_steady"] if config == "high-priority" else [])
+            cases = CASES + (["observation/high_priority_steady"] + POLICY_CASES if config == "high-priority" else [])
             for case in cases:
                 directory = self.root / config / case / "new"
                 self.write(directory / "benchmark.json", {"full_id": case})
@@ -58,7 +63,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(report, self.summary.read_text())
         self.assertIn("Overall result: **PASS**", report)
         self.assertIn("7/7", report)
-        self.assertIn("8/8", report)
+        self.assertIn("18/18", report)
         self.assertIn("10.000", report)
         self.assertIn("95%", report)
         self.assertIn("fixture-commit", report)
@@ -68,12 +73,17 @@ class ReportTests(unittest.TestCase):
         self.assertNotEqual(self.run_report().returncode, 0)
         report = self.summary.read_text()
         self.assertIn("6/7", report)
-        self.assertIn("8/8", report)
+        self.assertIn("18/18", report)
         self.assertIn("FAILED", report)
 
     def test_command_failure_is_not_hidden_by_complete_files(self):
         self.assertNotEqual(self.run_report("failure").returncode, 0)
         self.assertIn("command: failure", self.summary.read_text())
+
+    def test_missing_policy_case_fails(self):
+        (self.root / "high-priority" / POLICY_CASES[-1] / "new/estimates.json").unlink()
+        self.assertNotEqual(self.run_report().returncode, 0)
+        self.assertIn("17/18", self.summary.read_text())
 
     def test_invalid_statistics_fail(self):
         path = self.root / "default" / CASES[0] / "new/estimates.json"

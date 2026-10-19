@@ -6,6 +6,36 @@ environment and measurement population, not a universal performance guarantee.
 The service-count measurements below and the HighPriority resource-retention
 experiments use different methods and must not be combined into one cost model.
 
+## HighPriority Policy Polling
+
+The `high_priority_policy` Criterion group measures a full synchronous policy
+check with unchanged healthy samples. It covers an idle pool, increasing active
+instance counts, and unrelated retained Standard generation history. See the
+[measurement contract and commands](../development/release-validation.md#framework-operation-benchmarks)
+for setup and exclusions.
+
+On an Intel Core i5-11400 Linux host, Rust 1.99.1 release builds pinned to CPU 2
+produced the following Criterion means with an INFO filter. Each case used
+30 samples, a one-second warmup and two-second measurement window. The same
+fixture and dependency lockfile were used before and after replacing full
+diagnostic snapshots with focused policy reads.
+
+| Fixture | Full-snapshot evaluation | Focused evaluation |
+| :--- | ---: | ---: |
+| Idle pool | 2.25 µs | 0.64 µs |
+| 1 active HP instance | 2.97 µs | 0.91 µs |
+| 32 active HP instances | 26.86 µs | 8.45 µs |
+| 256 active HP instances | 266.27 µs | 64.19 µs |
+| 1 HP instance + 256 Standard instances with 8 generations each | 960.15 µs | 0.91 µs |
+
+The focused check no longer copies unrelated generation history. These timings
+exclude timer wakeup, daemon mutex acquisition/wait, concurrent sampling and
+async file logging. The DEBUG cases format to a discard sink without timestamps;
+they do not measure file throughput or compression. Runs were sequential on one
+host, not an interleaved multi-process comparison. These operation costs do not
+establish total daemon CPU use, pressure-recovery latency or a preferred polling
+interval. The production interval remains 250 ms.
+
 ## Service-count Measurement Summary
 
 - **Memory cost is linear in service count**: each additional service adds roughly **~3.5 KB** RSS overhead. Up to 1,000 services were measured stable in the test environment.

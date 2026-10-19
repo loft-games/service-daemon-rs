@@ -144,13 +144,14 @@ and failure-path tests run without Cargo:
 python3 -B -m unittest discover -s .github/scripts -p 'test_framework_benchmark_report.py'
 ```
 
-There are seven default measurement points and eight with HighPriority enabled:
+There are seven default measurement points and eighteen with HighPriority enabled:
 
 | Group | Cases | Measurement contract |
 | :--- | :--- | :--- |
 | `observation` | `standard_steady`, plus `high_priority_steady` when enabled | Real completed ServiceSleep recording, requested 1 ms / elapsed 2 ms. Pre-fill 128 observations outside timing; measure recording including its internal clock, locks and aggregate updates, never a real sleep. |
 | `diagnostics_snapshot` | 1, 32, 256 instances | One Standard generation and 128 observations per instance. Include full snapshot creation, consumption and destruction; exclude fixture construction, concurrent writes and serialization. These sizes are measurement points, not recommended capacities. |
 | `provider_resolve` | `immutable_warm`, `managed_warm`, `arc_clone_drop_reference` | Independent daemon resource scopes with pre-initialized `u64` slots and real managed promotion. Reuse a current-thread runtime and enter the daemon scope before the timed loop; measure the scoped resolution bridge and returned Arc consumption/destruction, not initialization or per-operation runtime construction. The Arc clone/drop case is a reference, not a required target. Earlier direct-StateManager measurements are not equivalent to this scoped path. |
+| `high_priority_policy` | Idle, 1/32/256 active HP instances, and 1 HP instance alongside 256 Standard instances with 8 generations each; INFO and DEBUG filters | Complete synchronous policy evaluation with healthy, unchanged samples and production policy. Includes diagnostic reads, candidate checks, facts updates and tracing to a discard sink. Excludes the daemon mutex acquisition/wait, timer wakeup, concurrent sampling, async log queues and file I/O. |
 
 Fixture assertions run outside timing, also in smoke mode: aggregate counts must
 match at generation/service/lane levels, the HP window must stay bounded, snapshot
@@ -159,6 +160,12 @@ calling an initializer. Criterion's default sampling parameters are retained.
 The HP fixture waits once for 2 ms before pre-filling so inferred sleep starts
 are inside the registered generation; this setup wait and the zero-settling
 window inspection are not timed and do not run or modify the production policy.
+The policy fixture separately waits out the production two-second settling
+period, fills 128 healthy samples per active instance and seeds controller
+cursors before timing. Its fixed observation time keeps samples unchanged;
+it measures repeated polling, not fresh-pressure recovery or intervention work.
+The INFO/DEBUG comparison isolates synchronous event formatting without timestamps.
+It does not measure the default file logging pipeline or total process CPU.
 
 For local full measurements, avoid concurrent builds or stress tests, and
 keep feature configurations in separate directories:

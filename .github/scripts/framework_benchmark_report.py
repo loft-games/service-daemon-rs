@@ -18,9 +18,14 @@ COMMON_CASES = (
     "provider_resolve/immutable_warm", "provider_resolve/managed_warm",
     "provider_resolve/arc_clone_drop_reference",
 )
+POLICY_CASES = tuple(
+    f"high_priority_policy/{case}/{level}"
+    for case in ("idle", "active_1", "active_32", "active_256", "active_1_standard_history_256x8")
+    for level in ("info", "debug")
+)
 EXPECTED = {
     "default": COMMON_CASES,
-    "high-priority": COMMON_CASES + ("observation/high_priority_steady",),
+    "high-priority": COMMON_CASES + ("observation/high_priority_steady",) + POLICY_CASES,
 }
 
 

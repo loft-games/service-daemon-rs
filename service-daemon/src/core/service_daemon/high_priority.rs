@@ -22,6 +22,8 @@ mod calibration;
 pub(crate) mod feedback;
 pub(crate) mod observation;
 #[cfg(test)]
+pub(crate) mod policy_bench;
+#[cfg(test)]
 mod policy_tests;
 pub(super) mod runtime;
 
