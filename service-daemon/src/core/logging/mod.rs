@@ -17,14 +17,14 @@ pub use file::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_lo
 
 use tracing_subscriber::prelude::*;
 
-/// One-line initialization: registers `DaemonLayer` + `EnvFilter` as the
-/// global tracing subscriber.
+/// Installs the global tracing subscriber for console and file logging.
 ///
-/// Reads the `RUST_LOG` environment variable for log-level configuration.
-/// Falls back to `"info"` if `RUST_LOG` is not set.
+/// With `RUST_LOG` unset, the console logs INFO and above; files log DEBUG and
+/// above. TRACE is disabled by default. Setting `RUST_LOG` applies the same
+/// `EnvFilter` directives to both outputs, including target and span filters.
 ///
-/// For custom subscriber stacks (e.g., adding Sentry or OpenTelemetry layers),
-/// compose your own subscriber using `DaemonLayer` directly:
+/// To add layers such as Sentry or OpenTelemetry, build a subscriber with
+/// [`DaemonLayer`] and your own filters. The filter below applies to both outputs:
 ///
 /// ```rust,ignore
 /// use service_daemon::DaemonLayer;
@@ -37,8 +37,7 @@ use tracing_subscriber::prelude::*;
 ///     .init();
 /// ```
 ///
-/// File logging is configured separately via `enable_file_logging()` and
-/// consumed by the independent `file_log_service`.
+/// Enable file output separately with `enable_file_logging()`.
 ///
 /// If a global tracing subscriber has already been set, this function logs a
 /// warning through the existing subscriber and leaves it unchanged. Use
@@ -68,13 +67,18 @@ pub fn init_logging() {
 /// }
 /// ```
 pub fn try_init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let configured = std::env::var("RUST_LOG").ok();
+    let filter = |default| match &configured {
+        Some(directives) => tracing_subscriber::EnvFilter::try_new(directives)
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        None => tracing_subscriber::EnvFilter::new(default),
+    };
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(DaemonLayer)
-        .try_init()
+    let subscriber = tracing_subscriber::registry()
+        .with(layer::CaptureLayer::Console.with_filter(filter("info")));
+    #[cfg(feature = "file-logging")]
+    let subscriber = subscriber.with(layer::CaptureLayer::File.with_filter(filter("debug")));
+    subscriber.try_init()
 }
 
 #[cfg(test)]

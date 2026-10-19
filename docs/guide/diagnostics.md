@@ -28,13 +28,32 @@ again. These are resource-management semantics, not a lossless reload promise.
 Maintainers can find the internal contract in
 [HighPriority feedback control](../architecture/high-priority-feedback.md).
 
-`DaemonLayer` is a `tracing::Layer` that captures tracing events, extracts service and trigger IDs from the current span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
+`DaemonLayer` captures tracing events and reads service and trigger IDs from
+the current span. Console and file logging use separate non-blocking broadcast
+queues. Each queue holds `batch_size * 4` events (512 by default). Set the batch
+size with `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`.
+The following SYSTEM-priority services consume these events:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
 - **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time-based rotation policy and optional background gzip archiving.
 - **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
-Both logging consumers drain events in batches, with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
+Both logging services drain events in batches. Events sent only to files do not
+use console queue capacity. A consumer that falls behind loses older events
+when its queue fills. Topology diagnostics read from the console queue.
+
+### Log levels
+
+With `RUST_LOG` unset, `init_logging()` and `try_init_logging()` log INFO and
+above to the console and DEBUG and above to files. TRACE is disabled by default.
+Setting `RUST_LOG` applies the same `EnvFilter` directives to both outputs,
+including target and span filters. For example,
+`RUST_LOG='debug,my_app::wire=trace'` enables TRACE for the `my_app::wire` target
+and DEBUG elsewhere.
+
+For file output, call `enable_file_logging()` and include `__file_log__` when
+selecting services by tag. With a custom subscriber, `DaemonLayer` forwards
+events to both queues; the subscriber's filters apply to both outputs.
 
 ### Enabling Diagnostics
 
@@ -43,7 +62,6 @@ Both logging consumers drain events in batches, with a safety cap of 1,024 event
 ```rust
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Registers DaemonLayer + EnvFilter (reads RUST_LOG, defaults to "info")
     service_daemon::init_logging();
 
     let daemon = ServiceDaemon::builder().build();

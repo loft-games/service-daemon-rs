@@ -74,6 +74,24 @@ app library supplies implementation candidates. Its integration test verifies
 that an explicit `use example_provider_contract as _;` retains those candidates
 across the final test-target link without candidate-function references.
 
+### Logging filters
+
+Run the subprocess integration test with file logging enabled:
+
+```bash
+cargo test -p service-daemon --features file-logging --test file_logging_filters
+cargo test -p service-daemon --all-features --test file_logging_filters
+```
+
+Each case runs in a separate process with its own log directory and subscriber.
+Cases cover unset `RUST_LOG`, INFO and DEBUG levels, and TRACE selected by target
+or span. Assertions verify which messages appear on stderr and in files, detect
+duplicates, and check the TRACE payload and `message_id` in JSON.
+
+Windows MSVC runs this target with `--all-features`; Linux and macOS include it
+in their workspace all-features tests. Running it without `file-logging`
+executes zero tests.
+
 ### Framework operation benchmarks
 
 The `framework` Criterion target measures framework operation costs independently

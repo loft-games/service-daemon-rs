@@ -74,6 +74,14 @@ per generation; HighPriority permits automatic resource intervention and reload.
 The mode is not a hard real-time guarantee. Its thresholds are internal, not
 global public builder settings. See the reference's HighPriority section.
 
+## Logging filters
+
+With `RUST_LOG` unset, `init_logging()` and `try_init_logging()` log INFO and
+above to the console and DEBUG and above to files. TRACE is disabled by default.
+Setting `RUST_LOG` filters both outputs, so `RUST_LOG=info` also excludes DEBUG
+from files. Custom subscribers using `DaemonLayer` use their own filters.
+See `docs/guide/diagnostics.md` for target and span filters and file logging setup.
+
 ## File logging
 
 When the `file-logging` feature is enabled, call `init_logging()` and then

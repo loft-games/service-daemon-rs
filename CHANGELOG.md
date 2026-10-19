@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Logging Filters**: With `RUST_LOG` unset, `init_logging()` and
+  `try_init_logging()` now log DEBUG and above to files; console output remains
+  at INFO and above. TRACE is disabled by default. Setting `RUST_LOG` applies
+  the same level, target, and span filters to both outputs. Custom `DaemonLayer`
+  subscribers keep their configured filters.
+
 - **File Logging Configuration**: Removed the `max_log_files` count-based
   cleanup setting. `RotationPolicy::Never` performs no archive maintenance, and
   file logging no longer promises automatic retention deletion; retention and

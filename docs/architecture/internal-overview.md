@@ -195,7 +195,7 @@ The main internal modules are:
   - `runner/wave.rs`: Priority startup/shutdown wave orchestration.
 - **`core/logging/`**: Logging and diagnostic event pipeline.
   - `mod.rs`: Public logging facade, subscriber initialization, and re-exports.
-  - `model.rs`: Log event model, broadcast queue, and batch-size configuration.
+  - `model.rs`: Log event model, independent console/file broadcast queues, and batch-size configuration.
   - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUIDv7 message IDs, UUID-backed service instance IDs, and trigger instance IDs) for asynchronous tracing.
   - `render.rs`: Console and feature-gated JSON rendering. Console timestamps convert the captured UTC instant to the process-local timezone and include its numeric offset; the event model and JSON serialization remain UTC.
   - `services.rs`: Console log drain service.

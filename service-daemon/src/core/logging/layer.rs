@@ -83,7 +83,7 @@ impl tracing::field::Visit for FieldCollector {
     }
 }
 
-/// A non-blocking tracing Layer that captures events and pushes them to the LogQueue.
+/// Sends tracing events to the console and file log queues without blocking.
 ///
 /// When reentrancy is detected (i.e., `log_service` emits a tracing event while
 /// processing a log), the event bypasses the queue and is written directly to stderr
@@ -101,6 +101,33 @@ impl<S> Layer<S> for DaemonLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        CaptureLayer::Both.on_new_span(attrs, id, ctx);
+    }
+
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        CaptureLayer::Both.on_event(event, ctx);
+    }
+}
+
+/// Routes events to the queues selected by each filtered layer.
+/// `DaemonLayer` uses `Both` for custom subscribers.
+pub(super) enum CaptureLayer {
+    Both,
+    Console,
+    #[cfg(feature = "file-logging")]
+    File,
+}
+
+impl<S> Layer<S> for CaptureLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
     /// Captures Span field values (`service_instance_id`, `message_id`, etc.) into the
     /// Span's extensions on creation. These are later read by `extract_span_ids`
     /// during event processing.
@@ -114,13 +141,13 @@ where
             let mut visitor = SpanFieldVisitor::default();
             attrs.record(&mut visitor);
 
-            // Only store if at least one known field was found
             if visitor.fields.service_instance_id.is_some()
                 || visitor.fields.message_id.is_some()
                 || visitor.fields.source_service_instance_id.is_some()
                 || visitor.fields.instance_seq.is_some()
             {
-                span.extensions_mut().insert(visitor.fields);
+                // Both output layers can visit the same span, so replace shared fields.
+                span.extensions_mut().replace(visitor.fields);
             }
         }
     }
@@ -128,13 +155,11 @@ where
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         let metadata = event.metadata();
 
-        // Collect message and structured fields from the event
         let mut collector = FieldCollector::new();
         event.record(&mut collector);
         let message = collector.build_message();
         let error_chain = collector.take_error();
 
-        // Walk the Span chain to extract service/trigger IDs
         let (service_instance_id, source_service_instance_id, message_id, trigger_instance_id) =
             extract_span_ids(&ctx, event);
 
@@ -153,15 +178,25 @@ where
             error_chain,
         });
 
-        // Reentrancy check: if log_service is currently processing a log event
-        // on this thread, bypass the queue and write directly to stderr.
+        // Avoid feeding log-processing events back into either queue.
         if in_log_processing() {
+            #[cfg(feature = "file-logging")]
+            if matches!(self, Self::File) {
+                return;
+            }
             render_to_stderr(&log_event);
             return;
         }
 
-        // Normal path: non-blocking send to the broadcast queue
-        let _ = get_log_queue().tx.send(log_event);
+        #[cfg(feature = "file-logging")]
+        if matches!(self, Self::Both | Self::File) {
+            let _ = super::model::get_file_log_queue()
+                .tx
+                .send(Arc::clone(&log_event));
+        }
+        if matches!(self, Self::Both | Self::Console) {
+            let _ = get_log_queue().tx.send(log_event);
+        }
     }
 }
 

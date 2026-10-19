@@ -16,7 +16,7 @@ use tracing_appender::non_blocking::NonBlockingBuilder;
 use crate::ServicePriority;
 use crate::service;
 
-use super::model::{LogEvent, effective_batch_size, get_log_queue};
+use super::model::{LogEvent, effective_batch_size, get_file_log_queue};
 use super::render::format_event_json;
 
 use super::archive::{ArchiveStore, rotated_log_name};
@@ -614,7 +614,7 @@ pub async fn file_log_service() -> anyhow::Result<()> {
         worker.request();
     }
 
-    let mut rx = get_log_queue().tx.subscribe();
+    let mut rx = get_file_log_queue().tx.subscribe();
     let batch_size = effective_batch_size();
     let mut buffer: Vec<Arc<LogEvent>> = Vec::with_capacity(batch_size);
 

@@ -57,6 +57,16 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Logging filters
+
+With `RUST_LOG` unset, `init_logging()` and `try_init_logging()` log INFO and
+above to the console and DEBUG and above to files. TRACE is disabled by default.
+File output requires the `file-logging` feature and `enable_file_logging(...)`.
+
+Set `RUST_LOG` to filter both outputs. For example, `RUST_LOG=info` excludes
+DEBUG from files too. See [Diagnostics & Logs](docs/guide/diagnostics.md) for
+file setup, target and span filters, and custom subscribers.
+
 ## Get Started
 
 The **[Quick Start Guide](https://github.com/loft-games/service-daemon-rs/blob/master/docs/guide/tutorial/quick-start.md)** walks through the framework one concept at a time:

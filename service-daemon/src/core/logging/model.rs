@@ -126,7 +126,8 @@ pub struct LogEvent {
 }
 
 /// Broadcast queue for log events.
-/// Multiple consumers, such as stderr and file logging, subscribe independently.
+/// Console and file output have separate queues so file-only events cannot fill
+/// the console queue.
 pub struct LogQueue {
     pub tx: broadcast::Sender<Arc<LogEvent>>,
 }
@@ -330,7 +331,10 @@ pub(super) fn set_log_batch_size_in(
 /// # Ok::<(), service_daemon::LogBatchSizeError>(())
 /// ```
 pub fn set_log_batch_size(size: NonZeroUsize) -> Result<(), LogBatchSizeError> {
-    set_log_batch_size_in(&LOG_BATCH_SIZE, LOG_QUEUE.get().is_some(), size)
+    let initialized = LOG_QUEUE.get().is_some();
+    #[cfg(feature = "file-logging")]
+    let initialized = initialized || FILE_LOG_QUEUE.get().is_some();
+    set_log_batch_size_in(&LOG_BATCH_SIZE, initialized, size)
 }
 
 impl Default for LogQueue {
@@ -356,4 +360,12 @@ static LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
 /// Gets the log queue, initializing it on first call.
 pub(crate) fn get_log_queue() -> &'static LogQueue {
     LOG_QUEUE.get_or_init(LogQueue::default)
+}
+
+#[cfg(feature = "file-logging")]
+static FILE_LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
+
+#[cfg(feature = "file-logging")]
+pub(super) fn get_file_log_queue() -> &'static LogQueue {
+    FILE_LOG_QUEUE.get_or_init(LogQueue::default)
 }
