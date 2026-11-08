@@ -125,6 +125,8 @@ struct StartupGate {
     started: AtomicBool,
     complete: AtomicBool,
     notify: Notify,
+    #[cfg(test)]
+    before_wait: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl StartupGate {
@@ -144,11 +146,17 @@ impl StartupGate {
 
     async fn wait_until_complete_or_cancelled(&self, cancellation_token: &CancellationToken) {
         loop {
+            // Register before checking completion so notify_waiters cannot be missed.
+            let notified = self.notify.notified();
             if self.complete.load(Ordering::Acquire) || cancellation_token.is_cancelled() {
                 return;
             }
+            #[cfg(test)]
+            if let Some(hook) = self.before_wait.lock().unwrap().take() {
+                hook();
+            }
             tokio::select! {
-                _ = self.notify.notified() => {}
+                _ = notified => {}
                 _ = cancellation_token.cancelled() => return,
             }
         }
@@ -1479,6 +1487,48 @@ fn record_matches_handle(record: &ServiceInstanceRecord, handle: &ServiceInstanc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn startup_gate_completion_between_check_and_wait_is_not_lost() {
+        let gate = Arc::new(StartupGate::default());
+        let completed = gate.clone();
+        *gate.before_wait.lock().unwrap() = Some(Box::new(move || completed.mark_complete()));
+        tokio::time::timeout(Duration::from_millis(200), gate.wait_until_complete_or_cancelled(&CancellationToken::new()))
+            .await.expect("completion must wake the waiter");
+    }
+
+    #[tokio::test]
+    async fn startup_gate_handles_completion_and_cancellation() {
+        let gate = StartupGate::default();
+        gate.mark_complete();
+        tokio::time::timeout(Duration::from_secs(1), gate.wait_until_complete_or_cancelled(&CancellationToken::new())).await.unwrap();
+        let gate = StartupGate::default();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), gate.wait_until_complete_or_cancelled(&cancel)).await.unwrap();
+        let cancel = CancellationToken::new();
+        let waiting = gate.wait_until_complete_or_cancelled(&cancel);
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_gate_broadcasts_completion_and_ignores_start_notification() {
+        let gate = Arc::new(StartupGate::default());
+        let cancel = CancellationToken::new();
+        let first = gate.wait_until_complete_or_cancelled(&cancel);
+        let second = gate.wait_until_complete_or_cancelled(&cancel);
+        tokio::pin!(first, second);
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        gate.mark_started();
+        assert!(futures::poll!(&mut first).is_pending());
+        assert!(futures::poll!(&mut second).is_pending());
+        gate.mark_complete();
+        tokio::time::timeout(Duration::from_secs(1), async { first.await; second.await }).await.unwrap();
+    }
     #[cfg(feature = "high-priority")]
     use crate::models::HighPriorityShardId;
     #[cfg(feature = "high-priority")]
