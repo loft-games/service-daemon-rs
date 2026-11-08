@@ -1,6 +1,6 @@
 [package]
 name = "service-daemon"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 edition = "2024"
 rust-version = "1.91"
 description = "A declarative Rust framework for automatic service management, event-driven triggers, and compile-time dependency injection."
@@ -25,7 +25,7 @@ file-logging = ["dep:flate2", "dep:tracing-appender", "dep:serde_json"]
 diagnostics = []
 
 [dependencies]
-service-daemon-macro = { version = "0.1.0-alpha.5", path = "../service-daemon-macro" }
+service-daemon-macro = { version = "0.1.0-alpha.6", path = "../service-daemon-macro" }
 tokio = { version = "1.54.1", features = ["full", "tracing"] }
 tokio-cron-scheduler = { version = "0.15.1", optional = true }
 tracing = "0.1.44"
