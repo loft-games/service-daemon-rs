@@ -26,7 +26,7 @@ diagnostics = []
 
 [dependencies]
 service-daemon-macro = { version = "0.1.0-alpha.5", path = "../service-daemon-macro" }
-tokio = { version = "1.53.2", features = ["full", "tracing"] }
+tokio = { version = "1.54.1", features = ["full", "tracing"] }
 tokio-cron-scheduler = { version = "0.15.1", optional = true }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -34,24 +34,24 @@ anyhow = "1.0.104"
 thiserror = "2.0.21"
 futures = "0.3.34"
 linkme = "0.3.37"
-uuid = { version = "1.27.0", features = ["v7", "serde"] }
-tokio-util = "0.7.19"
+uuid = { version = "1.29.1", features = ["v7", "serde"] }
+tokio-util = "0.7.20"
 rand = "0.10.3"
 dashmap = "6.2.1"
-parking_lot = "0.12.5"
+parking_lot = "0.13.0"
 chrono = { version = "0.4.45", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive"] }
 tracing-appender = { version = "0.2.5", optional = true }
-flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"], optional = true }
-serde_json = { version = "1.0.151", optional = true }
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"], optional = true }
+serde_json = { version = "1.0.154", optional = true }
 petgraph = "0.8.3"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support", "async_tokio", "html_reports"] }
-proptest = "1.6"
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-toml = "1.1.7"
+proptest = "1.12.0"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+toml = "1.2.1"
 
 [[bench]]
 name = "framework"

@@ -627,12 +627,10 @@ The policy is defined in `deny.toml`:
 - crates.io is the only allowed registry source;
 - licenses are allowlisted.
 
-Known temporary advisory exceptions:
-
-| Advisory | Path | Release stance | Removal condition |
-| :--- | :--- | :--- | :--- |
-| `RUSTSEC-2024-0436` | `example-web-api -> utoipa-axum -> paste` | Example-only unmaintained dependency, allowed by `deny.toml`. | Remove the ignore when `utoipa-axum` no longer pulls `paste`, or replace the example dependency path. |
-| `RUSTSEC-2026-0367`, `RUSTSEC-2026-0368`, `RUSTSEC-2026-0369` | `example-web-api -> utoipa-swagger-ui -> zip` (build dependency) | Temporary exclusion of `example-web-api` from `cargo-deny`; these advisories enter through an upstream build dependency, not `service-daemon`. | Remove the exclusion when the fix tracked by [utoipa issue #1644](https://github.com/juhaku/utoipa/issues/1644) is released. |
+The Web API example is included in dependency policy checks. Its Swagger UI
+build dependency uses `zip` 9 through `utoipa-swagger-ui` 10.0.2 or newer;
+there are currently no package-graph exclusions or ignored advisories in
+`deny.toml`.
 
 ## Linkme Platform Contract Monitoring
 

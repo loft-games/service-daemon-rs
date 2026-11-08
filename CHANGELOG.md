@@ -92,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Simulation API**: `MockContextBuilder::build()` now returns a `SimulationHandle` that owns the simulation daemon control flow. Registry selection moves to `MockContextBuilder::with_registry(...)`, bounded simulation runs are driven through `SimulationHandle::run_for_duration(...)`, and runtime shelf/status/reload operations use `ServiceInstanceHandle`.
 - **Provider Attribute Parser**: Shared named-tail parsing across service, trigger, and provider macros while keeping provider default/template heads as a macro-specific syntax boundary.
 - **Proc-macro Diagnostics**: Removed the `proc-macro-error2` dependency and routed macro errors through the repository-owned diagnostics facade while preserving stable compile-error output.
-- **Release Validation Gates**: Added `cargo deny --locked check` dependency-policy gating, documented the reviewed `cargo audit -D warnings` exception, and separated Windows local IPC provider checks into clearly named CI/manual gates.
+- **Release Validation Gates**: Added `cargo deny --locked check` dependency-policy gating, restored `example-web-api` to policy checks after updating its Swagger UI dependency, documented the reviewed `cargo audit -D warnings` exception, and separated Windows local IPC provider checks into clearly named CI/manual gates.
 - **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
 
 ### Fixed
