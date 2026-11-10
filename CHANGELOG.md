@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Service Handles**: Added daemon-bound `ServiceHandle` and `service_handle!(...)` for provider-time lookup of selected service definitions, listing instances, and creating or starting instances. Resolution is restricted to the owning daemon's selected registry; unselected or unlinked targets return provider initialization errors.
 - **Service Instance Handles**: Added daemon-bound `ServiceInstanceHandle` values exposing identity, metadata, status, runtime snapshots, and start/stop/remove operations. Service and instance handles use weak control references and do not keep the daemon alive; stale handles retain identity metadata without access to live daemon resources.
 - **Service Template Inputs**: Added `#[input]` service parameters. A service with one `#[input] value: &T` parameter is selected as a template and receives shared access to typed per-instance startup input when created or started.
-- **Dynamic Service Instances**: Added daemon-local instance creation and lifecycle control, plus an `example-on-demand` crate. Instance creation requested during startup waits until startup completes without missing the completion notification. Removal clears instance registry entries, status, shelf, reload state, runtime accounting, and instance diagnostics while preserving daemon-level history. Graceful stop/removal waits do not block unrelated instances' lifecycle operations.
+- **Dynamic Service Instances**: Added daemon-local instance creation and lifecycle control, plus an `example-on-demand` crate. Instance creation requested during startup waits until startup completes without missing the completion notification. Removal clears instance registry entries, status, shelf, reload state, runtime accounting, and instance diagnostics while preserving daemon-level history. Graceful stop/removal waits do not block unrelated instances' lifecycle operations. Cancelled or stopped instances reject `start()` with `Ok(false)`, including while shutdown is pending; create a new instance to run again.
 - **Normal Exit Diagnostics**: Added `DiagnosticRestartDecisionKind::BackoffNormalExit` for service generations that return `Ok(())` without a shutdown or reload control signal and restart through `RestartPolicy`.
 - **HighPriority Runtime Control**: Added automatic shard placement and bounded resource intervention based on fresh per-instance sleep drift with supporting shard pressure. Reload carries a placement intent into the next generation, and benefit is evaluated using the same metric at the actual placement. Low-benefit or timed-out interventions pause further intervention; late policy generations do not rearm it. Fresh healthy evidence or an observed external reload can permit re-evaluation.
 - **HighPriority Runtime Facts**: Added read-only HighPriority shard facts to daemon/runtime snapshots, including shard id, worker threads, creation time, active generations, assigned instances, and pressure state.
@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only validation, first-instance ownership checks, busy-pipe retry, listener-replacement handling, and focused Windows MSVC validation coverage. Like LocalIpc providers, their `accept().await?` / `connect().await?` helpers return `IpcStream`; connector providers defer dialing until `connect()`, and name arguments accept string literals or paths to `const`/`static &'static str` values.
 
 ### Changed
+
+- **Minimum Supported Rust Version**: Raised both published crates from Rust 1.91
+  to Rust 1.95 to match the dependency requirements. CI now checks the macro
+  library and the runtime library's default, all-features, and no-default-features
+  configurations with Rust 1.95.0.
 
 - **Logging Filters**: With `RUST_LOG` unset, `init_logging()` and
   `try_init_logging()` now log DEBUG and above to files; console output remains
@@ -140,11 +145,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Unix Domain Socket Providers**: Added `UnixListen` and `UnixConnect` provider templates for local IPC, sidecar coordination, and Unix-only service handoff patterns, including stale-socket recovery, non-socket path refusal, and lightweight connector endpoint handles.
+- **Unix Domain Socket Providers**: Added `UnixListen` and `UnixConnect` provider templates for local IPC, sidecar coordination, and Unix-only service handoff patterns, including stale-socket recovery, non-socket path refusal, reachability probes, and retryable connection initialization.
 
 ### Changed
 
-- **Provider Guides**: Documented Unix socket listener/client setup, stale-socket recovery, and error classification.
+- **Provider Guides**: Documented Unix socket listener/client setup, reachability probes, stale-socket recovery, and error classification.
 - **Scheduling Documentation**: Added `Standard`, `HighPriority`, and `Isolated` policy guidance to the tutorial, trigger guide, macro internals, and framework extension docs.
 
 ## [0.1.0-alpha.3] - 2026-03-29

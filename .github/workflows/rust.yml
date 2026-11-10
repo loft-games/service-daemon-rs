@@ -14,6 +14,22 @@ permissions:
   contents: read
 
 jobs:
+  msrv:
+    name: MSRV (Rust 1.95.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust 1.95.0
+        uses: dtolnay/rust-toolchain@1.95.0
+      - name: Check macro library
+        run: cargo check -p service-daemon-macro --lib
+      - name: Check runtime library
+        run: cargo check -p service-daemon --lib
+      - name: Check runtime library with all features
+        run: cargo check -p service-daemon --lib --all-features
+      - name: Check runtime library without default features
+        run: cargo check -p service-daemon --lib --no-default-features
+
   check:
     name: Check
     runs-on: ubuntu-latest

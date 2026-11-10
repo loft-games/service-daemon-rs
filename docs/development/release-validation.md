@@ -4,6 +4,22 @@ Maintainers use this map to check release and CI coverage without expanding the
 README. It ties feature flags to tests, examples, platform smoke jobs, and
 dependency baselines.
 
+## Minimum Supported Rust Version
+
+Both published crates require Rust 1.95; Rust 1.91 through 1.94 are no longer
+supported. The MSRV CI job pins Rust 1.95.0 and checks the published libraries
+independently of the stable workspace jobs:
+
+```bash
+cargo +1.95.0 check -p service-daemon-macro --lib
+cargo +1.95.0 check -p service-daemon --lib
+cargo +1.95.0 check -p service-daemon --lib --all-features
+cargo +1.95.0 check -p service-daemon --lib --no-default-features
+```
+
+This gate validates library compilation and dependency compatibility. Stable
+workspace tests still own example, integration, and platform coverage.
+
 ## Feature Validation Matrix
 
 | Feature | Role | CI / test coverage | Example coverage |
