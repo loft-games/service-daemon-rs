@@ -723,6 +723,8 @@ impl ServiceInstanceHandle {
     /// running until this method starts the supervisor pipeline for them.
     /// Calling `start()` for an already running instance succeeds without
     /// starting a duplicate task.
+    /// Cancelled or stopped instances return `Ok(false)`, even while shutdown
+    /// is still pending. Create a new instance to run the service again.
     pub async fn start(&self) -> ServiceResult<bool> {
         let Some(control) = self.control.upgrade() else {
             return Ok(false);
@@ -733,6 +735,7 @@ impl ServiceInstanceHandle {
     /// Request shutdown and wait for the service task to finish.
     ///
     /// The instance remains registered after a successful stop.
+    /// Its cancellation is permanent: `start()` returns `Ok(false)` afterward.
     pub async fn stop(&self) -> ServiceResult<bool> {
         let Some(control) = self.control.upgrade() else {
             return Ok(false);

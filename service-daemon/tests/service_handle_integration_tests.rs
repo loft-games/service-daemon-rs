@@ -12,6 +12,109 @@ use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tokio::sync::Mutex as AsyncMutex;
 
+static STOP_START_COUNT: AtomicUsize = AtomicUsize::new(0);
+static STOP_START_EXIT_ENTERED: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+static STOP_START_EXIT_RELEASE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(0);
+
+#[service(tags = ["__stop_start_contract__"])]
+async fn stop_start_worker() -> anyhow::Result<()> {
+    STOP_START_COUNT.fetch_add(1, Ordering::SeqCst);
+    done();
+    wait_shutdown().await;
+    STOP_START_EXIT_ENTERED.add_permits(1);
+    STOP_START_EXIT_RELEASE.acquire().await?.forget();
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_instances_reject_start_while_new_instances_can_run() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__stop_start_contract__")
+                    .build(),
+            )
+            .build();
+        daemon.run().await;
+        let first = daemon
+            .service_instances()
+            .into_iter()
+            .next()
+            .expect("auto-start instance");
+        wait_for_counter(&STOP_START_COUNT, 1, "first instance should start").await;
+        assert!(first.start().await.expect("running start is idempotent"));
+        assert_eq!(STOP_START_COUNT.load(Ordering::SeqCst), 1);
+
+        assert!(first.request_stop());
+        STOP_START_EXIT_ENTERED
+            .acquire()
+            .await
+            .expect("exit barrier")
+            .forget();
+        // The body is still blocked, so its supervisor task is still registered.
+        let cancelled_start = first.start().await.expect("cancelled start result");
+        STOP_START_EXIT_RELEASE.add_permits(1);
+        wait_for_instance_status(
+            &first,
+            ServiceStatus::Terminated,
+            "cancelled instance exits",
+        )
+        .await;
+        assert!(first.stop().await.expect("join stopped supervisor"));
+        assert!(
+            !cancelled_start,
+            "cancelled instance must reject start even while its task exists"
+        );
+        assert!(!first.start().await.expect("stopped start result"));
+        assert_eq!(STOP_START_COUNT.load(Ordering::SeqCst), 1);
+
+        let second = first
+            .service()
+            .create(())
+            .await
+            .expect("create fresh instance");
+        assert!(second.start().await.expect("fresh instance starts"));
+        wait_for_counter(&STOP_START_COUNT, 2, "fresh instance executes").await;
+        assert!(
+            second
+                .start()
+                .await
+                .expect("fresh running start is idempotent")
+        );
+        let stopping = tokio::spawn({
+            let second = second.clone();
+            async move { second.stop().await }
+        });
+        STOP_START_EXIT_ENTERED
+            .acquire()
+            .await
+            .expect("second exit barrier")
+            .forget();
+        STOP_START_EXIT_RELEASE.add_permits(1);
+        assert!(
+            stopping
+                .await
+                .expect("stop task joins")
+                .expect("stop succeeds")
+        );
+        assert!(
+            !second
+                .start()
+                .await
+                .expect("stopped instance rejects start")
+        );
+        assert_eq!(second.status().await, ServiceStatus::Terminated);
+        assert_eq!(STOP_START_COUNT.load(Ordering::SeqCst), 2);
+        assert!(first.remove().await.expect("remove first instance"));
+        assert!(second.remove().await.expect("remove second instance"));
+        daemon.shutdown();
+        daemon.wait().await.expect("daemon shuts down");
+    })
+    .await
+    .expect("stop/start contract completes within deadline");
+}
+
 static HANDLE_CONSUMER_READY: AtomicBool = AtomicBool::new(false);
 static REPEATED_HANDLE_READY: AtomicUsize = AtomicUsize::new(0);
 static REPEATED_HANDLE_PROVIDER_INITS: AtomicUsize = AtomicUsize::new(0);

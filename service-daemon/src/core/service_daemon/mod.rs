@@ -1135,6 +1135,9 @@ impl DaemonInstanceInner {
         if !record_matches_handle(&record, handle) {
             return Ok(false);
         }
+        if record.cancellation_token().is_cancelled() {
+            return Ok(false);
+        }
         if self.is_lifecycle_operation_pending(handle.instance_id()) {
             return Ok(false);
         }
