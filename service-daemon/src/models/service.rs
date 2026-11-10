@@ -711,6 +711,9 @@ impl ServiceInstanceHandle {
     /// This cancels the instance token and updates daemon-local status/runtime
     /// facts. It does not remove the instance from the daemon registry and does
     /// not wait for the task join handle to finish.
+    /// Returns `false` without changing status or runtime facts if the instance
+    /// is already cancelled or unavailable. A completed generation's terminal
+    /// state is preserved even when its instance still needs cancellation.
     pub fn request_stop(&self) -> bool {
         self.control
             .upgrade()

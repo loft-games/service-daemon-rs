@@ -61,6 +61,11 @@ async fn cancelled_instances_reject_start_while_new_instances_can_run() {
             "cancelled instance exits",
         )
         .await;
+        assert!(!first.request_stop(), "completed cancellation is a no-op");
+        assert_eq!(first.status().await, ServiceStatus::Terminated);
+        let facts = first.runtime().expect("runtime facts remain available");
+        assert_eq!(facts.status, ServiceStatus::Terminated);
+        assert!(facts.last_stopped_at.is_some());
         assert!(first.stop().await.expect("join stopped supervisor"));
         assert!(
             !cancelled_start,
@@ -105,6 +110,12 @@ async fn cancelled_instances_reject_start_while_new_instances_can_run() {
                 .expect("stopped instance rejects start")
         );
         assert_eq!(second.status().await, ServiceStatus::Terminated);
+        let stopped_at = second.runtime().expect("runtime facts").last_stopped_at;
+        assert!(!second.request_stop(), "completed stop is a no-op");
+        assert_eq!(second.status().await, ServiceStatus::Terminated);
+        let facts = second.runtime().expect("runtime facts remain available");
+        assert_eq!(facts.status, ServiceStatus::Terminated);
+        assert_eq!(facts.last_stopped_at, stopped_at);
         assert_eq!(STOP_START_COUNT.load(Ordering::SeqCst), 2);
         assert!(first.remove().await.expect("remove first instance"));
         assert!(second.remove().await.expect("remove second instance"));
@@ -113,6 +124,98 @@ async fn cancelled_instances_reject_start_while_new_instances_can_run() {
     })
     .await
     .expect("stop/start contract completes within deadline");
+}
+
+#[service(tags = ["__concurrent_stop_requests__"])]
+async fn concurrent_stop_worker() -> anyhow::Result<()> {
+    done();
+    wait_shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_stop_requests_preserve_terminal_status() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__concurrent_stop_requests__")
+                    .build(),
+            )
+            .build();
+        daemon.run().await;
+        let first = daemon
+            .service_instances()
+            .into_iter()
+            .next()
+            .expect("instance");
+        let service = first.service();
+        for iteration in 0..16 {
+            let instance = if iteration == 0 {
+                first.clone()
+            } else {
+                service.start(()).await.expect("start fresh instance")
+            };
+            wait_for_instance_status(&instance, ServiceStatus::Healthy, "worker ready").await;
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(8));
+            let mut requests = tokio::task::JoinSet::new();
+            for _ in 0..8 {
+                let instance = instance.clone();
+                let barrier = barrier.clone();
+                requests.spawn(async move {
+                    barrier.wait().await;
+                    instance.request_stop()
+                });
+            }
+            let mut accepted = 0;
+            while let Some(result) = requests.join_next().await {
+                accepted += usize::from(result.expect("stop request task"));
+            }
+            assert_eq!(accepted, 1, "only the first stop request is accepted");
+            wait_for_instance_status(&instance, ServiceStatus::Terminated, "worker terminated")
+                .await;
+            assert!(!instance.request_stop());
+            assert!(!instance.start().await.expect("cancelled start result"));
+            assert_eq!(instance.status().await, ServiceStatus::Terminated);
+            let facts = instance.runtime().expect("runtime facts");
+            assert_eq!(facts.status, ServiceStatus::Terminated);
+            assert!(facts.last_stopped_at.is_some());
+            assert!(facts.healthy_since.is_none());
+            instance.remove().await.expect("remove stopped instance");
+        }
+        daemon.shutdown();
+        daemon.wait().await.expect("daemon shutdown");
+    })
+    .await
+    .expect("concurrent stop test deadline");
+}
+
+#[tokio::test]
+async fn daemon_shutdown_preserves_stopped_instance_status() {
+    let daemon = ServiceDaemon::builder()
+        .with_registry(
+            Registry::builder()
+                .with_tag("__concurrent_stop_requests__")
+                .build(),
+        )
+        .build();
+    daemon.run().await;
+    let instance = daemon
+        .service_instances()
+        .into_iter()
+        .next()
+        .expect("instance");
+    assert!(instance.stop().await.expect("stop instance"));
+    let stopped = instance.runtime().expect("stopped runtime facts");
+    assert_eq!(stopped.status, ServiceStatus::Terminated);
+    daemon.shutdown();
+    tokio::time::timeout(Duration::from_secs(5), daemon.wait())
+        .await
+        .expect("shutdown deadline")
+        .expect("daemon shutdown");
+    assert_eq!(instance.status().await, ServiceStatus::Terminated);
+    assert_eq!(instance.runtime(), Some(stopped));
+    assert!(!instance.request_stop());
 }
 
 static HANDLE_CONSUMER_READY: AtomicBool = AtomicBool::new(false);

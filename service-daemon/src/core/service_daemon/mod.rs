@@ -486,14 +486,31 @@ impl ServiceControl for DaemonInstanceControl {
             return false;
         }
 
-        record.cancellation_token().cancel();
+        // Serialize the check and transition with other requests and supervisor
+        // status writes. Keep the entry locked through cancellation so a woken
+        // supervisor cannot publish Terminated before this transition completes.
+        let status_entry = self.resources.status_plane.entry(handle.instance_id());
+        let cancellation_token = record.cancellation_token();
+        if cancellation_token.is_cancelled() {
+            return false;
+        }
         let shutting_down = ServiceStatus::ShuttingDown;
-        self.resources
-            .status_plane
-            .insert(handle.instance_id(), shutting_down.clone());
-        self.resources
-            .runtime_facts
-            .record_service_status(handle.instance_id(), &shutting_down);
+        let mut status = status_entry.or_insert(ServiceStatus::Initializing);
+        // Terminated can also be a reload handshake; still cancel the instance
+        // so its supervisor cannot restart it, but preserve the completed state.
+        let was_terminated = *status == ServiceStatus::Terminated;
+        if !was_terminated {
+            *status = shutting_down.clone();
+        }
+        cancellation_token.cancel();
+        drop(status);
+        // Do not nest the status-plane lock with runtime-fact locks. Shutdown
+        // facts preserve an existing stop timestamp if termination wins here.
+        if !was_terminated {
+            self.resources
+                .runtime_facts
+                .record_service_status(handle.instance_id(), &shutting_down);
+        }
         self.resources.status_changed.notify_waiters();
         true
     }
@@ -2856,6 +2873,43 @@ mod tests {
             .insert(instance.instance_id(), ServiceStatus::Healthy);
         let status = instance.status().await;
         assert_eq!(status, ServiceStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn stop_request_cancels_reload_handshake_without_overwriting_terminal_facts() {
+        let daemon = ServiceDaemon::builder()
+            .with_registry(
+                Registry::builder()
+                    .with_tag("__unit_high_priority_capacity_primary__")
+                    .build(),
+            )
+            .build();
+        let instance = daemon
+            .service_instances()
+            .into_iter()
+            .next()
+            .expect("instance");
+        let record = daemon
+            .control
+            .instance_registry
+            .get(instance.instance_id())
+            .expect("record");
+        let resources = &daemon.control.resources;
+        // Model done() during reload: the generation completed its handshake,
+        // but the instance token is still live and would permit another generation.
+        resources
+            .status_plane
+            .insert(instance.instance_id(), ServiceStatus::Terminated);
+        resources
+            .runtime_facts
+            .record_service_status(instance.instance_id(), &ServiceStatus::Terminated);
+        let before = instance.runtime();
+        assert!(!record.cancellation_token().is_cancelled());
+        assert!(instance.request_stop());
+        assert!(record.cancellation_token().is_cancelled());
+        assert_eq!(instance.status().await, ServiceStatus::Terminated);
+        assert_eq!(instance.runtime(), before);
+        assert!(!instance.request_stop());
     }
 
     #[test]

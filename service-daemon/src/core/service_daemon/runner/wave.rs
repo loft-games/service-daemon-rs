@@ -226,14 +226,26 @@ pub(super) async fn stop_all_services(
 
         // 1. Parallel Signal: Cancel all services in this wave
         for service in &wave.services {
-            service.cancellation_token().cancel();
             let shutting_down = ServiceStatus::ShuttingDown;
-            resources
+            // A previously stopped instance may no longer have a join handle.
+            // Preserve its terminal state; the join phase cannot restore it.
+            let mut status = resources
                 .status_plane
-                .insert(service.instance_id(), shutting_down.clone());
-            resources
-                .runtime_facts
-                .record_service_status(service.instance_id(), &shutting_down);
+                .entry(service.instance_id())
+                .or_insert(shutting_down.clone());
+            let was_terminated = *status == ServiceStatus::Terminated;
+            if !was_terminated {
+                *status = shutting_down.clone();
+            }
+            // Publish shutdown before cancellation can wake the supervisor,
+            // using the same entry lock as its terminal status write.
+            service.cancellation_token().cancel();
+            drop(status);
+            if !was_terminated {
+                resources
+                    .runtime_facts
+                    .record_service_status(service.instance_id(), &shutting_down);
+            }
             resources.status_changed.notify_waiters();
         }
 
