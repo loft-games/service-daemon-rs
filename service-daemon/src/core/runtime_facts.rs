@@ -1,3 +1,5 @@
+#[cfg(feature = "high-priority")]
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -203,7 +205,7 @@ pub(crate) struct RuntimeFactsStore {
     services: DashMap<ServiceInstanceId, Arc<ServiceRuntimeRecord>>,
     triggers: DashMap<ServiceInstanceId, Arc<TriggerRuntimeRecord>>,
     #[cfg(feature = "high-priority")]
-    high_priority_shards: DashMap<HighPriorityShardId, HighPriorityRuntimeShardSnapshot>,
+    high_priority_shards: Mutex<BTreeMap<HighPriorityShardId, HighPriorityRuntimeShardSnapshot>>,
 }
 
 impl Default for RuntimeFactsStore {
@@ -225,7 +227,7 @@ impl RuntimeFactsStore {
             services: DashMap::new(),
             triggers: DashMap::new(),
             #[cfg(feature = "high-priority")]
-            high_priority_shards: DashMap::new(),
+            high_priority_shards: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -266,21 +268,18 @@ impl RuntimeFactsStore {
         &self,
         shards: Vec<HighPriorityRuntimeShardSnapshot>,
     ) {
-        self.high_priority_shards.clear();
-        for shard in shards {
-            self.high_priority_shards.insert(shard.shard_id, shard);
-        }
+        // Build before locking so readers see either complete published version,
+        // never the empty or partial intermediate state of a refresh.
+        let replacement = shards
+            .into_iter()
+            .map(|shard| (shard.shard_id, shard))
+            .collect();
+        *self.high_priority_shards.lock() = replacement;
     }
 
     #[cfg(feature = "high-priority")]
     fn high_priority_shard_snapshots(&self) -> Vec<HighPriorityRuntimeShardSnapshot> {
-        let mut snapshots: Vec<_> = self
-            .high_priority_shards
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-        snapshots.sort_by_key(|snapshot| snapshot.shard_id);
-        snapshots
+        self.high_priority_shards.lock().values().cloned().collect()
     }
 
     #[cfg(feature = "high-priority")]
@@ -505,6 +504,48 @@ mod tests {
     };
     use futures::future::BoxFuture;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    #[cfg(feature = "high-priority")]
+    fn high_priority_snapshot_replacement_is_atomic() {
+        let store = RuntimeFactsStore::new();
+        let snapshot = |id, workers| HighPriorityRuntimeShardSnapshot {
+            shard_id: HighPriorityShardId(id),
+            worker_threads: workers,
+            created_at: Utc::now(),
+            active_generations: 0,
+            assigned_instances: 0,
+            pressure_state: crate::models::HighPriorityShardPressureState::Nominal,
+        };
+        let before = vec![snapshot(0, 1), snapshot(1, 1)];
+        let after = vec![snapshot(0, 2), snapshot(1, 2)];
+        store.record_high_priority_shards(before.clone());
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                for iteration in 0..10_000 {
+                    let mut replacement = if iteration % 2 == 0 {
+                        after.clone()
+                    } else {
+                        before.clone()
+                    };
+                    replacement.reverse();
+                    store.record_high_priority_shards(replacement);
+                }
+            });
+            barrier.wait();
+            for _ in 0..10_000 {
+                let observed = store.daemon_snapshot(false).high_priority_shards;
+                assert!(
+                    observed == before || observed == after,
+                    "readers must see a complete published snapshot, got {observed:?}"
+                );
+            }
+        });
+        store.record_high_priority_shards(Vec::new());
+        assert!(store.daemon_snapshot(false).high_priority_shards.is_empty());
+    }
 
     fn noop_service(_context: ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
