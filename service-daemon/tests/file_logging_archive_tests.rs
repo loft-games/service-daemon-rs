@@ -7,6 +7,7 @@
 //! process so that the scenarios remain independent when the test harness
 //! executes them in parallel.
 
+use anyhow::Context;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,14 +16,14 @@ use std::time::{Duration, SystemTime};
 
 use service_daemon::{
     DaemonLayer, FileLogCompression, FileLogConfig, Registry, RestartPolicy, RotationPolicy,
-    ServiceDaemon, enable_file_logging,
+    ServiceDaemon, ServiceStatus, enable_file_logging,
 };
 use tracing_subscriber::prelude::*;
 
 const CHILD_MODE: &str = "SD_FILE_LOG_ARCHIVE_CHILD";
 const CHILD_DIR: &str = "SD_FILE_LOG_ARCHIVE_DIR";
 const TEST_NAME: &str = "file_logging_archive_lifecycle";
-const SIZE_DRAIN_MARKER: &str = "archive_size_drain_marker";
+const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SERVICE_INSTANCE_ID: &str = "019fe746-6158-7403-82c9-ac72cad515ec";
 const SOURCE_SERVICE_INSTANCE_ID: &str = "019fe746-6158-7403-82c9-ac6ccaa91ef5";
 const MESSAGE_ID: &str = "019fe746-6158-7403-82c9-ac8b7e502cb3";
@@ -74,9 +75,13 @@ fn assert_child_success(output: &Output) {
     );
 }
 
-fn read_gzip(path: &Path) -> std::io::Result<String> {
+fn read_gzip(path: &Path) -> anyhow::Result<String> {
     let mut contents = String::new();
-    flate2::read::MultiGzDecoder::new(File::open(path)?).read_to_string(&mut contents)?;
+    flate2::read::MultiGzDecoder::new(
+        File::open(path).with_context(|| format!("open archive {}", path.display()))?,
+    )
+    .read_to_string(&mut contents)
+    .with_context(|| format!("decode archive {}", path.display()))?;
     Ok(contents)
 }
 
@@ -90,7 +95,8 @@ fn write_historical_active(path: &Path, body: &str) -> std::io::Result<()> {
 }
 
 fn assert_active_markers(path: &Path, expected_count: usize) -> anyhow::Result<()> {
-    let contents = fs::read_to_string(path)?;
+    let contents =
+        fs::read_to_string(path).with_context(|| format!("read active log {}", path.display()))?;
     let markers = contents
         .lines()
         .filter(|line| line.contains("archive_test_marker"))
@@ -113,28 +119,61 @@ fn assert_active_markers(path: &Path, expected_count: usize) -> anyhow::Result<(
     Ok(())
 }
 
-async fn wait_for_size_records(path: &Path) -> anyhow::Result<()> {
-    tokio::time::timeout(Duration::from_secs(30), async {
+/// A bounded condition wait, not a fixed processing allowance.
+async fn wait_until(
+    description: &str,
+    mut ready: impl FnMut() -> anyhow::Result<bool>,
+) -> anyhow::Result<()> {
+    tokio::time::timeout(WAIT_TIMEOUT, async {
         loop {
-            let contents = match fs::read_to_string(path) {
-                Ok(contents) => contents,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(error) => return Err(error.into()),
-            };
-            // A snapshot can end in a partially written line. Only a complete
-            // marker proves the FIFO writer reached all preceding records.
-            if contents
-                .lines()
-                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-                .any(|value| value["message"] == SIZE_DRAIN_MARKER)
-            {
+            if ready()? {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .map_err(|_| anyhow::anyhow!("file log drain marker did not reach {}", path.display()))?
+    .with_context(|| format!("timed out waiting for {description}"))?
+}
+
+fn marker_persisted(directory: &Path, prefix: &str, marker: &str) -> anyhow::Result<bool> {
+    // A later framework record may rotate the marker out of the active file.
+    // Closed fragments may also be compressed between discovery and opening.
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let stem = prefix.rsplit_once('.').map_or(prefix, |(stem, _)| stem);
+        if (name != prefix && !name.starts_with(&format!("{stem}.segment."))) || !path.is_file() {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        let mut decoded = Vec::new();
+        let contents = if path.extension().is_some_and(|extension| extension == "gz") {
+            flate2::read::MultiGzDecoder::new(bytes.as_slice())
+                .read_to_end(&mut decoded)
+                .with_context(|| format!("decode {}", path.display()))?;
+            decoded.as_slice()
+        } else {
+            bytes.as_slice()
+        };
+        // Only complete lines count; the active writer may be mid-record.
+        for line in contents.split_inclusive(|byte| *byte == b'\n') {
+            if !line.ends_with(b"\n") {
+                continue;
+            }
+            // Historical fixture text is deliberately not JSON.
+            if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line)
+                && value["message"] == marker
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
@@ -177,44 +216,99 @@ fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
     config.archive.daily_start_jitter = Duration::ZERO;
     config.archive.monthly_start_jitter = Duration::ZERO;
     config.archive.monthly_volume_jitter = Duration::ZERO;
+    let prefix = config.file_prefix.clone();
+    let archive_count = match mode {
+        "archive" => 2,
+        "default" | "custom" | "custom-bare" => 1,
+        _ => 0,
+    };
+    let historical_sources: Vec<_> = fs::read_dir(directory)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| {
+            path.is_file()
+                && path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name != prefix && !name.starts_with('.') && !name.contains(".monthly.")
+                })
+        })
+        .collect();
     enable_file_logging(config);
     tracing_subscriber::registry()
         .with(DaemonLayer)
         .try_init()
-        .ok();
+        .map_err(|error| anyhow::anyhow!("install test subscriber: {error}"))?;
     let runtime = tokio::runtime::Runtime::new()?;
     runtime.block_on(async {
         let daemon = ServiceDaemon::builder()
             .with_registry(Registry::builder().with_tag("__file_log__").build())
-            .with_restart_policy(RestartPolicy::for_testing())
+            .with_restart_policy(RestartPolicy {
+                // Exercise the readiness barrier even when startup stops waiting immediately.
+                wave_spawn_timeout: Duration::ZERO,
+                ..RestartPolicy::for_testing()
+            })
             .build();
         daemon.run().await;
-        {
-            let span = tracing::info_span!(
-                "archive_identity",
-                service_instance_id = SERVICE_INSTANCE_ID,
-                source_service_instance_id = SOURCE_SERVICE_INSTANCE_ID,
-                message_id = MESSAGE_ID,
-                instance_seq = 42_u64,
-            );
-            let _entered = span.enter();
-            let count = if mode == "size" { 40 } else { 1 };
-            for index in 0..count { tracing::info!(target: "file_logging.archive.integration", index, "archive_test_marker"); }
-            if mode == "size" {
-                tracing::info!(target: "file_logging.archive.integration", "{SIZE_DRAIN_MARKER}");
+        let persisted = async {
+            let instances = daemon.service_instances();
+            anyhow::ensure!(instances.len() == 1, "expected exactly one file log service");
+            // run() may return after its startup timeout, before the sink subscribes.
+            tokio::time::timeout(WAIT_TIMEOUT, async {
+                while instances[0].status().await != ServiceStatus::Healthy {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .context("file log service did not become Healthy")?;
+            let drain_marker = format!("archive_drain_{}", uuid::Uuid::now_v7());
+            {
+                let span = tracing::info_span!(
+                    "archive_identity",
+                    service_instance_id = SERVICE_INSTANCE_ID,
+                    source_service_instance_id = SOURCE_SERVICE_INSTANCE_ID,
+                    message_id = MESSAGE_ID,
+                    instance_seq = 42_u64,
+                );
+                let _entered = span.enter();
+                let count = if mode == "size" { 40 } else { 1 };
+                for index in 0..count {
+                    tracing::info!(target: "file_logging.archive.integration", index, "archive_test_marker");
+                }
+                tracing::info!(target: "file_logging.archive.integration", "{drain_marker}");
             }
+            let marker_wait = format!("marker {drain_marker} in {}", directory.display());
+            wait_until(&marker_wait, || {
+                marker_persisted(directory, &prefix, &drain_marker)
+            })
+            .await?;
+            if archive_count > 0 {
+                // Graceful shutdown is bounded and may leave recoverable work.
+                // These normal-completion cases must finish before shutdown.
+                let archive_wait = format!(
+                    "{archive_count} monthly archives and source cleanup in {}",
+                    directory.display()
+                );
+                wait_until(&archive_wait, || {
+                    Ok(matching(directory, ".monthly.")?.len() == archive_count
+                        && historical_sources.iter().all(|path| !path.exists()))
+                })
+                .await?;
+            }
+            Ok::<_, anyhow::Error>(())
         }
-        // Rotation syncs its journal and files. A fixed sleep can leave queued
-        // records behind the appender's bounded shutdown wait on slow disks.
-        let persisted = if mode == "size" {
-            wait_for_size_records(&directory.join("latest.log")).await
-        } else {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            Ok(())
-        };
+        .await;
+        if let Err(error) = &persisted {
+            eprintln!("file log scenario {mode} failed: {error:#}");
+        }
         daemon.shutdown();
-        daemon.wait().await?;
-        persisted
+        let shutdown = daemon.wait().await;
+        if let Err(error) = &shutdown {
+            eprintln!("file log scenario {mode} shutdown failed: {error:#}");
+        }
+        persisted?;
+        shutdown?;
+        Ok(())
     })
 }
 
@@ -425,5 +519,55 @@ fn rotation_dates_use_container_local_time_without_changing_event_timestamps() -
         );
     }
     fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[test]
+fn marker_observation_follows_rotation_and_compression() -> anyhow::Result<()> {
+    for prefix in ["application.log", "app"] {
+        let directory = temporary_directory("marker-observation");
+        fs::create_dir_all(&directory)?;
+        let active = directory.join(prefix);
+        let marker = r#"{"message":"current-child-marker"}"#;
+        fs::write(&active, marker)?;
+        assert!(!marker_persisted(
+            &directory,
+            prefix,
+            "current-child-marker"
+        )?);
+        let complete = format!("{marker}\n");
+        fs::write(&active, &complete)?;
+        assert!(marker_persisted(
+            &directory,
+            prefix,
+            "current-child-marker"
+        )?);
+
+        let (stem, extension) = prefix
+            .rsplit_once('.')
+            .map_or((prefix, String::new()), |(stem, extension)| {
+                (stem, format!(".{extension}"))
+            });
+        let segment_name = format!("{stem}.segment.2026-11-11-00-00-00.1{extension}");
+        let segment = directory.join(&segment_name);
+        fs::rename(&active, &segment)?;
+        fs::write(&active, b"{\"message\":\"later framework record")?;
+        assert!(marker_persisted(
+            &directory,
+            prefix,
+            "current-child-marker"
+        )?);
+
+        let compressed = directory.join(format!("{segment_name}.gz"));
+        write_old_gzip_fragment(&compressed, &complete)?;
+        fs::remove_file(segment)?;
+        assert!(marker_persisted(
+            &directory,
+            prefix,
+            "current-child-marker"
+        )?);
+        assert!(!marker_persisted(&directory, prefix, "next-child-marker")?);
+        fs::remove_dir_all(directory)?;
+    }
     Ok(())
 }
