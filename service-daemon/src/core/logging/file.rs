@@ -1,4 +1,3 @@
-use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -8,7 +7,6 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 use std::{path::PathBuf, sync::mpsc::Receiver};
 
-use chrono::Timelike;
 use parking_lot::Mutex as ParkingMutex;
 use tokio::sync::broadcast;
 use tracing_appender::non_blocking::NonBlockingBuilder;
@@ -19,90 +17,9 @@ use crate::service;
 use super::model::{LogEvent, effective_batch_size, get_file_log_queue};
 use super::render::format_event_json;
 
-use super::archive::{ArchiveStore, rotated_log_name};
+use super::archive::{ArchiveStore, SCAN_INTERVAL};
 
-/// Time-based log rotation strategy.
-///
-/// Controls how frequently the file appender rotates to a new log file.
-/// Only available when the `file-logging` feature is enabled.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum RotationPolicy {
-    /// Rotate daily at UTC boundaries (default), e.g. `latest.2026-03-03.log`.
-    #[default]
-    Daily,
-    /// Rotate hourly. Suitable for high-volume services.
-    Hourly,
-    /// Never rotate. Single file, relies on external log rotation tools.
-    Never,
-}
-
-/// Compression strategy for files produced by time-based rotation.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub enum FileLogCompression {
-    /// Keep rotated files as plain JSON Lines.
-    None,
-    /// Compress closed rotated files with gzip (default).
-    #[default]
-    Gzip,
-}
-
-/// Configuration for file-based log persistence.
-///
-/// Controls the output directory, file prefix, rotation strategy, and
-/// compression strategy. Only available when the `file-logging` feature is enabled.
-///
-/// # Rotation Strategy
-/// Writes to the configured file name, `latest.log` by default. On the first
-/// write in a later UTC period, the closed file is renamed with its period
-/// before the last extension, e.g. `latest.2026-10-19.log`.
-///
-/// # Example
-/// ```rust,ignore
-/// use service_daemon::FileLogConfig;
-///
-/// let config = FileLogConfig::new("logs", "app");
-/// ```
-#[derive(Debug, Clone)]
-pub struct FileLogConfig {
-    /// Directory where log files are stored (e.g., "logs").
-    pub directory: String,
-    /// Active file name (e.g., "app.log" rotates to "app.2026-02-24.log").
-    pub file_prefix: String,
-    /// Time-based rotation strategy. Default: `RotationPolicy::Daily`.
-    pub rotation: RotationPolicy,
-    /// Compression strategy for closed rotated files. Default: gzip.
-    pub compression: FileLogCompression,
-}
-
-impl FileLogConfig {
-    /// Creates a new file log configuration.
-    ///
-    /// Uses daily rotation and gzip compression.
-    ///
-    /// # Arguments
-    /// * `directory` - Path to the log output directory (created if missing).
-    /// * `file_prefix` - Active file name, preserved exactly as supplied.
-    #[must_use]
-    pub fn new(directory: impl Into<String>, file_prefix: impl Into<String>) -> Self {
-        Self {
-            directory: directory.into(),
-            file_prefix: file_prefix.into(),
-            rotation: RotationPolicy::Daily,
-            compression: FileLogCompression::Gzip,
-        }
-    }
-}
-
-impl Default for FileLogConfig {
-    fn default() -> Self {
-        Self {
-            directory: "logs".to_string(),
-            file_prefix: "latest.log".to_string(),
-            rotation: RotationPolicy::Daily,
-            compression: FileLogCompression::Gzip,
-        }
-    }
-}
+use super::file_config::{FileLogCompression, FileLogConfig, FileLogConfigError, RotationPolicy};
 
 /// Global file log configuration, set once before the daemon starts.
 /// When `None`, file logging is disabled even if the feature is compiled in.
@@ -124,11 +41,7 @@ impl ArchiveWorker {
         config: &FileLogConfig,
         active_path: Arc<ParkingMutex<Option<PathBuf>>>,
     ) -> io::Result<Self> {
-        let store = ArchiveStore::new(
-            PathBuf::from(&config.directory),
-            config.file_prefix.clone(),
-            config.rotation,
-        );
+        let store = ArchiveStore::new(config)?;
         let (tx, rx) = sync_channel(1);
         let cancel = Arc::new(AtomicBool::new(false));
         let thread_cancel = Arc::clone(&cancel);
@@ -211,222 +124,44 @@ impl Drop for ArchiveWorker {
 }
 
 fn run_archive_worker(
-    store: ArchiveStore,
+    mut store: ArchiveStore,
     rx: Receiver<ArchiveCommand>,
     cancel: Arc<AtomicBool>,
     stopping: Arc<AtomicBool>,
-    active_path: Arc<ParkingMutex<Option<PathBuf>>>,
+    _active_path: Arc<ParkingMutex<Option<PathBuf>>>,
 ) {
+    let mut busy = false;
     loop {
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        let queued_now = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(ArchiveCommand::Maintain { now }) => now,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if stopping.load(Ordering::Acquire) => {
-                SystemTime::now()
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        };
-        let shutdown = stopping.load(Ordering::Acquire);
-        // A maintenance request may have been queued before shutdown began.
-        // Use a fresh cutoff for that final pass so a stale queued timestamp
-        // cannot leave the just-closed period pending until the next startup.
-        let now = if shutdown {
-            SystemTime::now()
+        let command = if busy {
+            rx.try_recv().ok()
         } else {
-            queued_now
+            rx.recv_timeout(Duration::from_millis(100)).ok()
         };
-        let active_path = active_path.lock().clone();
-        if let Err(error) = store.maintain(active_path.as_deref(), now, &cancel) {
-            eprintln!("service-daemon log archive maintenance failed: {error}");
+        let mut now = SystemTime::now();
+        if let Some(ArchiveCommand::Maintain { now: requested }) = command {
+            now = requested;
+            store.request();
         }
-        if shutdown || cancel.load(Ordering::Acquire) {
+        if stopping.load(Ordering::Acquire) {
+            now = SystemTime::now();
+        }
+        match store.step(now, &cancel) {
+            Ok(work) => busy = work,
+            Err(error) => {
+                eprintln!("service-daemon log archive maintenance failed: {error}");
+                busy = true;
+            }
+        }
+        if !busy && stopping.load(Ordering::Acquire) {
             break;
         }
     }
 }
 
-fn active_log_path(config: &FileLogConfig) -> PathBuf {
-    PathBuf::from(&config.directory).join(&config.file_prefix)
-}
-
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum WriterPeriod {
-    Daily(chrono::NaiveDate),
-    Hourly(chrono::NaiveDate, u32),
-    Never,
-}
-
-impl WriterPeriod {
-    fn at(rotation: RotationPolicy, now: SystemTime) -> Self {
-        let timestamp = chrono::DateTime::<chrono::Utc>::from(now);
-        match rotation {
-            RotationPolicy::Daily => Self::Daily(timestamp.date_naive()),
-            RotationPolicy::Hourly => Self::Hourly(timestamp.date_naive(), timestamp.hour()),
-            RotationPolicy::Never => Self::Never,
-        }
-    }
-
-    fn suffix(self) -> String {
-        match self {
-            Self::Daily(day) => day.format("%Y-%m-%d").to_string(),
-            Self::Hourly(day, hour) => format!("{}-{hour:02}", day.format("%Y-%m-%d")),
-            Self::Never => String::new(),
-        }
-    }
-}
-
-struct RotatingFileWriter {
-    directory: PathBuf,
-    prefix: String,
-    rotation: RotationPolicy,
-    period: WriterPeriod,
-    errors: Arc<AtomicUsize>,
-    // Rotation closes the old handle before renaming it on Windows. If opening
-    // the next active file fails, a later write retries without touching archives.
-    file: Option<File>,
-}
-
-impl RotatingFileWriter {
-    fn new(
-        config: &FileLogConfig,
-        active_path: Arc<ParkingMutex<Option<PathBuf>>>,
-        errors: Arc<AtomicUsize>,
-        now: SystemTime,
-    ) -> io::Result<Self> {
-        let path = active_log_path(config);
-        fs::create_dir_all(&config.directory)?;
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        let metadata = file.metadata()?;
-        let period = WriterPeriod::at(
-            config.rotation,
-            if metadata.len() == 0 {
-                now
-            } else {
-                metadata.modified()?
-            },
-        );
-        *active_path.lock() = Some(path);
-        let mut writer = Self {
-            directory: PathBuf::from(&config.directory),
-            prefix: config.file_prefix.clone(),
-            rotation: config.rotation,
-            period,
-            errors,
-            file: Some(file),
-        };
-        writer.rotate(now);
-        Ok(writer)
-    }
-
-    fn try_rotate(&mut self, now: SystemTime) -> io::Result<()> {
-        let next_period = WriterPeriod::at(self.rotation, now);
-        if next_period <= self.period || next_period == WriterPeriod::Never {
-            return Ok(());
-        }
-        let file = self.current_file()?;
-        if file.metadata()?.len() == 0 {
-            self.period = next_period;
-            return Ok(());
-        }
-        file.flush()?;
-        file.sync_all()?;
-        let destination = self.rotation_destination()?;
-        let active = self.directory.join(&self.prefix);
-        drop(self.file.take());
-        // Each directory/prefix has a single writer. The destination is chosen
-        // without replacing an existing plain file or compressed archive.
-        // On failure the next write reopens the unchanged active file.
-        fs::rename(&active, &destination)?;
-        self.period = next_period;
-        self.file = Some(
-            OpenOptions::new()
-                .create_new(true)
-                .append(true)
-                .open(active)?,
-        );
-        Ok(())
-    }
-
-    fn rotation_destination(&self) -> io::Result<PathBuf> {
-        let suffix = self.period.suffix();
-        let mut sequence = None;
-        loop {
-            let name = rotated_log_name(&self.prefix, &suffix, sequence);
-            let path = self.directory.join(&name);
-            let gzip = self.directory.join(format!("{name}.gz"));
-            let mut occupied = false;
-            for candidate in [&path, &gzip] {
-                match fs::symlink_metadata(candidate) {
-                    Ok(metadata) if metadata.is_file() => occupied = true,
-                    Ok(_) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::AlreadyExists,
-                            format!(
-                                "log rotation destination is not a regular file: {}",
-                                candidate.display()
-                            ),
-                        ));
-                    }
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            if !occupied {
-                return Ok(path);
-            }
-            sequence = Some(
-                sequence
-                    .unwrap_or(0)
-                    .checked_add(1)
-                    .ok_or_else(|| io::Error::other("log rotation fragment sequence exhausted"))?,
-            );
-        }
-    }
-
-    fn current_file(&mut self) -> io::Result<&mut File> {
-        if self.file.is_none() {
-            self.file = Some(
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(self.directory.join(&self.prefix))?,
-            );
-        }
-        self.file
-            .as_mut()
-            .ok_or_else(|| io::Error::other("active log file is unavailable"))
-    }
-
-    fn rotate(&mut self, now: SystemTime) {
-        if let Err(error) = self.try_rotate(now) {
-            self.errors.fetch_add(1, Ordering::Relaxed);
-            eprintln!(
-                "service-daemon file log rotation failed: {error}; retrying on the next write"
-            );
-        }
-    }
-
-    fn write_at(&mut self, buffer: &[u8], now: SystemTime) -> io::Result<usize> {
-        self.rotate(now);
-        self.current_file()?.write(buffer)
-    }
-}
-
-impl Write for RotatingFileWriter {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.write_at(buffer, SystemTime::now())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self.file.as_mut() {
-            Some(file) => file.flush(),
-            None => Ok(()),
-        }
-    }
-}
+use super::rotation::RotatingFileWriter;
 
 /// Counts errors returned by the background file writer.
 ///
@@ -531,7 +266,17 @@ impl FileLogHealthReporter {
 /// enable_file_logging(FileLogConfig::new("logs", "my-app"));
 /// ```
 pub fn enable_file_logging(config: FileLogConfig) {
-    let _ = FILE_LOG_CONFIG.set(config);
+    if let Err(error) = try_enable_file_logging(config) {
+        eprintln!("service-daemon {error}");
+    }
+}
+
+/// Configures file logging once, returning validation and duplicate-setup errors.
+pub fn try_enable_file_logging(config: FileLogConfig) -> Result<(), FileLogConfigError> {
+    config.validate()?;
+    FILE_LOG_CONFIG
+        .set(config)
+        .map_err(|_| FileLogConfigError::AlreadyEnabled)
 }
 
 /// An independent background service for file-based JSON log persistence.
@@ -548,9 +293,10 @@ pub fn enable_file_logging(config: FileLogConfig) {
 /// ## Output Format
 /// JSON lines (one JSON object per line), written to the configured active
 /// file, `latest.log` by default. After closing a period, rotation produces
-/// `latest.YYYY-MM-DD.log` or `latest.YYYY-MM-DD-HH.log`. With gzip compression,
-/// `.gz` is appended asynchronously, with same-day compaction and delayed
-/// repack handled by the archive worker. The active file is never archived.
+/// `latest.segment.<local-start-time>.<sequence>.log`. Background gzip uses
+/// independently configured fragment, daily and monthly levels. Daily grouping
+/// follows the starting local date; monthly volumes are independently readable.
+/// The active file is never archived.
 #[service(priority = ServicePriority::SYSTEM, tags = ["__file_log__"])]
 pub async fn file_log_service() -> anyhow::Result<()> {
     // If file logging is not configured, stay idle until shutdown instead of
@@ -566,7 +312,7 @@ pub async fn file_log_service() -> anyhow::Result<()> {
 
     let active_path = Arc::new(ParkingMutex::new(None));
     let io_errors = Arc::new(AtomicUsize::new(0));
-    let file_appender = match RotatingFileWriter::new(
+    let mut file_appender = match RotatingFileWriter::new(
         config,
         Arc::clone(&active_path),
         Arc::clone(&io_errors),
@@ -584,17 +330,6 @@ pub async fn file_log_service() -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let tracked_appender = ErrorTrackingWriter::new(file_appender, io_errors.clone());
-    let (mut writer, guard) = NonBlockingBuilder::default()
-        // Keep file I/O off the tracing producer path. Losses are surfaced by
-        // the error counter and reported on stderr instead of blocking a Tokio
-        // runtime worker when the disk is slow or unavailable.
-        .lossy(true)
-        .thread_name("service-daemon-file-log")
-        .finish(tracked_appender);
-    let dropped_lines = writer.error_counter();
-    let mut health = FileLogHealthReporter::new();
-
     let archive_worker = match config.compression {
         FileLogCompression::Gzip if !matches!(config.rotation, RotationPolicy::Never) => {
             match ArchiveWorker::start(config, active_path) {
@@ -607,8 +342,27 @@ pub async fn file_log_service() -> anyhow::Result<()> {
         }
         FileLogCompression::Gzip | FileLogCompression::None => None,
     };
+    if let Some(worker) = archive_worker.as_ref() {
+        let tx = worker.tx.clone();
+        file_appender.set_rotation_notifier(move || {
+            let _ = tx.try_send(ArchiveCommand::Maintain {
+                now: SystemTime::now(),
+            });
+        });
+    }
+    let tracked_appender = ErrorTrackingWriter::new(file_appender, io_errors.clone());
+    let (mut writer, guard) = NonBlockingBuilder::default()
+        // Keep file I/O off the tracing producer path. Losses are surfaced by
+        // the error counter and reported on stderr instead of blocking a Tokio
+        // runtime worker when the disk is slow or unavailable.
+        .lossy(true)
+        .thread_name("service-daemon-file-log")
+        .finish(tracked_appender);
+    let dropped_lines = writer.error_counter();
+    let mut health = FileLogHealthReporter::new();
+
     let mut archive_worker = archive_worker;
-    let mut archive_tick = tokio::time::interval(Duration::from_secs(1));
+    let mut archive_tick = tokio::time::interval(SCAN_INTERVAL);
     archive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     if let Some(worker) = archive_worker.as_ref() {
         worker.request();
@@ -644,8 +398,9 @@ pub async fn file_log_service() -> anyhow::Result<()> {
                         // Flush batch to file
                         {
                             for event in buffer.drain(..) {
-                                let json_line = format_event_json(&event);
-                                let _ = writeln!(writer, "{}", json_line);
+                                let mut json_line = format_event_json(&event);
+                                json_line.push('\n');
+                                let _ = writer.write_all(json_line.as_bytes());
                             }
                         }
                         health.report(
@@ -671,8 +426,9 @@ pub async fn file_log_service() -> anyhow::Result<()> {
     }
     if !buffer.is_empty() {
         for event in buffer.drain(..) {
-            let json_line = format_event_json(&event);
-            let _ = writeln!(writer, "{}", json_line);
+            let mut json_line = format_event_json(&event);
+            json_line.push('\n');
+            let _ = writer.write_all(json_line.as_bytes());
         }
     }
 
@@ -692,386 +448,44 @@ pub async fn file_log_service() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{self, Write};
-    use std::path::Path;
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::{fs, io::Read};
 
     struct TestDirectory(PathBuf);
-
     impl TestDirectory {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "service-daemon-writer-test-{}",
-                uuid::Uuid::now_v7()
-            ));
-            fs::create_dir_all(&path).unwrap();
-            Self(path)
-        }
-
-        fn config(&self) -> FileLogConfig {
-            FileLogConfig::new(self.0.to_string_lossy(), "latest.log")
+        fn path(&self) -> &std::path::Path {
+            &self.0
         }
     }
-
     impl Drop for TestDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
-
-    fn day(day: u32) -> SystemTime {
-        chrono::NaiveDate::from_ymd_opt(2026, 1, day)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc()
-            .into()
+    fn fixture() -> (TestDirectory, FileLogConfig) {
+        let directory =
+            TestDirectory(std::env::temp_dir().join(format!("sd-worker-{}", uuid::Uuid::now_v7())));
+        fs::create_dir_all(directory.path()).unwrap();
+        let mut config = FileLogConfig::new(directory.path().to_string_lossy(), "latest.log");
+        config.archive.daily_start_jitter = Duration::ZERO;
+        config.archive.monthly_start_jitter = Duration::ZERO;
+        config.archive.monthly_volume_jitter = Duration::ZERO;
+        (directory, config)
     }
-
-    fn decompress(path: &Path) -> String {
-        use std::io::Read;
-        let mut result = String::new();
-        flate2::read::MultiGzDecoder::new(File::open(path).unwrap())
-            .read_to_string(&mut result)
+    fn decompress(path: &std::path::Path) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        flate2::read::MultiGzDecoder::new(fs::File::open(path).unwrap())
+            .read_to_end(&mut bytes)
             .unwrap();
-        result
-    }
-
-    fn maintain(
-        config: &FileLogConfig,
-        active: &Arc<ParkingMutex<Option<PathBuf>>>,
-        now: SystemTime,
-    ) {
-        let store = ArchiveStore::new(
-            PathBuf::from(&config.directory),
-            config.file_prefix.clone(),
-            config.rotation,
-        );
-        store
-            .maintain(active.lock().as_deref(), now, &AtomicBool::new(false))
-            .unwrap();
-    }
-
-    #[test]
-    fn current_events_use_fixed_name_until_rotation() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            active.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"first day\n", day(1)).unwrap();
-        assert_eq!(
-            fs::read(directory.0.join("latest.log")).unwrap(),
-            b"first day\n"
-        );
-        assert!(!directory.0.join("latest.2026-01-01.log").exists());
-
-        writer.write_at(b"second day\n", day(2)).unwrap();
-        assert_eq!(
-            fs::read(directory.0.join("latest.log")).unwrap(),
-            b"second day\n"
-        );
-        assert_eq!(
-            fs::read(directory.0.join("latest.2026-01-01.log")).unwrap(),
-            b"first day\n"
-        );
-        assert_eq!(*active.lock(), Some(directory.0.join("latest.log")));
-    }
-
-    #[test]
-    fn restart_rotates_previous_period_before_appending() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let current = directory.0.join("latest.log");
-        fs::write(&current, b"previous process\n").unwrap();
-        File::options()
-            .write(true)
-            .open(&current)
-            .unwrap()
-            .set_modified(day(1))
-            .unwrap();
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            Arc::new(ParkingMutex::new(None)),
-            Arc::new(AtomicUsize::new(0)),
-            day(3),
-        )
-        .unwrap();
-        writer.write_at(b"new process\n", day(3)).unwrap();
-        assert_eq!(fs::read(&current).unwrap(), b"new process\n");
-        assert_eq!(
-            fs::read(directory.0.join("latest.2026-01-01.log")).unwrap(),
-            b"previous process\n"
-        );
-        assert!(!directory.0.join("latest.2026-01-02.log").exists());
-    }
-
-    #[test]
-    fn restart_within_period_appends_to_fixed_name() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let current = directory.0.join("latest.log");
-        fs::write(&current, b"first process\n").unwrap();
-        File::options()
-            .write(true)
-            .open(&current)
-            .unwrap()
-            .set_modified(day(1))
-            .unwrap();
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            Arc::new(ParkingMutex::new(None)),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"second process\n", day(1)).unwrap();
-        assert_eq!(
-            fs::read(&current).unwrap(),
-            b"first process\nsecond process\n"
-        );
-        assert!(!directory.0.join("latest.2026-01-01.log").exists());
-    }
-
-    #[test]
-    fn rotation_preserves_existing_plain_and_gzip_archives() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let plain = directory.0.join("latest.2026-01-01.log");
-        let gzip = directory.0.join("latest.2026-01-01.1.log.gz");
-        fs::write(&plain, b"existing plain\n").unwrap();
-        fs::write(&gzip, b"existing gzip\n").unwrap();
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            Arc::new(ParkingMutex::new(None)),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"new fragment\n", day(1)).unwrap();
-        writer.write_at(b"next period\n", day(2)).unwrap();
-        assert_eq!(fs::read(&plain).unwrap(), b"existing plain\n");
-        assert_eq!(fs::read(&gzip).unwrap(), b"existing gzip\n");
-        assert_eq!(
-            fs::read(directory.0.join("latest.2026-01-01.2.log")).unwrap(),
-            b"new fragment\n"
-        );
-    }
-
-    #[test]
-    fn hourly_rotation_names_the_closed_hour_and_preserves_custom_extension() {
-        let directory = TestDirectory::new();
-        let config = FileLogConfig {
-            rotation: RotationPolicy::Hourly,
-            ..FileLogConfig::new(directory.0.to_string_lossy(), "application.jsonl")
-        };
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            Arc::new(ParkingMutex::new(None)),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer
-            .write_at(b"first hour\n", day(1) + Duration::from_secs(3599))
-            .unwrap();
-        assert!(!directory.0.join("application.2026-01-01-00.jsonl").exists());
-        writer
-            .write_at(b"later hour\n", day(1) + Duration::from_secs(7200))
-            .unwrap();
-        assert_eq!(
-            fs::read(directory.0.join("application.2026-01-01-00.jsonl")).unwrap(),
-            b"first hour\n"
-        );
-        assert_eq!(
-            fs::read(directory.0.join("application.jsonl")).unwrap(),
-            b"later hour\n"
-        );
-        assert!(!directory.0.join("application.2026-01-01-01.jsonl").exists());
-    }
-
-    #[test]
-    fn empty_active_file_does_not_create_an_empty_archive() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            Arc::new(ParkingMutex::new(None)),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"first event\n", day(3)).unwrap();
-        assert_eq!(
-            fs::read(directory.0.join("latest.log")).unwrap(),
-            b"first event\n"
-        );
-        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_sharing_violation_preserves_active_file_and_retries_rotation() {
-        use std::os::windows::fs::OpenOptionsExt;
-
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let errors = Arc::new(AtomicUsize::new(0));
-        let mut writer =
-            RotatingFileWriter::new(&config, active.clone(), errors.clone(), day(1)).unwrap();
-        writer.write_at(b"first\n", day(1)).unwrap();
-        // Permit reads/writes but deny delete sharing, as a log reader may do.
-        let reader = OpenOptions::new()
-            .read(true)
-            .share_mode(0x0000_0003)
-            .open(directory.0.join("latest.log"))
-            .unwrap();
-        writer.write_at(b"rename blocked\n", day(2)).unwrap();
-        assert_eq!(errors.load(Ordering::Relaxed), 1);
-        maintain(&config, &active, day(3));
-        assert_eq!(
-            fs::read(directory.0.join("latest.log")).unwrap(),
-            b"first\nrename blocked\n"
-        );
-        assert!(!directory.0.join("latest.2026-01-01.log.gz").exists());
-
-        drop(reader);
-        writer.write_at(b"recovered\n", day(2)).unwrap();
-        maintain(&config, &active, day(3));
-        assert_eq!(
-            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
-            "first\nrename blocked\n"
-        );
-        assert_eq!(
-            fs::read(directory.0.join("latest.log")).unwrap(),
-            b"recovered\n"
-        );
-    }
-
-    #[test]
-    fn idle_period_boundary_preserves_actual_open_file() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            active.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"before boundary\n", day(1)).unwrap();
-        maintain(&config, &active, day(2));
-        let old = active_log_path(&config);
-        assert_eq!(*active.lock(), Some(old.clone()));
-        assert_eq!(fs::read_to_string(old).unwrap(), "before boundary\n");
-        assert!(!directory.0.join("latest.2026-01-01.log.gz").exists());
-    }
-
-    #[test]
-    fn successful_rotation_closes_old_file_before_archive_handoff() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            active.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"first\n", day(1)).unwrap();
-        writer.write_at(b"second\n", day(2)).unwrap();
-        assert_eq!(*active.lock(), Some(active_log_path(&config)));
-        maintain(&config, &active, day(3));
-        assert!(!directory.0.join("latest.2026-01-01.log").exists());
-        assert_eq!(
-            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
-            "first\n"
-        );
-        // The still-open second file is protected even though the maintenance
-        // clock has advanced past its period.
-        writer.write_at(b"still open\n", day(2)).unwrap();
-        assert_eq!(
-            fs::read_to_string(active_log_path(&config)).unwrap(),
-            "second\nstill open\n"
-        );
-    }
-
-    #[test]
-    fn rotation_destination_failure_keeps_old_file_usable_and_protected() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let errors = Arc::new(AtomicUsize::new(0));
-        let mut writer =
-            RotatingFileWriter::new(&config, active.clone(), errors.clone(), day(1)).unwrap();
-        writer.write_at(b"first\n", day(1)).unwrap();
-        let blocked = directory.0.join("latest.2026-01-01.log");
-        fs::create_dir(&blocked).unwrap();
-        writer.write_at(b"fallback\n", day(2)).unwrap();
-        assert_eq!(errors.load(Ordering::Relaxed), 1);
-        assert_eq!(*active.lock(), Some(active_log_path(&config)));
-        maintain(&config, &active, day(3));
-        assert_eq!(
-            fs::read_to_string(active_log_path(&config)).unwrap(),
-            "first\nfallback\n"
-        );
-        fs::remove_dir(blocked).unwrap();
-        writer.write_at(b"recovered\n", day(2)).unwrap();
-        maintain(&config, &active, day(3));
-        assert_eq!(
-            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
-            "first\nfallback\n"
-        );
-    }
-
-    #[test]
-    fn backwards_clock_does_not_reopen_an_archived_period() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            active.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"first\n", day(1)).unwrap();
-        writer.write_at(b"second\n", day(2)).unwrap();
-        maintain(&config, &active, day(3));
-        writer.write_at(b"clock moved back\n", day(1)).unwrap();
-        assert_eq!(*active.lock(), Some(active_log_path(&config)));
-        assert!(!directory.0.join("latest.2026-01-01.log").exists());
-        assert_eq!(
-            fs::read_to_string(active_log_path(&config)).unwrap(),
-            "second\nclock moved back\n"
-        );
+        bytes
     }
 
     #[tokio::test]
-    async fn full_archive_queue_preserves_source_and_shutdown_retries_current_state() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            active.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"old data\n", day(1)).unwrap();
-
-        // Keep the receiver idle so queue saturation is deterministic.
+    async fn full_wakeup_queue_preserves_sources_and_shutdown_rescans() {
+        let (directory, config) = fixture();
+        let stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
+        let name = format!("latest.segment.{stamp}.1.log");
+        fs::write(directory.path().join(&name), b"closed\n").unwrap();
+        fs::write(directory.path().join("latest.log"), b"active\n").unwrap();
         let (tx, rx) = sync_channel(1);
         let cancel = Arc::new(AtomicBool::new(false));
         let stopping = Arc::new(AtomicBool::new(false));
@@ -1082,73 +496,60 @@ mod tests {
             join: None,
         };
         worker.request();
-        writer.write_at(b"active data\n", day(2)).unwrap();
         worker.request();
-        assert!(directory.0.join("latest.2026-01-01.log").is_file());
-
-        let store = ArchiveStore::new(
-            PathBuf::from(&config.directory),
-            config.file_prefix.clone(),
-            config.rotation,
-        );
+        assert!(directory.path().join(&name).is_file());
+        let store = ArchiveStore::new(&config).unwrap();
         worker.join = Some(thread::spawn(move || {
-            run_archive_worker(store, rx, cancel, stopping, active)
+            run_archive_worker(
+                store,
+                rx,
+                cancel,
+                stopping,
+                Arc::new(ParkingMutex::new(None)),
+            )
         }));
         worker.shutdown().await;
         assert_eq!(
-            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
-            "old data\n"
+            decompress(&directory.path().join(format!("{name}.gz"))),
+            b"closed\n"
         );
         assert_eq!(
-            fs::read_to_string(active_log_path(&config)).unwrap(),
-            "active data\n"
+            fs::read(directory.path().join("latest.log")).unwrap(),
+            b"active\n"
         );
     }
 
     #[test]
-    fn shutdown_refreshes_cutoff_for_a_stale_queued_pass() {
-        let directory = TestDirectory::new();
-        let config = directory.config();
-        let active = Arc::new(ParkingMutex::new(None));
-        let mut writer = RotatingFileWriter::new(
-            &config,
-            active.clone(),
-            Arc::new(AtomicUsize::new(0)),
-            day(1),
-        )
-        .unwrap();
-        writer.write_at(b"old data\n", day(1)).unwrap();
-        writer.write_at(b"active data\n", day(2)).unwrap();
-        drop(writer);
-
+    fn shutdown_refreshes_a_stale_queued_cutoff() {
+        let (directory, config) = fixture();
+        fs::write(directory.path().join("latest.2020-01-01.log"), b"closed\n").unwrap();
         let (tx, rx) = sync_channel(1);
-        tx.send(ArchiveCommand::Maintain { now: day(1) })
-            .expect("queue stale pass");
-        let cancel = Arc::new(AtomicBool::new(false));
-        let stopping = Arc::new(AtomicBool::new(true));
-        let store = ArchiveStore::new(
-            PathBuf::from(&config.directory),
-            config.file_prefix.clone(),
-            config.rotation,
-        );
-        let join = thread::spawn(move || run_archive_worker(store, rx, cancel, stopping, active));
-        join.join().expect("archive worker");
-
-        assert_eq!(
-            decompress(&directory.0.join("latest.2026-01-01.log.gz")),
-            "old data\n"
+        tx.send(ArchiveCommand::Maintain {
+            now: SystemTime::UNIX_EPOCH,
+        })
+        .unwrap();
+        let store = ArchiveStore::new(&config).unwrap();
+        run_archive_worker(
+            store,
+            rx,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(ParkingMutex::new(None)),
         );
         assert_eq!(
-            fs::read_to_string(active_log_path(&config)).unwrap(),
-            "active data\n"
+            decompress(
+                &directory
+                    .path()
+                    .join("latest.monthly.2020-01.part0001.log.gz")
+            ),
+            b"closed\n"
         );
     }
 
     #[test]
-    fn dropping_worker_cancels_idle_thread() {
-        let directory = TestDirectory::new();
-        let mut worker =
-            ArchiveWorker::start(&directory.config(), Arc::new(ParkingMutex::new(None))).unwrap();
+    fn dropping_worker_cancels_the_idle_thread() {
+        let (_directory, config) = fixture();
+        let mut worker = ArchiveWorker::start(&config, Arc::new(ParkingMutex::new(None))).unwrap();
         let cancel = worker.cancel.clone();
         let join = worker.join.take().unwrap();
         drop(worker);
@@ -1157,8 +558,67 @@ mod tests {
         while !join.is_finished() && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        assert!(join.is_finished(), "idle archive thread did not stop");
+        assert!(join.is_finished());
         join.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_retains_future_scheduled_archive_instead_of_bypassing_jitter() {
+        let (directory, mut config) = fixture();
+        config.archive.daily_start_jitter = Duration::from_secs(1800);
+        let name = "latest.2020-01-01.log";
+        fs::write(directory.path().join(name), b"closed\n").unwrap();
+        let worker = ArchiveWorker::start(&config, Arc::new(ParkingMutex::new(None))).unwrap();
+        worker.shutdown().await;
+        assert_eq!(
+            decompress(&directory.path().join(format!("{name}.gz"))),
+            b"closed\n"
+        );
+        assert!(
+            !directory
+                .path()
+                .join("latest.monthly.2020-01.part0001.log.gz")
+                .exists()
+        );
+        let mut store = ArchiveStore::new(&config).unwrap();
+        assert!(
+            !store
+                .step(SystemTime::now(), &AtomicBool::new(false))
+                .unwrap()
+        );
+        assert!(directory.path().join(format!("{name}.gz")).exists());
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_unfinished_work_after_the_two_second_window() {
+        let (tx, rx) = sync_channel(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let thread_cancel = cancel.clone();
+        let thread_stopped = stopped.clone();
+        let join = thread::spawn(move || {
+            let _receiver = rx;
+            while !thread_cancel.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            thread_stopped.store(true, Ordering::Release);
+        });
+        let worker = ArchiveWorker {
+            tx,
+            cancel: cancel.clone(),
+            stopping: Arc::new(AtomicBool::new(false)),
+            join: Some(join),
+        };
+        let start = Instant::now();
+        worker.shutdown().await;
+        assert!(start.elapsed() >= Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(4));
+        assert!(cancel.load(Ordering::Acquire));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !stopped.load(Ordering::Acquire) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(stopped.load(Ordering::Acquire));
     }
 
     struct FailingWriter;

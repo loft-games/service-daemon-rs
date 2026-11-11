@@ -9,11 +9,21 @@ mod archive;
 #[cfg(feature = "file-logging")]
 mod file;
 
+#[cfg(feature = "file-logging")]
+mod file_config;
+
+#[cfg(feature = "file-logging")]
+mod rotation;
+
 pub use layer::DaemonLayer;
 pub use model::{LogBatchSizeError, MAX_LOG_BATCH_SIZE, set_log_batch_size};
 
 #[cfg(feature = "file-logging")]
-pub use file::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
+pub use file::{enable_file_logging, try_enable_file_logging};
+#[cfg(feature = "file-logging")]
+pub use file_config::{
+    FileLogArchiveConfig, FileLogCompression, FileLogConfig, FileLogConfigError, RotationPolicy,
+};
 
 use tracing_subscriber::prelude::*;
 

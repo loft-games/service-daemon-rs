@@ -7,8 +7,9 @@ pub use core::context::{
     spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
 };
 pub use core::di::{
-    ManagedProvided, Provided, ProviderDependencyChange, ProviderDependencyChangeReason,
-    ProviderContract, ProviderDependencyWatch, ProviderDependencyWatchSet, WatchableProvided,
+    ManagedProvided, Provided, ProviderContract, ProviderDependencyChange,
+    ProviderDependencyChangeReason, ProviderDependencyWatch, ProviderDependencyWatchSet,
+    WatchableProvided,
 };
 pub use core::ipc::IpcStream;
 pub use core::logging::{
@@ -55,7 +56,10 @@ pub use core::context::{MockContext, MockContextBuilder, SimulationHandle};
 
 // Conditionally re-export file logging utilities
 #[cfg(feature = "file-logging")]
-pub use core::logging::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
+pub use core::logging::{
+    FileLogArchiveConfig, FileLogCompression, FileLogConfig, FileLogConfigError, RotationPolicy,
+    enable_file_logging, try_enable_file_logging,
+};
 
 // Re-export diagnostics API (Behavioral Topology)
 #[cfg(feature = "diagnostics")]
@@ -71,6 +75,10 @@ pub mod __private {
     pub use crate::core::managed_state::{
         StateManager, TrackedMutex as Mutex, TrackedNotify, TrackedRwLock as RwLock, TrackedSender,
     };
+    pub use crate::core::provider_executor::{
+        prepare_provider_params, prepare_provider_type, resolve_provider_contract,
+        resolve_provider_contract_managed,
+    };
     pub use crate::core::provider_init::{
         ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
         ProviderInitSourceKind, ProviderRuntimePhase, catch_init_panic, init_fallible,
@@ -78,15 +86,11 @@ pub mod __private {
         provider_init_boundary, provider_init_failure_boundary, provider_init_failure_into_error,
         with_provider_runtime_phase,
     };
-    pub use crate::core::provider_executor::{
-        prepare_provider_params, prepare_provider_type,
-        resolve_provider_contract, resolve_provider_contract_managed,
-    };
     pub use crate::core::provider_scope::{
-        missing_prepared_provider_error, provider_dependency_watch,
-        ready_provider_mutex, ready_provider_rwlock, ready_provider_snapshot,
-        require_provider_context, resolve_provider_managed, resolve_provider_mutex,
-        resolve_provider_rwlock, resolve_provider_snapshot,
+        missing_prepared_provider_error, provider_dependency_watch, ready_provider_mutex,
+        ready_provider_rwlock, ready_provider_snapshot, require_provider_context,
+        resolve_provider_managed, resolve_provider_mutex, resolve_provider_rwlock,
+        resolve_provider_snapshot,
     };
     pub use crate::models::trigger::trigger_clone_payload;
     pub use crate::models::{
@@ -106,7 +110,9 @@ pub mod __private {
 }
 
 // Re-export macros for unified user experience
-pub use service_daemon_macro::{provider, provider_contract, provider_impl, service, service_handle, trigger};
+pub use service_daemon_macro::{
+    provider, provider_contract, provider_impl, service, service_handle, trigger,
+};
 
 /// A prelude module for commonly used items and trigger templates.
 ///
@@ -116,13 +122,14 @@ pub mod prelude {
     pub use crate::TT::*;
     pub use crate::{
         DaemonDiagnosticsSnapshot, DaemonInstanceHandle, DaemonInstanceId, DaemonRuntimeSnapshot,
-        DiagnosticRuntimeLane, IpcStream, ManagedProvided, Provided, ReadinessSnapshot,
-        ProviderContract, ServiceDaemon, ServiceError, ServiceHandle, ServiceInputDescriptor, ServiceInstanceHandle,
-        ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus, TT,
-        TriggerPolicyOverlay, TriggerPolicyOverlayError, TriggerPressureSnapshot,
-        TriggerRuntimeSnapshot, WatchableProvided, current_service_instance_id, done, is_shutdown,
-        provider, provider_contract, provider_impl, service, service_handle, shelve, shelve_clone,
-        sleep, spawn_with_context, state, trigger, trigger_config, unshelve, wait_shutdown,
+        DiagnosticRuntimeLane, IpcStream, ManagedProvided, Provided, ProviderContract,
+        ReadinessSnapshot, ServiceDaemon, ServiceError, ServiceHandle, ServiceInputDescriptor,
+        ServiceInstanceHandle, ServicePriority, ServiceRuntimeSnapshot, ServiceScheduling,
+        ServiceStatus, TT, TriggerPolicyOverlay, TriggerPolicyOverlayError,
+        TriggerPressureSnapshot, TriggerRuntimeSnapshot, WatchableProvided,
+        current_service_instance_id, done, is_shutdown, provider, provider_contract, provider_impl,
+        service, service_handle, shelve, shelve_clone, sleep, spawn_with_context, state, trigger,
+        trigger_config, unshelve, wait_shutdown,
     };
     #[cfg(feature = "high-priority")]
     pub use crate::{
