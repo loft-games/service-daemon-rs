@@ -496,6 +496,8 @@ async fn test_infallible_helper_panic_message_points_to_provider_definition() {
 
 #[tokio::test]
 async fn test_dependency_provider_fatal_shuts_down_daemon() -> anyhow::Result<()> {
+    // The dependency-source test also resets these flags; hold its lock through assertions.
+    let _trace_guard = TRACE_LOCK.lock().await;
     DEPENDENCY_FATAL_CALLED.store(false, Ordering::SeqCst);
     DEPENDENCY_FATAL_PARENT_ENTERED.store(false, Ordering::SeqCst);
     DEPENDENCY_FATAL_SERVICE_ENTERED.store(false, Ordering::SeqCst);
