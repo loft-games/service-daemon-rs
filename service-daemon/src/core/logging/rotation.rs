@@ -329,6 +329,22 @@ impl RotatingFileWriter {
         }
         Ok(())
     }
+    fn truncate_active(&self, length: u64) -> io::Result<()> {
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| io::Error::other("active file unavailable"))?;
+        #[cfg(windows)]
+        {
+            // Append handles lack FILE_WRITE_DATA on Windows, even with write(true).
+            // Reopen only for rollback so normal writes retain atomic append semantics.
+            let _ = file;
+            let active = Path::new(&self.config.directory).join(&self.config.file_prefix);
+            OpenOptions::new().write(true).open(active)?.set_len(length)
+        }
+        #[cfg(not(windows))]
+        file.set_len(length)
+    }
     pub(super) fn write_at(&mut self, buffer: &[u8], now: SystemTime) -> io::Result<usize> {
         if self.file.is_none() {
             if let Some(target) = &self.state.pending
@@ -357,10 +373,7 @@ impl RotatingFileWriter {
             }
         }
         if let Some(length) = self.rollback {
-            self.file
-                .as_mut()
-                .ok_or_else(|| io::Error::other("active file unavailable"))?
-                .set_len(length)?;
+            self.truncate_active(length)?;
             self.bytes = length;
             self.rollback = None;
         }
@@ -389,7 +402,7 @@ impl RotatingFileWriter {
                 // The sink is best effort, but a failed record must not corrupt
                 // the following record. Retry truncation before another write.
                 self.rollback = Some(start);
-                if file.set_len(start).is_ok() {
+                if self.truncate_active(start).is_ok() {
                     self.bytes = start;
                     self.rollback = None;
                 }
@@ -722,6 +735,88 @@ mod tests {
             .unwrap();
         assert_eq!(fs::read(fragment.path()).unwrap(), b"1234567\n");
         assert_eq!(writer.bytes, 5);
+        assert!(writer.rollback.is_none());
+        assert_eq!(
+            fs::read(Path::new(&config.directory).join("latest.log")).unwrap(),
+            b"next\n"
+        );
+        drop(writer);
+        fs::remove_dir_all(&config.directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_record_is_truncated_immediately_after_write_error() {
+        let mut config = config();
+        config.max_file_size = None;
+        let mut writer = writer(&config);
+        writer.write_all(b"before\n").unwrap();
+        // Leave unaccounted bytes behind and force the next write to fail.
+        writer.file.as_mut().unwrap().write_all(b"partial").unwrap();
+        let active = Path::new(&config.directory).join("latest.log");
+        writer.file = Some(File::open(&active).unwrap());
+        assert!(writer.write_all(b"next\n").is_err());
+        assert!(writer.rollback.is_none());
+        assert_eq!(writer.bytes, 7);
+        assert_eq!(fs::read(&active).unwrap(), b"before\n");
+        writer.file = Some(OpenOptions::new().append(true).open(&active).unwrap());
+        writer.write_all(b"next\n").unwrap();
+        assert_eq!(fs::read(&active).unwrap(), b"before\nnext\n");
+        drop(writer);
+        fs::remove_dir_all(&config.directory).unwrap();
+    }
+
+    #[test]
+    fn failed_record_truncation_preserves_append_position_without_rotation() {
+        let mut config = config();
+        config.max_file_size = None;
+        let mut writer = writer(&config);
+        writer.write_all(b"before\n").unwrap();
+        writer.file.as_mut().unwrap().write_all(b"partial").unwrap();
+        writer.bytes += 7;
+        writer.rollback = Some(7);
+        writer.write_all(b"next\n").unwrap();
+        assert!(writer.rollback.is_none());
+        assert_eq!(writer.bytes, 12);
+        assert_eq!(writer.state.sequence, 1);
+        assert_eq!(
+            fs::read(Path::new(&config.directory).join("latest.log")).unwrap(),
+            b"before\nnext\n"
+        );
+        drop(writer);
+        fs::remove_dir_all(&config.directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_record_truncation_waits_for_the_active_path_before_retrying() {
+        let config = config();
+        let mut writer = writer(&config);
+        writer.write_all(b"1234567\n").unwrap();
+        writer.file.as_mut().unwrap().write_all(b"partial").unwrap();
+        writer.bytes += 7;
+        writer.rollback = Some(8);
+        let active = Path::new(&config.directory).join("latest.log");
+        let moved = active.with_extension("moved");
+        fs::rename(&active, &moved).unwrap();
+        assert!(writer.write_all(b"next\n").is_err());
+        assert_eq!(writer.rollback, Some(8));
+        assert_eq!(writer.bytes, 15);
+        assert_eq!(writer.state.sequence, 1);
+        assert!(!active.exists());
+        assert_eq!(fs::read(&moved).unwrap(), b"1234567\npartial");
+        fs::rename(&moved, &active).unwrap();
+        writer.write_all(b"next\n").unwrap();
+        assert!(writer.rollback.is_none());
+        assert_eq!(writer.bytes, 5);
+        assert_eq!(writer.state.sequence, 2);
+        assert_eq!(fs::read(&active).unwrap(), b"next\n");
+        let fragment = fs::read_dir(&config.directory)
+            .unwrap()
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().contains(".segment."))
+            .unwrap();
+        assert_eq!(fs::read(fragment.path()).unwrap(), b"1234567\n");
         drop(writer);
         fs::remove_dir_all(&config.directory).unwrap();
     }
