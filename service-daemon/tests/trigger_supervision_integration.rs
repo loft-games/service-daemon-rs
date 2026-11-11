@@ -1,8 +1,11 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
-    DiagnosticGenerationExitKind, DiagnosticLifecycleStats, DiagnosticProviderFailureBoundaryKind,
-    DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind,
-    DiagnosticRestartDecisionKind, ProviderError, Registry, RestartPolicy, ServiceDaemon,
-    ServiceDiagnosticsSnapshot, TT::*, provider, trigger,
+    DaemonInstanceHandle, DiagnosticGenerationExitKind, DiagnosticLifecycleStats,
+    DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureRuntimePhase,
+    DiagnosticProviderFailureSourceKind, DiagnosticRestartDecisionKind, ProviderError, Registry,
+    RestartPolicy, ServiceDaemon, ServiceDiagnosticsSnapshot, TT::*, provider, trigger,
 };
 use std::sync::Arc;
 use std::sync::LazyLock;
@@ -128,7 +131,7 @@ fn phase9_policy() -> RestartPolicy {
 }
 
 async fn wait_for_service_lifecycle<F>(
-    daemon: &ServiceDaemon,
+    daemon: &DaemonInstanceHandle,
     service_name: &str,
     predicate: F,
 ) -> anyhow::Result<ServiceDiagnosticsSnapshot>
@@ -158,7 +161,7 @@ async fn test_topic_host_queue_trigger_dispatches_payload_without_downcast_panic
 -> anyhow::Result<()> {
     TOPIC_HOST_QUEUE_SMOKE_RECEIVED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_topic_host_queue_smoke__")
@@ -171,7 +174,11 @@ async fn test_topic_host_queue_trigger_dispatches_payload_without_downcast_panic
 
     timeout(Duration::from_secs(3), async {
         loop {
-            if TopicHostSmokeQueue::resolve().await.receiver_count() > 0 {
+            if provider_context::published::<TopicHostSmokeQueue>(&daemon)
+                .await
+                .receiver_count()
+                > 0
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -180,7 +187,7 @@ async fn test_topic_host_queue_trigger_dispatches_payload_without_downcast_panic
     })
     .await??;
 
-    TopicHostSmokeQueue::resolve()
+    provider_context::published::<TopicHostSmokeQueue>(&daemon)
         .await
         .push("topic-host-queue-smoke".to_owned())
         .expect("TopicHost smoke queue should have an active receiver");
@@ -212,7 +219,7 @@ async fn test_trigger_dispatch_retry_exhaustion_restarts_and_records_diagnostics
 -> anyhow::Result<()> {
     RETRY_EXHAUSTION_ATTEMPTS.store(0, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_retry_exhaustion_supervision__")
@@ -224,7 +231,9 @@ async fn test_trigger_dispatch_retry_exhaustion_restarts_and_records_diagnostics
     daemon.run().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    RetryExhaustionSignal::resolve().await.notify();
+    provider_context::published::<RetryExhaustionSignal>(&daemon)
+        .await
+        .notify();
 
     let service = wait_for_service_lifecycle(&daemon, "retry_exhaustion_trigger", |lifecycle| {
         lifecycle.recoverable_error >= 1 && lifecycle.backoff_restart >= 1
@@ -253,7 +262,7 @@ async fn test_trigger_dispatch_panic_restarts_and_records_panic_diagnostics() ->
 {
     PANIC_DISPATCH_ATTEMPTS.store(0, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_panic_supervision__")
@@ -265,7 +274,9 @@ async fn test_trigger_dispatch_panic_restarts_and_records_panic_diagnostics() ->
     daemon.run().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    PanicDispatchSignal::resolve().await.notify();
+    provider_context::published::<PanicDispatchSignal>(&daemon)
+        .await
+        .notify();
 
     let service = wait_for_service_lifecycle(&daemon, "panic_dispatch_trigger", |lifecycle| {
         lifecycle.panic >= 1 && lifecycle.backoff_restart >= 1
@@ -293,7 +304,7 @@ async fn test_trigger_dispatch_panic_restarts_and_records_panic_diagnostics() ->
 async fn test_trigger_provider_dependency_init_failure_shuts_down_daemon() -> anyhow::Result<()> {
     TRIGGER_FATAL_PROVIDER_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_provider_init_supervision__")
@@ -347,7 +358,7 @@ async fn test_trigger_provider_dependency_init_failure_shuts_down_daemon() -> an
 async fn test_trigger_dispatch_provider_failure_projects_dispatch_phase() -> anyhow::Result<()> {
     TRIGGER_DISPATCH_FATAL_PROVIDER_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_dispatch_provider_failure__")
@@ -359,7 +370,9 @@ async fn test_trigger_dispatch_provider_failure_projects_dispatch_phase() -> any
     daemon.run().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    DispatchProviderFailureSignal::resolve().await.notify();
+    provider_context::published::<DispatchProviderFailureSignal>(&daemon)
+        .await
+        .notify();
 
     let service =
         wait_for_service_lifecycle(&daemon, "dispatch_provider_failure_trigger", |lifecycle| {
@@ -397,7 +410,7 @@ async fn test_trigger_dispatch_provider_failure_projects_dispatch_phase() -> any
 #[tokio::test]
 async fn test_trigger_shutdown_with_in_flight_dispatch_does_not_record_recoverable_failure()
 -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_shutdown_inflight_supervision__")
@@ -409,7 +422,9 @@ async fn test_trigger_shutdown_with_in_flight_dispatch_does_not_record_recoverab
     daemon.run().await;
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    ShutdownInFlightSignal::resolve().await.notify();
+    provider_context::published::<ShutdownInFlightSignal>(&daemon)
+        .await
+        .notify();
     timeout(Duration::from_secs(2), SHUTDOWN_INFLIGHT_STARTED.notified()).await?;
 
     cancel.cancel();
@@ -432,5 +447,47 @@ async fn test_trigger_shutdown_with_in_flight_dispatch_does_not_record_recoverab
     );
     assert_eq!(service.aggregate.lifecycle.last_restart_decision, None);
 
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_trigger_retry_exhaustion_supervision__"])]
+async fn publish_retryexhaustionsignal(value: Arc<RetryExhaustionSignal>) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_trigger_panic_supervision__"])]
+async fn publish_panicdispatchsignal(value: Arc<PanicDispatchSignal>) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_trigger_dispatch_provider_failure__"])]
+async fn publish_dispatchproviderfailuresignal(
+    value: Arc<DispatchProviderFailureSignal>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_trigger_shutdown_inflight_supervision__"])]
+async fn publish_shutdowninflightsignal(value: Arc<ShutdownInFlightSignal>) -> anyhow::Result<()> {
+    provider_context::publish(&value);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_topic_host_queue_smoke__"])]
+async fn publish_topic_queue(queue: Arc<TopicHostSmokeQueue>) -> anyhow::Result<()> {
+    provider_context::publish(&queue);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

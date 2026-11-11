@@ -34,10 +34,16 @@ use tokio::runtime::Handle;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
+use uuid::Uuid;
 
 use service_daemon::{
-    BackoffController, RestartPolicy, ServiceDaemon, ServiceId, ServiceScheduling, ServiceStatus,
+    BackoffController, ProviderDependencyWatchSet, RestartPolicy, ServiceDaemon, ServiceEntryId,
+    ServiceInstanceId, ServiceScheduling, ServiceStatus,
 };
+
+fn service_instance_id(index: usize) -> ServiceInstanceId {
+    ServiceInstanceId::new(Uuid::from_u128(index as u128))
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -59,13 +65,13 @@ const SETTLE_DELAY_SECS: u64 = 2;
 type MockServiceFn = fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>;
 type MockShelfValue = Box<dyn Any + Send + Sync>;
 type MockServiceShelf = DashMap<String, MockShelfValue>;
-type MockGlobalShelfMapping = DashMap<ServiceId, MockServiceShelf>;
+type MockGlobalShelfMapping = DashMap<ServiceInstanceId, MockServiceShelf>;
 
 #[allow(dead_code)]
 struct MockDaemonResources {
-    status_plane: DashMap<ServiceId, ServiceStatus>,
+    status_plane: DashMap<ServiceInstanceId, ServiceStatus>,
     shelf: MockGlobalShelfMapping,
-    reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
+    reload_signals: DashMap<ServiceInstanceId, Arc<tokio::sync::Notify>>,
     status_changed: tokio::sync::Notify,
     trigger_configs: DashMap<TypeId, Box<dyn Any + Send + Sync>>,
 }
@@ -84,21 +90,21 @@ impl MockDaemonResources {
 
 #[allow(dead_code)]
 struct MockServiceDescription {
-    id: ServiceId,
+    entry_id: ServiceEntryId,
     entry: &'static (),
-    cancellation_token: CancellationToken,
+    instance_registry: Arc<()>,
 }
 
 // ---------------------------------------------------------------------------
-// MockSupervisor -- mirrors the private `ServiceSupervisor` in runner.rs
+// MockSupervisor -- mirrors the private `ServiceSupervisor` in supervisor.rs
 // ---------------------------------------------------------------------------
 // IMPORTANT: If `ServiceSupervisor` fields change, update this struct to match.
-// Reference: service-daemon/src/core/service_daemon/runner.rs (ServiceSupervisor)
+// Reference: service-daemon/src/core/service_daemon/runner/supervisor.rs (ServiceSupervisor)
 
 /// Layout-compatible mock of the internal `ServiceSupervisor` struct.
 ///
 /// This type exists solely for memory measurement. Its field types and order
-/// must mirror the real `ServiceSupervisor` defined in `runner.rs`.
+/// must mirror the real `ServiceSupervisor` defined in `supervisor.rs`.
 ///
 /// # Sync Contract
 ///
@@ -160,7 +166,7 @@ struct MockGenerationDiagnosticsHandle {
 
 #[allow(dead_code)]
 struct MockServiceIdentity {
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     name: &'static str,
     cancellation_token: CancellationToken,
     reload_token: CancellationToken,
@@ -171,10 +177,10 @@ struct MockServiceIdentity {
 #[allow(dead_code)]
 struct MockSupervisor {
     // -- Immutable service identity --
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     name: &'static str,
     run: MockServiceFn,
-    watcher: Option<fn() -> BoxFuture<'static, ()>>,
+    watcher: Option<fn() -> ProviderDependencyWatchSet>,
     scheduling: ServiceScheduling,
     body_lanes: MockBodyExecutionLanes,
     body_lane_resolver: MockBodyLaneResolver,
@@ -191,6 +197,7 @@ struct MockSupervisor {
     generation_start: Option<Instant>,
     generation: u64,
     generation_diagnostics: Option<MockGenerationDiagnosticsHandle>,
+    dependency_watch_set: Option<ProviderDependencyWatchSet>,
     reload_token: Option<CancellationToken>,
 }
 
@@ -200,11 +207,11 @@ struct MockSupervisor {
 // not for CI invariants.
 #[cfg(feature = "memory-analysis")]
 const _: () = {
-    const EXPECTED_SIZE: usize = 416;
+    const EXPECTED_SIZE: usize = 448;
     assert!(
         std::mem::size_of::<MockSupervisor>() == EXPECTED_SIZE,
         // If this fails, the real ServiceSupervisor layout has changed.
-        // Update MockSupervisor fields to match runner.rs and adjust EXPECTED_SIZE.
+        // Update MockSupervisor fields to match supervisor.rs and adjust EXPECTED_SIZE.
     );
 };
 
@@ -270,7 +277,10 @@ fn run_static_analysis() {
     print_header("Section 1: Static Analysis (std::mem::size_of)");
 
     let types: Vec<(&str, usize)> = vec![
-        ("ServiceId", std::mem::size_of::<ServiceId>()),
+        (
+            "ServiceInstanceId",
+            std::mem::size_of::<ServiceInstanceId>(),
+        ),
         ("ServiceStatus", std::mem::size_of::<ServiceStatus>()),
         (
             "MockServiceDescription (~= internal ServiceDescription)",
@@ -332,11 +342,11 @@ fn warmup_allocator() {
 
 fn measure_dashmap_status_plane() -> Option<f64> {
     warmup_allocator();
-    let map: DashMap<ServiceId, ServiceStatus> = DashMap::new();
+    let map: DashMap<ServiceInstanceId, ServiceStatus> = DashMap::new();
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            map.insert(ServiceId::new(i), ServiceStatus::Healthy);
+            map.insert(service_instance_id(i), ServiceStatus::Healthy);
         }
         std::hint::black_box(&map);
     })?;
@@ -346,11 +356,11 @@ fn measure_dashmap_status_plane() -> Option<f64> {
 
 fn measure_dashmap_reload_signals() -> Option<f64> {
     warmup_allocator();
-    let map: DashMap<ServiceId, Arc<tokio::sync::Notify>> = DashMap::new();
+    let map: DashMap<ServiceInstanceId, Arc<tokio::sync::Notify>> = DashMap::new();
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            map.insert(ServiceId::new(i), Arc::new(tokio::sync::Notify::new()));
+            map.insert(service_instance_id(i), Arc::new(tokio::sync::Notify::new()));
         }
         std::hint::black_box(&map);
     })?;
@@ -383,7 +393,7 @@ fn measure_supervisor_heap_box() -> Option<f64> {
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
             boxes.push(Box::new(MockSupervisor {
-                service_id: ServiceId::new(i),
+                service_instance_id: service_instance_id(i),
                 name: "bench",
                 run: |_| Box::pin(async { Ok(()) }),
                 watcher: None,
@@ -405,6 +415,7 @@ fn measure_supervisor_heap_box() -> Option<f64> {
                 generation_start: None,
                 generation: 0,
                 generation_diagnostics: None,
+                dependency_watch_set: None,
                 reload_token: None,
             }));
         }
@@ -420,7 +431,11 @@ fn measure_tracing_spans() -> Option<f64> {
 
     let delta = measure_rss_delta(|| {
         for i in 0..ISOLATION_COUNT {
-            spans.push(info_span!("service", name = "bench", service_id = i));
+            spans.push(info_span!(
+                "service",
+                name = "bench",
+                service_instance_id = i
+            ));
         }
         std::hint::black_box(&spans);
     })?;
@@ -450,7 +465,7 @@ async fn measure_tokio_task_spawn() -> Option<f64> {
 
 async fn measure_hashmap_join_handles() -> Option<f64> {
     warmup_allocator();
-    let mut map: HashMap<ServiceId, tokio::task::JoinHandle<()>> =
+    let mut map: HashMap<ServiceInstanceId, tokio::task::JoinHandle<()>> =
         HashMap::with_capacity(ISOLATION_COUNT);
 
     let before = read_rss_bytes()?;
@@ -458,7 +473,7 @@ async fn measure_hashmap_join_handles() -> Option<f64> {
         let handle = tokio::spawn(async {
             tokio::time::sleep(Duration::from_secs(3600)).await;
         });
-        map.insert(ServiceId::new(i), handle);
+        map.insert(service_instance_id(i), handle);
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
     let after = read_rss_bytes()?;
@@ -475,7 +490,7 @@ async fn measure_hashmap_join_handles() -> Option<f64> {
 async fn run_e2e_test() -> Option<(u64, u64, f64)> {
     let baseline = read_rss_bytes()?;
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
 
     // Allow all services to fully initialize.
@@ -522,10 +537,18 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let cost_status = measure_dashmap_status_plane().unwrap_or(0.0);
-    print_row("DashMap<ServiceId, ServiceStatus>", cost_status, "B/entry");
+    print_row(
+        "DashMap<ServiceInstanceId, ServiceStatus>",
+        cost_status,
+        "B/entry",
+    );
 
     let cost_signals = measure_dashmap_reload_signals().unwrap_or(0.0);
-    print_row("DashMap<ServiceId, Arc<Notify>>", cost_signals, "B/entry");
+    print_row(
+        "DashMap<ServiceInstanceId, Arc<Notify>>",
+        cost_signals,
+        "B/entry",
+    );
 
     let cost_token = measure_cancellation_tokens().unwrap_or(0.0);
     print_row("CancellationToken::new()", cost_token, "B/token");
@@ -544,7 +567,11 @@ async fn main() -> anyhow::Result<()> {
     print_row("tokio::spawn (idle future)", cost_task, "B/task");
 
     let cost_map = measure_hashmap_join_handles().await.unwrap_or(0.0);
-    print_row("HashMap<ServiceId, JoinHandle>", cost_map, "B/entry");
+    print_row(
+        "HashMap<ServiceInstanceId, JoinHandle>",
+        cost_map,
+        "B/entry",
+    );
 
     // Per-service total estimate: sum of isolation measurements.
     // In the real framework, the supervisor struct IS the tokio task's future,
@@ -589,8 +616,14 @@ async fn main() -> anyhow::Result<()> {
         print_header("Component Attribution (isolation -> % of E2E delta)");
 
         let components: Vec<(&str, f64)> = vec![
-            ("StatusPlane (DashMap<Id, Status>)", cost_status),
-            ("ReloadSignals (DashMap<Id, Arc<Notify>>)", cost_signals),
+            (
+                "StatusPlane (DashMap<ServiceInstanceId, Status>)",
+                cost_status,
+            ),
+            (
+                "ReloadSignals (DashMap<ServiceInstanceId, Arc<Notify>>)",
+                cost_signals,
+            ),
             ("CancellationTokens (x2)", cost_token * 2.0),
             (
                 "Supervisor Struct (Box<ServiceSupervisor>)",

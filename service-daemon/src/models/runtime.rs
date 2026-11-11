@@ -3,19 +3,112 @@
 //! These read models copy framework facts out of the daemon. They never expose
 //! runtime locks, semaphores, or control handles.
 
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::service::{ServiceId, ServiceScheduling, ServiceStatus};
+use super::service::{ServiceInstanceId, ServiceScheduling, ServiceStatus};
+
+/// Runtime identity for one daemon instance in this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "file-logging", derive(serde::Serialize, serde::Deserialize))]
+pub struct DaemonInstanceId(Uuid);
+
+impl DaemonInstanceId {
+    /// Explicitly construct a daemon instance id.
+    #[inline]
+    pub const fn new(id: Uuid) -> Self {
+        Self(id)
+    }
+
+    /// Allocate a new UUIDv7 daemon instance id.
+    #[inline]
+    pub fn new_v7() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    /// Return the underlying UUID.
+    #[inline]
+    pub const fn as_uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for DaemonInstanceId {
+    fn default() -> Self {
+        Self(Uuid::nil())
+    }
+}
+
+impl FromStr for DaemonInstanceId {
+    type Err = uuid::Error;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let raw = input.strip_prefix("daemon#").unwrap_or(input);
+        Uuid::parse_str(raw).map(Self)
+    }
+}
+
+impl fmt::Display for DaemonInstanceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "daemon#{}", self.0)
+    }
+}
+
+/// Runtime identity for one framework-owned HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg(feature = "high-priority")]
+pub struct HighPriorityShardId(pub u64);
+
+#[cfg(feature = "high-priority")]
+impl fmt::Display for HighPriorityShardId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "hp#{}", self.0)
+    }
+}
+
+/// Best-effort pressure state for a HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg(feature = "high-priority")]
+pub enum HighPriorityShardPressureState {
+    /// The shard has not collected enough observations for a stronger state.
+    Unknown,
+    /// The shard has enough samples and does not currently show pressure.
+    Nominal,
+    /// The shard is showing scheduling pressure.
+    Pressured,
+}
+
+/// Read-only runtime facts for one HighPriority runtime shard.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
+pub struct HighPriorityRuntimeShardSnapshot {
+    /// Runtime shard identity.
+    pub shard_id: HighPriorityShardId,
+    /// Tokio worker threads owned by this shard.
+    pub worker_threads: usize,
+    /// Wall-clock creation time.
+    pub created_at: DateTime<Utc>,
+    /// Currently running service generations assigned to this shard.
+    pub active_generations: usize,
+    /// Service instances last assigned to this shard.
+    pub assigned_instances: usize,
+    /// Best-effort pressure state derived from policy observations.
+    pub pressure_state: HighPriorityShardPressureState,
+}
 
 /// Daemon-level runtime facts.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonRuntimeSnapshot {
     /// Stable identifier for this daemon resource instance.
-    pub daemon_id: Uuid,
+    pub daemon_id: DaemonInstanceId,
     /// Creation time of the daemon resources.
     pub start_time: DateTime<Utc>,
     /// Monotonic elapsed time since creation.
@@ -26,6 +119,9 @@ pub struct DaemonRuntimeSnapshot {
     pub service_count: usize,
     /// Number of triggers observed by a `TriggerRunner`.
     pub trigger_count: usize,
+    /// Framework-owned HighPriority runtime shards.
+    #[cfg(feature = "high-priority")]
+    pub high_priority_shards: Vec<HighPriorityRuntimeShardSnapshot>,
     /// Snapshot generation time.
     pub generated_at: DateTime<Utc>,
 }
@@ -34,11 +130,14 @@ pub struct DaemonRuntimeSnapshot {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceRuntimeSnapshot {
-    /// Registry identity.
-    pub service_id: ServiceId,
+    /// Runtime service instance identity.
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub priority: u8,
     pub declared_scheduling: ServiceScheduling,
+    /// HighPriority shard that last ran this service generation, if applicable.
+    #[cfg(feature = "high-priority")]
+    pub high_priority_shard_id: Option<HighPriorityShardId>,
     /// Current lifecycle status from the daemon status plane.
     pub status: ServiceStatus,
     /// Latest generation number observed by the supervisor.
@@ -58,7 +157,7 @@ pub struct ServiceRuntimeSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadinessServiceError {
     /// Service that produced the error.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub status: ServiceStatus,
     /// Human-readable error summary.
@@ -97,7 +196,7 @@ pub struct ReadinessSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerPressureSnapshot {
     /// Trigger service identity.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
     /// Currently running handler dispatches.
@@ -128,7 +227,7 @@ pub struct TriggerPressureSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TriggerRuntimeSnapshot {
     /// Trigger service identity.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     pub service_name: &'static str,
     pub generation: u64,
     /// Pressure facts observed by the trigger runner.

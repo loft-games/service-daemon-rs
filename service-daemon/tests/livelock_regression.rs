@@ -34,7 +34,7 @@ async fn normal_service() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_livelock_shutdown_responsiveness() -> anyhow::Result<()> {
     // 1. Initialize daemon with multiple noisy services to maximize pressure
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("noisy")

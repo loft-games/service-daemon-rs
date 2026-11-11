@@ -10,7 +10,7 @@ use tokio::sync::{
 };
 use uuid::Uuid;
 
-use crate::{ProviderError, models::ServiceId};
+use crate::{ProviderError, models::ServiceInstanceId};
 
 /// Manages provider snapshots and tracked mutable state.
 ///
@@ -61,6 +61,24 @@ impl<T: 'static + Send + Sync + Clone> StateManager<T> {
 
     pub(crate) fn value_epoch(&self) -> u64 {
         self.epoch_counter().load(Ordering::Acquire)
+    }
+
+    pub(crate) fn snapshot_ready(&self) -> Option<Arc<T>> {
+        if let Some(rx) = self.watch_rx.get() {
+            return Some(rx.borrow().clone());
+        }
+        self.snapshot_cache.get().cloned()
+    }
+
+    pub(crate) fn rwlock_ready(&self) -> Option<Arc<TrackedRwLock<T>>> {
+        self.lock.get().cloned()
+    }
+
+    pub(crate) fn mutex_ready(&self) -> Option<Arc<TrackedMutex<T>>> {
+        self.lock
+            .get()
+            .cloned()
+            .map(|lock| Arc::new(TrackedMutex { inner: lock }))
     }
 
     /// Internal helper to get or initialize the shared notification handle.
@@ -435,9 +453,9 @@ impl<T: Clone> DerefMut for TrackedMutexGuard<'_, T> {
 /// Generates a new UUID v7 message ID and captures the current service ID.
 /// Used by `TrackedNotify` and `TrackedSender` to maintain causal identity.
 #[inline]
-fn capture_message_identity() -> (Uuid, ServiceId) {
+fn capture_message_identity() -> (Uuid, ServiceInstanceId) {
     let msg_id = Uuid::now_v7();
-    let src_id = super::context::api::current_service_id();
+    let src_id = super::context::api::current_service_instance_id();
     (msg_id, src_id)
 }
 
@@ -460,7 +478,7 @@ pub struct TrackedNotify {
     inner: TokioNotify,
     /// The most recently generated message ID and the emitting service's ID.
     /// Protected by a `parking_lot::RwLock` for minimal overhead (no async needed).
-    last_id: PlRwLock<Option<(Uuid, ServiceId)>>,
+    last_id: PlRwLock<Option<(Uuid, ServiceInstanceId)>>,
 }
 
 impl TrackedNotify {
@@ -498,9 +516,9 @@ impl TrackedNotify {
 
     /// Retrieves and clears the most recently generated message identity.
     ///
-    /// Returns `Some((Uuid, ServiceId))` if a signal was emitted since the last call,
+    /// Returns `Some((Uuid, ServiceInstanceId))` if a signal was emitted since the last call,
     /// `None` otherwise. The ID is cleared after reading to prevent reuse.
-    pub fn last_id(&self) -> Option<(Uuid, ServiceId)> {
+    pub fn last_id(&self) -> Option<(Uuid, ServiceInstanceId)> {
         self.last_id.write().take()
     }
 }
@@ -534,7 +552,7 @@ impl Clone for TrackedNotify {
 pub struct TrackedSender<P> {
     inner: tokio::sync::broadcast::Sender<P>,
     /// The most recently generated message ID and emitting service's ID.
-    last_id: PlRwLock<Option<(Uuid, ServiceId)>>,
+    last_id: PlRwLock<Option<(Uuid, ServiceInstanceId)>>,
 }
 
 impl<P: Clone> TrackedSender<P> {
@@ -580,9 +598,9 @@ impl<P: Clone> TrackedSender<P> {
 
     /// Retrieves and clears the most recently generated message identity.
     ///
-    /// Returns `Some((Uuid, ServiceId))` if a message was sent since the last call,
+    /// Returns `Some((Uuid, ServiceInstanceId))` if a message was sent since the last call,
     /// `None` otherwise. The ID is cleared after reading to prevent reuse.
-    pub fn last_id(&self) -> Option<(Uuid, ServiceId)> {
+    pub fn last_id(&self) -> Option<(Uuid, ServiceInstanceId)> {
         self.last_id.write().take()
     }
 }

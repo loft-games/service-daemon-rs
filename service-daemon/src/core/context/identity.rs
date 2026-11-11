@@ -9,7 +9,7 @@
 use dashmap::DashMap;
 use std::any::{Any, TypeId};
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use tokio::task_local;
 use tokio_util::sync::CancellationToken;
 
@@ -17,7 +17,9 @@ use crate::core::diagnostics::{DiagnosticsStore, GenerationDiagnosticsHandle};
 use crate::core::provider_scope::ProviderScope;
 use crate::core::runtime_facts::RuntimeFactsStore;
 use crate::core::trigger_policy_overlay::TriggerPolicyOverlayStore;
-use crate::models::{ServiceId, ServiceStatus};
+use crate::models::{
+    DaemonInstanceId, ServiceCatalogProjection, ServiceControl, ServiceInstanceId, ServiceStatus,
+};
 
 // ---------------------------------------------------------------------------
 // Process-Level Cancellation Token -- shared by ALL ServiceDaemon instances
@@ -37,7 +39,7 @@ pub(crate) fn process_token() -> &'static CancellationToken {
 // Type aliases for the Shelf
 pub(crate) type ShelfValue = Box<dyn Any + Send + Sync>;
 pub(crate) type ServiceShelf = DashMap<String, ShelfValue>;
-pub(crate) type GlobalShelfMapping = DashMap<ServiceId, ServiceShelf>;
+pub(crate) type GlobalShelfMapping = DashMap<ServiceInstanceId, ServiceShelf>;
 
 /// Identity and resource container for a running service daemon.
 ///
@@ -47,13 +49,13 @@ pub(crate) type GlobalShelfMapping = DashMap<ServiceId, ServiceShelf>;
 /// **Not `Clone`** -- callers share ownership via `Arc<DaemonResources>`.
 pub struct DaemonResources {
     /// The current lifecycle status of all services in the registry.
-    /// Indexed by `ServiceId` for safety and performance.
-    pub status_plane: DashMap<ServiceId, ServiceStatus>,
+    /// Indexed by `ServiceInstanceId` for safety and performance.
+    pub status_plane: DashMap<ServiceInstanceId, ServiceStatus>,
     /// Global storage for service-owned arbitrary data (the shelf).
-    /// Keyed by `ServiceId` to prevent same-name services from sharing state.
+    /// Keyed by `ServiceInstanceId` to prevent same-name services from sharing state.
     pub shelf: GlobalShelfMapping,
-    /// Signals for services to reload, indexed by `ServiceId`.
-    pub reload_signals: DashMap<ServiceId, Arc<tokio::sync::Notify>>,
+    /// Signals for services to reload, indexed by `ServiceInstanceId`.
+    pub reload_signals: DashMap<ServiceInstanceId, Arc<tokio::sync::Notify>>,
     /// Global notification for any status change in the STATUS_PLANE.
     pub status_changed: tokio::sync::Notify,
     /// Type-erased registry for trigger-specific configurations.
@@ -64,6 +66,8 @@ pub struct DaemonResources {
     pub(crate) provider_scope: Arc<ProviderScope>,
     pub(crate) runtime_facts: Arc<RuntimeFactsStore>,
     pub(crate) trigger_policy_overlays: Arc<TriggerPolicyOverlayStore>,
+    pub(crate) service_catalog_projection: OnceLock<Arc<ServiceCatalogProjection>>,
+    pub(crate) service_control: OnceLock<Weak<dyn ServiceControl>>,
 }
 
 impl DaemonResources {
@@ -73,7 +77,15 @@ impl DaemonResources {
         Self::new_with_diagnostics(Arc::new(DiagnosticsStore::new()))
     }
 
+    #[cfg(any(test, feature = "simulation"))]
     pub(crate) fn new_with_diagnostics(diagnostics: Arc<DiagnosticsStore>) -> Arc<Self> {
+        Self::new_with_diagnostics_for_daemon(diagnostics, DaemonInstanceId::new_v7())
+    }
+
+    pub(crate) fn new_with_diagnostics_for_daemon(
+        diagnostics: Arc<DiagnosticsStore>,
+        daemon_id: DaemonInstanceId,
+    ) -> Arc<Self> {
         Arc::new(Self {
             status_plane: DashMap::new(),
             shelf: DashMap::new(),
@@ -82,9 +94,31 @@ impl DaemonResources {
             trigger_configs: DashMap::new(),
             diagnostics,
             provider_scope: ProviderScope::new_daemon_scope(),
-            runtime_facts: Arc::new(RuntimeFactsStore::new()),
+            runtime_facts: Arc::new(RuntimeFactsStore::new_for_daemon(daemon_id)),
             trigger_policy_overlays: Arc::new(TriggerPolicyOverlayStore::default()),
+            service_catalog_projection: OnceLock::new(),
+            service_control: OnceLock::new(),
         })
+    }
+
+    pub(crate) fn daemon_id(&self) -> DaemonInstanceId {
+        self.runtime_facts.daemon_id()
+    }
+
+    pub(crate) fn set_service_catalog_projection(&self, projection: Arc<ServiceCatalogProjection>) {
+        let _ = self.service_catalog_projection.set(projection);
+    }
+
+    pub(crate) fn service_catalog_projection(&self) -> Option<Arc<ServiceCatalogProjection>> {
+        self.service_catalog_projection.get().cloned()
+    }
+
+    pub(crate) fn set_service_control(&self, control: Arc<dyn ServiceControl>) {
+        let _ = self.service_control.set(Arc::downgrade(&control));
+    }
+
+    pub(crate) fn service_control(&self) -> Option<Arc<dyn ServiceControl>> {
+        self.service_control.get().and_then(Weak::upgrade)
     }
 }
 
@@ -96,7 +130,7 @@ impl DaemonResources {
 #[derive(Clone)]
 pub struct ServiceIdentity {
     /// Unique runtime ID -- the strong identity for resource lookups.
-    pub service_id: ServiceId,
+    pub service_instance_id: ServiceInstanceId,
     /// Human-readable name -- the weak identity for logging only.
     ///
     /// Points to the static name in `ServiceEntry`, zero-cost to clone.
@@ -113,13 +147,13 @@ impl ServiceIdentity {
     /// Creates a new ServiceIdentity with the handshake flag set to false.
     #[cfg(test)]
     pub(crate) fn new(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         name: &'static str,
         cancellation_token: CancellationToken,
         reload_token: CancellationToken,
     ) -> Self {
         Self {
-            service_id,
+            service_instance_id,
             name,
             cancellation_token,
             reload_token,
@@ -130,14 +164,14 @@ impl ServiceIdentity {
 
     #[cfg(test)]
     pub(crate) fn new_with_diagnostics(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         name: &'static str,
         cancellation_token: CancellationToken,
         reload_token: CancellationToken,
         diagnostics: GenerationDiagnosticsHandle,
     ) -> Self {
         Self::new_generation_with_diagnostics(
-            service_id,
+            service_instance_id,
             name,
             cancellation_token,
             reload_token,
@@ -146,14 +180,14 @@ impl ServiceIdentity {
     }
 
     pub(crate) fn new_generation_with_diagnostics(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         name: &'static str,
         cancellation_token: CancellationToken,
         reload_token: CancellationToken,
         diagnostics: GenerationDiagnosticsHandle,
     ) -> Self {
         Self {
-            service_id,
+            service_instance_id,
             name,
             cancellation_token,
             reload_token,

@@ -10,7 +10,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, OnceLock};
 
-use crate::models::{ServiceId, service::InstanceId};
+use crate::models::{ServiceInstanceId, service::TriggerInstanceId};
 
 /// Log severity level stored as an enum.
 ///
@@ -74,7 +74,7 @@ impl fmt::Display for LogLevel {
 ///
 /// # ID Fields
 ///
-/// The `service_id`, `message_id`, and `instance_id` fields are automatically
+/// The `service_instance_id`, `message_id`, and `trigger_instance_id` fields are automatically
 /// extracted from the current `tracing::Span` context by `DaemonLayer`. They
 /// are `None` for log events that occur outside a service or trigger Span
 /// (e.g., during daemon initialization).
@@ -91,32 +91,32 @@ pub struct LogEvent {
     pub file: Option<Cow<'static, str>>,
     #[cfg_attr(not(feature = "file-logging"), allow(dead_code))]
     pub line: Option<u32>,
-    /// The `ServiceId` of the service that produced this event.
+    /// The `ServiceInstanceId` of the service that produced this event.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub service_id: Option<ServiceId>,
-    /// The `ServiceId` of the service that originally emitted the event.
+    pub service_instance_id: Option<ServiceInstanceId>,
+    /// The `ServiceInstanceId` of the service that originally emitted the event.
     /// Used for causal topology correlation.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub source_service_id: Option<ServiceId>,
+    pub source_service_instance_id: Option<ServiceInstanceId>,
     /// Message ID for causal tracing.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
     pub message_id: Option<Uuid>,
-    /// The trigger instance identifier, combining `ServiceId` and sequence
-    /// number. Extracted from numeric fields or native InstanceId extension.
+    /// The trigger instance identifier, combining `ServiceInstanceId` and sequence
+    /// number. Extracted from span fields or native TriggerInstanceId extension.
     #[cfg_attr(
         feature = "file-logging",
         serde(skip_serializing_if = "Option::is_none")
     )]
-    pub instance_id: Option<InstanceId>,
+    pub trigger_instance_id: Option<TriggerInstanceId>,
     /// Structured error chain captured via `record_error`.
     #[cfg_attr(
         feature = "file-logging",
@@ -126,7 +126,8 @@ pub struct LogEvent {
 }
 
 /// Broadcast queue for log events.
-/// Multiple consumers, such as stderr and file logging, subscribe independently.
+/// Console and file output have separate queues so file-only events cannot fill
+/// the console queue.
 pub struct LogQueue {
     pub tx: broadcast::Sender<Arc<LogEvent>>,
 }
@@ -181,6 +182,53 @@ impl fmt::Display for LogBatchSizeError {
 }
 
 impl std::error::Error for LogBatchSizeError {}
+
+#[cfg(all(test, feature = "file-logging"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_logging_serializes_service_instance_ids_as_uuid_wrappers() {
+        let service_instance_id = ServiceInstanceId::new(
+            Uuid::parse_str("019fe746-6158-7403-82c9-ac72cad515ec").unwrap(),
+        );
+        let source_service_instance_id = ServiceInstanceId::new(
+            Uuid::parse_str("019fe746-6158-7403-82c9-ac6ccaa91ef5").unwrap(),
+        );
+        let trigger_instance_id = TriggerInstanceId::new(service_instance_id, 42);
+        let event = LogEvent {
+            timestamp: Utc::now(),
+            level: LogLevel::Info,
+            target: Cow::Borrowed("test"),
+            message: "serialized identity".to_string(),
+            module_path: None,
+            file: None,
+            line: None,
+            service_instance_id: Some(service_instance_id),
+            source_service_instance_id: Some(source_service_instance_id),
+            message_id: Some(Uuid::parse_str("019fe746-6158-7403-82c9-ac8b7e502cb3").unwrap()),
+            trigger_instance_id: Some(trigger_instance_id),
+            error_chain: None,
+        };
+
+        let json = serde_json::to_value(&event).expect("log event should serialize");
+        assert_eq!(
+            json["service_instance_id"],
+            serde_json::json!("019fe746-6158-7403-82c9-ac72cad515ec")
+        );
+        assert_eq!(
+            json["source_service_instance_id"],
+            serde_json::json!("019fe746-6158-7403-82c9-ac6ccaa91ef5")
+        );
+        assert_eq!(
+            json["trigger_instance_id"]["service_instance_id"],
+            serde_json::json!("019fe746-6158-7403-82c9-ac72cad515ec")
+        );
+        assert_eq!(json["trigger_instance_id"]["seq"], serde_json::json!(42));
+        assert!(json.get("service_instance_id_num").is_none());
+        assert!(json.get("trigger_instance_service_instance_id").is_none());
+    }
+}
 
 /// Global batch size override, set via [`set_log_batch_size()`].
 /// Must be configured before the first call to `get_log_queue()` (which is
@@ -252,7 +300,7 @@ pub(super) fn set_log_batch_size_in(
 
 /// Sets the batch processing size for the log service drain cycle.
 ///
-/// Must be called **before** `init_logging()` or `ServiceDaemon::run()` to
+/// Must be called **before** `init_logging()` or the daemon handle's `run()` to
 /// take effect. The broadcast queue capacity is automatically derived as
 /// `batch_size * 4`.
 ///
@@ -283,7 +331,10 @@ pub(super) fn set_log_batch_size_in(
 /// # Ok::<(), service_daemon::LogBatchSizeError>(())
 /// ```
 pub fn set_log_batch_size(size: NonZeroUsize) -> Result<(), LogBatchSizeError> {
-    set_log_batch_size_in(&LOG_BATCH_SIZE, LOG_QUEUE.get().is_some(), size)
+    let initialized = LOG_QUEUE.get().is_some();
+    #[cfg(feature = "file-logging")]
+    let initialized = initialized || FILE_LOG_QUEUE.get().is_some();
+    set_log_batch_size_in(&LOG_BATCH_SIZE, initialized, size)
 }
 
 impl Default for LogQueue {
@@ -309,4 +360,12 @@ static LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
 /// Gets the log queue, initializing it on first call.
 pub(crate) fn get_log_queue() -> &'static LogQueue {
     LOG_QUEUE.get_or_init(LogQueue::default)
+}
+
+#[cfg(feature = "file-logging")]
+static FILE_LOG_QUEUE: OnceLock<LogQueue> = OnceLock::new();
+
+#[cfg(feature = "file-logging")]
+pub(super) fn get_file_log_queue() -> &'static LogQueue {
+    FILE_LOG_QUEUE.get_or_init(LogQueue::default)
 }

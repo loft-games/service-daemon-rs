@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET="x86_64-pc-windows-msvc"
+
+write_step_summary_header() {
+    if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        return
+    fi
+
+    {
+        echo "## Windows local IPC provider gate"
+        echo
+        echo "- Target: \`${TARGET}\`"
+        echo "- Commands:"
+        echo "  - \`cargo test --target ${TARGET} -p service-daemon --test named_pipe_strategy_tests\`"
+        echo "  - \`cargo test --target ${TARGET} -p service-daemon --test named_pipe_roundtrip_tests\`"
+        echo "  - \`cargo test --target ${TARGET} -p service-daemon --test local_ipc_roundtrip_tests\`"
+        echo "  - \`cargo test --target ${TARGET} -p example-named-pipe\`"
+        echo "  - \`cargo test --target ${TARGET} -p example-local-ipc\`"
+        echo "  - \`cargo test --target ${TARGET} -p example-macro-tests\`"
+        echo
+    } >> "${GITHUB_STEP_SUMMARY}"
+}
+
+write_step_summary_success() {
+    if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+        return
+    fi
+
+    echo "- Result: passed" >> "${GITHUB_STEP_SUMMARY}"
+}
+
+run() {
+    echo "+ $*"
+    "$@"
+}
+
+write_step_summary_header
+
+run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_strategy_tests
+run cargo test --target "${TARGET}" -p service-daemon --test named_pipe_roundtrip_tests
+run cargo test --target "${TARGET}" -p service-daemon --test local_ipc_roundtrip_tests
+run cargo test --target "${TARGET}" -p example-named-pipe
+run cargo test --target "${TARGET}" -p example-local-ipc
+run cargo test --target "${TARGET}" -p example-macro-tests
+
+write_step_summary_success

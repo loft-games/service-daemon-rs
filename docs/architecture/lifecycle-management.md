@@ -4,7 +4,7 @@ The `ServiceDaemon` uses a structured orchestration system to manage service gen
 
 ## 1. Unified Status Plane
 
-All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus>`) managed by `DaemonResources`.
+All services share a central **Status Plane** (`DashMap<ServiceInstanceId, ServiceStatus>`) managed by `DaemonResources`.
 
 | Level | Transitions to | Triggered by |
 |--------|----------------|--------------|
@@ -24,21 +24,21 @@ All services share a central **Status Plane** (`DashMap<ServiceId, ServiceStatus
 
 Service supervisors, dependency watch construction, startup wave orchestration, restart/backoff waits, shutdown coordination, and control diagnostics run on a daemon-owned control runtime. Service and trigger bodies execute through their statically declared scheduling mode:
 
-- `Standard`: host Tokio runtime integration through the runtime that called `ServiceDaemon::run()`.
-- `HighPriority`: daemon-owned low-contention high-priority runtime lane, created lazily with a worker count derived from final declared HighPriority entries.
+- `Standard`: host Tokio runtime integration through the runtime that called the daemon handle's `run()`.
+- `HighPriority`: daemon-owned low-contention high-priority runtime shard pool, created lazily from the final declared HighPriority entries and then managed by the HighPriority runtime policy.
 - `Isolated`: a private OS thread and private Tokio runtime for each generation body.
 
 The supervisor awaits body outcomes through the body-lane bridge, so reload, restart/backoff, fatal/provider-init handling, and shutdown coordination stay in the control plane even when the body runs elsewhere.
 
-Startup control-plane code is split under `core/service_daemon/`: `provider_graph.rs` validates provider dependency cycles and runs reachable eager providers, `runtime.rs` prepares control/high-priority runtimes and probes, and `startup_pipeline.rs` sequences those steps before handing service startup to `runner/wave.rs`.
+Startup control-plane code is split under `core/service_daemon/`: `provider_graph.rs` validates provider dependency cycles and runs reachable eager providers, `runtime.rs` prepares the control runtime with optional HighPriority extension hooks, and `startup_pipeline.rs` sequences those steps before handing service startup to `runner/wave.rs`.
 
-HighPriority worker-count selection happens before runtime allocation and only reads the final daemon service list. Services and triggers are both `ServiceDescription` entries, so declared HighPriority triggers and services contribute equally to the selected worker count. Pressure diagnostics remain advisory and do not rebuild or resize the runtime after creation.
+HighPriority requires the opt-in `high-priority` feature. Startup capacity reads the final daemon service list; declared HighPriority triggers and services contribute equally. The optional controller in `high_priority/runtime.rs` requires fresh instance-level ServiceSleep drift and supporting shard pressure before intervening. It evaluates the same metric after actual new-generation placement and pauses repeated low-benefit interventions. See [HighPriority feedback control](high-priority-feedback.md) for the observation, placement, and convergence boundaries.
 
 ### Scheduling Advisory and Generation Boundaries
 
-Scheduling analysis is intentionally limited to internal recommendations. The analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or request restarts in production. `SchedulingAdvisoryProfile` can disable advisory emission, but it does not change lifecycle, placement, reload, restart, or shutdown behavior.
+When `high-priority` is enabled, scheduling advisory analysis is limited to internal recommendations. The advisory analyzer runs on the control runtime, reads windowed diagnostics, and logs advisory actions; it does not mutate the declared scheduling mode or drive the HighPriority runtime policy. `SchedulingAdvisoryProfile` can disable advisory emission without changing lifecycle or resource intervention. The separate `diagnostics` feature controls topology collection.
 
-A running Tokio future cannot be moved between runtimes. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract; if added, they must happen at a generation boundary inside the same declared mode.
+The framework does not migrate running futures between runtimes. Placement changes happen at generation boundaries through the existing reload path. A valid requested target is consumed by the next generation before ordinary least-loaded placement. All services are reloadable under the lifecycle contract; business continuity and in-flight work handling remain the service author's responsibility. Rollover is not a service failure and does not enter failure backoff or restart-storm rate limiting.
 
 ### 1.1. Provider Dependency Watch Path
 Provider reload propagation distinguishes value mutation from binding mutation:
@@ -63,8 +63,8 @@ sequenceDiagram
     Super->>Super: Spawn Generation N+1
 ```
 
-- **Value mutation**: Managed providers publish through the effective slot's `StateManager` and advance its value epoch. Root slot changes reload daemons that still inherit root; daemon-local slot changes stay inside that daemon.
-- **Binding mutation**: A daemon-local fork or simulation override changes which slot a provider type resolves to for that daemon. The binding epoch changes and dependent generations reload so the next generation resolves the new slot.
+- **Value mutation**: Managed providers publish through the effective slot's `StateManager` and advance its value epoch. Value changes stay inside the owning daemon.
+- **Binding mutation**: A simulation override changes which slot a provider type resolves to for that daemon. The binding epoch changes and dependent generations reload so the next generation resolves the new slot.
 - **Baseline capture**: Each generation constructs its `ProviderDependencyWatchSet` before the service or trigger body can become externally observable. This makes already-published changes level-triggered instead of relying on a retained notification edge.
 - **Dirty tracking**: Acquiring and releasing a write lock without mutating the value does not publish a value change.
 - **Race Safety**: Provider value watches use epoch check / notification arm / re-check loops, and the supervisor races the generation body directly against the dependency watch set. A change published between startup and the first async poll is still observed.
@@ -79,7 +79,7 @@ Fatal outcomes stop the current service generation without entering the retry/ba
 - `ProviderInitError` during lazy service startup: the supervisor treats this as a daemon-wide startup/runtime boundary failure, requests daemon shutdown, and terminates the affected service.
 - Ordinary `Err(...)` and panics are different: they transition the service into `Recovering(...)` and restart with backoff.
 
-A normal `Ok(())` return is also distinct from failure recovery. The supervisor still starts a fresh generation, but it does so immediately and records success on the backoff controller instead of counting the exit as another failure.
+A service generation that returns `Ok(())` without a shutdown or reload control signal is distinct from failure recovery at the Rust result level, but it is still an unexpected service lifecycle termination. The supervisor starts a fresh generation through `RestartPolicy` backoff and records the exit kind as `NormalExit`. Shutdown-driven `Ok(())` remains terminal, and reload-driven `Ok(())` remains an immediate generation replacement.
 
 Trigger handlers run inside trigger service generations. A single handler `Err` is retried by the trigger runner; retry exhaustion and dispatch infrastructure errors are bridged back to the supervisor as recoverable generation failures. Dispatch task panics keep their panic classification, so panic lifecycle counters and backoff behavior remain consistent with ordinary service panics.
 
@@ -90,14 +90,15 @@ Isolated startup failures are intentionally not fatal. If an isolated OS thread,
 Each service generation is registered in an internal diagnostics store when the supervisor enters `Starting`. The generation records:
 
 - statically declared body scheduling mode (`Standard`, `HighPriority`, or `Isolated`);
+- actual body runtime lane and, for HighPriority generations, the selected shard and placement decision;
 - lifecycle outcome classification (`NormalExit`, recoverable error, panic, fatal service error, provider init error, reload, shutdown, or isolated startup failure);
 - reload requests, restart decisions, last restart decision kind, policy/effective restart delay, rate-limited restart flags, and termination;
 - service-level `service_daemon::sleep()` completed/interrupted counts and wakeup drift;
-- runtime heartbeat probe observations for the control plane and body execution lanes.
+- runtime heartbeat probe observations for the control plane, body execution lanes, and HighPriority shards.
 
 The supervisor includes a compact per-generation summary in the outcome tracing event. The public `DaemonDiagnosticsSnapshot` exposes distilled service, generation, and lane summaries through read-only daemon/handle methods. Generation-detail snapshot retention is bounded to the most recent 1024 generations per service so crash loops do not make snapshot collection and sorting unbounded; service and lane aggregates still accumulate across evicted generation details. Standard service and Standard lane summaries can include interpretation labels, confidence, and investigation hints, but those labels are derived from snapshot facts and do not change generation lifecycle, restart/backoff, reload, shutdown, or body placement. The store, windows, evaluator, recommendation fingerprints, thresholds, and mutation paths remain internal. In particular, isolated thread/runtime/bridge startup failures are classified separately, with a private startup failure kind, but still use the recoverable backoff path.
 
-`last_exit_kind` and `last_restart_decision` are intentionally separate lifecycle facts. Clean exits and reloads record an immediate restart decision; recoverable service errors and trigger retry exhaustion record recoverable backoff; service or trigger dispatch panics record panic backoff; isolated startup failures record isolated-startup backoff. Fatal service errors, provider-init terminal errors, and shutdown exits do not synthesize a restart decision because they bypass the restart loop.
+`last_exit_kind` and `last_restart_decision` are intentionally separate lifecycle facts. Service generations that return `Ok(())` without a shutdown or reload control signal record `NormalExit` plus normal-exit backoff; reloads record an immediate restart decision; recoverable service errors and trigger retry exhaustion record recoverable backoff; service or trigger dispatch panics record panic backoff; isolated startup failures record isolated-startup backoff. Fatal service errors, provider-init terminal errors, and shutdown exits do not synthesize a restart decision because they bypass the restart loop.
 
 ### 1.5. `BackoffController` Internals
 The `BackoffController` is a stateful abstraction shared by both `ServiceSupervisor` and `TriggerRunner` (via `RetryInterceptor`). 
@@ -113,7 +114,7 @@ The controller tracks the uptime of the current service generation. When a servi
 #### Restart Storm Guard
 Service supervisors layer an internal restart-storm guard on top of the policy backoff. Recoverable service errors, panics, and isolated startup failures are counted in a short sliding window; once the threshold is reached, the effective restart delay becomes `max(policy_delay, storm_guard_delay)`.
 
-This guard is deliberately not a public `RestartPolicy` knob yet. Clean `Ok(())` exits and reloads reset both the backoff controller and the storm guard, fatal/provider-init outcomes bypass the guard, and shutdown still interrupts any restart wait immediately.
+This guard is deliberately not a public `RestartPolicy` knob yet. Reloads reset both the backoff controller and the storm guard; service generations that return `Ok(())` without a shutdown or reload control signal advance the normal `RestartPolicy` backoff path; fatal/provider-init outcomes bypass the guard, and shutdown still interrupts any restart wait immediately.
 
 ## 2. Wave-Based Orchestration
 
@@ -138,7 +139,7 @@ For minimalist services, any call to `is_shutdown()`, `sleep()`, or `wait_shutdo
 ## 4. State Persistence (The Shelf)
 
 The "Shelf" is a daemon-scoped store where services can deposit data before a reload or after a crash.
-- **Isolation**: Buckets are isolated by `ServiceId`, so two selected services with the same Rust function name cannot share shelf state accidentally.
+- **Isolation**: Buckets are isolated by `ServiceInstanceId`, so two selected services with the same Rust function name cannot share shelf state accidentally.
 - **Survival**: Unlike ordinary in-memory state, Shelf data survives generation termination and is inherited by the next generation of the same selected service.
 
 ## 5. Provider Initialization Errors
@@ -163,6 +164,12 @@ A Provider is considered **fallible** if its definition explicitly returns:
 - `ProviderError::Retryable(...)`
   - The provider reports a transient initialization failure.
   - The framework retries with backoff until `RestartPolicy::provider_init_timeout` elapses, then maps the terminal result to `ProviderInitError::Timeout`.
+- `ProviderError::Unavailable(...)`
+  - In an ordinary `#[provider]`, there is no fallback candidate, so this maps
+    to a fatal provider-init failure.
+  - In a `#[provider_impl]` candidate for a `#[provider_contract]`, this means
+    the candidate does not apply in the current process and the runtime tries
+    the next candidate.
 
 `ProviderInitError` is the framework orchestration boundary. It also covers framework-owned sources that user providers do not construct directly: required environment variable failures, environment parse failures, provider dependency failures, initialization timeout, cancellation, panic translation, and dependency-graph defense errors. Lazy provider-init failures are handled by the supervisor as daemon-wide boundary failures; eager failures stop startup before dependent services become externally observable.
 
@@ -181,6 +188,10 @@ Provider-init failures retain the public `ProviderInitError::{Fatal, Timeout, Ca
 | :--- | :--- | :--- | :--- |
 | User provider returns `ProviderError::Fatal` | `ProviderInitError::Fatal` | `user_provider_fatal` | No retry; treated as daemon-wide provider-init failure. |
 | User provider returns `ProviderError::Retryable` until timeout | `ProviderInitError::Timeout` | `user_provider_retryable_timeout` | Retry/backoff remains bounded by `provider_init_timeout`. |
+| Ordinary provider returns `ProviderError::Unavailable` | `ProviderInitError::Fatal` | `user_provider_fatal` | No fallback exists outside provider-contract candidate chains. |
+| Contract candidate returns `ProviderError::Unavailable` | Next candidate or final `ProviderInitError::Fatal` | candidate chain result | Candidate-level non-applicability, not a degraded provider state. |
+| Contract candidate returns `ProviderError::Retryable` until timeout | Next candidate or final `ProviderInitError::Fatal` | `user_provider_retryable_timeout`, then `user_provider_fatal` if exhausted | Candidate timeout diagnostics retain attempts and recent errors before fallback advances. |
+| Contract candidate panics or returns `ProviderError::Fatal` | `ProviderInitError::Fatal` | `panic` / `user_provider_fatal` | Terminal; no later candidate is attempted. |
 | Required `env` missing | `ProviderInitError::Fatal` | `environment_missing` | Framework-owned configuration failure generated by the macro. |
 | Required `env` parse failure | `ProviderInitError::Fatal` | `environment_parse` | Framework-owned configuration failure generated by the macro. |
 | Dependency provider failure | Propagated `ProviderInitError` | `dependency_provider` at the consuming provider boundary | The downstream provider still owns the terminal message; service identity is recorded by the supervisor. |
@@ -193,13 +204,22 @@ The generated wrapper path (`snapshot_resolve`, `rwlock_resolve`, `mutex_resolve
 
 ### 5.4. Lazy vs. Eager Provider Initialization
 
-The default behavior is **lazy** for all providers (including `Listen`). Lazy initialization happens the first time a selected service, trigger, provider dependency, or helper call resolves that provider in its current effective scope.
+The default behavior is **lazy** for all providers (including `Listen`). Lazy initialization happens when a selected service, trigger, provider dependency, or helper call creates a runtime demand for that provider in its current effective scope.
+
+The daemon handles that demand by asking the provider executor to prepare the relevant dependency graph. The executor initializes provider nodes in dependency order and generated service/trigger/provider wrappers then read already-prepared values. This keeps provider construction from forming language-level `A.await -> B.await -> C.await` initialization chains while preserving the same effective provider slots.
 
 A provider may opt into **eager** initialization via an explicit macro parameter:
 
 - `#[provider(..., eager = true)]`
+- `#[provider_contract(eager = true)]`
 
-Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers resolve through that daemon's provider scope, not by bypassing the scoped bridge. By default the daemon inherits the root provider slot; simulation overrides or internal forks can install a daemon-local slot before eager initialization, so startup seeds the local slot without polluting root state.
+Eager initialization applies only to **reachable** providers (those referenced by the selected `Registry` services and their dependency graph), to avoid unnecessary work. During daemon startup, reachable eager providers and their dependencies are prepared through that daemon's provider scope, not by bypassing the scoped bridge. All providers are daemon-local. A pre-start simulation override seeds its daemon slot and suppresses the overridden constructor; eager does not imply process-wide sharing.
+
+For provider contracts, eager reachability follows the contract's normal
+`ProviderEntry.params`. Candidate dependencies are prepared only after candidate
+ordering selects that attempt. The structural graph still includes every
+candidate edge for cycle detection, but an unused fallback cannot initialize or
+fail during another candidate's successful resolution.
 
 ### 5.5. RestartPolicy reuse
 
@@ -218,7 +238,9 @@ Generated provider helpers expose a low-level `resolve_managed()` path for tests
 
 ### 5.7. Provider ownership boundary
 
-Generated provider resolution uses a root scope plus daemon effective scopes. Calls made outside framework context fall back to the root scope, which preserves convenient helper usage in tests and setup code. Calls made while a daemon is starting or while a service, trigger, or watcher is running use that daemon's effective provider scope.
+Generated provider resolution requires a daemon context and uses only that daemon's per-type slots. No process-wide instance cache exists. Provider definitions remain globally registered, but their instances are isolated across daemon creation and simulation runs. Ordinary generation restarts reuse the owning daemon's provider instances.
+
+Outside daemon context, fallible resolution returns a fatal missing-context error before constructing dependencies. Direct `Arc` helpers and `watch_dependency()` panic with explicit diagnostics; their signatures are unchanged. Tests should resolve inside a test driver service or preinstall simulation overrides, rather than resolving in setup and expecting another daemon to inherit the result. Externally retained `Arc` values can outlive daemon shutdown; there is no forced destruction of caller-owned references.
 
 The effective binding is generation-sensitive: if a daemon-local binding changes, dependent services and triggers reload at a generation boundary. Existing generations are not silently mutated in place; the next generation resolves the new provider slot.
 

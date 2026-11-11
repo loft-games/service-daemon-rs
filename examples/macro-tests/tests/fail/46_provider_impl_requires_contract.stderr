@@ -1,0 +1,17 @@
+error[E0277]: Provider Contract required: `NotAContract` must be marked with `#[provider_contract]`.
+ --> tests/fail/46_provider_impl_requires_contract.rs:7:36
+  |
+7 | pub async fn missing_contract() -> NotAContract {
+  |                                    ^^^^^^^^^^^^ this provider implementation returns `NotAContract`, which is not a provider contract
+  |
+help: the trait `ProviderContract` is not implemented for `NotAContract`
+ --> tests/fail/46_provider_impl_requires_contract.rs:4:1
+  |
+4 | pub struct NotAContract;
+  | ^^^^^^^^^^^^^^^^^^^^^^^
+  = note: Add `#[provider_contract]` to the shared output type, then register implementations with `#[provider_impl]`.
+note: required by a bound in `__service_daemon_assert_provider_contract`
+ --> tests/fail/46_provider_impl_requires_contract.rs:7:36
+  |
+7 | pub async fn missing_contract() -> NotAContract {
+  |                                    ^^^^^^^^^^^^ required by this bound in `__service_daemon_assert_provider_contract`

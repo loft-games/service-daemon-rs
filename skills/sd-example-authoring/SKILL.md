@@ -1,6 +1,6 @@
 ---
 name: sd-example-authoring
-description: "[dev] Author examples/* crates for the service-daemon-rs repo. Use when adding or reviewing a new example crate under examples/, to keep examples framework-topology focused and consistent with repo conventions."
+description: "[dev] Author examples/* crates and their Rust-native validation for service-daemon-rs. Use when adding or reviewing example workloads, integration tests, or calibration evidence associated with an example, keeping framework topology and test ownership aligned."
 ---
 
 # Authoring `examples/*` for service-daemon-rs
@@ -17,6 +17,8 @@ Conventions for adding a new example crate to this repo. Examples demonstrate
   (triggers/web-api add `trigger_handlers.rs`). Use module-level `//!` docs that
   describe the **framework mechanic** the example teaches.
 - Put integration tests under `tests/`.
+- Multi-crate adoption examples need a root `README.md`; their integration tests
+  must start the public service topology instead of validating only a helper call.
 
 ## What an example should (and shouldn't) show
 
@@ -33,17 +35,37 @@ Conventions for adding a new example crate to this repo. Examples demonstrate
 
 Mixed and deliberate:
 
-- Handlers may return `anyhow::Result<()>` and use `?` for ergonomics.
-- But **resource-acquisition paths use an explicit `match`** that returns a
-  structured framework error, so the framework semantics stay visible rather than
-  being swallowed by `?`. See `examples/minimal/src/services.rs`
-  (`ServiceError::runtime_io(...)` branches on `listener.get()` / `local_addr()`).
+- Handlers may return `anyhow::Result<()>` and use `?` for ergonomics where the
+  error meaning is uninteresting.
+- Resource acquisition and IPC I/O paths should use explicit `match`/`if let`
+  branches and, when the example has its own operation semantics, an example-local
+  error enum under `src/models/`. This keeps each possible failure visible to the
+  reader instead of flattening it behind one opaque `?`.
 
-Use the explicit form whenever `?` would obscure what the supervisor observes.
+Use `ServiceError::runtime_io(...)` only when the failure is genuinely part of the
+framework service runtime boundary being demonstrated. Do not wrap example-level
+business or IPC operation errors as service-daemon framework errors just to avoid
+declaring an example-local error type.
+
+## Rust-native validation ownership
+
+Use the workspace's Rust test infrastructure for executable acceptance criteria.
+Implement deterministic evidence validation with typed Rust records and
+`#[test]` cases. Exercise real services and public lifecycle behavior through
+example-backed integration tests using `#[test]` or `#[tokio::test]`.
+
+Keep private runtime controls and internal invariants in the owning module's
+`#[cfg(test)]` tests. Reuse `examples/*` for representative workloads and public
+framework wiring. Place expensive production-default experiments behind explicit
+ignored Rust test entrypoints, with separate fast regression coverage.
+
+Read `reference.md` section "Validation and calibration evidence" when extending
+an experiment's assertions, evidence model, or reproducibility checks.
 
 ## Source of truth
 
-- Reference examples: `examples/minimal/`, `examples/triggers/`, `examples/web-api/`
+- Reference examples: `examples/minimal/`, `examples/triggers/`,
+  `examples/web-api/`, `examples/on-demand/`
 - Contributor workflow: `docs/CONTRIBUTING.md`
   (`cargo test --workspace`, `cargo expand -p example-complete`,
   `cargo clippy --workspace -- -D warnings`, Conventional Commits)

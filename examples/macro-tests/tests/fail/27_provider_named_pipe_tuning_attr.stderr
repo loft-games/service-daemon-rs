@@ -1,0 +1,5 @@
+error: Unknown provider attribute 'pipe_mode'. Supported: env, capacity, eager
+ --> tests/fail/27_provider_named_pipe_tuning_attr.rs:5:47
+  |
+5 | #[provider(NamedPipeConnect(r"\\.\pipe\bad"), pipe_mode = "message")]
+  |                                               ^^^^^^^^^

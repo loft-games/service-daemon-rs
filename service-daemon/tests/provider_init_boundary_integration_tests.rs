@@ -1,14 +1,18 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use futures::FutureExt;
 use service_daemon::{
-    DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
+    DaemonInstanceHandle, DiagnosticGenerationExitKind, DiagnosticProviderFailureBoundaryKind,
     DiagnosticProviderFailureKind, DiagnosticProviderFailureRuntimePhase,
     DiagnosticProviderFailureSourceKind, ProviderError, ProviderInitError, Registry, RestartPolicy,
-    ServiceDaemon, TT::*, provider, service, trigger,
+    ServiceDaemon, TT::*, provider, provider_contract, provider_impl, service, trigger,
 };
 use std::any::Any;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::panic::AssertUnwindSafe;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, MutexGuard, Once};
 use std::time::Duration;
@@ -79,6 +83,9 @@ where
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let mut visitor = TraceFieldVisitor::default();
         event.record(&mut visitor);
+        visitor
+            .fields
+            .insert("level".to_owned(), event.metadata().level().to_string());
         self.events
             .lock()
             .unwrap_or_else(|err| panic!("trace capture lock poisoned: {err}"))
@@ -151,6 +158,19 @@ fn assert_trace_source(kind: &str) {
             .iter()
             .any(|event| { event.get("provider_init_source_kind") == Some(&kind.to_owned()) }),
         "expected provider_init_source_kind={kind}, got events: {events:?}"
+    );
+}
+
+fn assert_error_log_contains(fragment: &str) {
+    let events = trace_events();
+    assert!(
+        events.iter().any(|event| {
+            event.get("level").is_some_and(|level| level == "ERROR")
+                && event
+                    .get("message")
+                    .is_some_and(|message| message.contains(fragment))
+        }),
+        "expected ERROR log containing {fragment:?}, got events: {events:?}"
     );
 }
 
@@ -239,6 +259,33 @@ async fn panic_source_provider() -> PanicSourceProvider {
     panic!("phase16 typed source panic")
 }
 
+#[derive(Clone, Debug)]
+#[provider_contract]
+pub struct MissingCandidateContract;
+
+static RETRY_CONTRACT_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+static RETRY_CONTRACT_SERVICE_ENTERED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Debug)]
+#[provider_contract]
+pub struct RetryExhaustedContract;
+
+#[provider_impl]
+async fn retry_exhausted_contract_impl() -> Result<RetryExhaustedContract, ProviderError> {
+    RETRY_CONTRACT_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+    Err(ProviderError::Retryable(
+        "contract candidate remains unavailable".to_owned(),
+    ))
+}
+
+#[service(tags = ["__provider_contract_retry_exhausted__"])]
+async fn retry_exhausted_contract_service(
+    _contract: Arc<RetryExhaustedContract>,
+) -> anyhow::Result<()> {
+    RETRY_CONTRACT_SERVICE_ENTERED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
 fn phase16_policy() -> RestartPolicy {
     RestartPolicy::builder()
         .initial_delay(Duration::from_millis(5))
@@ -250,8 +297,10 @@ fn phase16_policy() -> RestartPolicy {
         .build()
 }
 
-async fn run_until_provider_init_shutdown(tag: &'static str) -> anyhow::Result<ServiceDaemon> {
-    let mut daemon = ServiceDaemon::builder()
+async fn run_until_provider_init_shutdown(
+    tag: &'static str,
+) -> anyhow::Result<DaemonInstanceHandle> {
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag(tag).build())
         .with_restart_policy(phase16_policy())
         .build();
@@ -264,7 +313,13 @@ async fn run_until_provider_init_shutdown(tag: &'static str) -> anyhow::Result<S
     Ok(daemon)
 }
 
-fn assert_provider_init_exit(daemon: &ServiceDaemon, service_name: &str) {
+fn provider_init_boundary_source_location(prefix: &str) -> String {
+    let file = Path::new("service-daemon")
+        .join("tests")
+        .join("provider_init_boundary_integration_tests.rs");
+    format!("{prefix}{}:", file.display())
+}
+fn assert_provider_init_exit(daemon: &DaemonInstanceHandle, service_name: &str) {
     let diagnostics = daemon.diagnostics_snapshot();
     let service = diagnostics
         .services
@@ -292,87 +347,151 @@ fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_required_env_parse_emits_environment_parse_source() {
-    let _trace_guard = TRACE_LOCK.lock().await;
-    install_trace_capture();
-    clear_trace_events();
     let _env_guard = set_test_env(TRACE_PARSE_ENV_NAME, "not-a-u16");
+    provider_context::run(async move {
+        let _trace_guard = TRACE_LOCK.lock().await;
+        install_trace_capture();
+        clear_trace_events();
 
-    let result = TraceParseEnvToken::resolve().await;
+        let result = TraceParseEnvToken::resolve().await;
 
-    assert!(matches!(
-        result,
-        Err(ProviderInitError::Fatal { provider, .. }) if provider == "TraceParseEnvToken"
-    ));
-    assert_trace_source("environment_parse");
+        assert!(matches!(
+            result,
+            Err(ProviderInitError::Fatal { provider, .. }) if provider == "TraceParseEnvToken"
+        ));
+        assert_trace_source("environment_parse");
+    })
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_dependency_provider_failure_emits_dependency_source() {
-    let _trace_guard = TRACE_LOCK.lock().await;
-    install_trace_capture();
-    clear_trace_events();
-    DEPENDENCY_FATAL_CALLED.store(false, Ordering::SeqCst);
-    DEPENDENCY_FATAL_PARENT_ENTERED.store(false, Ordering::SeqCst);
+    provider_context::run(async move {
+        let _trace_guard = TRACE_LOCK.lock().await;
+        install_trace_capture();
+        clear_trace_events();
+        DEPENDENCY_FATAL_CALLED.store(false, Ordering::SeqCst);
+        DEPENDENCY_FATAL_PARENT_ENTERED.store(false, Ordering::SeqCst);
 
-    let result = FatalParentProvider::resolve().await;
+        let result = FatalParentProvider::resolve().await;
 
-    assert!(DEPENDENCY_FATAL_CALLED.load(Ordering::SeqCst));
-    assert!(!DEPENDENCY_FATAL_PARENT_ENTERED.load(Ordering::SeqCst));
-    assert!(matches!(result, Err(ProviderInitError::Fatal { .. })));
-    assert_trace_source("user_provider_fatal");
-    assert_trace_source("dependency_provider");
+        assert!(DEPENDENCY_FATAL_CALLED.load(Ordering::SeqCst));
+        assert!(!DEPENDENCY_FATAL_PARENT_ENTERED.load(Ordering::SeqCst));
+        assert!(matches!(result, Err(ProviderInitError::Fatal { .. })));
+        assert_trace_source("user_provider_fatal");
+        assert_trace_source("dependency_provider");
+    })
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_provider_panic_emits_panic_source() {
+    provider_context::run(async move {
+        let _trace_guard = TRACE_LOCK.lock().await;
+        install_trace_capture();
+        clear_trace_events();
+
+        let result = <PanicSourceProvider as service_daemon::Provided>::resolve().await;
+
+        assert!(matches!(
+            result,
+            Err(ProviderInitError::Fatal { provider, .. }) if provider == "PanicSourceProvider"
+        ));
+        assert_trace_source("panic");
+    })
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_provider_contract_without_candidates_uses_fatal_boundary_and_error_log() {
+    provider_context::run(async move {
+        let _trace_guard = TRACE_LOCK.lock().await;
+        install_trace_capture();
+        clear_trace_events();
+
+        let result = MissingCandidateContract::resolve().await;
+
+        assert!(matches!(result, Err(ProviderInitError::Fatal { .. })));
+        assert_trace_source("user_provider_fatal");
+        assert_error_log_contains("no registered #[provider_impl] candidates");
+    })
+    .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_provider_contract_retry_timeout_preserves_diagnostics_before_exhaustion() {
     let _trace_guard = TRACE_LOCK.lock().await;
     install_trace_capture();
     clear_trace_events();
+    RETRY_CONTRACT_ATTEMPTS.store(0, Ordering::SeqCst);
+    RETRY_CONTRACT_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let result = <PanicSourceProvider as service_daemon::Provided>::resolve().await;
+    let daemon = run_until_provider_init_shutdown("__provider_contract_retry_exhausted__")
+        .await
+        .expect("retry-exhausted contract daemon should stop at provider boundary");
 
-    assert!(matches!(
-        result,
-        Err(ProviderInitError::Fatal { provider, .. }) if provider == "PanicSourceProvider"
-    ));
-    assert_trace_source("panic");
+    assert!(RETRY_CONTRACT_ATTEMPTS.load(Ordering::SeqCst) > 0);
+    assert!(!RETRY_CONTRACT_SERVICE_ENTERED.load(Ordering::SeqCst));
+    let diagnostics = daemon.diagnostics_snapshot();
+    let candidate_failure = diagnostics
+        .provider_failures
+        .iter()
+        .find(|failure| {
+            failure.provider == "retry_exhausted_contract_impl"
+                && failure.source
+                    == DiagnosticProviderFailureSourceKind::UserProviderRetryableTimeout
+        })
+        .expect("candidate retry timeout should retain its source diagnostics");
+    let retry = candidate_failure
+        .retry
+        .as_ref()
+        .expect("candidate retry timeout should retain retry facts");
+    assert!(retry.attempts > 0);
+    assert!(!retry.recent_errors.is_empty());
+    assert!(diagnostics.provider_failures.iter().any(|failure| {
+        failure.provider == "RetryExhaustedContract"
+            && failure.source == DiagnosticProviderFailureSourceKind::UserProviderFatal
+    }));
+    assert_error_log_contains("exhausted all #[provider_impl] candidates");
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn test_infallible_helper_panic_message_points_to_provider_definition() {
-    let payload = match AssertUnwindSafe(PanicSourceProvider::resolve())
-        .catch_unwind()
-        .await
-    {
-        Ok(_) => panic!("direct helper should panic after provider init panic"),
-        Err(payload) => payload,
-    };
-    let message = panic_payload_message(payload);
+    provider_context::run(async move {
+        let payload = match AssertUnwindSafe(PanicSourceProvider::resolve())
+            .catch_unwind()
+            .await
+        {
+            Ok(_) => panic!("direct helper should panic after provider init panic"),
+            Err(payload) => payload,
+        };
+        let message = panic_payload_message(payload);
 
-    assert!(
-        message.contains("provider `PanicSourceProvider` failed in direct helper `resolve`"),
-        "panic message should name the provider type and generated helper: {message}"
-    );
-    assert!(
-        message.contains("provider_origin=#[provider] function panic_source_provider"),
-        "panic message should point to the provider function: {message}"
-    );
-    assert!(
-        message.contains(
-            "provider_defined_at=service-daemon/tests/provider_init_boundary_integration_tests.rs:"
-        ),
-        "panic message should include the provider definition file: {message}"
-    );
-    assert!(
-        message.contains(
-            "helper_called_at=service-daemon/tests/provider_init_boundary_integration_tests.rs:"
-        ),
-        "panic message should include the direct helper callsite: {message}"
-    );
-    assert!(
-        message.contains("phase16 typed source panic"),
-        "panic message should preserve the original user panic text: {message}"
-    );
+        assert!(
+            message.contains("provider `PanicSourceProvider` failed in direct helper `resolve`"),
+            "panic message should name the provider type and generated helper: {message}"
+        );
+        assert!(
+            message.contains("provider_origin=#[provider] function panic_source_provider"),
+            "panic message should point to the provider function: {message}"
+        );
+
+        assert!(
+            message.contains(&provider_init_boundary_source_location(
+                "provider_defined_at="
+            )),
+            "panic message should include the provider definition file: {message}"
+        );
+        assert!(
+            message.contains(&provider_init_boundary_source_location("helper_called_at=")),
+            "panic message should include the direct helper callsite: {message}"
+        );
+        assert!(
+            message.contains("phase16 typed source panic"),
+            "panic message should preserve the original user panic text: {message}"
+        );
+    })
+    .await
 }
 
 #[tokio::test]

@@ -51,7 +51,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         let semaphore = self.semaphore.clone();
         let current_limit = self.current_limit.clone();
         let trigger_name = self.name;
-        let service_id = self.service_id;
+        let service_instance_id = self.service_instance_id;
         let generation = self.generation;
         let policy_overlays = self.policy_overlays.clone();
 
@@ -69,7 +69,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     || scaling.max_concurrency(),
                     |store| {
                         store.effective_concurrency_limit(
-                            service_id,
+                            service_instance_id,
                             generation,
                             scaling.max_concurrency(),
                         )
@@ -85,7 +85,11 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                             effective_max,
                             &mut idle_since,
                         );
-                        store.reconcile_effective_concurrency(service_id, generation, base_target);
+                        store.reconcile_effective_concurrency(
+                            service_instance_id,
+                            generation,
+                            base_target,
+                        );
                     } else {
                         Self::try_scale_down(
                             &semaphore,
@@ -105,7 +109,11 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 if let Some(store) = &policy_overlays {
                     let base_target =
                         Self::scale_up_target(&scaling, limit, in_flight, effective_max);
-                    store.reconcile_effective_concurrency(service_id, generation, base_target);
+                    store.reconcile_effective_concurrency(
+                        service_instance_id,
+                        generation,
+                        base_target,
+                    );
                 } else {
                     Self::try_scale_up(
                         &semaphore,
@@ -126,14 +134,14 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
         handle: JoinHandle<()>,
     ) -> BoxFuture<'static, DispatchTaskOutcome> {
         let trigger_name = self.name;
-        let service_id = self.service_id;
+        let service_instance_id = self.service_instance_id;
         Box::pin(async move {
             let mut handle = AbortOnDropJoinHandle::new(handle);
             match handle.join().await {
                 Ok(()) => Err(TriggerDispatchFailure::new(
                     TriggerDispatchFailureKind::ScaleMonitorFailed,
                     trigger_name,
-                    service_id,
+                    service_instance_id,
                     None,
                     None,
                     "scale monitor exited unexpectedly",
@@ -141,7 +149,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                 Err(join_error) => Err(TriggerDispatchFailure::new(
                     TriggerDispatchFailureKind::ScaleMonitorFailed,
                     trigger_name,
-                    service_id,
+                    service_instance_id,
                     None,
                     None,
                     format!("scale monitor task failed: {join_error}"),
@@ -288,10 +296,11 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::sync::Arc;
 
     use crate::models::policy::RestartPolicy;
-    use crate::models::service::ServiceId;
+    use crate::models::service::ServiceInstanceId;
     use crate::models::trigger::TriggerHandler;
 
     /// Verifies that the semaphore limits concurrent handler invocations
@@ -521,6 +530,31 @@ mod tests {
         );
     }
 
+    proptest! {
+        #[test]
+        fn pressure_limit_is_bounded_for_all_inputs(limit: usize, threshold: usize) {
+            let pressure = TriggerRunner::<()>::pressure_limit_for(limit, threshold);
+            prop_assert!(pressure <= limit);
+        }
+
+        #[test]
+        fn scaled_limit_never_exceeds_policy_max(
+            limit in 0usize..=usize::MAX,
+            scale_factor in 1usize..=usize::MAX,
+            max_concurrency in 1usize..=usize::MAX,
+        ) {
+            let scaling = ScalingPolicy::try_new(
+                1,
+                max_concurrency,
+                scale_factor,
+                1,
+                Duration::ZERO,
+            ).expect("positive scaling policy values are valid");
+            let next = TriggerRunner::<()>::next_scaled_limit(limit, &scaling);
+            prop_assert!(next <= max_concurrency);
+        }
+    }
+
     #[test]
     fn scale_up_ignores_non_growing_limit_without_underflow() {
         let scaling = ScalingPolicy::default();
@@ -552,7 +586,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_no_scaling",
-            ServiceId::new(99),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(99)),
             handler,
             RestartPolicy::default(),
             None, // no scaling
@@ -575,7 +609,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_with_scaling",
-            ServiceId::new(100),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(100)),
             handler,
             RestartPolicy::default(),
             Some(sp),
@@ -596,7 +630,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_default_sp",
-            ServiceId::new(101),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(101)),
             handler,
             RestartPolicy::default(),
             Some(sp),
@@ -625,7 +659,7 @@ mod tests {
         let handler: TriggerHandler<String> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "test_builder_sp",
-            ServiceId::new(102),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(102)),
             handler,
             RestartPolicy::default(),
             Some(sp),
@@ -644,7 +678,7 @@ mod tests {
         let handler: TriggerHandler<()> = Arc::new(|_ctx| Box::pin(async { Ok(()) }));
         let runner = TriggerRunner::new(
             "scale_monitor_trigger",
-            ServiceId::new(205),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(205)),
             handler,
             RestartPolicy::for_testing(),
             Some(ScalingPolicy::default()),

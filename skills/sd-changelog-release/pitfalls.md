@@ -9,6 +9,12 @@ unsure, run `git tag | sort -V` first — that is the release boundary.
 
 ## Putting a change in the wrong subsection
 
+First verify the previous released tag. A bug introduced and corrected within
+the unreleased cycle is not a fix to the released product. Fold it into the final
+feature description when relevant; do not list review fixes or unreleased API
+redesigns as separate `Fixed` or `Changed` entries merely because their commits
+have those prefixes.
+
 A behavior change filed under `Added`, or a new feature filed under `Fixed`,
 misleads readers scanning for breaking/behavioral changes. Map from intent: new
 capability → `Added`, changed behavior → `Changed`, bug fix → `Fixed`,

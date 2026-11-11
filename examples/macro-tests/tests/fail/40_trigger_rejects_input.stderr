@@ -1,0 +1,16 @@
+error: #[input] is only supported by #[service].
+
+         = help: Use #[payload] for trigger payloads.
+
+ --> tests/fail/40_trigger_rejects_input.rs:6:17
+  |
+6 | async fn worker(#[input] event: Event) -> anyhow::Result<()> {
+  |                 ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `TT`
+ --> tests/fail/40_trigger_rejects_input.rs:1:22
+  |
+1 | use service_daemon::{TT, trigger};
+  |                      ^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

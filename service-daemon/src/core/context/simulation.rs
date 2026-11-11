@@ -5,65 +5,118 @@
 //! from production builds.
 
 use crate::core::context::identity::DaemonResources;
-use crate::core::service_daemon::{RestartPolicy, ServiceDaemonBuilder};
-use crate::models::{ServiceId, ServiceStatus};
+use crate::core::service_daemon::{DaemonInstanceHandle, RestartPolicy, ServiceDaemonBuilder};
+use crate::models::{
+    DaemonInstanceId, Registry, Result as ServiceResult, ServiceHandle, ServiceInstanceHandle,
+    ServiceInstanceId, ServiceStatus,
+};
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
-/// A handle for updating daemon resources during a simulation run.
+/// A handle for controlling and inspecting one simulation daemon.
 ///
-/// `SimulationHandle` holds `Arc`-backed daemon resources, so updates are
-/// visible to services that use the same simulation daemon.
+/// `SimulationHandle` is the public simulation API surface. It delegates daemon
+/// lifecycle work to the underlying [`DaemonInstanceHandle`] and sends
+/// simulation-only mutations through daemon-owned hooks.
 ///
 /// # Example
 /// ```rust,ignore
-/// let (daemon, handle) = ctx.run().await;
+/// let simulation = MockContext::builder()
+///     .with_registry(Registry::builder().with_tag("test").build())
+///     .build();
 ///
-/// // Phase 2: mid-flight mutation
-/// handle.set_shelf::<String>(svc_id, "db_url", "new://host".into());
-/// handle.set_status(svc_id, ServiceStatus::NeedReload);
+/// simulation.run().await;
+/// let instance = simulation.service_instances()[0].clone();
+/// simulation.set_shelf::<String>(&instance, "db_url", "new://host".into());
+/// simulation.set_status(&instance, ServiceStatus::NeedReload);
 /// ```
 #[derive(Clone)]
 pub struct SimulationHandle {
-    /// Reference to the daemon's shared resources.
-    resources: Arc<DaemonResources>,
+    daemon: DaemonInstanceHandle,
 }
 
 impl SimulationHandle {
-    /// Creates a new `SimulationHandle` wrapping the given resources.
-    pub(crate) fn new(resources: Arc<DaemonResources>) -> Self {
-        Self { resources }
+    /// Creates a new `SimulationHandle` wrapping the given daemon.
+    pub(crate) fn new(daemon: DaemonInstanceHandle) -> Self {
+        Self { daemon }
     }
 
-    /// Dynamically update a shelf entry for the specified service.
+    /// Returns the daemon instance controlled by this simulation.
+    pub fn daemon(&self) -> &DaemonInstanceHandle {
+        &self.daemon
+    }
+
+    /// Return this simulation daemon identity.
+    pub fn id(&self) -> DaemonInstanceId {
+        self.daemon.id()
+    }
+
+    /// Get the cancellation token for this simulation daemon.
+    pub fn cancel_token(&self) -> CancellationToken {
+        self.daemon.cancel_token()
+    }
+
+    /// Start the simulation daemon in the background.
+    pub async fn run(&self) {
+        self.daemon.run().await;
+    }
+
+    /// Wait for the simulation daemon to stop.
+    pub async fn wait(&self) -> ServiceResult<()> {
+        self.daemon.wait().await
+    }
+
+    /// Trigger graceful shutdown of the simulation daemon.
+    pub fn shutdown(&self) {
+        self.daemon.shutdown();
+    }
+
+    /// Run the simulation daemon for a limited duration and then stop services.
+    pub async fn run_for_duration(&self, duration: Duration) -> ServiceResult<()> {
+        self.daemon.simulation_run_for_duration(duration).await
+    }
+
+    /// Return all service instances owned by this simulation daemon.
+    pub fn service_instances(&self) -> Vec<ServiceInstanceHandle> {
+        self.daemon.service_instances()
+    }
+
+    /// Return service instances for one service definition selected by this daemon.
+    pub fn service_instances_for(&self, handle: &ServiceHandle) -> Vec<ServiceInstanceHandle> {
+        self.daemon.service_instances_for(handle)
+    }
+
+    /// Dynamically update a shelf entry for the specified service instance.
     ///
     /// This simulates external state changes (e.g., a config reload, crash recovery
     /// data arriving mid-flight). The change is immediately visible to the service
     /// on its next `unshelve()` call.
-    pub fn set_shelf<T: Any + Send + Sync>(&self, service_id: ServiceId, key: &str, value: T) {
-        let entry = self.resources.shelf.entry(service_id).or_default();
-        entry.insert(key.to_string(), Box::new(value));
+    pub fn set_shelf<T: Any + Send + Sync>(
+        &self,
+        handle: &ServiceInstanceHandle,
+        key: &str,
+        value: T,
+    ) -> bool {
+        self.daemon.simulation_set_shelf(handle, key, value)
     }
 
-    /// Dynamically override the lifecycle status of a service.
+    /// Dynamically override the lifecycle status of a service instance.
     ///
     /// This simulates external status transitions (e.g., a dependency going unhealthy,
     /// or an operator manually marking a service for reload).
-    pub fn set_status(&self, service_id: ServiceId, status: ServiceStatus) {
-        self.resources.status_plane.insert(service_id, status);
-        // Notify any watchers that a status change occurred.
-        self.resources.status_changed.notify_waiters();
+    pub fn set_status(&self, handle: &ServiceInstanceHandle, status: ServiceStatus) -> bool {
+        self.daemon.simulation_set_status(handle, status)
     }
 
-    /// Triggers a reload signal for the specified service.
+    /// Triggers a reload signal for the specified service instance.
     ///
     /// If the service has a `Watch` trigger or calls `wait_reload()`, it will
     /// be woken up immediately.
-    pub fn trigger_reload(&self, service_id: &ServiceId) {
-        if let Some(notify) = self.resources.reload_signals.get(service_id) {
-            notify.notify_one();
-        }
+    pub fn trigger_reload(&self, handle: &ServiceInstanceHandle) -> bool {
+        self.daemon.simulation_trigger_reload(handle)
     }
 
     /// Overrides a provider for this simulation daemon only.
@@ -75,32 +128,14 @@ impl SimulationHandle {
     where
         T: 'static + Send + Sync + Clone,
     {
-        self.resources
-            .provider_scope
-            .override_local_slot(Arc::new(value));
-    }
-
-    /// Returns a list of all `ServiceId`s currently visible in the status plane.
-    ///
-    /// This is useful for discovering the runtime IDs assigned by `Registry`,
-    /// which are needed for `set_status()` and `trigger_reload()`.
-    ///
-    /// **Note**: Services only appear here after the runner has spawned them
-    /// and written their initial status. Call this after a short delay to ensure
-    /// services have been registered.
-    pub fn service_ids(&self) -> Vec<ServiceId> {
-        self.resources
-            .status_plane
-            .iter()
-            .map(|entry| *entry.key())
-            .collect()
+        self.daemon.simulation_override_provider(value);
     }
 
     // =========================================================================
     // Safe Read API -- lock-free accessors that return owned values
     // =========================================================================
 
-    /// Reads a shelf value by service ID and key, returning an owned clone.
+    /// Reads a shelf value by service instance handle and key, returning an owned clone.
     ///
     /// This is the **recommended** way to inspect shelf data in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
@@ -108,19 +143,15 @@ impl SimulationHandle {
     ///
     /// # Example
     /// ```rust,ignore
-    /// let val: Option<String> = handle.get_shelf(svc_id, "config_key");
+    /// let val: Option<String> = handle.get_shelf(&instance, "config_key");
     /// assert_eq!(val, Some("expected_value".to_string()));
     /// ```
     pub fn get_shelf<T: Any + Clone + Send + Sync>(
         &self,
-        service_id: ServiceId,
+        handle: &ServiceInstanceHandle,
         key: &str,
     ) -> Option<T> {
-        self.resources.shelf.get(&service_id).and_then(|entry| {
-            entry
-                .get(key)
-                .and_then(|val| val.downcast_ref::<T>().cloned())
-        })
+        self.daemon.simulation_get_shelf(handle, key)
     }
 
     /// Reads the current lifecycle status of a service, returning an owned clone.
@@ -128,32 +159,22 @@ impl SimulationHandle {
     /// This is the **recommended** way to inspect service status in tests.
     /// The internal `DashMap` lock is acquired and released entirely within
     /// this call, making it safe to use across `.await` points.
-    pub fn get_status(&self, service_id: ServiceId) -> Option<ServiceStatus> {
-        self.resources
-            .status_plane
-            .get(&service_id)
-            .map(|s| s.value().clone())
+    pub fn get_status(&self, handle: &ServiceInstanceHandle) -> Option<ServiceStatus> {
+        self.daemon.simulation_get_status(handle)
     }
 
     /// Checks whether a shelf key exists for the specified service.
     ///
     /// Returns `true` if the key is present (regardless of its type).
-    pub fn has_shelf(&self, service_id: ServiceId, key: &str) -> bool {
-        self.resources
-            .shelf
-            .get(&service_id)
-            .is_some_and(|entry| entry.contains_key(key))
+    pub fn has_shelf(&self, handle: &ServiceInstanceHandle, key: &str) -> bool {
+        self.daemon.simulation_has_shelf(handle, key)
     }
 
     /// Returns all shelf key names for the specified service.
     ///
     /// Returns an empty `Vec` if the service has no shelved data.
-    pub fn shelf_keys(&self, service_id: ServiceId) -> Vec<String> {
-        self.resources
-            .shelf
-            .get(&service_id)
-            .map(|entry| entry.iter().map(|kv| kv.key().clone()).collect())
-            .unwrap_or_default()
+    pub fn shelf_keys(&self, handle: &ServiceInstanceHandle) -> Vec<String> {
+        self.daemon.simulation_shelf_keys(handle)
     }
 }
 
@@ -170,6 +191,7 @@ pub struct MockContext;
 /// Builder for `MockContext`.
 pub struct MockContextBuilder {
     resources: Arc<DaemonResources>,
+    registry: Option<Registry>,
     /// Whether to auto-include framework logging services in the simulation.
     /// Default: `true` - matches production behavior.
     enable_logging: bool,
@@ -180,6 +202,7 @@ impl MockContext {
     pub fn builder() -> MockContextBuilder {
         MockContextBuilder {
             resources: DaemonResources::new(),
+            registry: None,
             enable_logging: true,
         }
     }
@@ -192,12 +215,12 @@ impl MockContextBuilder {
     /// and state persistence logic.
     pub fn with_shelf<T: Any + Send + Sync>(
         self,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         key: &str,
         data: T,
     ) -> Self {
         {
-            let entry = self.resources.shelf.entry(service_id).or_default();
+            let entry = self.resources.shelf.entry(service_instance_id).or_default();
             entry.insert(key.to_string(), Box::new(data));
         }
         self
@@ -207,8 +230,14 @@ impl MockContextBuilder {
     ///
     /// This is useful for simulating the status of dependency services or
     /// setting the initial state of the service under test.
-    pub fn with_status(self, service_id: ServiceId, status: ServiceStatus) -> Self {
-        self.resources.status_plane.insert(service_id, status);
+    pub fn with_status(
+        self,
+        service_instance_id: ServiceInstanceId,
+        status: ServiceStatus,
+    ) -> Self {
+        self.resources
+            .status_plane
+            .insert(service_instance_id, status);
         self
     }
 
@@ -216,7 +245,7 @@ impl MockContextBuilder {
     ///
     /// The override is scoped to this sandbox's daemon resources, so eager
     /// provider initialization and service injection see the fake value without
-    /// writing into the root provider slot.
+    /// affecting any other daemon provider slot.
     pub fn with_provider_override<T>(self, value: T) -> Self
     where
         T: 'static + Send + Sync + Clone,
@@ -240,28 +269,36 @@ impl MockContextBuilder {
         self
     }
 
-    /// Builds the `MockContext` and returns a pre-configured `ServiceDaemonBuilder`
-    /// along with a `SimulationHandle` for runtime updates.
+    /// Use a pre-built `Registry` for service discovery inside this simulation.
+    #[must_use]
+    pub fn with_registry(mut self, registry: Registry) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// Builds the `MockContext` and returns a simulation handle.
     ///
-    /// The returned builder:
+    /// The returned handle controls a daemon instance that:
     /// - Has `Registry` isolation enabled (empty registry, no auto-discovery).
     /// - Uses a testing-friendly restart policy.
     /// - Has the pre-filled `DaemonResources` injected.
     /// - Includes framework logging services by default (controlled by `with_logging`).
     ///
-    /// You can further customize it by calling `.with_registry()` to select
-    /// the real service(s) you want to debug via tag filtering.
-    pub fn build(self) -> (ServiceDaemonBuilder, SimulationHandle) {
-        let handle = SimulationHandle::new(self.resources.clone());
-
+    /// Call [`with_registry`](Self::with_registry) to select the real
+    /// service(s) you want to debug via tag filtering.
+    pub fn build(self) -> SimulationHandle {
         let mut builder = ServiceDaemonBuilder::new_isolated()
             .with_resources(self.resources)
             .with_restart_policy(RestartPolicy::for_testing());
+
+        if let Some(registry) = self.registry {
+            builder = builder.with_registry(registry);
+        }
 
         if self.enable_logging {
             builder = builder.with_infra_tags(&["__log__"]);
         }
 
-        (builder, handle)
+        SimulationHandle::new(builder.build())
     }
 }

@@ -8,12 +8,15 @@ use tracing::{error, info, warn};
 use crate::ServiceScheduling;
 use crate::core::context::{__run_daemon_resources_sync_scope, DaemonResources};
 use crate::core::diagnostics::{
-    DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind,
+    DiagnosticsStore, GenerationDiagnosticsHandle, GenerationExitKind, GenerationRegistration,
     RestartDecisionKind as DiagnosticsRestartDecisionKind, RuntimeLane,
 };
 use crate::core::trigger_runner::{TriggerDispatchFailure, TriggerDispatchFailureKind};
 use crate::models::policy::RestartStormGuard;
-use crate::models::{BackoffController, ServiceError, ServiceFn, ServiceId, ServiceStatus};
+use crate::models::{
+    BackoffController, ServiceError, ServiceFn, ServiceInstanceId, ServiceInvocationContext,
+    ServiceStatus,
+};
 use crate::{ProviderDependencyWatchSet, ProviderInitError};
 
 use super::super::parts::{
@@ -91,6 +94,7 @@ impl GenerationExitRecord {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RestartFailureKind {
+    NormalExit,
     RecoverableError,
     Panic,
     IsolatedStartupFailure,
@@ -107,6 +111,9 @@ impl RestartDecision {
     pub(super) fn diagnostics_kind(self) -> DiagnosticsRestartDecisionKind {
         match self {
             Self::Immediate => DiagnosticsRestartDecisionKind::Immediate,
+            Self::WithBackoff(RestartFailureKind::NormalExit) => {
+                DiagnosticsRestartDecisionKind::BackoffNormalExit
+            }
             Self::WithBackoff(RestartFailureKind::RecoverableError) => {
                 DiagnosticsRestartDecisionKind::BackoffRecoverableError
             }
@@ -131,9 +138,10 @@ fn duration_millis(duration: Duration) -> u64 {
 /// Internally driven by a [`SupervisorState`] FSM -- see module-level docs.
 pub(super) struct ServiceSupervisor {
     // -- Immutable service identity --
-    pub(super) service_id: ServiceId,
+    pub(super) service_instance_id: ServiceInstanceId,
     pub(super) name: &'static str,
     pub(super) run: ServiceFn,
+    pub(super) invocation_context: ServiceInvocationContext,
     pub(super) watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub(super) scheduling: ServiceScheduling,
     pub(super) body_lanes: BodyExecutionLanes,
@@ -161,9 +169,10 @@ pub(super) struct ServiceSupervisor {
 impl ServiceSupervisor {
     pub(super) fn new(parts: ServiceSupervisorParts) -> Self {
         let ServiceSupervisorParts {
-            service_id,
+            service_instance_id,
             name,
             run,
+            invocation_context,
             watcher,
             policy,
             scheduling,
@@ -177,9 +186,10 @@ impl ServiceSupervisor {
         } = parts;
 
         Self {
-            service_id,
+            service_instance_id,
             name,
             run,
+            invocation_context,
             watcher,
             scheduling,
             body_lanes,
@@ -206,7 +216,7 @@ impl ServiceSupervisor {
         let initial_status = self
             .resources
             .status_plane
-            .get(&self.service_id)
+            .get(&self.service_instance_id)
             .map(|s| s.value().clone())
             .unwrap_or(ServiceStatus::Initializing);
 
@@ -234,6 +244,17 @@ impl ServiceSupervisor {
         let (next_status, restart_decision, result) = match result {
             Ok(Ok(_)) => {
                 warn!("Service {} exited normally", self.name);
+                if signals.shutdown_requested {
+                    should_restart = false;
+                    return GenerationExitRecord {
+                        next_status: ServiceStatus::Terminated,
+                        should_restart,
+                        should_shutdown_daemon,
+                        restart_decision: RestartDecision::Immediate,
+                        result: GenerationResultKind::NormalExit,
+                        signals,
+                    };
+                }
                 let result = if signals.reload_requested {
                     GenerationResultKind::Reload
                 } else {
@@ -245,7 +266,11 @@ impl ServiceSupervisor {
                     } else {
                         ServiceStatus::Initializing
                     },
-                    RestartDecision::Immediate,
+                    if signals.reload_requested {
+                        RestartDecision::Immediate
+                    } else {
+                        RestartDecision::WithBackoff(RestartFailureKind::NormalExit)
+                    },
                     result,
                 )
             }
@@ -319,10 +344,10 @@ impl ServiceSupervisor {
                     };
                     error!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         trigger = %trigger_failure.trigger_name(),
-                        trigger_service_id = %trigger_failure.service_id(),
+                        trigger_service_id = %trigger_failure.service_instance_id(),
                         instance_seq = ?trigger_failure.instance_seq(),
                         message_id = ?trigger_failure.message_id(),
                         trigger_failure_kind = %trigger_failure.kind().as_str(),
@@ -400,13 +425,13 @@ impl ServiceSupervisor {
 
     /// Waits for the restart delay, allowing early exit on reload or cancellation.
     /// Returns `true` if restart should proceed, `false` if shutdown was requested.
-    /// Immediate restarts after a clean exit or reload do not advance the backoff counter.
+    /// Reload restarts are immediate; ordinary service generation exits use policy backoff.
     pub(super) async fn wait_for_restart(&mut self, decision: RestartDecision) -> bool {
         let RestartDecision::WithBackoff(failure_kind) = decision else {
             self.record_restart_decision(decision, Duration::ZERO, Duration::ZERO, false);
             self.resources
                 .runtime_facts
-                .record_service_restart(self.service_id, None);
+                .record_service_restart(self.service_instance_id, None);
             self.backoff.record_success();
             self.restart_storm.reset();
             return true;
@@ -415,7 +440,7 @@ impl ServiceSupervisor {
         let reload_signal = self
             .resources
             .reload_signals
-            .entry(self.service_id)
+            .entry(self.service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
@@ -425,7 +450,7 @@ impl ServiceSupervisor {
         let restart_delay = storm_decision.effective_delay;
         self.resources
             .runtime_facts
-            .record_service_restart(self.service_id, Some(restart_delay));
+            .record_service_restart(self.service_instance_id, Some(restart_delay));
         self.record_restart_decision(
             decision,
             storm_decision.policy_delay,
@@ -434,7 +459,7 @@ impl ServiceSupervisor {
         );
         warn!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             policy_delay_ms = duration_millis(storm_decision.policy_delay),
             effective_delay_ms = duration_millis(restart_delay),
@@ -449,6 +474,10 @@ impl ServiceSupervisor {
         tokio::select! {
             _ = tokio::time::sleep(restart_delay) => {}
             _ = reload_signal.notified() => {
+                #[cfg(feature = "high-priority")]
+                if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                    accounting.record_reload_signal(self.service_instance_id, self.generation);
+                }
                 info!("Supervisor: Service {} received immediate reload during restart delay", self.name);
                 // Immediate reload -- reset backoff so we restart right away
                 self.backoff.record_success();
@@ -458,10 +487,10 @@ impl ServiceSupervisor {
             _ = self.cancellation_token.cancelled() => {
                 info!("Service {} received shutdown signal during restart delay", self.name);
                 let terminated = ServiceStatus::Terminated;
-                self.resources.status_plane.insert(self.service_id, terminated.clone());
+                self.resources.status_plane.insert(self.service_instance_id, terminated.clone());
                 self.resources
                     .runtime_facts
-                    .record_service_status(self.service_id, &terminated);
+                    .record_service_status(self.service_instance_id, &terminated);
                 self.resources.status_changed.notify_waiters();
                 return false;
             }
@@ -489,18 +518,49 @@ impl ServiceSupervisor {
 
         let start_status = self.determine_start_status();
         self.generation = self.generation.saturating_add(1);
-        let resolved_scheduling =
-            self.body_lane_resolver
-                .resolve(self.service_id, self.generation, self.scheduling);
-        let runtime_lane = RuntimeLane::from(resolved_scheduling);
-        self.generation_diagnostics = Some(self.diagnostics.register_generation(
-            self.service_id,
-            self.name,
+        let resolved_scheduling = self.body_lane_resolver.resolve(
+            self.service_instance_id,
             self.generation,
-            runtime_lane,
-        ));
+            self.scheduling,
+        );
+        let runtime_lane = RuntimeLane::from(resolved_scheduling);
         self.generation_scheduling = Some(resolved_scheduling);
-        self.generation_body_lane = self.body_lanes.resolve(resolved_scheduling);
+        self.generation_body_lane = self.body_lanes.resolve(
+            self.service_instance_id,
+            self.generation,
+            resolved_scheduling,
+        );
+        #[cfg(feature = "high-priority")]
+        if let Some(BodyExecutionLane::HighPriority { accounting, .. }) = &self.generation_body_lane
+        {
+            self.resources
+                .runtime_facts
+                .record_high_priority_shards(accounting.snapshot());
+        }
+        #[cfg(feature = "high-priority")]
+        let (high_priority_shard_id, placement_decision) = self
+            .generation_body_lane
+            .as_ref()
+            .map_or((None, None), |lane| match lane {
+                BodyExecutionLane::HighPriority {
+                    shard_id, decision, ..
+                } => (Some(*shard_id), Some(*decision)),
+                BodyExecutionLane::UnavailableHighPriority(decision) => (None, Some(*decision)),
+                _ => (None, None),
+            });
+        self.generation_diagnostics = Some(self.diagnostics.register_generation_with_placement(
+            GenerationRegistration {
+                service_instance_id: self.service_instance_id,
+                service_name: self.name,
+                generation: self.generation,
+                declared_scheduling: self.scheduling,
+                lane: runtime_lane,
+                #[cfg(feature = "high-priority")]
+                high_priority_shard_id,
+                #[cfg(feature = "high-priority")]
+                placement_decision,
+            },
+        ));
         self.generation_start = Some(Instant::now());
         self.reload_token = Some(CancellationToken::new());
         self.dependency_watch_set = match self.watcher {
@@ -514,7 +574,7 @@ impl ServiceSupervisor {
 
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             declared_scheduling = ?self.scheduling,
             resolved_scheduling = ?resolved_scheduling,
@@ -524,16 +584,27 @@ impl ServiceSupervisor {
             "Starting service generation"
         );
         self.resources.runtime_facts.record_service_started(
-            self.service_id,
+            self.service_instance_id,
             self.generation,
             &start_status,
         );
+        #[cfg(feature = "high-priority")]
+        self.resources
+            .runtime_facts
+            .record_service_high_priority_shard(self.service_instance_id, high_priority_shard_id);
         self.resources
             .status_plane
-            .insert(self.service_id, start_status);
+            .insert(self.service_instance_id, start_status);
         self.resources.status_changed.notify_waiters();
 
-        if self.generation_body_lane.is_none() {
+        #[cfg(feature = "high-priority")]
+        let unavailable_high_priority = matches!(
+            self.generation_body_lane,
+            Some(BodyExecutionLane::UnavailableHighPriority(_))
+        );
+        #[cfg(not(feature = "high-priority"))]
+        let unavailable_high_priority = false;
+        if self.generation_body_lane.is_none() || unavailable_high_priority {
             return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
                 "service '{}' resolved to HighPriority without an available high-priority runtime",
                 self.name
@@ -551,7 +622,7 @@ impl ServiceSupervisor {
         let reload_signal = self
             .resources
             .reload_signals
-            .entry(self.service_id)
+            .entry(self.service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
 
@@ -579,7 +650,7 @@ impl ServiceSupervisor {
 
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             declared_scheduling = ?self.scheduling,
             resolved_scheduling = ?resolved_scheduling,
@@ -589,34 +660,49 @@ impl ServiceSupervisor {
         );
 
         let generation_parts = ServiceGenerationParts {
-            service_id: self.service_id,
+            service_instance_id: self.service_instance_id,
             name: self.name,
             generation: self.generation,
             run: self.run,
-            cancellation_token: self.cancellation_token.clone(),
+            invocation_context: self.invocation_context.clone(),
             reload_token: reload_token.clone(),
             resources: self.resources.clone(),
             diagnostics: diagnostics.clone(),
         };
         let mut generation_future = match &body_lane {
-            BodyExecutionLane::Standard(runtime) | BodyExecutionLane::HighPriority(runtime) => {
+            BodyExecutionLane::Standard(runtime) => {
+                run_body_service_generation(generation_parts, runtime.clone())
+            }
+            #[cfg(feature = "high-priority")]
+            BodyExecutionLane::HighPriority { runtime, .. } => {
                 run_body_service_generation(generation_parts, runtime.clone())
             }
             BodyExecutionLane::Isolated => run_isolated_service_generation(
                 generation_parts,
                 self.isolated_startup_permits.clone(),
             ),
+            #[cfg(feature = "high-priority")]
+            BodyExecutionLane::UnavailableHighPriority(_) => {
+                return SupervisorState::Outcome(Ok(Err(Error::msg(format!(
+                    "service '{}' entered Running without an available high-priority runtime",
+                    self.name
+                )))));
+            }
         };
 
         let result = if let Some(watch_set) = self.dependency_watch_set.take() {
             tokio::select! {
                 res = &mut generation_future => res,
                 change = watch_set.changed() => {
+                    #[cfg(feature = "high-priority")]
+                    if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                        accounting.record_external_reload(self.service_instance_id, self.generation);
+                    }
                     diagnostics.record_reload_requested();
                     reload_token.cancel();
                     info!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         body_lane = ?body_lane,
                         dependency_type_id = ?change.type_id,
@@ -626,11 +712,15 @@ impl ServiceSupervisor {
                     generation_future.await
                 }
                 _ = reload_signal.notified() => {
+                    #[cfg(feature = "high-priority")]
+                    if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                        accounting.record_reload_signal(self.service_instance_id, self.generation);
+                    }
                     diagnostics.record_reload_requested();
                     reload_token.cancel();
                     info!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         body_lane = ?body_lane,
                         "Service reload signal received, waiting for service generation to exit"
@@ -642,11 +732,15 @@ impl ServiceSupervisor {
             tokio::select! {
                 res = &mut generation_future => res,
                 _ = reload_signal.notified() => {
+                    #[cfg(feature = "high-priority")]
+                    if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+                        accounting.record_reload_signal(self.service_instance_id, self.generation);
+                    }
                     diagnostics.record_reload_requested();
                     reload_token.cancel();
                     info!(
                         service = %self.name,
-                        service_id = %self.service_id,
+                        service_instance_id = %self.service_instance_id,
                         generation = self.generation,
                         body_lane = ?body_lane,
                         "Service reload signal received, waiting for service generation to exit"
@@ -664,6 +758,15 @@ impl ServiceSupervisor {
     /// Decides whether the service should restart (--> `Restart`) or stop
     /// permanently (--> `Terminated`).
     pub(super) async fn on_outcome(&mut self, result: ServiceGenerationOutcome) -> SupervisorState {
+        #[cfg(feature = "high-priority")]
+        if let Some(BodyExecutionLane::HighPriority { accounting, .. }) = &self.generation_body_lane
+        {
+            accounting.release_generation(self.service_instance_id, self.generation);
+            self.resources
+                .runtime_facts
+                .record_high_priority_shards(accounting.snapshot());
+        }
+
         let elapsed_ms = self
             .generation_start
             .map(|start| duration_millis(start.elapsed()));
@@ -701,7 +804,7 @@ impl ServiceSupervisor {
 
             info!(
                 service = %self.name,
-                service_id = %self.service_id,
+                service_instance_id = %self.service_instance_id,
                 generation = self.generation,
                 runtime_lane = ?runtime_lane,
                 elapsed_ms,
@@ -724,7 +827,7 @@ impl ServiceSupervisor {
             );
             error!(
                 service = %self.name,
-                service_id = %self.service_id,
+                service_instance_id = %self.service_instance_id,
                 generation = self.generation,
                 message = %message,
                 "Service generation outcome missing reload token"
@@ -732,10 +835,10 @@ impl ServiceSupervisor {
             let recovering = ServiceStatus::Recovering(message);
             self.resources
                 .status_plane
-                .insert(self.service_id, recovering.clone());
+                .insert(self.service_instance_id, recovering.clone());
             self.resources
                 .runtime_facts
-                .record_service_status(self.service_id, &recovering);
+                .record_service_status(self.service_instance_id, &recovering);
             self.resources.status_changed.notify_waiters();
             return SupervisorState::Restart(RestartDecision::WithBackoff(
                 RestartFailureKind::InternalSupervisorError,
@@ -776,7 +879,7 @@ impl ServiceSupervisor {
 
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             runtime_lane = ?runtime_lane,
             next_status = ?exit_record.next_status,
@@ -805,16 +908,16 @@ impl ServiceSupervisor {
         if !exit_record.should_restart {
             self.resources
                 .runtime_facts
-                .record_service_status(self.service_id, &exit_record.next_status);
+                .record_service_status(self.service_instance_id, &exit_record.next_status);
             info!("Service {} marked as fatal, not restarting", self.name);
             return self.terminate();
         }
         self.resources
             .status_plane
-            .insert(self.service_id, exit_record.next_status.clone());
+            .insert(self.service_instance_id, exit_record.next_status.clone());
         self.resources
             .runtime_facts
-            .record_service_status(self.service_id, &exit_record.next_status);
+            .record_service_status(self.service_instance_id, &exit_record.next_status);
         self.resources.status_changed.notify_waiters();
 
         if matches!(
@@ -848,12 +951,16 @@ impl ServiceSupervisor {
 
     /// Mark the service as `Terminated` and notify status listeners.
     fn terminate(&self) -> SupervisorState {
+        #[cfg(feature = "high-priority")]
+        if let Some(accounting) = self.body_lanes.high_priority.as_ref() {
+            accounting.remove_service_instance_generations(self.service_instance_id);
+        }
         if let Some(diagnostics) = self.generation_diagnostics.as_ref() {
             diagnostics.record_terminated();
         }
         info!(
             service = %self.name,
-            service_id = %self.service_id,
+            service_instance_id = %self.service_instance_id,
             generation = self.generation,
             elapsed_ms = self.generation_start.map(|start| duration_millis(start.elapsed())),
             "Service generation terminated"
@@ -861,10 +968,10 @@ impl ServiceSupervisor {
         let terminated = ServiceStatus::Terminated;
         self.resources
             .status_plane
-            .insert(self.service_id, terminated.clone());
+            .insert(self.service_instance_id, terminated.clone());
         self.resources
             .runtime_facts
-            .record_service_status(self.service_id, &terminated);
+            .record_service_status(self.service_instance_id, &terminated);
         self.resources.status_changed.notify_waiters();
         SupervisorState::Terminated
     }
@@ -886,9 +993,10 @@ impl ServiceSupervisor {
 /// Spawn a single service with the given restart policy.
 pub(super) async fn spawn_service(parts: SpawnServiceParts) {
     let SpawnServiceParts {
-        service_id,
+        service_instance_id,
         name,
         run,
+        invocation_context,
         watcher,
         policy,
         scheduling,
@@ -904,9 +1012,10 @@ pub(super) async fn spawn_service(parts: SpawnServiceParts) {
     } = parts;
 
     let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-        service_id,
+        service_instance_id,
         name,
         run,
+        invocation_context,
         watcher,
         policy,
         scheduling,
@@ -923,7 +1032,10 @@ pub(super) async fn spawn_service(parts: SpawnServiceParts) {
         SupervisorSpawnLane::Control(runtime) => runtime.spawn(supervisor.run_loop()),
     };
 
-    running_tasks.lock().await.insert(service_id, handle);
+    running_tasks
+        .lock()
+        .await
+        .insert(service_instance_id, handle);
 }
 #[cfg(test)]
 mod tests {
@@ -1008,12 +1120,15 @@ mod tests {
         }
     }
 
-    fn noop_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn noop_service(_: ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
     }
 
-    fn cancellable_service(token: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn cancellable_service(
+        context: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async move {
+            let token = context.cancellation_token();
             token.cancelled().await;
             Ok(())
         })
@@ -1044,7 +1159,9 @@ mod tests {
         .expect("thread records should reach expected length")
     }
 
-    fn no_live_remap_service(_: CancellationToken) -> BoxFuture<'static, anyhow::Result<()>> {
+    fn no_live_remap_service(
+        _: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async {
             record_current_thread_name(NO_LIVE_REMAP_THREADS.clone()).await;
             crate::done();
@@ -1064,7 +1181,7 @@ mod tests {
     }
 
     fn standard_to_isolated_remap_service(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async {
             record_current_thread_name(STANDARD_TO_ISOLATED_THREADS.clone()).await;
@@ -1079,7 +1196,7 @@ mod tests {
     }
 
     fn isolated_to_standard_remap_service(
-        _: CancellationToken,
+        _: ServiceInvocationContext,
     ) -> BoxFuture<'static, anyhow::Result<()>> {
         Box::pin(async {
             record_current_thread_name(ISOLATED_TO_STANDARD_THREADS.clone()).await;
@@ -1116,16 +1233,23 @@ mod tests {
     fn test_body_lanes() -> BodyExecutionLanes {
         BodyExecutionLanes {
             standard: tokio::runtime::Handle::current(),
+            #[cfg(feature = "high-priority")]
             high_priority: None,
         }
     }
 
     fn test_body_lanes_with_high_priority() -> BodyExecutionLanes {
-        let current = tokio::runtime::Handle::current();
         BodyExecutionLanes {
-            standard: current.clone(),
-            high_priority: Some(current),
+            standard: tokio::runtime::Handle::current(),
+            #[cfg(feature = "high-priority")]
+            high_priority: Some(
+                crate::core::service_daemon::high_priority::HighPriorityRuntimePoolState::for_test_current_runtime(),
+            ),
         }
+    }
+
+    fn test_invocation_context(name: &'static str) -> ServiceInvocationContext {
+        ServiceInvocationContext::new(name, CancellationToken::new(), None)
     }
 
     struct RemapSupervisorShared {
@@ -1135,7 +1259,7 @@ mod tests {
     }
 
     fn remap_supervisor(
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         name: &'static str,
         run: ServiceFn,
         declared_scheduling: ServiceScheduling,
@@ -1143,9 +1267,14 @@ mod tests {
         shared: RemapSupervisorShared,
     ) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
-            service_id,
+            service_instance_id,
             name,
             run,
+            invocation_context: ServiceInvocationContext::new(
+                name,
+                shared.cancellation_token.clone(),
+                None,
+            ),
             watcher: None,
             policy: fast_policy(),
             scheduling: declared_scheduling,
@@ -1171,17 +1300,20 @@ mod tests {
     async fn default_body_lane_resolver_preserves_declared_scheduling_at_generation_start() {
         let declared_lanes = [
             ServiceScheduling::Standard,
+            #[cfg(feature = "high-priority")]
             ServiceScheduling::HighPriority,
             ServiceScheduling::Isolated,
         ];
 
         for (index, declared_scheduling) in declared_lanes.into_iter().enumerate() {
-            let service_id = ServiceId::new(200 + index);
+            let service_instance_id =
+                ServiceInstanceId::new(uuid::Uuid::from_u128((200 + index) as u128));
             let diagnostics = Arc::new(DiagnosticsStore::new());
             let mut supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-                service_id,
+                service_instance_id,
                 name: "default_resolver",
                 run: noop_service,
+                invocation_context: test_invocation_context("default_resolver"),
                 watcher: None,
                 policy: fast_policy(),
                 scheduling: declared_scheduling,
@@ -1203,13 +1335,15 @@ mod tests {
                 supervisor.generation_body_lane.as_ref(),
             ) {
                 (ServiceScheduling::Standard, Some(BodyExecutionLane::Standard(_))) => {}
-                (ServiceScheduling::HighPriority, Some(BodyExecutionLane::HighPriority(_))) => {}
+                #[cfg(feature = "high-priority")]
+                (ServiceScheduling::HighPriority, Some(BodyExecutionLane::HighPriority { .. })) => {
+                }
                 (ServiceScheduling::Isolated, Some(BodyExecutionLane::Isolated)) => {}
                 (_, lane) => panic!("unexpected body lane: {:?}", lane),
             }
             assert_eq!(
                 diagnostics
-                    .generation_snapshot(service_id, 1)
+                    .generation_snapshot(service_instance_id, 1)
                     .expect("generation diagnostics should be registered")
                     .runtime_lane,
                 RuntimeLane::from(declared_scheduling)
@@ -1222,12 +1356,12 @@ mod tests {
         NO_LIVE_REMAP_THREADS.lock().await.clear();
         NO_LIVE_REMAP_RECORD_AGAIN.store(false, Ordering::SeqCst);
         let should_isolate_next_generation = Arc::new(AtomicBool::new(false));
-        let service_id = ServiceId::new(210);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(210));
         let resources = DaemonResources::new();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
         let supervisor = remap_supervisor(
-            service_id,
+            service_instance_id,
             "no_live_remap",
             no_live_remap_service,
             ServiceScheduling::Standard,
@@ -1256,7 +1390,11 @@ mod tests {
 
         let records = wait_for_thread_records(NO_LIVE_REMAP_THREADS.clone(), 2).await;
         assert_ne!(records[1], "svc-no_live_remap");
-        assert!(diagnostics.generation_snapshot(service_id, 2).is_none());
+        assert!(
+            diagnostics
+                .generation_snapshot(service_instance_id, 2)
+                .is_none()
+        );
 
         stop_supervisor(&cancellation_token, handle).await;
     }
@@ -1264,17 +1402,17 @@ mod tests {
     #[tokio::test]
     async fn standard_to_isolated_remap_applies_only_after_reload_boundary() {
         STANDARD_TO_ISOLATED_THREADS.lock().await.clear();
-        let service_id = ServiceId::new(220);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(220));
         let resources = DaemonResources::new();
         let reload_signal = resources
             .reload_signals
-            .entry(service_id)
+            .entry(service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
         let supervisor = remap_supervisor(
-            service_id,
+            service_instance_id,
             "standard_to_isolated_remap",
             standard_to_isolated_remap_service,
             ServiceScheduling::Standard,
@@ -1297,7 +1435,7 @@ mod tests {
         assert_ne!(first_records[0], "svc-standard_to_isolated_remap");
         assert_eq!(
             diagnostics
-                .generation_snapshot(service_id, 1)
+                .generation_snapshot(service_instance_id, 1)
                 .expect("generation 1 diagnostics should exist")
                 .runtime_lane,
             RuntimeLane::Standard
@@ -1307,10 +1445,10 @@ mod tests {
         let records = wait_for_thread_records(STANDARD_TO_ISOLATED_THREADS.clone(), 2).await;
         assert_eq!(records[1], "svc-standard_to_isolated_remap");
         let generation_1 = diagnostics
-            .generation_snapshot(service_id, 1)
+            .generation_snapshot(service_instance_id, 1)
             .expect("generation 1 diagnostics should exist after reload");
         let generation_2 = diagnostics
-            .generation_snapshot(service_id, 2)
+            .generation_snapshot(service_instance_id, 2)
             .expect("generation 2 diagnostics should exist after reload");
         assert_eq!(generation_1.runtime_lane, RuntimeLane::Standard);
         assert_eq!(generation_1.aggregate.lifecycle.reload_requested, 1);
@@ -1323,17 +1461,17 @@ mod tests {
     #[tokio::test]
     async fn isolated_to_standard_remap_applies_only_after_reload_boundary() {
         ISOLATED_TO_STANDARD_THREADS.lock().await.clear();
-        let service_id = ServiceId::new(230);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(230));
         let resources = DaemonResources::new();
         let reload_signal = resources
             .reload_signals
-            .entry(service_id)
+            .entry(service_instance_id)
             .or_insert_with(|| Arc::new(Notify::new()))
             .clone();
         let diagnostics = Arc::new(DiagnosticsStore::new());
         let cancellation_token = CancellationToken::new();
         let supervisor = remap_supervisor(
-            service_id,
+            service_instance_id,
             "isolated_to_standard_remap",
             isolated_to_standard_remap_service,
             ServiceScheduling::Isolated,
@@ -1356,7 +1494,7 @@ mod tests {
         assert_eq!(first_records[0], "svc-isolated_to_standard_remap");
         assert_eq!(
             diagnostics
-                .generation_snapshot(service_id, 1)
+                .generation_snapshot(service_instance_id, 1)
                 .expect("generation 1 diagnostics should exist")
                 .runtime_lane,
             RuntimeLane::Isolated
@@ -1366,10 +1504,10 @@ mod tests {
         let records = wait_for_thread_records(ISOLATED_TO_STANDARD_THREADS.clone(), 2).await;
         assert_ne!(records[1], "svc-isolated_to_standard_remap");
         let generation_1 = diagnostics
-            .generation_snapshot(service_id, 1)
+            .generation_snapshot(service_instance_id, 1)
             .expect("generation 1 diagnostics should exist after reload");
         let generation_2 = diagnostics
-            .generation_snapshot(service_id, 2)
+            .generation_snapshot(service_instance_id, 2)
             .expect("generation 2 diagnostics should exist after reload");
         assert_eq!(generation_1.runtime_lane, RuntimeLane::Isolated);
         assert_eq!(generation_1.aggregate.lifecycle.reload_requested, 1);
@@ -1382,17 +1520,17 @@ mod tests {
     #[tokio::test]
     async fn body_bridge_returns_scoped_generation_outcome() {
         let store = Arc::new(DiagnosticsStore::new());
-        let service_id = ServiceId::new(42);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
         let parts = ServiceGenerationParts {
-            service_id,
+            service_instance_id,
             name: "body_bridge",
             generation: 1,
             run: noop_service,
-            cancellation_token: CancellationToken::new(),
+            invocation_context: test_invocation_context("body_bridge"),
             reload_token: CancellationToken::new(),
             resources: DaemonResources::new(),
             diagnostics: store.register_generation(
-                service_id,
+                service_instance_id,
                 "body_bridge",
                 1,
                 RuntimeLane::Standard,
@@ -1445,16 +1583,17 @@ mod tests {
             .thread_name("test-control")
             .build()
             .expect("control runtime should build");
-        let service_id = ServiceId::new(77);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(77));
         let running_tasks = Arc::new(Mutex::new(HashMap::new()));
         let resources = DaemonResources::new();
         let cancellation_token = CancellationToken::new();
         let daemon_token = CancellationToken::new();
 
         spawn_service(SpawnServiceParts {
-            service_id,
+            service_instance_id,
             name: "control_watcher",
             run: cancellable_service,
+            invocation_context: test_invocation_context("control_watcher"),
             watcher: Some(control_runtime_watcher),
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Standard,
@@ -1486,7 +1625,7 @@ mod tests {
         );
 
         cancellation_token.cancel();
-        let handle = { running_tasks.lock().await.remove(&service_id) };
+        let handle = { running_tasks.lock().await.remove(&service_instance_id) };
         if let Some(handle) = handle {
             let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
         }
@@ -1497,9 +1636,10 @@ mod tests {
 
     fn test_supervisor(policy: RestartPolicy) -> ServiceSupervisor {
         ServiceSupervisor::new(ServiceSupervisorParts {
-            service_id: ServiceId::new(1),
+            service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             name: "test_service",
             run: noop_service,
+            invocation_context: test_invocation_context("test_service"),
             watcher: None,
             policy,
             scheduling: ServiceScheduling::Standard,
@@ -1517,11 +1657,55 @@ mod tests {
         supervisor.generation = generation;
         supervisor.reload_token = Some(CancellationToken::new());
         supervisor.generation_diagnostics = Some(supervisor.diagnostics.register_generation(
-            supervisor.service_id,
+            supervisor.service_instance_id,
             supervisor.name,
             generation,
             RuntimeLane::Standard,
         ));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "high-priority")]
+    async fn high_priority_supervisor_distinguishes_late_policy_and_external_reload() {
+        for policy_requested in [false, true] {
+            let mut supervisor = test_supervisor(fast_policy());
+            let state = crate::core::service_daemon::high_priority::HighPriorityRuntimePoolState::for_test_current_runtime();
+            supervisor.body_lanes.high_priority = Some(state.clone());
+            supervisor.scheduling = ServiceScheduling::HighPriority;
+            supervisor.run = |_| {
+                Box::pin(async {
+                    while !crate::is_shutdown() {
+                        crate::sleep(Duration::from_millis(5)).await;
+                    }
+                    Ok(())
+                })
+            };
+            assert!(matches!(
+                supervisor.on_starting().await,
+                SupervisorState::Running
+            ));
+            let instance = supervisor.service_instance_id;
+            if policy_requested {
+                state.request_rollover(instance, 1, crate::models::HighPriorityShardId(0));
+                state.cancel_rollover(instance);
+            }
+            supervisor
+                .resources
+                .reload_signals
+                .entry(instance)
+                .or_insert_with(|| Arc::new(Notify::new()))
+                .notify_one();
+            let outcome = tokio::time::timeout(Duration::from_secs(2), supervisor.on_running())
+                .await
+                .unwrap();
+            assert!(matches!(outcome, SupervisorState::Outcome(_)));
+            assert!(!state.take_external_reload(instance, 1));
+            assert_eq!(state.take_external_reload(instance, 2), !policy_requested);
+            assert!(!state.take_external_reload(instance, 3));
+            state.record_external_reload(instance, 2);
+            supervisor.terminate();
+            assert!(!state.take_external_reload(instance, 3));
+        }
     }
 
     #[test]
@@ -1529,6 +1713,10 @@ mod tests {
         assert_eq!(
             RestartDecision::Immediate.diagnostics_kind(),
             DiagnosticsRestartDecisionKind::Immediate
+        );
+        assert_eq!(
+            RestartDecision::WithBackoff(RestartFailureKind::NormalExit).diagnostics_kind(),
+            DiagnosticsRestartDecisionKind::BackoffNormalExit
         );
         assert_eq!(
             RestartDecision::WithBackoff(RestartFailureKind::RecoverableError).diagnostics_kind(),
@@ -1551,6 +1739,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unexpected_normal_exit_uses_backoff_without_changing_exit_kind() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+
+        let exit_record = supervisor.handle_outcome(Ok(Ok(())), &reload_token);
+
+        assert_eq!(exit_record.next_status, ServiceStatus::Initializing);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(
+            exit_record.restart_decision,
+            RestartDecision::WithBackoff(RestartFailureKind::NormalExit)
+        );
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::NormalExit);
+    }
+
+    #[tokio::test]
+    async fn unexpected_normal_exit_advances_backoff_and_storm_guard() {
+        let mut supervisor = test_supervisor(fast_policy());
+
+        assert!(
+            supervisor
+                .wait_for_restart(RestartDecision::WithBackoff(RestartFailureKind::NormalExit,))
+                .await
+        );
+
+        let storm_decision = supervisor
+            .restart_storm
+            .record_failure(Instant::now(), Duration::from_millis(1));
+        assert_eq!(supervisor.backoff.attempt_count(), 1);
+        assert_eq!(storm_decision.window_failures, 2);
+    }
+
+    #[tokio::test]
     async fn supervisor_records_restart_decision_into_generation_diagnostics() {
         let mut supervisor = test_supervisor(RestartPolicy::for_testing());
         let generation = 1;
@@ -1565,7 +1787,7 @@ mod tests {
 
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(generation.aggregate.lifecycle.restart, 1);
         assert_eq!(generation.aggregate.lifecycle.backoff_restart, 1);
@@ -1585,7 +1807,7 @@ mod tests {
 
         let service = supervisor
             .diagnostics
-            .service_snapshot(supervisor.service_id)
+            .service_snapshot(supervisor.service_instance_id)
             .expect("service diagnostics should be present");
         assert_eq!(
             service.aggregate.lifecycle.last_restart_decision,
@@ -1613,7 +1835,7 @@ mod tests {
 
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(generation.aggregate.lifecycle.restart, 1);
         assert_eq!(generation.aggregate.lifecycle.backoff_restart, 0);
@@ -1647,7 +1869,7 @@ mod tests {
             .find(|event| event.get("restart_decision_kind").is_some())
             .expect("restart trace event should be captured");
         assert_eq!(event.get("service"), Some(&"test_service".to_string()));
-        assert!(event.contains_key("service_id"));
+        assert!(event.contains_key("service_instance_id"));
         assert_eq!(event.get("generation"), Some(&generation.to_string()));
         assert_eq!(
             event.get("restart_decision_kind"),
@@ -1682,7 +1904,7 @@ mod tests {
             .find(|event| event.get("exit_kind").is_some())
             .unwrap_or_else(|| panic!("outcome trace event should be captured: {:?}", *events));
         assert_eq!(event.get("service"), Some(&"test_service".to_string()));
-        assert!(event.contains_key("service_id"));
+        assert!(event.contains_key("service_instance_id"));
         assert_eq!(event.get("generation"), Some(&generation.to_string()));
         assert_eq!(
             event.get("runtime_lane"),
@@ -1702,9 +1924,10 @@ mod tests {
     #[tokio::test]
     async fn isolated_startup_errors_use_backoff_recovery() {
         let supervisor = ServiceSupervisor::new(ServiceSupervisorParts {
-            service_id: ServiceId::new(1),
+            service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             name: "isolated_startup",
             run: noop_service,
+            invocation_context: test_invocation_context("isolated_startup"),
             watcher: None,
             policy: RestartPolicy::for_testing(),
             scheduling: ServiceScheduling::Isolated,
@@ -1796,19 +2019,23 @@ mod tests {
     #[tokio::test]
     async fn isolated_startup_gate_cancellation_returns_startup_failure() {
         let store = Arc::new(DiagnosticsStore::new());
-        let service_id = ServiceId::new(1);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
         let cancellation_token = CancellationToken::new();
         cancellation_token.cancel();
         let generation_parts = ServiceGenerationParts {
-            service_id,
+            service_instance_id,
             name: "isolated_gate",
             generation: 1,
             run: noop_service,
-            cancellation_token,
+            invocation_context: ServiceInvocationContext::new(
+                "isolated_gate",
+                cancellation_token,
+                None,
+            ),
             reload_token: CancellationToken::new(),
             resources: DaemonResources::new(),
             diagnostics: store.register_generation(
-                service_id,
+                service_instance_id,
                 "isolated_gate",
                 1,
                 RuntimeLane::Isolated,
@@ -1892,7 +2119,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::HandlerRetryExhausted,
             "test_trigger",
-            ServiceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             Some(7),
             Some(uuid::Uuid::nil()),
             "retry exhausted",
@@ -1922,7 +2149,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTaskPanic,
             "panic_trigger",
-            ServiceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             Some(8),
             Some(uuid::Uuid::nil()),
             "dispatch panicked",
@@ -2003,7 +2230,7 @@ mod tests {
         let failure = TriggerDispatchFailure::new(
             TriggerDispatchFailureKind::DispatchTaskError,
             "reload_trigger",
-            ServiceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             Some(9),
             Some(uuid::Uuid::nil()),
             "dispatch failed during reload",
@@ -2070,6 +2297,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn normal_exit_after_instance_cancellation_does_not_restart() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        supervisor.cancellation_token.cancel();
+
+        let exit_record = supervisor.handle_outcome(Ok(Ok(())), &reload_token);
+
+        assert_eq!(exit_record.next_status, ServiceStatus::Terminated);
+        assert!(!exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::NormalExit);
+    }
+
+    #[tokio::test]
+    async fn normal_exit_after_reload_request_restarts_immediately() {
+        let supervisor = test_supervisor(RestartPolicy::for_testing());
+        let reload_token = CancellationToken::new();
+        reload_token.cancel();
+
+        let exit_record = supervisor.handle_outcome(Ok(Ok(())), &reload_token);
+
+        assert_eq!(exit_record.next_status, ServiceStatus::Restoring);
+        assert!(exit_record.should_restart);
+        assert!(!exit_record.should_shutdown_daemon);
+        assert_eq!(exit_record.restart_decision, RestartDecision::Immediate);
+        assert_eq!(exit_record.exit_kind(), GenerationExitKind::Reload);
+    }
+
+    #[tokio::test]
     async fn provider_init_errors_bypass_restart_guard_and_shutdown_daemon() {
         let supervisor = test_supervisor(RestartPolicy::for_testing());
         let reload_token = CancellationToken::new();
@@ -2107,7 +2364,7 @@ mod tests {
         assert!(matches!(state, SupervisorState::Terminated));
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(
             generation.aggregate.lifecycle.last_exit_kind,
@@ -2132,7 +2389,7 @@ mod tests {
         assert!(supervisor.daemon_token.is_cancelled());
         let generation = supervisor
             .diagnostics
-            .generation_snapshot(supervisor.service_id, generation)
+            .generation_snapshot(supervisor.service_instance_id, generation)
             .expect("generation diagnostics should be present");
         assert_eq!(
             generation.aggregate.lifecycle.last_exit_kind,
@@ -2172,7 +2429,7 @@ mod tests {
             supervisor
                 .resources
                 .status_plane
-                .get(&supervisor.service_id)
+                .get(&supervisor.service_instance_id)
                 .map(|status| status.value().clone()),
             Some(ServiceStatus::Terminated)
         );
@@ -2185,7 +2442,7 @@ mod tests {
         supervisor
             .resources
             .reload_signals
-            .insert(supervisor.service_id, reload_signal.clone());
+            .insert(supervisor.service_instance_id, reload_signal.clone());
 
         for _ in 0..5 {
             assert!(

@@ -61,10 +61,10 @@ changes layout, this assertion will fail, prompting you to update the mock.
 
 | Component | What It Represents |
 |:----------|:------------------|
-| `DashMap<ServiceId, ServiceStatus>` | StatusPlane entry (lifecycle tracking) |
-| `DashMap<ServiceId, Arc<Notify>>` | ReloadSignals entry (hot-reload support) |
+| `DashMap<ServiceInstanceId, ServiceStatus>` | StatusPlane entry (lifecycle tracking) |
+| `DashMap<ServiceInstanceId, Arc<Notify>>` | ReloadSignals entry (hot-reload support) |
 | `CancellationToken::new()` | Shutdown/reload token (x2 per service) |
 | `Box<ServiceSupervisor>` | Supervisor struct heap allocation |
 | `tracing::info_span!` | Per-service tracing span metadata |
 | `tokio::spawn` | Tokio task runtime cost (future boxing + header) |
-| `HashMap<ServiceId, JoinHandle>` | Running tasks map entry |
+| `HashMap<ServiceInstanceId, JoinHandle>` | Running tasks map entry |

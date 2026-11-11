@@ -4,6 +4,21 @@ In the first chapter, we used a `#[provider]` macro on a simple struct. Real app
 
 For these, the struct + `Default` pattern doesn't fit -- initialization is async, fallible, or depends on configuration. Use a provider function instead.
 
+For a TCP listener, the built-in template already handles setup. Just choose a port:
+
+```rust
+use service_daemon::provider;
+
+#[provider(Listen(8080), env = "ADAPTER_API_BIND", eager = true)]
+pub struct ApiListener;
+```
+
+This listens on all IPv4 interfaces. Set `ADAPTER_API_BIND=9090` to use another
+port, or `ADAPTER_API_BIND=127.0.0.1:9090` for local-only access. Inject
+`Arc<ApiListener>` into your service and call `listener.get()?` to obtain a
+Tokio listener. See the [Listen reference](../provider-best-practices.md#the-listen-template)
+for the complete address options.
+
 ---
 
 ## 1. The Async Provider Function
@@ -99,6 +114,13 @@ async fn fallible_db_provider(url: Arc<Url>) -> Result<MyDb, ProviderError> {
 * Use providers for shared resources such as database pools, MQTT clients, HTTP clients, and configuration.
 * Keep network and disk initialization in `async` provider functions.
 * Return `ProviderError::Retryable` for transient startup failures so the daemon can retry within the configured provider initialization timeout.
+* When a shared library owns the injectable type but the final application must
+  choose how to construct it, use the advanced cross-crate provider pattern:
+  the shared crate marks the injectable type with `#[provider_contract]`, and
+  the application supplies one or more `#[provider_impl]` candidates. This is
+  useful for shared service libraries that should not own deployment-specific
+  connections or configuration. Follow the [cross-crate provider tutorial](./cross-crate-provider-contracts.md)
+  for a complete setup guide, or see the [runnable example](../../../examples/provider-contract/README.md).
 
 > [!TIP]
 > For naming conventions and lifecycle patterns, see the [Provider Strategy](../provider-best-practices.md) guide.

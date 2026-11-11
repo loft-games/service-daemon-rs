@@ -55,32 +55,41 @@ mod tests {
     use service_daemon::{MockContext, Registry};
 
     #[tokio::test]
-    async fn test_two_phase_simulation() -> anyhow::Result<()> {
-        let (builder, handle) = MockContext::builder()
-            .with_shelf::<String>("shelf_reader_service", "config_key", "initial_val".into())
+    async fn simulation_can_seed_and_mutate_shelf() -> anyhow::Result<()> {
+        let registry = Registry::builder().with_tag("sim_shelf").build();
+        let shelf_reader_id = registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "shelf_reader_service")
+            .and_then(|service| service.instance_ids().first().copied())
+            .expect("shelf_reader_service should be selected");
+        let simulation = MockContext::builder()
+            .with_shelf::<String>(shelf_reader_id, "config_key", "initial_val".into())
+            .with_registry(registry)
             .build();
 
-        let daemon = builder
-            .with_registry(Registry::builder().with_tag("sim_shelf").build())
-            .build();
-
-        let cancel = daemon.cancel_token();
+        let cancel = simulation.cancel_token();
+        let runner = simulation.clone();
         let daemon_task = tokio::spawn(async move {
-            let mut daemon = daemon;
-            daemon.run().await;
-            if let Err(err) = daemon.wait().await {
+            runner.run().await;
+            if let Err(err) = runner.wait().await {
                 panic!("daemon.wait() failed: {err}");
             }
         });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = handle.get_shelf("shelf_reader_service", "read_result");
+        let shelf_reader = simulation
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "shelf_reader_service")
+            .expect("shelf_reader_service should have one instance");
+        let result: Option<String> = simulation.get_shelf(&shelf_reader, "read_result");
         assert_eq!(result, Some("initial_val".into()));
 
-        handle.set_shelf::<String>("shelf_reader_service", "dynamic_key", "mid_flight_val".into());
+        simulation.set_shelf::<String>(&shelf_reader, "dynamic_key", "mid_flight_val".into());
 
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let result: Option<String> = handle.get_shelf("shelf_reader_service", "dynamic_result");
+        let result: Option<String> = simulation.get_shelf(&shelf_reader, "dynamic_result");
         assert_eq!(result, Some("mid_flight_val".into()));
 
         cancel.cancel();
@@ -92,15 +101,16 @@ mod tests {
 
 ## 3. The `SimulationHandle`
 
-The `SimulationHandle` lets tests inspect and mutate the running sandbox without reaching into daemon internals.
+The `SimulationHandle` lets tests run, inspect, and mutate the sandbox without reaching into daemon internals.
 
 ### Snapshot Inspection
 
 ```rust,ignore
-let val: Option<String> = handle.get_shelf("svc", "key");
-let status = handle.get_status(svc_id);
+let instance = handle.service_instances()[0].clone();
+let val: Option<String> = handle.get_shelf(&instance, "key");
+let status = handle.get_status(&instance);
 
-if handle.has_shelf("svc", "key") {
+if handle.has_shelf(&instance, "key") {
     // assert or trigger the next test step
 }
 ```
@@ -108,8 +118,8 @@ if handle.has_shelf("svc", "key") {
 ### Mutation API
 
 ```rust,ignore
-handle.set_status(service_id, ServiceStatus::NeedReload);
-handle.set_shelf::<String>("target_svc", "config_override", "NEW_VALUE".into());
+handle.set_status(&instance, ServiceStatus::NeedReload);
+handle.set_shelf::<String>(&instance, "config_override", "NEW_VALUE".into());
 ```
 
 ## 4. Supported test controls

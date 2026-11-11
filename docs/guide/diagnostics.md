@@ -4,13 +4,61 @@
 
 ## 1. `DaemonLayer` pipeline
 
-`DaemonLayer` is a `tracing::Layer` that captures tracing events, extracts service and trigger IDs from the current span context, and pushes structured `LogEvent` instances to a non-blocking broadcast queue. The queue capacity is derived as `batch_size * 4` (default: 128 * 4 = 512 slots; configurable via `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`). Two independent SYSTEM-priority consumers process this queue:
+HighPriority execution and its performance controller require the separate
+`high-priority` Cargo feature (disabled by default). Enable it on the dependency
+before using `#[service(scheduling = HighPriority)]` or the equivalent trigger.
+It observes framework-aware `sleep()` calls and can reload an instance onto
+different execution resources, stopping repeated low-benefit interventions.
+Service authors handle business continuity across reload; the framework does
+not promise an absolute latency SLA. Core lifecycle snapshots and the
+`diagnostics` topology feature do not require HighPriority.
+
+Add `high-priority` to the `features` list of your existing `service-daemon`
+dependency. There is no global public threshold setter. The initial feedback
+path uses completed framework-aware sleep drift, not total business-cycle time
+or queue backlog; a service without valid sleep observations cannot drive it.
+Do not insert artificial sleeps or mandatory round markers just to feed policy.
+Trigger concurrency scaling is a separate mechanism from runtime shard expansion.
+
+A pause warning reports the instance, before/after metric when available,
+placement, resource count, and reason. Insufficient evidence is not low benefit.
+A timed-out policy generation arriving late does not rearm expansion; fresh
+healthy evidence or an explicitly observed external reload can permit evaluation
+again. These are resource-management semantics, not a lossless reload promise.
+Routine HighPriority polling is TRACE-only. DEBUG reports changes in actual
+intervention suppression, such as cooldown or the worker cap; normal operation
+and waiting for samples do not fill the placement decision history. Intervention
+requests and benefit evaluations remain at INFO, with pause and allocation
+failures at WARN.
+Maintainers can find the internal contract in
+[HighPriority feedback control](../architecture/high-priority-feedback.md).
+
+`DaemonLayer` captures tracing events and reads service and trigger IDs from
+the current span. Console and file logging use separate non-blocking broadcast
+queues. Each queue holds `batch_size * 4` events (512 by default). Set the batch
+size with `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`.
+The following SYSTEM-priority services consume these events:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
-- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines to daily-rotating log files.
+- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time/size rotation policy and optional background gzip archiving.
 - **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
-Both logging consumers drain events in batches, with a safety cap of 1,024 events per drain cycle. They are independent broadcast subscribers - failure in one does not affect the other.
+Both logging services drain events in batches. Events sent only to files do not
+use console queue capacity. A consumer that falls behind loses older events
+when its queue fills. Topology diagnostics read from the console queue.
+
+### Log levels
+
+With `RUST_LOG` unset, `init_logging()` and `try_init_logging()` log INFO and
+above to the console and DEBUG and above to files. TRACE is disabled by default.
+Setting `RUST_LOG` applies the same `EnvFilter` directives to both outputs,
+including target and span filters. For example,
+`RUST_LOG='debug,my_app::wire=trace'` enables TRACE for the `my_app::wire` target
+and DEBUG elsewhere.
+
+For file output, call `enable_file_logging()` and include `__file_log__` when
+selecting services by tag. With a custom subscriber, `DaemonLayer` forwards
+events to both queues; the subscriber's filters apply to both outputs.
 
 ### Enabling Diagnostics
 
@@ -19,10 +67,9 @@ Both logging consumers drain events in batches, with a safety cap of 1,024 event
 ```rust
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Registers DaemonLayer + EnvFilter (reads RUST_LOG, defaults to "info")
     service_daemon::init_logging();
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
 
@@ -53,36 +100,145 @@ tracing_subscriber::registry()
     .init();
 ```
 
-**File logging** - configured independently:
+### File logging
+
+Enable the `file-logging` feature, then configure the file sink before starting
+the daemon:
 
 ```rust
-use service_daemon::{FileLogConfig, enable_file_logging};
+use service_daemon::{FileLogConfig, try_enable_file_logging};
 
-// Daily rotation, retains last 30 log files (defaults)
-enable_file_logging(FileLogConfig::new("logs", "my-app"));
+try_enable_file_logging(FileLogConfig::default())?;
 ```
 
-If the file appender cannot be initialized, for example because the configured
-path is not writable or is not a directory, the file logging service logs a
-warning and degrades to console logging only. It does not fail daemon startup
-and does not hot-restart the SYSTEM logging service. Deployments that require
-audit-grade file persistence should validate the log directory with an external
-startup check or operational probe.
+Framework and application events are written as JSON lines to `logs/latest.log`.
+The file rotates before the next record would exceed 100MiB (104,857,600 bytes),
+or on the first write after its elapsed-time deadline. The default deadline is
+8 hours with ±5% jitter: 7h36m–8h24m. Each new file gets a new deadline, including
+files opened after size rotation. A record larger than 100MiB stays in one piece.
 
-Custom rotation and retention can be configured via the struct fields:
+An idle file stays open until the next write. Startup rotates an expired,
+nonempty file; shutdown leaves the active file in place. Restart restores the
+saved deadline. File size is read once on open, then counted as bytes are written.
+
+### Compression and archives
+
+| Stage | Default gzip level | When it runs |
+| :--- | :--- | :--- |
+| Fragment | 1 | After rotation closes the file. |
+| Daily | 6 | At least 24 hours after the starting date ends, once all active fragments for that date have closed. A single fragment also gets recompressed. |
+| Monthly | 9 | After the natural month ends and all discovered fragments for that month have reached daily archives. |
+
+Dates use the container OS timezone. A fragment belongs to the date on which it
+started, even if it contains records from after midnight. JSON timestamps stay
+in UTC. `Daily` and `Hourly` rotation also use local calendar boundaries.
+
+Daily and monthly archives are decompressed and recompressed at their configured
+levels. Monthly output is split into independent gzip files targeting 1GiB
+(1,073,741,824 compressed bytes). Volumes end at line boundaries; a long record
+or codec buffering can make a volume larger than the target.
+
+Daily and monthly jobs each add a random delay of 0–30 minutes after becoming
+eligible. Each subsequent monthly volume adds another independently sampled
+0–30 minute delay after the preceding volume is published. The first volume uses
+only the monthly start delay. These delays spread archive work across instances;
+fragment compression starts immediately.
+
+| Field in `FileLogConfig.archive` | Maximum random delay | Default |
+| :--- | :--- | :--- |
+| `daily_start_jitter` | Before a daily job | 30 minutes |
+| `monthly_start_jitter` | Before a monthly job's first volume | 30 minutes |
+| `monthly_volume_jitter` | Between monthly volumes | 30 minutes |
+
+Set a field to `Duration::ZERO` to disable that delay. Deadlines survive restart
+without resampling; an expired deadline resumes immediately. New settings apply
+to new archive transactions. Existing transactions keep their saved deadlines
+and volume-delay setting.
+
+For example, keep the rotation defaults and set different archive delays:
 
 ```rust
-use service_daemon::{FileLogConfig, RotationPolicy, enable_file_logging};
+use std::time::Duration;
+use service_daemon::{FileLogConfig, try_enable_file_logging};
 
-let config = FileLogConfig {
-    rotation: RotationPolicy::Hourly,
-    max_log_files: Some(48), // keep last 48 hourly files (2 days)
-    ..FileLogConfig::new("logs", "my-app")
-};
-enable_file_logging(config);
+let mut config = FileLogConfig::new("logs", "application.log");
+config.archive.daily_start_jitter = Duration::from_secs(10 * 60);
+config.archive.monthly_start_jitter = Duration::from_secs(30 * 60);
+config.archive.monthly_volume_jitter = Duration::from_secs(5 * 60);
+try_enable_file_logging(config)?;
 ```
 
-**Log batch size** - controls both drain cycle size and queue capacity:
+Other settings are on `FileLogConfig`: `rotation`, `rotation_jitter` and
+`max_file_size` (`None` disables size rotation). Its `archive` field also holds
+`fragment_compression_level`, `daily_compression_level`,
+`monthly_compression_level`, `daily_archive_delay` and `monthly_volume_size`.
+Gzip levels accept 0–9. `rotation_jitter` is a finite ratio in `[0, 1)` and applies
+only to `Interval(Duration)` rotation.
+
+`FileLogCompression::None` keeps rotation and skips compression and merging.
+`RotationPolicy::Never` disables both rotation and archive maintenance. Archives
+are not deleted by age or count.
+
+### Filenames and recovery
+
+With the default prefix, files look like this:
+
+| File | Example |
+| :--- | :--- |
+| Active | `latest.log` |
+| Closed fragment | `latest.segment.2026-11-11-10-30-00.1.log`, then `.log.gz` |
+| Daily archive | `latest.daily.2026-11-11.1.log.gz` |
+| Monthly volume | `latest.monthly.2026-11.part0001.log.gz` |
+
+`file_prefix` is the complete active filename. Custom extensions are preserved;
+filenames without extensions stay extensionless. Late historical input creates
+additional daily batches or monthly volumes. Completed archives are not rewritten.
+
+Back up the whole log directory, including `.latest.log.active.json` and
+`.service-daemon-archive-v2/`. They contain the deadlines and recovery state.
+Sources are kept until their output files have been published; a source spanning
+several volumes stays until all of those volumes are complete. Failed jobs keep
+their inputs for retry. Shutdown allows two seconds for archive work, then leaves
+unfinished and future scheduled jobs for the next startup.
+
+Legacy daily/hourly names, multi-member gzip files and `.needs-repack` markers
+are imported automatically. Dates in legacy names are preserved. Natural-month
+archives replace the old 30-day repack. Test an upgrade on a full directory copy
+and keep the original for rollback; older binaries cannot recover the new state.
+See [the archive implementation](../architecture/internal-overview.md#file-archive-processing)
+for transaction and scheduling details.
+
+### Errors and output format
+
+`try_enable_file_logging()` returns configuration errors and rejects repeated
+setup. `enable_file_logging()` prints those errors to stderr. If opening the
+appender fails, the service warns and continues with console logging. It does
+not fail daemon startup or restart the SYSTEM logging service.
+
+File logging is best-effort. A full queue can drop records; write errors and
+broadcast lag are reported on stderr, with cumulative counters where available.
+For required audit persistence, use an external log pipeline with its own
+startup, durability and retention checks. Each active log file must have a single
+program owner; external rotation or truncation is not supported.
+
+Console output uses local timestamps, ANSI colors and flattened fields. File
+output serializes the same `LogEvent` as JSON, with UTC timestamps and no ANSI
+codes. Each line has these keys:
+
+| Key | JSON shape | Presence |
+| :--- | :--- | :--- |
+| `timestamp` | RFC 3339 UTC string | always |
+| `level` | `"Error"`, `"Warn"`, `"Info"`, `"Debug"`, or `"Trace"` | always |
+| `target` | string | always |
+| `message` | string | always |
+| `module_path` | string or `null` | always |
+| `file` | string or `null` | always |
+| `line` | integer or `null` | always |
+| `service_instance_id`, `source_service_instance_id`, `message_id`, `trigger_instance_id`, `error_chain` | typed JSON value | omitted when unavailable |
+
+### Log batch size
+
+The batch size controls the drain cycle and queue capacity:
 
 ```rust
 use std::num::NonZeroUsize;
@@ -133,21 +289,24 @@ The daemon keeps a runtime-pressure baseline for diagnostics. Public APIs expose
 Two low-level signals feed this baseline:
 
 - **Service sleep drift**: `service_daemon::sleep(duration)` records `requested`, `elapsed`, and `drift = elapsed - requested` when the sleep completes. Reload and shutdown interruptions are counted separately and do not contribute drift.
-- **Runtime heartbeat probes**: the framework runs low-frequency internal sleep probes on the daemon-owned Control runtime, on the host Standard body runtime, on the daemon-owned HighPriority body runtime when it exists, and inside each Isolated private runtime generation.
+- **Runtime heartbeat probes**: the framework runs low-frequency internal sleep probes on the daemon-owned Control runtime, on the host Standard body runtime, on each daemon-owned HighPriority runtime shard, and inside each Isolated private runtime generation.
 
 The logical lanes are reported separately as `Control`, `Standard`, `HighPriority`, and `Isolated`. `Control` is an internal diagnostics/control-plane lane, not a user-facing `ServiceScheduling` option. `Standard` represents the host runtime body lane rather than the supervisor/control runtime.
 
-HighPriority runtime capacity is derived from the daemon's final declared `HighPriority` service/trigger entries before the runtime is lazily created. The resulting worker count is read-only operational context: pressure probes and advisory recommendations can warn about lane saturation, but they do not resize the worker count, reload services, restart services, trigger rollover, or move work across modes.
+HighPriority startup capacity is derived from the daemon's final declared `HighPriority` service/trigger entries before the initial shard is lazily created. After startup, internal HighPriority runtime control can use shard probe pressure to create additional HighPriority shards within the framework's worker cap and can request cooperative generation rollover. This is separate from advisory recommendations: disabling `SchedulingAdvisoryProfile` stops advisory log emission but does not disable HighPriority scale-out or placement decisions.
 
-Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger automatic migration or rescheduling.
+Generation outcome logs include a compact summary of sleep/probe observations, restart decisions, policy/effective restart delay, rate-limited restart state, termination, and the internal exit classification. Sleep drift is a wakeup-delay signal: it can be caused by executor pressure, OS scheduling, blocking tasks, I/O wake storms, or test-host load. It is not a CPU profiler and it does not trigger cross-mode migration.
 
 ### Public Diagnostics Snapshot
 
-`ServiceDaemon::diagnostics_snapshot()` and `ServiceDaemonHandle::diagnostics_snapshot()` return a `DaemonDiagnosticsSnapshot`. The snapshot contains service summaries, generation summaries, and logical lane summaries.
+`DaemonInstanceHandle::diagnostics_snapshot()` returns a `DaemonDiagnosticsSnapshot`. The snapshot contains service summaries, generation summaries, logical lane summaries, HighPriority shard summaries, and a bounded recent HighPriority placement decision history.
 
 - Service and generation records expose `declared_scheduling`, the static `ServiceScheduling` declaration generated by `#[service]` or `#[trigger]`.
+- Service and generation records also expose the actual `runtime_lane`, optional `high_priority_shard_id`, and optional HighPriority placement decision. For `Standard` and `Isolated`, the shard field is `None`.
 - Generation-detail records are bounded to the most recent 1024 generations per service; service and lane aggregates continue accumulating across evicted generation details.
 - Lane records expose `DiagnosticRuntimeLane`, including the internal `Control` diagnostics lane for observation-only aggregates.
+- HighPriority shard records expose runtime-probe observation aggregates and pressure state per shard. Daemon runtime snapshots expose the companion capacity facts: shard id, worker threads, creation time, active generation count, assigned instance count, and pressure state.
+- HighPriority placement decisions include decision kind and reason, such as least-loaded placement, scale-out, policy rollover, cooldown suppression, max-capacity suppression, global-pressure suppression, or insufficient samples.
 - Observation stats expose completed/interrupted counts plus total/avg/max/last drift in milliseconds.
 - Lifecycle stats expose reload, restart, backoff, rate-limited restart, termination, exit-kind counters, last exit kind, last policy/effective restart delay, and last restart decision.
 - Shutdown boundary stats expose bounded shutdown outcomes for isolated runtime join and trigger dispatch drain, including completed/timed-out/panicked counters, residual work, and the last boundary outcome/action.
@@ -155,7 +314,7 @@ Generation outcome logs include a compact summary of sleep/probe observations, r
 - Daemon-level snapshots retain a bounded recent `provider_failures` list with provider name, runtime phase, resolve boundary, source kind, failure kind, error summary, and retry diagnostics when available.
 - Trigger services use the same lifecycle counters: retry exhaustion and dispatch infrastructure errors appear as recoverable exits, while dispatch panics appear as panic exits.
 - Standard service and Standard lane records may include read-only `DiagnosticInterpretation` entries with a label, confidence, and investigation hints.
-- Snapshot reads are side-effect free: they do not emit advisory logs, mutate the diagnostics store, reload/restart services, or change body placement.
+- Snapshot reads are side-effect free: they do not emit advisory logs, mutate the diagnostics store, reload/restart services, scale out HighPriority shards, or change body placement.
 
 The public snapshot is a distilled read model. It does not expose `DiagnosticsStore`, diagnostics windows, recommendation fingerprints, evaluator thresholds, or mutation paths.
 
@@ -165,12 +324,10 @@ Use runtime facts for health endpoints, debug pages, or operational checks that
 need current daemon state:
 
 ```rust
-let handle = daemon.handle();
-
-let runtime = handle.runtime();
-let readiness = handle.runtime_readiness();
-let services = handle.runtime_services();
-let trigger = handle.runtime_trigger(trigger_service_id);
+let runtime = daemon.runtime();
+let readiness = daemon.runtime_readiness();
+let services = daemon.runtime_services();
+let trigger = trigger_instance.trigger_runtime();
 ```
 
 `DaemonRuntimeSnapshot` reports daemon identity, uptime, shutdown state, and
@@ -207,7 +364,8 @@ submit a temporary overlay with
 
 `last_exit_kind` describes why the previous recorded generation ended. `last_restart_decision` describes the most recent restart path the supervisor actually entered. Keeping these facts separate avoids making users infer restart meaning from delay values alone.
 
-- Clean `Ok(())` exits and reload restarts record `DiagnosticRestartDecisionKind::Immediate`.
+- Service generations that return `Ok(())` without a shutdown or reload control signal record `DiagnosticGenerationExitKind::NormalExit` and `DiagnosticRestartDecisionKind::BackoffNormalExit`.
+- Reload restarts record `DiagnosticRestartDecisionKind::Immediate`.
 - Recoverable service errors, trigger retry exhaustion, and trigger dispatch infrastructure failures record `BackoffRecoverableError`.
 - Service panics and trigger dispatch panics record `BackoffPanic`.
 - Isolated thread/runtime/bridge startup failures record `BackoffIsolatedStartupFailure`.
@@ -247,14 +405,14 @@ These recommendations are advisory. They can report:
 - Isolated resource pressure when isolated startup failures or rate-limited restarts appear.
 - Lifecycle instability when restart/backoff signals are high, which suppresses placement-like advice.
 
-The analyzer does not expose a public metrics schema, does not change the declared service scheduling mode, and does not feed HighPriority worker-count selection. Mode-internal placement changes, such as HighPriority runtime epoch rollover, are outside the current runtime contract; if added, they must happen at a generation boundary inside the same declared mode.
+The analyzer does not expose a public metrics schema, does not change the declared service scheduling mode, and does not drive HighPriority runtime control decisions. HighPriority scale-out and rollover are handled by the internal HighPriority control loop, not by the advisory analyzer.
 
 The default `SchedulingAdvisoryProfile` keeps this advisory loop enabled. To suppress advisory emission without changing lifecycle or body placement, configure the daemon explicitly:
 
 ```rust,ignore
 use service_daemon::{SchedulingAdvisoryProfile, ServiceDaemon};
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_scheduling_advisory_profile(SchedulingAdvisoryProfile::disabled())
     .build();
 ```
@@ -297,9 +455,10 @@ For triggers with elastic scaling, `DaemonLayer` reports:
 
 Every log event inside a service or trigger Span is automatically tagged with:
 
-- **`service_id`**: The name of the service that produced the event (e.g., `"my-service"`).
+- **`service_instance_id`**: The `ServiceInstanceId` of the service instance that produced the event.
+- **`source_service_instance_id`**: The `ServiceInstanceId` of the service instance that originally emitted the event, when available.
 - **`message_id`**: The globally unique **UUID v7** (time-ordered) of the event that triggered this handler.
-- **`instance_id`**: A numeric composite identifier (e.g., `svc#1:42`) that uniquely identifies this trigger invocation generation.
+- **`trigger_instance_id`**: A composite identifier (`svcinst#<uuid>:<seq>`) that uniquely identifies this trigger invocation generation.
 
 These IDs are `None` for log events outside a service context (e.g., daemon initialization).
 

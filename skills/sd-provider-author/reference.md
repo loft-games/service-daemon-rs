@@ -26,11 +26,11 @@ The macro generates a `Default` impl from the value. Inject as `Arc<Port>`.
 #[provider("localhost:5432", env = "DATABASE_HOST")]
 pub struct DatabaseHost(pub String);
 
-// Non-String field: env var auto-parsed via `.parse()`.
+// Non-String field: trim before conversion (bool rules are described below).
 #[provider(8080, env = "PORT")]
 pub struct Port(pub i32);
 
-// Env-only, no default: initialization FAILS if the env var is missing.
+// Env-only, no default: initialization FAILS if the env var is missing or empty.
 #[provider(env = "API_KEY")]
 pub struct ApiKey(pub String);
 ```
@@ -38,7 +38,8 @@ pub struct ApiKey(pub String);
 ### Template providers
 
 Template names recognized by the macro: `Notify`, `Event`, `Queue`, `BQueue`,
-`BroadcastQueue`, `Listen`, `UnixListen`, `UnixConnect`. The macro replaces the
+`BroadcastQueue`, `Listen`, `UnixListen`, `UnixConnect`, `NamedPipeListen`,
+`NamedPipeConnect`, `LocalIpcListen`, `LocalIpcConnect`. The macro replaces the
 struct body with generated code.
 
 ```rust
@@ -57,24 +58,49 @@ pub struct JobQueue;
 #[provider(BQueue(i32))]       // BQueue / BroadcastQueue aliases
 pub struct Numbers;
 
-#[provider(Listen("0.0.0.0:8080"))]                 // TCP listener
+#[provider(Listen(8080))]                         // TCP listener, all IPv4 interfaces
 pub struct ApiListener;
 
-#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")] // env overrides addr
+#[provider(Listen(8080), env = "LISTEN_ADDR")]     // env accepts a port or full address
 pub struct ConfigurableListener;
 
 #[provider(UnixListen("/run/myapp/sock"))]
 pub struct ControlSocket;
 
-#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]
+const PEER_SOCK_PATH: &str = "/run/peer/sock";
+
+#[provider(UnixConnect(PEER_SOCK_PATH), env = "PEER_SOCK", eager = true)]
 pub struct PeerSocket;
+
+#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]
+pub struct WindowsControlPipe;
+
+#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), env = "PEER_PIPE", eager = true)]
+pub struct WindowsPeerPipe;
+
+#[provider(LocalIpcListen("myapp-api"))]
+pub struct LocalControlIpc;
+
+#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true)]
+pub struct LocalPeerIpc;
 ```
 
-Syntax rules (enforced by the parser):
+Template syntax and initialization rules:
 
 - `capacity = N` is only valid on `Queue`/`BQueue` templates and must be `> 0`.
-- `Listen`/`UnixListen`/`UnixConnect` take a **string literal** address/path;
-  `Queue`/`BQueue` take a **type**.
+- Prefer `Listen(8080)` for TCP examples; `Listen("8080")` is equivalent. Both
+  bind all IPv4 interfaces. Use `Listen("127.0.0.1:8080")` for local-only access
+  or a full IPv6/hostname address when needed. `Listen` accepts integer or string
+  literals, not const paths. Ports are `0..=65535` (`0` allocates a free port).
+  Trimmed env values accept the same port/address forms; invalid or empty env
+  values fail rather than falling back. Missing/non-Unicode env uses the default.
+- `UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect` take
+  a string literal or a path to a `const/static &'static str` address/path.
+  `LocalIpcListen`/`LocalIpcConnect` take a string literal or `const/static
+  &'static str` logical name containing only ASCII letters, digits, `.`, `_`, and
+  `-`; `Queue`/`BQueue` take a **type**.
+- Dynamic string expressions such as `format!(...)` or function calls are outside
+  the public contract for template paths and env names.
 - Named attributes (`env`, `capacity`, `eager`) go **outside** the template
   parentheses: `#[provider(Listen("addr"), env = "VAR")]`, never
   `#[provider(Listen("addr", env = "VAR"))]` (that is a compile error).
@@ -106,13 +132,67 @@ pub async fn db_pool(url: Arc<DbUrl>) -> Result<DatabasePool, ProviderError> {
 }
 ```
 
+### Cross-crate provider contract
+
+Use this when a shared crate owns the injectable type and the final binary owns
+the concrete implementation:
+
+```rust
+use service_daemon::{ProviderError, provider_contract, provider_impl};
+
+#[derive(Clone)]
+#[provider_contract(eager = true)]
+pub struct SharedSettings {
+    source: &'static str,
+}
+
+#[provider_impl(priority = 80)]
+pub async fn primary_settings() -> Result<SharedSettings, ProviderError> {
+    Err(ProviderError::Unavailable("not configured".to_owned()))
+}
+
+#[provider_impl(priority = 10)]
+pub async fn fallback_settings() -> SharedSettings {
+    SharedSettings { source: "fallback" }
+}
+```
+
+`#[provider_contract]` generates `Provided`, `ManagedProvided`,
+`WatchableProvided`, helper methods, and `ProviderContract` for the shared output
+type. `#[provider_impl]` registers a local candidate; it does not implement DI
+traits on the returned type. Candidates are tried by descending priority, with a
+default priority of `50` and stable equal-priority ordering by module path and
+function name. Only the attempted candidate's dependencies are initialized;
+every candidate edge still participates in structural cycle detection. A
+contract is always daemon-local, including when candidates obtain service handles
+through helper functions. Eager initialization changes timing, not ownership.
+
+If the candidate functions live in a library crate and the final binary or test
+does not otherwise reference that crate, explicitly link it for registration:
+
+```rust
+use implementation_crate as _;
+```
+
+A `Cargo.toml` dependency alone does not make an otherwise unused library part of
+the final target. The underscore import is the explicit linkage declaration.
+
 ## 2. Attributes
 
 | Attribute | Applies to | Meaning |
 | :--- | :--- | :--- |
-| `env = "VAR"` | value forms | Override/source the value from an env var. Non-String parsed via `.parse()`. |
+| `env = "VAR"` | value forms | Override/source the value using the conversion rules below. |
 | `capacity = N` | `Queue`/`BQueue` | Bounded queue capacity, `N > 0`. |
-| `eager = true` | any | Initialize at startup instead of lazily (see §4). |
+| `eager = true` | provider forms and `#[provider_contract]` | Initialize at startup instead of lazily (see §4). |
+
+Value/env conversion preserves `String` whitespace and trims all other types
+before conversion (including type aliases). Empty input then uses the declared
+default; without a default it is a fatal missing-configuration error. Bool
+accepts every nonempty value: `false`/`off`/`no` (ASCII case-insensitive) and
+exactly `0` are false; all others are true.
+Other types use `FromStr`; parse errors fall back to the default or fail fatally
+when required. Absent/unreadable variables retain that same fallback/failure
+behavior. These rules do not change socket/address template providers.
 
 ## 3. `ProviderError` model
 
@@ -125,6 +205,9 @@ framework wraps it in `Arc<T>`. `ProviderError` is `#[non_exhaustive]` with:
 - `ProviderError::Retryable(String)` — transient. The framework retries with
   backoff until the provider-init timeout, then maps the terminal result to a
   `Timeout` provider-init error.
+- `ProviderError::Unavailable(String)` — candidate non-applicability. Only
+  `#[provider_impl]` uses this to advance to the next candidate. Ordinary
+  `#[provider]` declarations have no fallback and treat it as fatal.
 
 Classify by whether a retry can plausibly succeed. `Retryable` on permanently
 broken config only delays the inevitable timeout; `Fatal` on a not-yet-ready
@@ -137,6 +220,8 @@ upstream prevents a recovery that would have worked.
 - `#[provider(..., eager = true)]` initializes during daemon startup. Eager applies
   only to providers **reachable** from the selected services and their dependency
   graph (unreferenced providers are not eagerly built).
+- `#[provider_contract(eager = true)]` has the same reachability rule. Candidate
+  dependencies remain lazy until that candidate is attempted.
 - An eager provider that panics during init is converted into a fatal provider-init
   error (it does not unwind the process).
 
@@ -149,6 +234,12 @@ to `wave_spawn_timeout`**; raise it on the daemon's `RestartPolicy` if `Retryabl
 providers need a longer window. Cancellation during init or backoff yields a
 distinct cancelled outcome (not fatal).
 
+For provider contracts, each candidate gets its own full provider-init timeout.
+`Retryable` timeout advances to the next candidate; `Fatal` and cancellation
+stop the contract. Candidate retry diagnostics are recorded before advancing.
+Zero candidates and total exhaustion finish through the normal user-provider
+fatal boundary and emit an error-level log.
+
 ## 6. DI traits (auto-generated — do not hand-implement)
 
 The macro generates three capabilities together:
@@ -160,4 +251,7 @@ The macro generates three capabilities together:
 
 Injection sites just declare the type they want (`Arc<T>`, `Arc<RwLock<T>>`,
 etc.); the matching trait must exist, which it does for any `#[provider]` type.
+For cross-crate contracts, the matching trait exists because the shared crate
+marked the output type with `#[provider_contract]`; the final app supplies
+`#[provider_impl]` candidates.
 Hand-writing these for the same type causes duplicate-impl compile errors.

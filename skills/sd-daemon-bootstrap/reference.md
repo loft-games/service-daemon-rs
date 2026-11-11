@@ -2,21 +2,22 @@
 
 ## 1. `ServiceDaemon::builder()` → `ServiceDaemonBuilder`
 
-Every method is chainable and optional. `build()` is infallible.
+Every method is chainable and optional. `build()` is infallible and returns a
+`DaemonInstanceHandle`.
 
 | Method | Purpose |
 | :--- | :--- |
 | `with_registry(Registry)` | Restrict which discovered services run. Default = all static services. |
 | `with_restart_policy(RestartPolicy)` | Supervision: restart limits, backoff, provider-init timeout, wave timeouts. |
-| `with_scheduling_advisory_profile(SchedulingAdvisoryProfile)` | Tune the scheduling advisory plane. |
+| `with_scheduling_advisory_profile(SchedulingAdvisoryProfile)` | Enable/disable advisory emission; requires `high-priority`. Does not disable resource control. |
 | `with_isolated_startup_concurrency_limit(NonZeroUsize)` | Cap how many `Isolated`-scheduled services start at once. |
 | `with_cancel_token(CancellationToken)` | Supply an external token so something other than a signal can drive shutdown. |
 | `with_trigger_config<C: 'static + Clone + Send + Sync>(C)` | Inject a typed config object visible to trigger hosts. |
 | `with_infra_tags(&[&'static str])` | Mark certain tags as infrastructure for ordering/advisory purposes. |
-| `build()` | Produce the `ServiceDaemon`. Never fails. |
+| `build()` | Produce and register the daemon instance handle. Never fails. |
 
 ```rust
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_registry(registry)
     .with_restart_policy(policy)
     .build();
@@ -33,16 +34,17 @@ let mut daemon = ServiceDaemon::builder()
 
 A registry with no `with_tag` selects nothing extra by tag — be explicit about
 your selection model. `build()` with no registry at all (skip `with_registry`)
-runs every discovered service.
+selects every discovered service. Selected services without `#[input]` auto-start
+one instance; selected service templates with `#[input]` are definition handles
+only until code calls `ServiceHandle::create(input)` or `start(input)`.
 
-## 3. Lifecycle methods on `ServiceDaemon`
+## 3. Lifecycle methods on the daemon handle
 
 | Method | Blocking? | Behavior |
 | :--- | :--- | :--- |
-| `run(&mut self) -> &mut Self` | No | Brings the daemon up wave by wave, then returns. |
-| `wait(&mut self) -> ServiceResult<()>` | Yes | Blocks until SIGINT / SIGTERM / Ctrl+C or the cancel token fires, then performs graceful shutdown. |
+| `run(&self)` | No | Brings the daemon up wave by wave, then returns. |
+| `wait(&self) -> ServiceResult<()>` | Yes | Blocks until SIGINT / SIGTERM / Ctrl+C or the cancel token fires, then performs graceful shutdown. |
 | `shutdown(&self)` | No | Signals shutdown from elsewhere (another task, a handler). |
-| `run_for_duration(self, Duration) -> ServiceResult<()>` | Yes | **`#[cfg(feature = "simulation")]` only** — run, then auto-shutdown after the duration. For deterministic tests. |
 
 The usual pairing is `run().await` then `wait().await?`. `run()` alone does
 not keep the process alive.
@@ -51,7 +53,7 @@ not keep the process alive.
 
 - Startup proceeds in **descending** priority (high values first); shutdown in
   **ascending** priority (low values first).
-- Priority is a `u8`, default `50`. Constants (`service_daemon::Priority`):
+- Priority is a `u8`, default `50`. Constants (`service_daemon::ServicePriority`):
   `EXTERNAL = 0`, `DEFAULT = 50`, `STORAGE = 80`, `SYSTEM = 100`.
 - Each wave waits for its members to become healthy before the next wave starts,
   bounded by `RestartPolicy::wave_spawn_timeout` (and `wave_stop_timeout` on the
@@ -72,8 +74,46 @@ let policy = RestartPolicy::builder()
     .build();
 ```
 
-## 6. Choosing run vs run_for_duration
+## 6. HighPriority runtime control
+
+`#[service(scheduling = HighPriority)]` and `#[trigger(..., scheduling = HighPriority)]`
+are the source-level declarations for the HighPriority mode. Enable the
+dependency's `high-priority` Cargo feature first; it is disabled by default.
+Without it, the mode does not exist and these declarations fail to compile.
+The daemon manages that mode internally at runtime, without global public
+threshold setters.
+
+The daemon uses conservative HighPriority runtime control:
+
+- initial capacity comes from the final selected HighPriority service/trigger
+  entries;
+- total HighPriority worker threads are capped by available CPU parallelism
+  by default;
+- fresh sustained instance-level ServiceSleep drift, with supporting shard probe
+  pressure, can justify additional HighPriority shards;
+- cooperative rollover can ask an existing HighPriority generation to reload so
+  the next generation consumes a placement intent; benefit is evaluated using
+  the same sleep metric at its actual placement;
+- repeated low benefit or timeout pauses intervention. A late policy generation
+  does not clear the pause; healthy evidence or an observed external reload can
+  rearm evaluation. Missing evidence does not count as low benefit.
+
+`SchedulingAdvisoryProfile` is separate: disabling advisory logs does not disable
+HighPriority scale-out or rollover.
+
+Routine HighPriority polling is TRACE-only. DEBUG records changes in actual
+intervention suppression; waiting for samples does not fill decision history.
+Keep intervention requests/evaluations and pause warnings visible when adjusting
+log filters. The 250 ms policy interval is not an expansion or reload frequency.
+
+All services may reload; authors own business continuity. The mode provides no
+hard latency SLA. Normal framework-aware sleep supplies observations, with no
+mandatory business instrumentation. Trigger concurrency scaling and the
+`diagnostics` topology feature are separate from this execution mode.
+
+## 7. Choosing production vs simulation execution
 
 - Production binary → `run().await; wait().await?;`
-- Deterministic test under the `simulation` feature → `run_for_duration(self, d)`.
+- Deterministic test under the `simulation` feature → `MockContext` /
+  `SimulationHandle::run_for_duration(d)`.
   See the `sd-simulation-testing` skill for the full test harness.

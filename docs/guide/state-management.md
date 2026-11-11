@@ -67,7 +67,7 @@ pub async fn stats_updater(stats: Arc<RwLock<GlobalStats>>) -> anyhow::Result<()
 
 ### Watch and reload boundaries
 
-A provider value change belongs to the provider slot that published it. In the default case, daemon scopes inherit the root slot, so a managed value mutation can reload every selected service or trigger that still depends on that root slot. If a simulation daemon or internal fork shadows that provider with a daemon-local slot, local value changes reload only that daemon's dependents.
+A provider value change belongs to the daemon-local slot that published it. Managed value mutations reload only that daemon's dependents. Other daemons have independent slots, and ordinary generation restarts retain the owning daemon's provider instances.
 
 A provider binding change is different: it changes which slot a daemon uses for a provider type. The framework treats that as a generation-boundary reload, so the old generation exits and the next generation resolves the new provider slot.
 
@@ -92,9 +92,9 @@ If you call `TcpListener::bind()` inside a service, the port doesn't open until 
 
 These two templates form the UDS counterpart of `Listen` and work as a pair: one service runs the accept loop via `UnixListen`, another runs the client side via `UnixConnect`. Both are gated by `#[cfg(unix)]`; on non-Unix targets the macro emits a `compile_error!` at the declaration site.
 
-- **`UnixListen("/path/to/sock")`**: wraps `Arc<std::os::unix::net::UnixListener>`. `accept().await?` accepts a connection from a freshly cloned listener; use `try_get().await?` when you need direct access to that cloned `tokio::net::UnixListener`. Critical difference: at init time, if the path already exists, the template probes with `UnixStream::connect`; a live process answering means the framework refuses fatally, while a failed probe only unlinks the path after confirming it is a Unix socket. Ordinary files and other filesystem nodes are refused and preserved.
+- **`UnixListen("/path/to/sock")`**: wraps `Arc<std::os::unix::net::UnixListener>`. `accept().await?` accepts a connection from a freshly cloned listener; use `get()?` when you need direct access to that cloned `tokio::net::UnixListener`. Critical difference: at init time, if the path already exists, the template probes with `UnixStream::connect`; a live process answering means the framework refuses fatally, while a failed probe only unlinks the path after confirming it is a Unix socket. Ordinary files and other filesystem nodes are refused and preserved.
 
-- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `connect().await?` opens a fresh `tokio::net::UnixStream` on each call (no pooling -- UDS connections are local and cheap); `try_connect().await?` is the equivalent lower-level helper. At init time the template performs one reachability probe and immediately drops the connection. Pair with `eager = true` to block the startup wave until the peer sidecar / supervisor is up.
+- **`UnixConnect("/path/to/sock")`**: wraps `Arc<PathBuf>`. `connect().await?` opens a fresh `service_daemon::IpcStream` on each call (no pooling -- UDS connections are local and cheap); `try_connect().await?` is the lower-level helper when code needs the raw Tokio `UnixStream`. Resolving the provider does not dial the peer.
 
 ```rust
 #[derive(Clone)]
@@ -107,7 +107,7 @@ pub struct PeerClient;
 
 #[service]
 pub async fn web_server(api: Arc<ApiSocket>) -> anyhow::Result<()> {
-    let (sock, _) = api.accept().await?;
+    let sock = api.accept().await?;
     // handle sock ...
     Ok(())
 }
@@ -120,7 +120,59 @@ pub async fn supervisor_caller(peer: Arc<PeerClient>) -> anyhow::Result<()> {
 }
 ```
 
-Error classification details for both sides live in [Resilience Guide § 2.3-2.4](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener). Note one subtlety: `io::ErrorKind::NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory does not exist).
+Error classification details for both sides live in [Resilience Guide § 2.3-2.4](resilience.md#23-unixlisten-strategy-unix-domain-socket-listener). Note one subtlety: `io::ErrorKind::NotFound` is a runtime `connect().await?` error for `UnixConnect` but **Fatal** for `UnixListen` when the listener's parent directory does not exist.
+
+### `NamedPipeListen` and `NamedPipeConnect` (Windows named pipes, Windows-only)
+
+These two templates are the Windows-side local IPC pair. They are explicit
+Windows named pipe templates, not alternate behavior for `UnixListen` or
+`UnixConnect`. Both are gated by `#[cfg(windows)]`; on non-Windows targets the
+macro emits a `compile_error!` at the provider declaration site.
+
+- **`NamedPipeListen(r"\\.\pipe\name")`**: wraps the server side. `try_new()`
+  validates the local pipe name, creates the first instance with
+  `reject_remote_clients(true)` and `first_pipe_instance(true)`, and fails
+  fatally if another server already owns the pipe. `accept().await?` yields an
+  already connected server end; an internal listener manager replenishes the
+  next pending instance and retries replacement creation failures internally.
+
+- **`NamedPipeConnect(r"\\.\pipe\name")`**: wraps the client side. Each
+  `connect().await?` opens a fresh `service_daemon::IpcStream` and retries short
+  `ERROR_PIPE_BUSY` windows internally. Resolving the provider does not dial the
+  peer pipe.
+
+Use these templates for Windows local IPC only. Use `UnixListen` / `UnixConnect`
+for Unix domain sockets and `Listen` for TCP sockets. Error classification
+details live in [Resilience Guide § 2.5-2.6](resilience.md#25-namedpipelisten-strategy-windows-named-pipe-server).
+
+### `LocalIpcListen` and `LocalIpcConnect` (logical local IPC, cross-platform)
+
+Use `LocalIpcListen(Name)` and `LocalIpcConnect(Name)` when the service code only
+needs a local byte stream and does not care whether the platform transport is a
+Unix domain socket or a Windows named pipe.
+
+```rust
+#[provider(LocalIpcListen("myapp-api"))]
+pub struct ApiIpc;
+
+#[provider(LocalIpcConnect("myapp-api"), env = "MYAPP_IPC", eager = true)]
+pub struct ApiClient;
+
+async fn handle_stream<S>(stream: &mut S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    // request/response framing ...
+    Ok(())
+}
+```
+
+The logical name is validated as non-empty ASCII with only letters, digits, `.`,
+`_`, and `-`. The optional `env` value overrides that logical name, not the
+derived platform endpoint. The generated listener exposes `name()` and
+`accept().await?`; the connector exposes `name()` and `connect().await?`.
+Platform-specific endpoint control remains in `UnixListen` / `UnixConnect` /
+`NamedPipeListen` / `NamedPipeConnect`.
 
 ### Eager Initialization: `eager = true`
 
@@ -128,7 +180,7 @@ Providers are lazy-initialized upon their first injection by default. For provid
 
 ```rust
 #[derive(Clone)]
-#[provider(Listen("0.0.0.0:8080"), eager = true)]
+#[provider(Listen("127.0.0.1:8080"), eager = true)]
 pub struct HealthListener;
 
 #[provider(eager = true)]
@@ -141,7 +193,7 @@ pub async fn telemetry_init() -> StatsClient {
 ```rust
 // In your providers definition:
 #[derive(Clone)]
-#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]
+#[provider(Listen(8080), env = "LISTEN_ADDR")]
 pub struct ApiListener;
 
 // In your service:
@@ -154,6 +206,9 @@ pub async fn web_server(listener: Arc<ApiListener>) -> anyhow::Result<()> {
         .map_err(Into::into)
 }
 ```
+
+`Listen(8080)` listens on all IPv4 interfaces. `LISTEN_ADDR` accepts a port
+such as `9090` or a full address such as `127.0.0.1:9090` for local-only access.
 
 For a complete Web API reference that combines an Axum HTTP service, explicit CORS policy, `utoipa-axum` OpenAPI routing, response envelopes, graceful shutdown, and a maintenance trigger, see `examples/web-api` (`cargo run -p example-web-api`).
 

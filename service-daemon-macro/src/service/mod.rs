@@ -2,7 +2,7 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{ItemFn, parse_macro_input};
+use syn::{FnArg, ItemFn, Pat, Visibility, parse_macro_input};
 
 use crate::common::{ExtractedParams, extract_sync_handler_flag, scope_inner_visibility};
 use crate::common::{generate_call_expr, generate_watcher};
@@ -29,7 +29,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Detect #[allow(sync_handler)] and strip it from the attribute list
     let (allow_sync_present, cleaned_attrs) = extract_sync_handler_flag(&input.attrs);
 
-    // `extract_params(..., false)` uses the shared parser in service mode.
+    // `try_extract_service_params` uses the shared parser in service mode.
     // Bare or `#[payload]` parameters still flow through the shared payload
     // lane internally, but that lane is only used to reject invalid service
     // signatures. `#[service]` parameters must be Arc-based dependencies.
@@ -39,11 +39,26 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         call_args,
         param_entries,
         watcher_arms,
+        input_entry,
         ..
-    } = crate::common::extract_params(sig, false);
+    } = match crate::common::try_extract_service_params(sig) {
+        Ok(params) => params,
+        Err(err) => return TokenStream::from(err.to_compile_error()),
+    };
 
     let mut clean_sig = sig.clone();
     clean_sig.inputs = clean_inputs;
+    let projection_call_args = clean_sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            FnArg::Typed(pat_type) => match &*pat_type.pat {
+                Pat::Ident(pat_ident) => Some(pat_ident.ident.clone()),
+                _ => None,
+            },
+            FnArg::Receiver(_) => None,
+        })
+        .collect::<Vec<_>>();
 
     let wrapper_name = format_ident!("{}_wrapper", fn_name);
     let entry_name = format_ident!("__SERVICE_ENTRY_{}", fn_name.to_string().to_uppercase());
@@ -73,8 +88,27 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         body,
     );
 
+    let user_fn_projection = if matches!(vis, Visibility::Inherited) {
+        let bridge_call = if is_async {
+            quote! { #scope_mod::#fn_name(#(#projection_call_args),*).await }
+        } else {
+            quote! { #scope_mod::#fn_name(#(#projection_call_args),*) }
+        };
+
+        quote! {
+            #clean_sig {
+                #bridge_call
+            }
+        }
+    } else {
+        quote! {
+            #vis use #scope_mod::#fn_name;
+        }
+    };
+
     let wrapper_fn = crate::common::generate_wrapper_fn(
         &wrapper_name,
+        &param_entries,
         &quote! {
             #(#resolve_tokens)*
             #call_expr
@@ -86,6 +120,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
             entry_name: &entry_name,
             fn_name_str: &fn_name_str,
             param_entries: &param_entries,
+            input_entry: &input_entry.unwrap_or_else(|| quote! { None }),
             wrapper_name: &wrapper_name,
             watcher_ptr: &watcher_ptr,
             priority: &priority_tokens,
@@ -96,7 +131,7 @@ pub fn service_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let expanded = quote! {
         #user_scope
 
-        #vis use #scope_mod::#fn_name;
+        #user_fn_projection
 
         #wrapper_fn
 

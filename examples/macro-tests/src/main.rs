@@ -7,6 +7,7 @@
 //! **Run**: `cargo test -p example-macro-tests`
 
 fn main() {
-    println!("This crate is designed to be run as tests:");
-    println!("  cargo test -p example-macro-tests");
+    service_daemon::init_logging();
+    tracing::info!("This crate is designed to be run as tests:");
+    tracing::info!("  cargo test -p example-macro-tests");
 }

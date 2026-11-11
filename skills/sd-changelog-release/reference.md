@@ -41,18 +41,24 @@ released — the table above is a snapshot and the latest tag is authoritative.
 `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`. Only include the
 ones that have entries. Keep order consistent within a release.
 
-## 4. Conventional Commits → changelog mapping
+## 4. Release-baseline classification
 
 | Commit type | Changelog subsection |
 | :--- | :--- |
-| `feat:` | Added |
-| `fix:` | Fixed |
-| `refactor:`, `perf:` | Changed (if user-visible) |
+| `feat:` | Added when the capability is absent from the released baseline |
+| `fix:` | Fixed only when the problem exists in the released baseline; otherwise merge into the new feature description |
+| `refactor:`, `perf:` | Changed if there is a user-visible difference from the released baseline |
 | `docs:`, `test:`, `chore:`, `ci:` | usually **no** changelog entry |
-| `feat!:` / `BREAKING CHANGE:` | Changed/Removed **and** a version bump |
+| `feat!:` / `BREAKING CHANGE:` | Changed/Removed for a released contract; apply the project's versioning policy |
 
 Not every commit earns a changelog line — internal-only changes (docs, tests,
 chores) typically don't appear.
+
+Inspect the previous released implementation, not just commit subjects. New
+handles or providers may be redesigned and fixed several times before release;
+publish their final capability once, without implying users must migrate from
+those intermediate forms. Split mixed entries: a change to an existing provider
+is a migration, while the same API on a new provider is part of its added contract.
 
 ## 5. Release-validation changes that need entries
 

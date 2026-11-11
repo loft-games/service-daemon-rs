@@ -1,6 +1,6 @@
 ---
 name: sd-state-management
-description: "[user] Use service-daemon-rs managed state and persistence. Use when sharing mutable state across services via Arc<RwLock<T>>/Arc<Mutex<T>>, when a state change must wake a Watch(T) trigger, or when state must survive a service restart (the Shelf)."
+description: "[user] Use service-daemon-rs managed state and persistence. Use when sharing mutable state across services via Arc RwLock or Arc Mutex dependencies, when a state change must wake a Watch(T) trigger, or when state must survive a service restart (the Shelf)."
 ---
 
 # Managed state & persistence in service-daemon-rs

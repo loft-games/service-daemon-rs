@@ -17,6 +17,10 @@ const SERVICE_PASS_CASES: &[&str] = &[
     "tests/pass/17_service_visibility_super.rs",
     "tests/pass/19_service_visibility_in_self_path.rs",
     "tests/pass/20_service_visibility_in_super_path.rs",
+    "tests/pass/27_service_wrapper_path_visibility.rs",
+    "tests/pass/28_service_handle_macro_path_visibility.rs",
+    "tests/pass/29_service_input_template.rs",
+    "tests/pass/32_service_input_internal_name_hygiene.rs",
 ];
 
 const SERVICE_FAIL_CASES: &[&str] = &[
@@ -28,6 +32,13 @@ const SERVICE_FAIL_CASES: &[&str] = &[
     "tests/fail/13_service_private_not_visible_to_sibling.rs",
     "tests/fail/14_service_invalid_scheduling.rs",
     "tests/fail/15_service_auto_scheduling.rs",
+    "tests/fail/37_service_auto_start_removed.rs",
+    "tests/fail/38_service_multiple_inputs.rs",
+    "tests/fail/39_service_input_arc_dependency.rs",
+    "tests/fail/42_service_input_owned.rs",
+    "tests/fail/43_service_input_mut_ref.rs",
+    "tests/fail/44_service_input_explicit_lifetime.rs",
+    "tests/fail/33_service_handle_rejects_generic_path.rs",
 ];
 
 const TRIGGER_PASS_CASES: &[&str] = &["tests/pass/18_trigger_visibility_super.rs"];
@@ -35,9 +46,17 @@ const TRIGGER_PASS_CASES: &[&str] = &["tests/pass/18_trigger_visibility_super.rs
 const TRIGGER_FAIL_CASES: &[&str] = &[
     "tests/fail/08_trigger_multiple_payloads.rs",
     "tests/fail/09_trigger_payload_plus_dependency_hint.rs",
-    "tests/fail/12_non_watchable_provider_cannot_watch.rs",
     "tests/fail/16_trigger_control_scheduling.rs",
+    "tests/fail/40_trigger_rejects_input.rs",
 ];
+
+#[cfg(not(windows))]
+const TRIGGER_PLATFORM_FAIL_CASES: &[&str] =
+    &["tests/fail/12_non_watchable_provider_cannot_watch.rs"];
+
+#[cfg(windows)]
+const TRIGGER_PLATFORM_FAIL_CASES: &[&str] =
+    &["tests/fail/12_non_watchable_provider_cannot_watch_windows.rs"];
 
 const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/03_provider_with_defaults.rs",
@@ -53,7 +72,21 @@ const PROVIDER_PASS_CASES: &[&str] = &[
     "tests/pass/15_provider_queue_with_bqueue_alias.rs",
     "tests/pass/17_provider_fallible_helpers.rs",
     "tests/pass/22_provider_return_type_contracts.rs",
+    "tests/pass/24_provider_default_expression_boundary.rs",
+    "tests/pass/25_provider_explicit_key_forms.rs",
+    "tests/pass/26_provider_local_ipc_templates.rs",
+    "tests/pass/30_provider_ipc_const_paths.rs",
+    "tests/pass/31_provider_env_const_paths.rs",
+    "tests/pass/34_provider_listen_ports.rs",
+    "tests/pass/35_provider_contract_impl.rs",
+    "tests/pass/36_provider_contract_eager.rs",
 ];
+
+#[cfg(not(windows))]
+const PROVIDER_PLATFORM_PASS_CASES: &[&str] = &[];
+
+#[cfg(windows)]
+const PROVIDER_PLATFORM_PASS_CASES: &[&str] = &["tests/pass/24_provider_named_pipe_templates.rs"];
 
 const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/04_provider_on_enum.rs",
@@ -70,6 +103,37 @@ const PROVIDER_FAIL_CASES: &[&str] = &[
     "tests/fail/23_provider_custom_provider_error.rs",
     "tests/fail/24_provider_unsafe_fn.rs",
     "tests/fail/25_provider_result_non_provider_error.rs",
+    "tests/fail/26_provider_custom_path_template_not_open.rs",
+    "tests/fail/27_provider_template_named_attr_inside_parens.rs",
+    "tests/fail/29_provider_local_ipc_capacity_attr.rs",
+    "tests/fail/32_provider_local_ipc_invalid_name.rs",
+    "tests/fail/33_provider_local_ipc_inner_attr.rs",
+    "tests/fail/34_provider_ipc_dynamic_arg.rs",
+    "tests/fail/35_provider_ipc_dynamic_env.rs",
+    "tests/fail/41_provider_rejects_input.rs",
+    "tests/fail/45_provider_listen_invalid_port.rs",
+    "tests/fail/46_provider_impl_requires_contract.rs",
+    "tests/fail/47_provider_contract_duplicate_eager.rs",
+    "tests/fail/48_provider_contract_unknown_attr.rs",
+    "tests/fail/49_provider_contract_malformed_eager.rs",
+    "tests/fail/50_provider_impl_duplicate_priority.rs",
+    "tests/fail/51_provider_impl_unknown_attr.rs",
+    "tests/fail/52_provider_impl_non_integer_priority.rs",
+    "tests/fail/53_provider_impl_priority_out_of_range.rs",
+];
+
+#[cfg(not(windows))]
+const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[
+    "tests/fail/30_provider_named_pipe_listen_non_windows.rs",
+    "tests/fail/31_provider_named_pipe_connect_non_windows.rs",
+];
+
+#[cfg(windows)]
+const PROVIDER_PLATFORM_FAIL_CASES: &[&str] = &[
+    "tests/fail/26_provider_named_pipe_inner_attr.rs",
+    "tests/fail/27_provider_named_pipe_tuning_attr.rs",
+    "tests/fail/28_provider_named_pipe_capacity_attr.rs",
+    "tests/fail/36_provider_named_pipe_dynamic_arg.rs",
 ];
 
 const INTEGRATION_PASS_CASES: &[&str] = &[
@@ -98,12 +162,18 @@ fn service_macro_cases() {
 
 #[test]
 fn trigger_macro_cases() {
-    run_cases(TRIGGER_PASS_CASES, TRIGGER_FAIL_CASES);
+    let mut fail_cases = Vec::from(TRIGGER_FAIL_CASES);
+    fail_cases.extend_from_slice(TRIGGER_PLATFORM_FAIL_CASES);
+    run_cases(TRIGGER_PASS_CASES, &fail_cases);
 }
 
 #[test]
 fn provider_macro_cases() {
-    run_cases(PROVIDER_PASS_CASES, PROVIDER_FAIL_CASES);
+    let mut pass_cases = Vec::from(PROVIDER_PASS_CASES);
+    pass_cases.extend_from_slice(PROVIDER_PLATFORM_PASS_CASES);
+    let mut fail_cases = Vec::from(PROVIDER_FAIL_CASES);
+    fail_cases.extend_from_slice(PROVIDER_PLATFORM_FAIL_CASES);
+    run_cases(&pass_cases, &fail_cases);
 }
 
 #[test]

@@ -5,7 +5,122 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0-alpha.6] - 2026-11-11
+
+### Added
+
+- **File Archives**: Added background gzip compression with separate levels for
+  fragments (1), daily archives (6), and natural-month archives (9). Daily
+  archives wait at least 24 hours after day end. Monthly volumes target 1GiB
+  compressed, preserve complete lines, and decompress independently. Interrupted
+  work can resume; legacy files are imported without replacing completed archives.
+  `FileLogCompression::None` disables compression and archiving while retaining
+  rotation.
+
+- **File Logging Configuration**: Added `FileLogArchiveConfig` for compression
+  levels, archive limits, and delays. Its `daily_start_jitter`,
+  `monthly_start_jitter`, and `monthly_volume_jitter` settings independently add
+  0–30 minutes of random delay by default; zero disables each delay. Added
+  `try_enable_file_logging()` and `FileLogConfigError` for fallible setup.
+
+- **Provider Contracts and Fallback Implementations**: Added
+  `#[provider_contract]` for shared injectable output types and
+  `#[provider_impl(priority = N)]` for app-local implementation candidates.
+  Candidates support deterministic priority ordering, `Unavailable` fallback,
+  selected-candidate dependency preparation, retry-timeout advancement, fatal
+  stop behavior, eager startup, daemon-local caching for every provider,
+  preserved provider failure diagnostics, managed state, watch reloads, and a
+  real cross-crate `example-provider-contract` topology with library-owned
+  implementation candidates.
+
+- **TCP Listener Port Shorthand**: `Listen(8080)`, `Listen("8080")`, and port-only environment overrides bind to `0.0.0.0:8080`. Full host/port and IPv6 addresses remain supported. String inputs are trimmed, ports are bounded to `0..=65535`, and invalid or empty environment overrides fail initialization.
+
+- **Framework Microbenchmarks**: Added a dev-only Criterion target for observation recording, diagnostic snapshots at multiple instance counts, warm provider resolution, and HighPriority policy polling with varied instance/history sizes and INFO/DEBUG filters. Policy measurements cover synchronous evaluation and formatting, excluding lock wait and file I/O. A dedicated Linux CI job builds, smoke-runs and measures default and HighPriority configurations, publishes statistical summaries, and archives reports and raw results for 30 days.
+
+- **Unified IPC Streams**: Added `IpcStream`, a platform-neutral `AsyncRead` / `AsyncWrite` stream returned by IPC provider `accept()` and `connect()` helpers.
+- **Cross-platform Local IPC Providers**: Added `LocalIpcListen` and `LocalIpcConnect` provider templates that accept logical names and map them to Unix domain sockets or Windows named pipes. Their `accept().await?` / `connect().await?` helpers return `IpcStream`, and connector providers defer dialing until `connect()`. Name arguments accept string literals or paths to `const`/`static &'static str` values.
+- **Provider Attribute Normalization**: Added explicit `default = ...` and `template = ...` provider head forms while preserving existing bare defaults and built-in template syntax.
+- **Release Security Contract**: Added maintainer documentation for deployment boundaries, logging safety, Unix socket deployment, TCP listener exposure, and example-production responsibilities.
+- **Service Handles**: Added daemon-bound `ServiceHandle` and `service_handle!(...)` for provider-time lookup of selected service definitions, listing instances, and creating or starting instances. Resolution is restricted to the owning daemon's selected registry; unselected or unlinked targets return provider initialization errors.
+- **Service Instance Handles**: Added daemon-bound `ServiceInstanceHandle` values exposing identity, metadata, status, runtime snapshots, and start/stop/remove operations. Service and instance handles use weak control references and do not keep the daemon alive; stale handles retain identity metadata without access to live daemon resources.
+- **Service Template Inputs**: Added `#[input]` service parameters. A service with one `#[input] value: &T` parameter is selected as a template and receives shared access to typed per-instance startup input when created or started.
+- **Dynamic Service Instances**: Added daemon-local instance creation and lifecycle control, plus an `example-on-demand` crate. Instance creation requested during startup waits until startup completes without missing the completion notification. Removal clears instance registry entries, status, shelf, reload state, runtime accounting, and instance diagnostics while preserving daemon-level history. Graceful stop/removal waits do not block unrelated instances' lifecycle operations. Cancelled or stopped instances reject `start()` with `Ok(false)`, including while shutdown is pending; create a new instance to run again. Repeated `request_stop()` calls return `false` without changing status or runtime facts once instance cancellation has been observed; concurrent stop requests and later daemon shutdown preserve the terminal state.
+- **Normal Exit Diagnostics**: Added `DiagnosticRestartDecisionKind::BackoffNormalExit` for service generations that return `Ok(())` without a shutdown or reload control signal and restart through `RestartPolicy`.
+- **HighPriority Runtime Control**: Added automatic shard placement and bounded resource intervention based on fresh per-instance sleep drift with supporting shard pressure. Reload carries a placement intent into the next generation, and benefit is evaluated using the same metric at the actual placement. Low-benefit or timed-out interventions pause further intervention; late policy generations do not rearm it. Fresh healthy evidence or an observed external reload can permit re-evaluation.
+- **HighPriority Runtime Facts**: Added read-only HighPriority shard facts to daemon/runtime snapshots, including shard id, worker threads, creation time, active generations, assigned instances, and pressure state. Refreshes publish the complete shard snapshot atomically, preserving sorted shard IDs without exposing an empty or partially rebuilt list.
+- **HighPriority Placement Diagnostics**: Added read-only diagnostics for HighPriority shard observations and recent placement decisions, plus service/generation placement fields for actual runtime lane and selected shard. Routine polling is TRACE-only; repeated intervention suppression is deduplicated so waiting ticks preserve decision history. Policy evaluation reads current probes and active instances without copying retained diagnostic history.
+- **HighPriority Calibration**: Added opt-in Rust release-test entrypoints comparing Standard, fixed HighPriority, and adaptive HighPriority with production defaults. Typed evidence regression tests correlate requests, actual generations/placements and observations; recoverable source snapshots bind workload and validator binaries to raw results. Maintainer guidance covers separate dual-pressure workloads and whole-run versus post-generation evidence boundaries, without implying a latency SLA. Example-backed lifecycle tests and short smoke runs remain distinct from full calibration.
+- **Daemon Instance Handles**: Added UUIDv7 `DaemonInstanceId` and `DaemonInstanceHandle` as the public daemon instance control handle returned by `ServiceDaemonBuilder::build()`.
+- **Service Registry Catalog**: Added a process-wide lazy service catalog with entry, tag, and wrapper-function indexes. Tag-filtered registries now build daemon-local projections from this catalog while preserving original `SERVICE_REGISTRY` order and `ServiceEntryId` values.
+- **Windows Named Pipe Providers**: Added `NamedPipeListen` and `NamedPipeConnect` provider templates for Windows local IPC, including local-only validation, first-instance ownership checks, busy-pipe retry, listener-replacement handling, and focused Windows MSVC validation coverage. Like LocalIpc providers, their `accept().await?` / `connect().await?` helpers return `IpcStream`; connector providers defer dialing until `connect()`, and name arguments accept string literals or paths to `const`/`static &'static str` values.
+
+### Changed
+
+- **Minimum Supported Rust Version**: Raised both published crates from Rust 1.91
+  to Rust 1.95 to match the dependency requirements. CI now checks the macro
+  library and the runtime library's default, all-features, and no-default-features
+  configurations with Rust 1.95.0.
+
+- **Logging Filters**: With `RUST_LOG` unset, `init_logging()` and
+  `try_init_logging()` now log DEBUG and above to files; console output remains
+  at INFO and above. TRACE is disabled by default. Setting `RUST_LOG` applies
+  the same level, target, and span filters to both outputs. Custom `DaemonLayer`
+  subscribers keep their configured filters.
+
+- **File Logging Rotation (breaking)**: Replaced default daily rotation with
+  elapsed 8h ±5% or 100MiB, whichever comes first. Size rotation resets the timer;
+  records remain intact. `FileLogConfig` gains `compression`, `max_file_size`,
+  `rotation_jitter`, and `archive`; `RotationPolicy` gains `Interval(Duration)`.
+  Update struct literals and exhaustive enum matches. `Never` disables all
+  rotation and archiving. `enable_file_logging()` now reports invalid or repeated
+  setup on stderr.
+
+- **Log Filenames and Dates (breaking)**: The default active path changes from
+  `logs/daemon.YYYY-MM-DD` to `logs/latest.log`. Closed files use `segment`,
+  `daily`, and `monthly` markers; update log shipping patterns. Custom prefixes
+  are now complete active filenames. Archive dates and `Daily`/`Hourly` boundaries
+  use OS local time instead of UTC. JSON timestamps remain UTC, and dates in
+  legacy filenames are preserved.
+
+- **Daemon-local Provider Ownership (breaking)**: All generated provider instances,
+  including eager providers and provider contracts, now belong to the current
+  daemon. Removed root instance caches and syntax-based `service_handle!` scope
+  inference. Separate daemons and simulations initialize independently; ordinary
+  service generation restarts reuse the same daemon slots. Direct helper return
+  types are unchanged: outside daemon context, fallible resolution returns a
+  fatal error, while `Arc` helpers and watch builders panic before initialization.
+  Move provider access into daemon-managed services or use simulation overrides
+  instead of initializing a process-global provider during setup.
+
+- **Value Provider Environment Conversion**: Non-string env values are now trimmed before parsing. Bool values accept case-insensitive `false`/`off`/`no` and exactly `0` as false, with every other nonempty value treated as true. Empty input uses the declared default or fails as missing required configuration; strings preserve whitespace. Applies consistently to snapshot and managed initialization, including type aliases; socket/address templates are unchanged.
+
+- **Provider DI Graph Execution**: Provider dependency injection now prepares registered provider graphs through the runtime executor before generated wrappers read typed dependencies. Generated provider constructors no longer recursively initialize dependency providers, and hand-written provider capability trait impls are no longer supported as DI entry points; use `#[provider]` so dependency metadata and single-node constructors are registered.
+- **Console Log Timezone**: Text logs now display the process-local time with an explicit numeric UTC offset instead of fixed UTC with a `Z` suffix. Internal event timestamps and structured JSON file logs remain UTC; console parsers must accept the offset.
+- **IPC Provider Helper API**: Existing `UnixListen` and `UnixConnect` providers expose `accept().await?` / `connect().await?` returning `IpcStream`. `UnixConnect` resolves as an endpoint handle and defers dialing to `connect().await?` instead of opening an initialization probe connection.
+- **Provider Template String Arguments**: Existing `UnixListen`, `UnixConnect`, and shared provider `env` arguments now accept either a string literal or a path to a `const`/`static &'static str`; dynamic string expressions remain rejected by the macro.
+- **Service Identity API**: Split static `ServiceEntryId` from UUIDv7-backed runtime `ServiceInstanceId`, removed the previous service identity type and entry-to-instance ID mapping, renamed service/trigger/logging context fields to `service_instance_id` / `source_service_instance_id`, and renamed trigger invocation identity to `TriggerInstanceId`.
+- **Daemon Ownership API**: `ServiceDaemon` is now a lightweight builder facade. `ServiceDaemonBuilder::build()` registers a process-local daemon instance and returns `DaemonInstanceHandle`; the previous `ServiceDaemonHandle` type and `.handle()` flow were removed.
+- **Service Instance Model**: `ServiceDescription` is entry-scoped and exposes setup-time instance IDs instead of carrying a single instance ID and cancellation token. Runtime instances are tracked separately as daemon-local records.
+- **HighPriority Scheduling Runtime**: HighPriority now requires the opt-in `high-priority` feature, disabled by default. Enable it on the runtime dependency before using existing HighPriority declarations; without it they fail at compile time. Standard and Isolated remain available without the feature.
+- **Simulation API**: `MockContextBuilder::build()` now returns a `SimulationHandle` that owns the simulation daemon control flow. Registry selection moves to `MockContextBuilder::with_registry(...)`, bounded simulation runs are driven through `SimulationHandle::run_for_duration(...)`, and runtime shelf/status/reload operations use `ServiceInstanceHandle`.
+- **Provider Attribute Parser**: Shared named-tail parsing across service, trigger, and provider macros while keeping provider default/template heads as a macro-specific syntax boundary.
+- **Proc-macro Diagnostics**: Removed the `proc-macro-error2` dependency and routed macro errors through the repository-owned diagnostics facade while preserving stable compile-error output.
+- **Release Validation Gates**: Added `cargo deny --locked check` dependency-policy gating, restored `example-web-api` to policy checks after updating its Swagger UI dependency, documented the reviewed `cargo audit -D warnings` exception, and separated Windows local IPC provider checks into clearly named CI/manual gates.
+- **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
+
+### Removed
+
+- **Automatic Log Retention**: Removed `FileLogConfig::max_log_files` and the
+  default 30-file retention limit. Historical logs are no longer deleted by age
+  or count; configure retention outside the framework. Archive processing removes
+  its inputs only after their replacement archives are safely published.
+
+### Fixed
+
+- **Deep Provider Graph Initialization**: Fixed stack overflows from deeply nested generated provider initialization chains by replacing constructor-local dependency resolution with explicit provider graph preparation.
+- **Memory Analysis Example**: Corrected the supervisor layout model's watcher type and missing dependency-watch state to reflect the actual supervisor structure.
+- **Normal Service Exit Restart Policy**: Service generations that return `Ok(())` without a shutdown or reload control signal now restart through `RestartPolicy` backoff instead of immediate restart, preventing tight restart loops while preserving `NormalExit` lifecycle diagnostics.
+- **Private Service Visibility Diagnostics**: Stabilized the compile-time diagnostic for private service paths that are not visible to sibling modules.
 
 ## [0.1.0-alpha.5] - 2026-06-21
 
@@ -106,7 +221,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MockContext` simulation support (feature-gated).
 - `#![deny(unsafe_code)]` across the entire crate.
 
-[unreleased]: https://github.com/loft-games/service-daemon-rs/compare/v0.1.0-alpha.5...HEAD
+[0.1.0-alpha.6]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.6
 [0.1.0-alpha.5]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.5
 [0.1.0-alpha.4]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/loft-games/service-daemon-rs/releases/tag/v0.1.0-alpha.3

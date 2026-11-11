@@ -1,0 +1,7 @@
+error: `NamedPipeConnect` provider template is only available on Windows targets. Wrap the `#[provider(NamedPipeConnect(r"\\.\pipe\..."))]` declaration in `#[cfg(windows)]`, or use the Unix-specific `UnixListen` / `UnixConnect` templates on Unix targets.
+ --> tests/fail/31_provider_named_pipe_connect_non_windows.rs:5:1
+  |
+5 | #[provider(NamedPipeConnect(r"\\.\pipe\sd-test-connect"))]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `provider` (in Nightly builds, run with -Z macro-backtrace for more info)

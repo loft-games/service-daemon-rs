@@ -22,7 +22,22 @@ git tag | sort -V   # if v0.1.0-alpha.4 exists, that section is frozen
 If the version is tagged, it shipped — your change belongs under `[Unreleased]`,
 not in the released section.
 
+`AGENTS.md` and `TODO.md` are internal working documents in this repository by
+default. Do not quote or summarize their current-only planning details in
+`CHANGELOG.md`, release notes, PR text, or public docs unless the user explicitly
+asks to publish that internal context.
+
 ## Recording a change
+
+Compare the final behavior with the previous released tag, not the preceding
+commit or review round. Use `git show <released-tag>:<path>` and
+`git diff <released-tag> -- <path>` to confirm that an alleged old behavior shipped.
+A `fix:` commit is not automatically a `Fixed` release entry: fixes to a feature
+introduced during the same unreleased cycle belong in that feature's final
+description. Likewise, merge unreleased API redesigns into the final `Added`
+contract rather than documenting migrations from interfaces users never received.
+Keep `Changed` for migrations from released behavior and `Fixed` for problems
+present in the released baseline. Preserve all released sections unchanged.
 
 Under `## [Unreleased]`, add a bullet to the right `###` subsection:
 
@@ -35,14 +50,21 @@ Under `## [Unreleased]`, add a bullet to the right `###` subsection:
 | `Fixed` | bug fixes |
 | `Security` | vulnerability fixes |
 
-Commits follow Conventional Commits, which map cleanly: `feat:` → **Added**,
-`fix:` → **Fixed**, `refactor:`/`perf:` → **Changed**, a breaking change → a
-version bump plus a **Changed**/**Removed** note.
+Conventional Commit prefixes help locate changes, but release-baseline evidence
+determines their changelog category. Describe the final user-visible difference,
+not the sequence of implementation commits.
 
 Add a changelog entry when release-validation work changes visible behavior or
 maintainer release gates. Record diagnostics output contract changes, file
 logging failure semantics, linkme platform smoke coverage, and new release
 validation documentation under `[Unreleased]`.
+
+For file logging changes, record the changed defaults and APIs, including
+struct-literal and exhaustive-match breakage. State changes to filenames, time
+semantics, archive cleanup or migration when they affect deployment. Put usage
+and configuration details in `docs/guide/diagnostics.md`; keep implementation and
+validation details in their respective architecture and development pages.
+Keep unreleased changes under `[Unreleased]`.
 
 ## Cutting a release
 

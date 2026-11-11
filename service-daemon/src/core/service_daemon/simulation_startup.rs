@@ -1,10 +1,12 @@
-use crate::models::{Result as ServiceResult, ServiceError, ServiceScheduling};
+#[cfg(feature = "high-priority")]
+use crate::models::ServiceScheduling;
+use crate::models::{Result as ServiceResult, ServiceError};
 
 use super::runtime::RuntimePreparationError;
 use super::startup_preflight::StartupPreflightError;
-use super::{RestartPolicy, ServiceDaemon, parts, runner};
+use super::{DaemonInstanceInner, RestartPolicy, parts, runner};
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn run_simulation_startup(
         &mut self,
         test_policy: RestartPolicy,
@@ -21,19 +23,29 @@ impl ServiceDaemon {
                 StartupPreflightError::EagerProviderInit(err) => ServiceError::InternalError(
                     format!("eager provider initialization failed: {err}"),
                 ),
-                StartupPreflightError::Runtime(
-                    RuntimePreparationError::Control(err)
-                    | RuntimePreparationError::HighPriority(err),
-                ) => ServiceError::InternalError(err.to_string()),
+                StartupPreflightError::Runtime(RuntimePreparationError::Control(err)) => {
+                    ServiceError::InternalError(err.to_string())
+                }
+                #[cfg(feature = "high-priority")]
+                StartupPreflightError::Runtime(RuntimePreparationError::HighPriority(err)) => {
+                    ServiceError::InternalError(err.to_string())
+                }
             })?;
+
+        self.standard_runtime = Some(runtimes.standard.clone());
 
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let body_lanes = parts::BodyExecutionLanes {
                 standard: runtimes.standard.clone(),
-                high_priority: runtimes.high_priority.clone(),
+                #[cfg(feature = "high-priority")]
+                high_priority: runtimes
+                    .high_priority
+                    .as_ref()
+                    .map(|_| self.high_priority_runtime_pool.state()),
             };
-            for service in &self.services {
-                if matches!(service.entry.scheduling, ServiceScheduling::HighPriority)
+            for service in self.instance_registry.records() {
+                #[cfg(feature = "high-priority")]
+                if matches!(service.scheduling(), ServiceScheduling::HighPriority)
                     && body_lanes.high_priority.is_none()
                 {
                     return Err(ServiceError::InternalError(format!(
@@ -43,12 +55,13 @@ impl ServiceDaemon {
                 }
 
                 runner::spawn_service(parts::SpawnServiceParts {
-                    service_id: service.id,
+                    service_instance_id: service.instance_id(),
                     name: service.name(),
-                    run: service.entry.wrapper,
-                    watcher: service.entry.watcher,
+                    run: service.entry().wrapper,
+                    invocation_context: service.invocation_context(),
+                    watcher: service.entry().watcher,
                     policy: test_policy,
-                    scheduling: service.entry.scheduling,
+                    scheduling: service.scheduling(),
                     supervisor_lane: parts::SupervisorSpawnLane::Control(control_runtime.clone()),
                     body_lanes: body_lanes.clone(),
                     body_lane_resolver: parts::BodyLaneResolver::default(),
@@ -56,7 +69,7 @@ impl ServiceDaemon {
                     resources: self.resources.clone(),
                     diagnostics: self.diagnostics.clone(),
                     isolated_startup_permits: self.isolated_startup_permits.clone(),
-                    cancellation_token: service.cancellation_token.clone(),
+                    cancellation_token: service.cancellation_token(),
                     daemon_token: daemon_token.clone(),
                 })
                 .await;

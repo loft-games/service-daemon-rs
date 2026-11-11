@@ -1,0 +1,5 @@
+error: expected a string literal or a path to a `const &'static str`
+ --> tests/fail/34_provider_ipc_dynamic_arg.rs:7:27
+  |
+7 | #[provider(LocalIpcListen(local_ipc_name()))]
+  |                           ^^^^^^^^^^^^^^

@@ -16,6 +16,20 @@ pub async fn db_pool() -> MyDbPool {
 - Use **Queues** for fanning out tasks to multiple services.
 - Use **Watch Triggers** to react to data changes without tight coupling.
 
+### Log timestamps and container timezones
+
+Console text logs render the captured event time in the process-local timezone,
+with millisecond precision and an explicit offset (for example,
+`2026-09-15T04:30:45.123+08:00`). Internal event timestamps and structured JSON
+file logs remain UTC; text rendering does not change the recorded instant.
+
+Configure the deployment timezone before starting the process. For a Linux
+container using `TZ=Asia/Shanghai`, ensure the image also supplies the matching
+timezone data (commonly via `tzdata`). The framework does not hardcode Shanghai
+or provide a separate logging timezone setting. In a UTC environment, text logs
+use `+00:00`. Log consumers should parse the offset rather than require a literal
+`Z` suffix on console lines; JSON timestamp semantics are unchanged.
+
 ## 2. Testing
 
 The framework is designed for testability. Use `cargo test` to run the integrated suites.
@@ -47,27 +61,43 @@ async fn my_service() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_two_phase_simulation() {
-    // 1. Set up the test shelf
-    let (builder, handle) = MockContext::builder()
-        .with_shelf::<String>("my_service", "config_key", "initial_val".into())
-        .build();
+    let registry = Registry::builder().with_tag("__test_sim__").build();
+    let service_instance_id = registry
+        .services()
+        .iter()
+        .find(|service| service.name() == "my_service")
+        .and_then(|service| service.instance_ids().first().copied())
+        .expect("my_service should be selected");
 
-    let daemon = builder
-        .with_registry(Registry::builder().with_tag("__test_sim__").build())
+    // 1. Set up the test shelf
+    let simulation = MockContext::builder()
+        .with_shelf::<String>(service_instance_id, "config_key", "initial_val".into())
+        .with_registry(registry)
         .build();
-    let cancel = daemon.cancel_token();
+    let cancel = simulation.cancel_token();
     
     // Start daemon in background
-    let daemon_task = tokio::spawn(async move { daemon.run().await; });
+    let runner = simulation.clone();
+    let daemon_task = tokio::spawn(async move {
+        runner.run().await;
+        runner.wait().await.ok();
+    });
+
+    let instance = simulation
+        .service_instances()
+        .into_iter()
+        .find(|instance| instance.name() == "my_service")
+        .expect("my_service should have one instance");
 
     // 2. Update state while the daemon is running
-    handle.set_shelf::<String>("my_service", "dynamic_key", "new_val".into());
+    simulation.set_shelf::<String>(&instance, "dynamic_key", "new_val".into());
 
     // 3. Verify side-effects
-    let result = handle.get_shelf("my_service", "processed_result");
+    let result = simulation.get_shelf::<String>(&instance, "processed_result");
     assert!(result.is_some());
 
     cancel.cancel();
+    daemon_task.await.ok();
 }
 ```
 
@@ -78,6 +108,11 @@ async fn test_two_phase_simulation() {
 | **Builder** | `with_shelf` | Pre-fills a Shelf entry for a specific service. |
 | **Builder** | `with_status` | Pre-sets a lifecycle status in the isolated status plane. |
 | **Builder** | `with_provider_override` | Installs a daemon-local provider value before eager initialization and service startup. |
+| **Builder** | `with_registry` | Selects which registered services run inside the simulation. |
+| **Handle** | `run` / `wait` / `shutdown` | Controls the sandbox daemon lifecycle. |
+| **Handle** | `run_for_duration` | Runs the sandbox daemon for a bounded duration. |
+| **Handle** | `service_instances` | Lists daemon-bound service instance handles for runtime operations. |
+| **Handle** | `service_instances_for` | Lists runtime instances for a selected service definition handle. |
 | **Handle** | `get_shelf` | Reads a cloned value from the shelf without holding a lock after return. |
 | **Handle** | `get_status` | Reads a cloned status value without holding a lock after return. |
 | **Handle** | `set_shelf` | Writes or replaces a value in the shelf. |
@@ -85,7 +120,9 @@ async fn test_two_phase_simulation() {
 | **Handle** | `trigger_reload` | Sends a reload signal for a service. |
 | **Handle** | `override_provider` | Replaces a provider for this simulation daemon and reloads dependent generations through the provider watch path. |
 
-Provider overrides are scoped to the simulation daemon. They do not write into the root provider slot and do not affect another simulation or production daemon in the same process.
+Provider overrides are scoped to the simulation daemon. All providers are daemon-local by default; overrides do not affect another simulation or production daemon in the same process.
+
+`ServiceInstanceHandle` values returned by simulation APIs are daemon-bound operation tokens, not daemon owners. They can be cloned and passed through test helpers without keeping the sandbox daemon alive. After the simulation daemon has been unregistered, stale instance handles keep their IDs and static metadata, but status reads report `Terminated`, runtime snapshots return `None`, and stop/reload/shelf operations fail without mutating daemon state.
 
 ```rust
 #[derive(Clone)]
@@ -93,19 +130,16 @@ struct TestConfig {
     endpoint: String,
 }
 
-let (builder, handle) = MockContext::builder()
+let simulation = MockContext::builder()
     .with_provider_override(TestConfig {
         endpoint: "memory://test".to_string(),
     })
-    .build();
-
-let mut daemon = builder
     .with_registry(Registry::builder().with_tag("__test_sim__").build())
     .build();
 
-daemon.run().await;
+simulation.run().await;
 
-handle.override_provider(TestConfig {
+simulation.override_provider(TestConfig {
     endpoint: "memory://after-reload".to_string(),
 });
 ```
@@ -113,7 +147,7 @@ handle.override_provider(TestConfig {
 A pre-run override is visible to reachable eager providers and the first service generation. A runtime override mutates the provider binding: dependent services and `Watch` triggers reload, and the next generation resolves the new daemon-local provider value.
 
 > [!WARNING]
-> **Deadlock Risk**: Avoid using `handle.resources()` directly in tests if you plan to `await` anything afterwards. Holding a reference to internal `DashMap` guards across `.await` points will cause an immediate deadlock when a service tries to access those same resources. Always prefer `get_shelf()` and `get_status()`.
+> **Deadlock Risk**: Avoid reaching into daemon internals in tests if you plan to `await` anything afterwards. Holding internal `DashMap` guards across `.await` points can deadlock when a service tries to access those same resources. Always prefer `SimulationHandle` readers such as `get_shelf()` and `get_status()`.
 
 ## 3. Troubleshooting
 

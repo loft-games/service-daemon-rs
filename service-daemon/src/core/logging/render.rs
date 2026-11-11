@@ -41,6 +41,7 @@ pub(super) fn in_log_processing() -> bool {
 }
 
 /// Renders a log event into the provided buffer with ANSI color codes.
+/// Displays the captured UTC instant in the process-local timezone with its offset.
 ///
 /// The buffer is cleared but NOT deallocated, allowing memory reuse across
 /// successive calls within a batch loop.
@@ -50,7 +51,10 @@ pub(super) fn render_to_buf(event: &LogEvent, buf: &mut String) {
     let _ = write!(
         buf,
         "{} {}{:<5}{} [{}] {}",
-        event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        event
+            .timestamp
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
         color,
         event.level.as_str(),
         reset,
@@ -59,17 +63,17 @@ pub(super) fn render_to_buf(event: &LogEvent, buf: &mut String) {
     );
 
     // Append IDs when present (inside a service/trigger Span)
-    if let Some(sid) = event.service_id {
-        let _ = write!(buf, " service_id={}", sid);
+    if let Some(sid) = event.service_instance_id {
+        let _ = write!(buf, " service_instance_id={}", sid);
     }
-    if let Some(src_sid) = event.source_service_id {
-        let _ = write!(buf, " source_service_id={}", src_sid);
+    if let Some(src_sid) = event.source_service_instance_id {
+        let _ = write!(buf, " source_service_instance_id={}", src_sid);
     }
     if let Some(mid) = event.message_id {
         let _ = write!(buf, " message_id={}", mid);
     }
-    if let Some(ref iid) = event.instance_id {
-        let _ = write!(buf, " instance_id={}", iid);
+    if let Some(ref iid) = event.trigger_instance_id {
+        let _ = write!(buf, " trigger_instance_id={}", iid);
     }
     if let Some(ref err) = event.error_chain {
         let _ = write!(buf, " error={}", err);
@@ -102,8 +106,11 @@ pub(super) fn render_to_stderr(event: &LogEvent) {
 
 /// Formats a `LogEvent` as a structured JSON string for file persistence.
 ///
-/// Output includes `level`, `time` (ISO 8601), `target`,
-/// `msg`, `caller` (file:line), and `module_path`.
+/// The JSON keys are the serialized `LogEvent` field names: `timestamp`,
+/// `level`, `target`, `message`, `module_path`, `file`, `line`, and the
+/// optional correlation fields (`service_instance_id`,
+/// `source_service_instance_id`, `message_id`, `trigger_instance_id`, and
+/// `error_chain`).
 #[cfg(feature = "file-logging")]
 pub(super) fn format_event_json(event: &LogEvent) -> String {
     // Primary path: use serde_json for correct, structured JSON output.

@@ -3,6 +3,9 @@
 //! These tests verify end-to-end behavior of trigger registration,
 //! signal firing, and watch state changes through the public API.
 
+#[path = "../../../service-daemon/tests/support/provider_context.rs"]
+mod provider_context;
+
 use std::time::Duration;
 
 use example_triggers::providers::{ExternalStatus, UserNotifier};
@@ -17,7 +20,7 @@ fn isolated_registry() -> Registry {
 /// and the daemon can start/stop with them present.
 #[tokio::test]
 async fn test_trigger_registration() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -37,7 +40,7 @@ async fn test_trigger_registration() -> anyhow::Result<()> {
 /// Verifies that Signal triggers fire when notified.
 #[tokio::test]
 async fn test_signal_trigger_fires() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -48,7 +51,9 @@ async fn test_signal_trigger_fires() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Fire the signal
-    UserNotifier::resolve().await.notify();
+    provider_context::published::<UserNotifier>(&daemon)
+        .await
+        .notify();
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     cancel.cancel();
@@ -59,7 +64,7 @@ async fn test_signal_trigger_fires() -> anyhow::Result<()> {
 /// Verifies that Watch triggers fire when the watched state changes.
 #[tokio::test]
 async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(isolated_registry())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -72,7 +77,8 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
 
     // Modify ExternalStatus -- this should trigger the Watch handler
     {
-        let lock = ExternalStatus::resolve_rwlock().await;
+        let lock =
+            provider_context::published::<service_daemon::RwLock<ExternalStatus>>(&daemon).await;
         let mut guard = lock.write().await;
         guard.message = "Watch test update".to_string();
         guard.updated_count = 1;
@@ -82,5 +88,17 @@ async fn test_watch_trigger_on_state_change() -> anyhow::Result<()> {
 
     cancel.cancel();
     daemon.wait().await?;
+    Ok(())
+}
+
+#[service_daemon::service(tags = ["__test_isolation__"])]
+async fn publish_trigger_inputs(
+    notifier: std::sync::Arc<UserNotifier>,
+    status: std::sync::Arc<service_daemon::RwLock<ExternalStatus>>,
+) -> anyhow::Result<()> {
+    provider_context::publish(&notifier);
+    provider_context::publish(&status);
+    service_daemon::done();
+    service_daemon::wait_shutdown().await;
     Ok(())
 }

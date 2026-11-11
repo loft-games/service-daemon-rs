@@ -1,7 +1,8 @@
 # Example authoring reference
 
 Detailed conventions for an `examples/<dir>` crate. Reference crates:
-`examples/minimal/`, `examples/triggers/`, `examples/web-api/`.
+`examples/minimal/`, `examples/triggers/`, `examples/web-api/`, and
+`examples/on-demand/`.
 
 ## 1. Crate skeleton (`Cargo.toml`)
 
@@ -33,36 +34,30 @@ explicit (not a glob), so an unlisted example is invisible to
 | `src/services.rs` | `#[service]` definitions. |
 | `src/trigger_handlers.rs` | `#[trigger]` handlers (triggers/web-api). |
 | `tests/` | Integration tests exercising the example's topology. |
+| `README.md` | The example's crate split, run command, focused test command, and contract boundary. |
 
 Every module opens with a module-level `//!` doc describing the **framework
 mechanic** it teaches, not the pretend domain. See `examples/minimal/src/services.rs:1`.
+An adoption-reference example with multiple crates should place one README at the
+example root and make its integration test start the real service topology, not
+only call a provider helper directly.
 
 ## 3. Error-handling policy
 
 Two deliberate idioms coexist:
 
 - **Ergonomic path** — handler bodies return `anyhow::Result<()>` and use `?` for
-brevity where the error meaning is uninteresting.
-- **Explicit framework-error path** — resource acquisition returns a *structured*
-  `ServiceError` so the supervisor's view stays visible instead of being flattened
-  by `?`. Two equivalent forms, both real:
-
-  ```rust
-  // examples/minimal/src/services.rs — explicit match
-  let l = match listener.get() {
-      Ok(l) => l,
-      Err(error) => return Err(ServiceError::runtime_io("clone TCP listener", error).into()),
-  };
-
-  // examples/web-api/src/services/daemon_services.rs — map_err + ?
-  let l = listener
-      .get()
-      .map_err(|error| ServiceError::runtime_io("clone HTTP listener", error))?;
-  ```
+  brevity where the error meaning is uninteresting.
+- **Explicit example-error path** — resource acquisition and IPC I/O branches use
+  `match`/`if let` and return an example-local error enum from `src/models/` when
+  each operation has distinct teaching value. This is the right shape for examples
+  such as `unix-domain-socket`, `named-pipe`, and `local-ipc`, where readers need
+  to see each accept/connect/read/write failure separately.
 
 `ServiceError::runtime_io(operation: impl Into<String>, source: std::io::Error)`
-lives at `service-daemon/src/models/error.rs:63`. Use the explicit form whenever a
-bare `?` would hide what the framework observes (restart/backoff classification).
+lives at `service-daemon/src/models/error.rs:63`, but it is for framework runtime
+I/O boundaries being demonstrated by the example. Do not use it to disguise
+example-level business or IPC operation failures as service-daemon-owned errors.
 
 ## 4. What to extract vs omit
 
@@ -83,13 +78,69 @@ Keep `docs/development/release-validation.md` aligned with this classification:
 | Feature verification | `logging`, `diagnostics`, `scheduling`, `unix-domain-socket` | Keep non-default or focused framework features compiling and runnable. |
 | Macro compile verification | `macro-tests` | Lock macro pass/fail behavior with compile-time tests. |
 | Pressure and analysis | `stress`, `memory-analysis` | Measure scale and overhead; not production API contracts. |
-| Adoption reference | `web-api`, `controller-bridge` | Show realistic integration shapes without turning every detail into a framework contract. |
+| Adoption reference | `web-api`, `controller-bridge`, `provider-contract`, `on-demand` | Show realistic integration shapes without turning every detail into a framework contract. |
 
 When adding or reworking an example, update the release-validation map if its
 layer or responsibility changes. Do not treat every example as a production
 compatibility promise.
 
-## 6. Contributor workflow
+## 6. Validation and calibration evidence
+
+Choose the Rust test owner according to the behavior being accepted:
+
+| Behavior | Owner and entrypoint |
+| :--- | :--- |
+| Evidence association, statistics, classification, and malformed inputs | Typed test-support functions with deterministic `#[test]` cases. |
+| Example topology and public service lifecycle | `examples/<topic>/tests/` integration tests using real example services. |
+| Private runtime placement, controller state, and internal test controls | The owning runtime module's `#[cfg(test)]` tests. |
+| Framework operation cost and scaling with input size | The `service-daemon` Criterion `framework` target; the dedicated CI job builds, smoke-runs and measures both configurations, then publishes a Summary and downloadable results. |
+| Source archive restoration and artifact integrity | Rust filesystem integration tests with temporary directories and real input files. |
+| Long-running production-default calibration | Explicit `#[test]` / `#[ignore]` entrypoints run through Cargo in release mode. |
+
+Represent evidence with Rust structs, enums, and instance/generation/shard
+identities. Acceptance should connect a request to the actual generation and
+placement, comparable before/after observations, and the evaluated outcome.
+Pair each valid fixture with counterexamples for missing records, crossed
+identities, contradictory placement, and mismatched experiment parameters.
+
+Keep workload execution, evidence validation, and report rendering as distinct
+test-support responsibilities. The report presents the result established by
+Rust assertions and classification. Example workloads teach reusable framework
+wiring; private test controls remain with their runtime owner.
+
+Internal Criterion benchmarks share the library's source declarations through
+`service-daemon/src/crate_root.rs`. Verify the operation, fixture state and timing
+boundary, including configuration differences introduced by `cfg(test)`. Keep setup assertions
+outside timing but active in smoke mode. Report operation costs separately from
+system recovery and service latency evidence. Criterion output is not a full
+recoverable experiment archive; record source/configuration identity separately.
+
+The CI report adapter in `.github/scripts/framework_benchmark_report.py` presents
+Criterion JSON estimates and checks result completeness. Keep its expected case
+IDs aligned when adding or renaming benchmarks, and run its companion Python
+unittest suite. Missing results and failed commands fail the job; timing changes
+do not. Reports and raw results are retained as artifacts for 30 days. See
+`docs/development/release-validation.md` for commands and report locations.
+
+For reproducible experiments, preserve the selected source contents, build
+configuration, executable identity, raw observations, and validator identity as
+one artifact set. Test recovery after changing or removing the original inputs,
+and test detection of modified artifacts. Record incomplete evidence explicitly.
+
+For isolation-relievable contention, verify both service and source-shard
+pressure and check that the competitor continues after the subject relocates.
+Keep changed workload parameters in a separate archive; never overwrite or
+re-label an earlier inconclusive baseline. Distinguish whole-run and
+post-generation percentile populations and sample-weighted means. Repeated
+benefit validates the stated workload, not a general SLA; do not expand runtime
+features or tune production thresholds merely to close an experiment.
+
+Describe the maintained Cargo commands and their acceptance scope in
+`docs/development/release-validation.md`. Keep fast deterministic regressions
+separate from opt-in long experiments and record the production timing and
+resource assumptions of each experiment.
+
+## 7. Contributor workflow
 
 Before opening a PR (`docs/CONTRIBUTING.md`):
 

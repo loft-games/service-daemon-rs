@@ -1,0 +1,17 @@
+error: Listen port must be in 0..=65535
+ --> tests/fail/45_provider_listen_invalid_port.rs:3:19
+  |
+3 | #[provider(Listen(65536))]
+  |                   ^^^^^
+
+error: Listen port must be in 0..=65535
+ --> tests/fail/45_provider_listen_invalid_port.rs:6:19
+  |
+6 | #[provider(Listen(-1))]
+  |                   ^
+
+error: expected string literal
+ --> tests/fail/45_provider_listen_invalid_port.rs:9:19
+  |
+9 | #[provider(Listen(80.5))]
+  |                   ^^^^

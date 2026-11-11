@@ -1,6 +1,6 @@
 ---
 name: sd-provider-author
-description: "[user] Author service-daemon-rs #[provider] dependency providers. Use when writing or reviewing a #[provider] (value, env, template, struct, or async-fn form) for the service-daemon Rust framework, or when deciding fallible Result<T, ProviderError> error semantics (Fatal vs Retryable) and lazy vs eager initialization."
+description: "[user] Author service-daemon-rs dependency providers. Use when writing or reviewing #[provider] (value, env, template, struct, or async-fn form), #[provider_contract], #[provider_impl], fallible Result provider error semantics (Fatal vs Retryable vs Unavailable), and lazy vs eager initialization."
 ---
 
 # Authoring `#[provider]` for service-daemon-rs
@@ -25,10 +25,12 @@ This SKILL.md is the entry point. Load the companion files for depth:
 | A queue / signal / socket source | template | `#[provider(Queue(Job))] struct Jobs;` |
 | A struct composed from other providers | struct | `#[provider] struct Cfg { db: Arc<DbUrl> }` |
 | Async/fallible construction (clients, pools) | async fn | `#[provider] async fn pool() -> Result<Pool, ProviderError>` |
+| Cross-crate shared contract | contract + impl | `#[provider_contract] struct SharedSettings;` + `#[provider_impl] async fn settings() -> SharedSettings` |
 
 Full syntax for each (templates `Notify`/`Event`/`Queue`/`BQueue`/`Listen`/
-`UnixListen`/`UnixConnect`, the `env`/`capacity`/`eager` attributes) is in
-`reference.md`.
+`UnixListen`/`UnixConnect`/`NamedPipeListen`/`NamedPipeConnect`/
+`LocalIpcListen`/`LocalIpcConnect`, the `env`/`capacity`/`eager` attributes) is
+in `reference.md`.
 
 ## The two decisions that matter most
 
@@ -39,6 +41,9 @@ Full syntax for each (templates `Notify`/`Event`/`Queue`/`BQueue`/`Listen`/
 - `ProviderError::Retryable(msg)` — transient (upstream not ready). The daemon
   **retries with backoff** until `RestartPolicy::provider_init_timeout`, then the
   run is treated as a terminal timeout failure.
+- `ProviderError::Unavailable(msg)` — only for `#[provider_impl]` candidates that
+  do not apply in the current deployment. The contract tries the next candidate.
+  In ordinary `#[provider]`, there is no fallback, so `Unavailable` is fatal.
 
 Return the **plain `T`** (e.g. `Ok(pool)`), never `Arc<T>` — the framework wraps it.
 
@@ -51,5 +56,15 @@ Add `eager = true` only when a failure must abort startup before dependents run
 - Don't reimplement retry/timeout in the provider body — return `ProviderError`
   and let the framework own retry, fatal shutdown, and cancellation.
 - Don't return `Arc<T>`; return `T`.
+- For cross-crate providers, put `#[provider_contract]` on the shared output type
+  and `#[provider_impl(priority = N)]` on app-local functions. Do not use
+  ordinary `#[provider]` to implement DI traits for a foreign type.
+- If implementation candidates live in a library that the final target does not
+  otherwise reference, add `use implementation_crate as _;` to that binary or
+  integration test.
+- Candidate dependencies initialize only when fallback reaches that candidate.
+  Every contract is cached per daemon, regardless of candidate code shape.
+  Use `#[provider_contract(eager = true)]` only
+  when a reachable contract must resolve during startup.
 - Don't read a managed provider's snapshot before it is initialized (it panics by
   design — see `pitfalls.md`).

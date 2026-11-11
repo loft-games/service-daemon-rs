@@ -1,0 +1,6 @@
+improved|before=1|after=2|target=1|workers=2
+pressure-cleared|before=1|after=2|target=1|workers=2
+low-benefit|before=1|after=2|target=1|workers=2
+low-benefit|before=1|after=2|target=1|workers=2
+paused-low-benefit|before=2|after=3|target=2|workers=3
+timed-out|before=1|after=0|target=1|workers=2

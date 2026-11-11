@@ -15,7 +15,9 @@
 use example_stress as _;
 
 #[cfg(feature = "s0")]
-use service_daemon::ServiceDaemon;
+use service_daemon::{ServiceDaemon, ServiceError};
+#[cfg(feature = "s0")]
+use tracing::{error, info};
 #[cfg(feature = "s0")]
 use tracing_subscriber::layer::SubscriberExt;
 #[cfg(feature = "s0")]
@@ -25,7 +27,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 async fn main() -> anyhow::Result<()> {
     #[cfg(not(feature = "s0"))]
     {
-        println!("No stress features enabled (s0..s1000). Skipping real framework pipeline.");
+        service_daemon::init_logging();
+        tracing::info!("No stress features enabled (s0..s1000). Skipping real framework pipeline.");
         Ok(())
     }
 
@@ -43,9 +46,27 @@ async fn run_stress_test() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
-    daemon.wait().await?;
 
-    Ok(())
+    match daemon.wait().await {
+        Ok(()) => {
+            info!("Stress example daemon stopped cleanly");
+            Ok(())
+        }
+        Err(ServiceError::InternalError(message)) => {
+            error!(
+                reason = %message,
+                "Stress example could not install an OS shutdown signal listener"
+            );
+            Err(ServiceError::InternalError(message).into())
+        }
+        Err(error) => {
+            error!(
+                %error,
+                "Stress example daemon wait failed outside the documented signal-listener path"
+            );
+            Err(error.into())
+        }
+    }
 }

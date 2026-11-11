@@ -16,6 +16,10 @@ ordered lessons. A new beginner lesson goes here **and** is linked from
 - `priority-orchestration.md` — priority waves + runtime scheduling.
 - `error-handling.md` — fallible flows.
 - `custom-providers.md` — provider authoring on the learning path.
+- `cross-crate-provider-contracts.md` — advanced, standalone walkthrough for
+  shared `#[provider_contract]` types and application `#[provider_impl]`
+  candidates; linked from `custom-providers.md`, but intentionally excluded from
+  the beginner `quick-start.md` sequence.
 - `custom-trigger-hosts.md`, `advanced-macros.md`, `unit-testing.md` — later,
   more advanced chapters.
 
@@ -39,6 +43,9 @@ here, not in `tutorial/`.
 - `release-validation.md` — release validation map: feature-to-test/example
   matrix, dependency baseline, linkme platform smoke coverage, example layers,
   and maintainer release checklist.
+  Production-default HighPriority calibration commands, verdicts, and evidence
+  handling live here too; raw run artifacts stay in the chosen output directory,
+  not in a chronological design-document log.
 
 ## `docs/architecture/` — internal mechanics
 
@@ -46,8 +53,12 @@ Not API usage — how the framework works inside:
 
 - `internal-overview.md` — the big picture (registries, DI resolution, status plane).
 - `lifecycle-management.md` — wave orchestration, supervisor FSM, provider-init
-  error semantics (`ProviderError` Fatal/Retryable, `RestartPolicy`).
+  error semantics (`ProviderError` Fatal/Retryable/Unavailable, `RestartPolicy`).
 - `macro-expansion.md` — what `#[service]`/`#[trigger]`/`#[provider]` generate.
+- `high-priority-feedback.md` — authoritative optional HighPriority observation,
+  placement, reload-origin, and convergence semantics; experiment interpretation
+  keeps whole-run and post-generation results separate. Maintainer commands belong
+  in `docs/development/release-validation.md`, usage in `docs/guide/diagnostics.md`.
 - `causal-tracing.md`, `performance-benchmarks.md`.
 
 ## `docs/CONTRIBUTING.md` — workflow

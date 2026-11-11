@@ -1,15 +1,11 @@
-use axum::Router;
 use axum::extract::State;
-use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::models::api::response::{HealthResponse, WebResponse};
 use crate::services::api::{HttpApiState, health_response};
 
-pub fn router() -> (Router<HttpApiState>, OpenApi) {
-    OpenApiRouter::new()
-        .routes(routes!(health))
-        .split_for_parts()
+pub fn router() -> OpenApiRouter<HttpApiState> {
+    OpenApiRouter::new().routes(routes!(health))
 }
 
 #[utoipa::path(

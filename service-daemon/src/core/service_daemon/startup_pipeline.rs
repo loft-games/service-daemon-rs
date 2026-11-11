@@ -4,17 +4,18 @@ use crate::models::ProviderInitError;
 
 use super::runtime::RuntimePreparationError;
 use super::startup_preflight::StartupPreflightError;
-use super::{ServiceDaemon, clone_service_descriptions, parts, runner};
+use super::{DaemonInstanceInner, parts, runner};
 
 pub(super) enum StartupError {
     ProviderGraph(ProviderInitError),
     EagerProviderInit(ProviderInitError),
     ControlRuntime(std::io::Error),
+    #[cfg(feature = "high-priority")]
     HighPriorityRuntime(std::io::Error),
     StartupOrchestration(JoinError),
 }
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn run_startup_pipeline(&mut self) -> Result<(), StartupError> {
         let runtimes = self
             .run_startup_preflight()
@@ -27,15 +28,20 @@ impl ServiceDaemon {
                 StartupPreflightError::Runtime(RuntimePreparationError::Control(err)) => {
                     StartupError::ControlRuntime(err)
                 }
-                StartupPreflightError::Runtime(RuntimePreparationError::HighPriority(err)) => {
+                #[cfg(feature = "high-priority")]
+                StartupPreflightError::Runtime(RuntimePreparationError::HighPriority(err)) =>
+                {
+                    #[cfg(feature = "high-priority")]
                     StartupError::HighPriorityRuntime(err)
                 }
             })?;
 
+        self.standard_runtime = Some(runtimes.standard.clone());
+
         if let Some(control_runtime) = runtimes.control.as_ref() {
             let startup =
                 control_runtime.spawn(runner::spawn_all_services(parts::SpawnAllServicesParts {
-                    services: clone_service_descriptions(&self.services),
+                    instances: self.instance_registry.records(),
                     restart_policy: self.restart_policy,
                     running_tasks: self.running_tasks.clone(),
                     resources: self.resources.clone(),
@@ -43,7 +49,11 @@ impl ServiceDaemon {
                     isolated_startup_permits: self.isolated_startup_permits.clone(),
                     control_runtime: control_runtime.clone(),
                     standard_runtime: runtimes.standard,
-                    high_priority_runtime: runtimes.high_priority,
+                    #[cfg(feature = "high-priority")]
+                    high_priority_pool: runtimes
+                        .high_priority
+                        .as_ref()
+                        .map(|_| self.high_priority_runtime_pool.state()),
                     daemon_token: self.cancellation_token.clone(),
                 }));
 

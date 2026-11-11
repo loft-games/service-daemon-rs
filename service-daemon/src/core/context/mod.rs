@@ -23,10 +23,13 @@ pub(crate) use identity::{CURRENT_RESOURCES, CURRENT_SERVICE};
 pub use identity::{DaemonResources, ServiceIdentity};
 
 // Public API functions (re-exported at crate root via lib.rs)
+#[doc(hidden)]
+pub use api::__resolve_service_handle;
 pub(crate) use api::{__run_daemon_resources_scope, __run_daemon_resources_sync_scope};
 pub use api::{
-    __run_service_scope, current_cancellation_token, current_service_id, done, is_shutdown, shelve,
-    shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve, wait_shutdown,
+    __run_service_scope, current_cancellation_token, current_service_instance_id, done,
+    is_shutdown, shelve, shelve_clone, sleep, spawn_with_context, state, trigger_config, unshelve,
+    wait_shutdown,
 };
 pub(crate) use api::{
     clear_trigger_policy_overlay, current_daemon_diagnostics, current_generation_diagnostics,
@@ -44,7 +47,14 @@ pub use simulation::{MockContext, MockContextBuilder, SimulationHandle};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ScalingPolicy, ServiceId, ServiceStatus};
+    use crate::models::{
+        DaemonInstanceId, ScalingPolicy, ServiceControl, ServiceEntry, ServiceEntryId,
+        ServiceHandle, ServiceInstanceHandle, ServiceInstanceId, ServiceInvocationContext,
+        ServiceParam, ServiceRuntimeSnapshot, ServiceScheduling, ServiceStatus,
+        TriggerRuntimeSnapshot,
+    };
+    use futures::future::BoxFuture;
+    use linkme::distributed_slice;
     use std::any::TypeId;
     use std::future::Future;
     use std::sync::Arc;
@@ -56,12 +66,153 @@ mod tests {
 
     fn create_test_identity(name: &'static str) -> ServiceIdentity {
         ServiceIdentity::new(
-            ServiceId::new(0),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
             name,
             CancellationToken::new(),
             CancellationToken::new(),
         )
     }
+
+    struct TestServiceControl {
+        daemon_id: DaemonInstanceId,
+        projection: Arc<crate::models::ServiceCatalogProjection>,
+    }
+
+    impl ServiceControl for TestServiceControl {
+        fn daemon_id(&self) -> DaemonInstanceId {
+            self.daemon_id
+        }
+
+        fn owns_service_entry(
+            &self,
+            entry_id: ServiceEntryId,
+            entry: &'static ServiceEntry,
+        ) -> bool {
+            self.projection
+                .resolve_entry(entry_id)
+                .is_some_and(|record| std::ptr::eq(record.entry, entry))
+        }
+
+        fn service_instances_for_entry(
+            &self,
+            _entry_id: ServiceEntryId,
+            _entry: &'static ServiceEntry,
+            _control: Arc<dyn ServiceControl>,
+        ) -> Vec<ServiceInstanceHandle> {
+            Vec::new()
+        }
+
+        fn service_status(&self, _handle: &ServiceInstanceHandle) -> ServiceStatus {
+            ServiceStatus::Terminated
+        }
+
+        fn service_runtime(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> Option<ServiceRuntimeSnapshot> {
+            None
+        }
+
+        fn trigger_runtime(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> Option<TriggerRuntimeSnapshot> {
+            None
+        }
+
+        fn request_stop(&self, _handle: &ServiceInstanceHandle) -> bool {
+            false
+        }
+
+        fn create_service_instance(
+            &self,
+            _handle: &ServiceHandle,
+            _input: Option<crate::models::ServiceInputPayload>,
+            _actual_input_type_name: &'static str,
+            _actual_input_type_id: TypeId,
+            _control: Arc<dyn ServiceControl>,
+        ) -> BoxFuture<'static, crate::models::Result<ServiceInstanceHandle>> {
+            Box::pin(async {
+                Err(crate::models::ServiceError::RegistryError(
+                    "test service control cannot create service instances".to_owned(),
+                ))
+            })
+        }
+
+        fn start_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn stop_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn remove_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+
+        fn force_remove_service_instance(
+            &self,
+            _handle: &ServiceInstanceHandle,
+        ) -> BoxFuture<'static, crate::models::Result<bool>> {
+            Box::pin(async { Ok(false) })
+        }
+    }
+
+    fn selected_handle_test_wrapper(
+        _: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn excluded_handle_test_wrapper(
+        _: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn unlinked_handle_test_wrapper(
+        _: ServiceInvocationContext,
+    ) -> BoxFuture<'static, anyhow::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(crate::models::SERVICE_REGISTRY)]
+    static SELECTED_HANDLE_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "selected_handle_test_service",
+        module: "core::context::tests",
+        params: &[] as &[ServiceParam],
+        wrapper: selected_handle_test_wrapper,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        input: None,
+        tags: &["__handle_resolver_selected__"],
+    };
+
+    #[allow(unsafe_code)]
+    #[distributed_slice(crate::models::SERVICE_REGISTRY)]
+    static EXCLUDED_HANDLE_TEST_ENTRY: ServiceEntry = ServiceEntry {
+        name: "excluded_handle_test_service",
+        module: "core::context::tests",
+        params: &[] as &[ServiceParam],
+        wrapper: excluded_handle_test_wrapper,
+        watcher: None,
+        priority: 50,
+        scheduling: ServiceScheduling::Standard,
+        input: None,
+        tags: &["__handle_resolver_excluded__"],
+    };
 
     /// Helper to run a future in a service scope (for tests).
     async fn in_scope<F, Fut, T>(
@@ -76,6 +227,74 @@ mod tests {
         CURRENT_SERVICE
             .scope(identity, CURRENT_RESOURCES.scope(resources, f()))
             .await
+    }
+
+    fn resources_with_registry_tag(
+        tag: &'static str,
+    ) -> (Arc<DaemonResources>, Arc<dyn ServiceControl>) {
+        let registry = crate::models::Registry::builder().with_tag(tag).build();
+        let (_, projection, _) = registry.into_parts();
+        let resources = create_test_resources();
+        resources.set_service_catalog_projection(projection.clone());
+        let control: Arc<dyn ServiceControl> = Arc::new(TestServiceControl {
+            daemon_id: resources.daemon_id(),
+            projection,
+        });
+        resources.set_service_control(control.clone());
+        (resources, control)
+    }
+
+    #[test]
+    fn service_handle_resolution_fails_outside_daemon_scope() {
+        let error = __resolve_service_handle(selected_handle_test_wrapper).unwrap_err();
+
+        assert!(
+            matches!(error, crate::ProviderError::Fatal(message) if message.contains("requires a daemon provider scope"))
+        );
+    }
+
+    #[tokio::test]
+    async fn service_handle_resolution_returns_daemon_local_handle() {
+        let (resources, _control) = resources_with_registry_tag("__handle_resolver_selected__");
+
+        let handle = __run_daemon_resources_sync_scope(resources, || {
+            __resolve_service_handle(selected_handle_test_wrapper)
+        })
+        .await
+        .expect("selected service should resolve to handle");
+
+        assert_eq!(handle.name(), "selected_handle_test_service");
+        assert_eq!(handle.module(), "core::context::tests");
+    }
+
+    #[tokio::test]
+    async fn service_handle_resolution_reports_unlinked_target() {
+        let (resources, _control) = resources_with_registry_tag("__handle_resolver_selected__");
+
+        let error = __run_daemon_resources_sync_scope(resources, || {
+            __resolve_service_handle(unlinked_handle_test_wrapper)
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, crate::ProviderError::Fatal(message) if message.contains("not linked into SERVICE_REGISTRY"))
+        );
+    }
+
+    #[tokio::test]
+    async fn service_handle_resolution_reports_linked_but_not_selected_target() {
+        let (resources, _control) = resources_with_registry_tag("__handle_resolver_selected__");
+
+        let error = __run_daemon_resources_sync_scope(resources, || {
+            __resolve_service_handle(excluded_handle_test_wrapper)
+        })
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, crate::ProviderError::Fatal(message) if message.contains("linked but not selected"))
+        );
     }
 
     #[tokio::test]
@@ -96,16 +315,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shelf_isolated_by_service_id_for_duplicate_names() {
+    async fn test_shelf_isolated_by_service_instance_id_for_duplicate_names() {
         let resources = create_test_resources();
         let first = ServiceIdentity::new(
-            ServiceId::new(1),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
             "duplicate_name",
             CancellationToken::new(),
             CancellationToken::new(),
         );
         let second = ServiceIdentity::new(
-            ServiceId::new(2),
+            ServiceInstanceId::new(uuid::Uuid::from_u128(2)),
             "duplicate_name",
             CancellationToken::new(),
             CancellationToken::new(),
@@ -125,7 +344,7 @@ mod tests {
 
         in_scope(
             ServiceIdentity::new(
-                ServiceId::new(1),
+                ServiceInstanceId::new(uuid::Uuid::from_u128(1)),
                 "duplicate_name",
                 CancellationToken::new(),
                 CancellationToken::new(),
@@ -144,9 +363,10 @@ mod tests {
         let resources = create_test_resources();
         let identity = create_test_identity("state_service");
 
-        resources
-            .status_plane
-            .insert(ServiceId::new(0), ServiceStatus::NeedReload);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::NeedReload,
+        );
 
         in_scope(identity, resources, || async {
             assert!(matches!(state(), ServiceStatus::NeedReload));
@@ -159,9 +379,10 @@ mod tests {
         let resources = create_test_resources();
 
         // Start in Initializing
-        resources
-            .status_plane
-            .insert(ServiceId::new(0), ServiceStatus::Initializing);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
         let identity = create_test_identity("handshake_service");
         let resources_clone = resources.clone();
@@ -170,16 +391,17 @@ mod tests {
             done();
             let status = resources_clone
                 .status_plane
-                .get(&ServiceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status, Some(ServiceStatus::Healthy));
         })
         .await;
 
         // Now test the descending phase
-        resources
-            .status_plane
-            .insert(ServiceId::new(0), ServiceStatus::NeedReload);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::NeedReload,
+        );
 
         let identity2 = create_test_identity("handshake_service");
         let resources_clone2 = resources.clone();
@@ -188,7 +410,7 @@ mod tests {
             done();
             let status = resources_clone2
                 .status_plane
-                .get(&ServiceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status, Some(ServiceStatus::Terminated));
         })
@@ -202,12 +424,14 @@ mod tests {
         let resources_a = create_test_resources();
         let resources_b = create_test_resources();
 
-        resources_a
-            .status_plane
-            .insert(ServiceId::new(0), ServiceStatus::Healthy);
-        resources_b
-            .status_plane
-            .insert(ServiceId::new(0), ServiceStatus::Initializing);
+        resources_a.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Healthy,
+        );
+        resources_b.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
         let identity_a = create_test_identity("isolated_svc");
         let identity_b = create_test_identity("isolated_svc");
@@ -223,9 +447,10 @@ mod tests {
     async fn test_is_shutdown_handshake_optimization() {
         // Verify that is_shutdown only performs the handshake once
         let resources = create_test_resources();
-        resources
-            .status_plane
-            .insert(ServiceId::new(0), ServiceStatus::Initializing);
+        resources.status_plane.insert(
+            ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+            ServiceStatus::Initializing,
+        );
 
         let identity = create_test_identity("opt_svc");
         let resources_clone = resources.clone();
@@ -237,14 +462,15 @@ mod tests {
             // Status should now be Healthy
             let status = resources_clone
                 .status_plane
-                .get(&ServiceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status, Some(ServiceStatus::Healthy));
 
             // Revert status to Initializing to prove the flag prevents re-handshake
-            resources_clone
-                .status_plane
-                .insert(ServiceId::new(0), ServiceStatus::Initializing);
+            resources_clone.status_plane.insert(
+                ServiceInstanceId::new(uuid::Uuid::from_u128(0)),
+                ServiceStatus::Initializing,
+            );
 
             // Second call should NOT re-handshake (flag is set)
             assert!(!is_shutdown());
@@ -252,7 +478,7 @@ mod tests {
             // Status should remain Initializing because handshake was skipped
             let status2 = resources_clone
                 .status_plane
-                .get(&ServiceId::new(0))
+                .get(&ServiceInstanceId::new(uuid::Uuid::from_u128(0)))
                 .map(|s| s.clone());
             assert_eq!(status2, Some(ServiceStatus::Initializing));
         })
@@ -386,85 +612,148 @@ mod tests {
 #[cfg(feature = "simulation")]
 mod simulation_tests {
     use crate::MockContext;
-    use crate::models::{ServiceId, ServiceStatus};
+    use crate::models::{Registry, ServiceInstanceId, ServiceStatus};
+
+    fn selected_registry() -> Registry {
+        Registry::builder()
+            .with_tag("__handle_resolver_selected__")
+            .build()
+    }
+
+    fn selected_instance_id(registry: &Registry) -> ServiceInstanceId {
+        registry
+            .services()
+            .iter()
+            .find(|service| service.name() == "selected_handle_test_service")
+            .and_then(|service| service.instance_ids().first().copied())
+            .expect("selected test service should be materialized")
+    }
 
     #[test]
     fn test_mock_context_shelf_pre_filling() {
         // Verify that pre-filled shelf data is accessible through the handle.
-        let svc_id = ServiceId::new(7);
-        let (builder, handle) = MockContext::builder()
+        let registry = selected_registry();
+        let svc_id = selected_instance_id(&registry);
+        let handle = MockContext::builder()
             .with_shelf::<i32>(svc_id, "counter", 42)
             .with_shelf::<String>(svc_id, "name", "hello".to_string())
+            .with_registry(registry)
             .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(42));
+        assert_eq!(handle.get_shelf::<i32>(&instance, "counter"), Some(42));
         assert_eq!(
-            handle.get_shelf::<String>(svc_id, "name"),
+            handle.get_shelf::<String>(&instance, "name"),
             Some("hello".to_string())
         );
 
-        // Builder should be valid (not consumed)
-        let _ = builder;
+        assert_eq!(handle.daemon().id(), handle.id());
     }
 
     #[test]
     fn test_mock_context_status_pre_filling() {
-        let svc_id = ServiceId::new(1);
-        let (_, handle) = MockContext::builder()
+        let registry = selected_registry();
+        let svc_id = selected_instance_id(&registry);
+        let handle = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Healthy)
+            .with_registry(registry)
             .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Healthy));
+        assert_eq!(handle.get_status(&instance), Some(ServiceStatus::Healthy));
     }
 
     #[test]
     fn test_simulation_handle_dynamic_shelf_update() {
-        let (_, handle) = MockContext::builder().build();
-        let svc_id = ServiceId::new(7);
+        let handle = MockContext::builder()
+            .with_registry(selected_registry())
+            .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert!(!handle.has_shelf(svc_id, "counter"));
+        assert!(!handle.has_shelf(&instance, "counter"));
 
-        handle.set_shelf::<i32>(svc_id, "counter", 99);
+        assert!(handle.set_shelf::<i32>(&instance, "counter", 99));
 
-        assert_eq!(handle.get_shelf::<i32>(svc_id, "counter"), Some(99));
+        assert_eq!(handle.get_shelf::<i32>(&instance, "counter"), Some(99));
     }
 
     #[test]
     fn test_simulation_handle_dynamic_status_update() {
-        let svc_id = ServiceId::new(42);
-        let (_, handle) = MockContext::builder()
+        let registry = selected_registry();
+        let svc_id = selected_instance_id(&registry);
+        let handle = MockContext::builder()
             .with_status(svc_id, ServiceStatus::Initializing)
+            .with_registry(registry)
             .build();
+        let instance = handle
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
-        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::Initializing));
+        assert_eq!(
+            handle.get_status(&instance),
+            Some(ServiceStatus::Initializing)
+        );
 
-        handle.set_status(svc_id, ServiceStatus::NeedReload);
+        assert!(handle.set_status(&instance, ServiceStatus::NeedReload));
 
-        assert_eq!(handle.get_status(svc_id), Some(ServiceStatus::NeedReload));
+        assert_eq!(
+            handle.get_status(&instance),
+            Some(ServiceStatus::NeedReload)
+        );
     }
 
     #[test]
     fn test_mock_context_isolation() {
         // Two MockContexts should have completely separate resources.
-        let (_, handle_a) = MockContext::builder()
-            .with_status(ServiceId::new(1), ServiceStatus::Healthy)
+        let registry_a = selected_registry();
+        let registry_b = selected_registry();
+        let svc_id_a = selected_instance_id(&registry_a);
+        let svc_id_b = selected_instance_id(&registry_b);
+        let handle_a = MockContext::builder()
+            .with_status(svc_id_a, ServiceStatus::Healthy)
+            .with_registry(registry_a)
             .build();
-        let (_, handle_b) = MockContext::builder()
-            .with_status(ServiceId::new(1), ServiceStatus::Initializing)
+        let handle_b = MockContext::builder()
+            .with_status(svc_id_b, ServiceStatus::Initializing)
+            .with_registry(registry_b)
             .build();
+        let instance_a = handle_a
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
+        let instance_b = handle_b
+            .service_instances()
+            .into_iter()
+            .find(|instance| instance.name() == "selected_handle_test_service")
+            .expect("selected test service should have one instance");
 
         assert_eq!(
-            handle_a.get_status(ServiceId::new(1)),
+            handle_a.get_status(&instance_a),
             Some(ServiceStatus::Healthy)
         );
         assert_eq!(
-            handle_b.get_status(ServiceId::new(1)),
+            handle_b.get_status(&instance_b),
             Some(ServiceStatus::Initializing)
         );
 
-        handle_a.set_status(ServiceId::new(1), ServiceStatus::Terminated);
+        assert!(handle_a.set_status(&instance_a, ServiceStatus::Terminated));
         assert_eq!(
-            handle_b.get_status(ServiceId::new(1)),
+            handle_b.get_status(&instance_b),
             Some(ServiceStatus::Initializing)
         );
     }

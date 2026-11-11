@@ -20,9 +20,14 @@ use rand::RngExt;
 use std::collections::VecDeque;
 use std::error::Error as StdError;
 use std::fmt;
+#[cfg(feature = "high-priority")]
+use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+
+#[cfg(feature = "high-priority")]
+pub(crate) const HIGH_PRIORITY_RECENT_PROBE_WINDOW_SAMPLES: u64 = 32;
 
 // ---------------------------------------------------------------------------
 // SchedulingAdvisoryProfile -- diagnostics advisory emission
@@ -34,10 +39,12 @@ use tracing::info;
 /// profile only stops advisory emission; it does not change service lifecycle,
 /// declared scheduling modes, body placement, reload, or restart behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
 pub struct SchedulingAdvisoryProfile {
     enabled: bool,
 }
 
+#[cfg(feature = "high-priority")]
 impl SchedulingAdvisoryProfile {
     /// Enable scheduling advisory diagnostics.
     #[must_use]
@@ -58,9 +65,116 @@ impl SchedulingAdvisoryProfile {
     }
 }
 
+#[cfg(feature = "high-priority")]
 impl Default for SchedulingAdvisoryProfile {
     fn default() -> Self {
         Self::enabled()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HighPriorityRuntimeControl -- runtime placement and scale-out
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(feature = "high-priority")]
+pub(crate) struct HighPriorityRuntimeControl {
+    max_worker_threads: Option<NonZeroUsize>,
+    scale_step_worker_threads: NonZeroUsize,
+    high_avg_drift_ms: u64,
+    minimum_completed_samples: u64,
+    pressure_windows: u32,
+    scale_cooldown: Duration,
+    rollover_cooldown: Duration,
+    max_rollovers_per_window: usize,
+}
+
+#[cfg(feature = "high-priority")]
+impl HighPriorityRuntimeControl {
+    #[must_use]
+    pub(crate) const fn automatic() -> Self {
+        Self {
+            max_worker_threads: None,
+            scale_step_worker_threads: nonzero_one(),
+            high_avg_drift_ms: 100,
+            minimum_completed_samples: 3,
+            pressure_windows: 2,
+            scale_cooldown: Duration::from_secs(30),
+            rollover_cooldown: Duration::from_secs(60),
+            max_rollovers_per_window: 1,
+        }
+    }
+
+    #[must_use]
+    #[cfg(test)]
+    pub(crate) const fn for_testing() -> Self {
+        Self {
+            max_worker_threads: Some(nonzero_two()),
+            scale_step_worker_threads: nonzero_one(),
+            high_avg_drift_ms: 5,
+            minimum_completed_samples: 1,
+            pressure_windows: 1,
+            scale_cooldown: Duration::from_millis(10),
+            rollover_cooldown: Duration::from_millis(10),
+            max_rollovers_per_window: 1,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn max_worker_threads(self) -> Option<NonZeroUsize> {
+        self.max_worker_threads
+    }
+
+    pub(crate) const fn scale_step_worker_threads(self) -> NonZeroUsize {
+        self.scale_step_worker_threads
+    }
+
+    pub(crate) const fn high_avg_drift_ms(self) -> u64 {
+        self.high_avg_drift_ms
+    }
+
+    pub(crate) const fn minimum_completed_samples(self) -> u64 {
+        self.minimum_completed_samples
+    }
+
+    pub(crate) const fn pressure_windows(self) -> u32 {
+        self.pressure_windows
+    }
+
+    pub(crate) const fn scale_cooldown(self) -> Duration {
+        self.scale_cooldown
+    }
+
+    pub(crate) const fn rollover_cooldown(self) -> Duration {
+        self.rollover_cooldown
+    }
+
+    pub(crate) const fn max_rollovers_per_window(self) -> usize {
+        self.max_rollovers_per_window
+    }
+}
+
+#[cfg(feature = "high-priority")]
+impl Default for HighPriorityRuntimeControl {
+    fn default() -> Self {
+        Self::automatic()
+    }
+}
+
+#[cfg(feature = "high-priority")]
+const fn nonzero_one() -> NonZeroUsize {
+    match NonZeroUsize::new(1) {
+        Some(value) => value,
+        None => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "high-priority")]
+const fn nonzero_two() -> NonZeroUsize {
+    match NonZeroUsize::new(2) {
+        Some(value) => value,
+        None => unreachable!(),
     }
 }
 
@@ -1048,6 +1162,27 @@ mod tests {
             "initial_concurrency must be clamped to max_concurrency"
         );
         assert_eq!(policy.max_concurrency(), 4);
+    }
+
+    #[test]
+    #[cfg(feature = "high-priority")]
+    fn high_priority_runtime_control_defaults_are_conservative() {
+        let policy = HighPriorityRuntimeControl::default();
+
+        assert_eq!(policy.max_worker_threads(), None);
+        assert_eq!(policy.minimum_completed_samples(), 3);
+        assert_eq!(policy.high_avg_drift_ms(), 100);
+    }
+
+    #[test]
+    #[cfg(feature = "high-priority")]
+    fn high_priority_runtime_control_test_profile_is_short_cycle() {
+        let policy = HighPriorityRuntimeControl::for_testing();
+
+        assert_eq!(policy.max_worker_threads().map(NonZeroUsize::get), Some(2));
+        assert_eq!(policy.minimum_completed_samples(), 1);
+        assert_eq!(policy.high_avg_drift_ms(), 5);
+        assert_eq!(policy.pressure_windows(), 1);
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! TCP listener provider template.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
+use super::super::parser::StringTemplateArg;
 use super::context::has_clone_derive;
 
 /// Generates a Listen (TCP Listener) provider with kernel-level FD cloning.
@@ -30,7 +31,7 @@ pub(in crate::provider) fn generate_listen_template(
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -46,19 +47,14 @@ pub(in crate::provider) fn generate_listen_template(
     // Build the address resolution expression:
     // - With env: try env var first, fall back to the literal default
     // - Without env: use the literal default directly
-    let addr_expr = if let Some(env_lit) = env {
-        let env_str = env_lit.value();
+    let addr_expr = if let Some(env_arg) = env {
+        let env_expr = env_arg.to_static_str_expr();
         quote! {
-            std::env::var(#env_str).unwrap_or_else(|_| #addr.to_owned())
+            std::env::var(#env_expr).unwrap_or_else(|_| #addr.to_owned())
         }
     } else {
         quote! { #addr.to_owned() }
     };
-
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
 
     let type_tokens = quote! { #struct_name };
     let framework_init_fn = quote! {
@@ -78,7 +74,7 @@ pub(in crate::provider) fn generate_listen_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
@@ -96,6 +92,18 @@ pub(in crate::provider) fn generate_listen_template(
         impl #struct_name {
             pub fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let addr = #addr_expr;
+                let addr = addr.trim();
+                let addr = if !addr.is_empty() && addr.bytes().all(|byte| byte.is_ascii_digit()) {
+                    let port = addr.parse::<u16>().map_err(|_| {
+                        service_daemon::ProviderError::Fatal(format!(
+                            "Provider '{}' Listen port '{}' must be in 0..=65535",
+                            #struct_name_str, addr
+                        ))
+                    })?;
+                    format!("0.0.0.0:{port}")
+                } else {
+                    addr.to_owned()
+                };
                 let listener = std::net::TcpListener::bind(&addr).map_err(|e| {
                     let msg = format!(
                         "Provider '{}' failed to bind TCP port '{}': {}",

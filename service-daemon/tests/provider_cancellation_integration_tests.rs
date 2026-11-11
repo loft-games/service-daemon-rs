@@ -80,7 +80,7 @@ async fn test_service_prebody_provider_resolve_respects_shutdown() -> anyhow::Re
     PREBODY_PROVIDER_ATTEMPTS.store(0, Ordering::SeqCst);
     PREBODY_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_provider_prebody_cancellation__")
@@ -123,7 +123,7 @@ async fn test_trigger_prebody_provider_resolve_respects_shutdown() -> anyhow::Re
     PREBODY_PROVIDER_ATTEMPTS.store(0, Ordering::SeqCst);
     PREBODY_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_trigger_prebody_cancellation__")
@@ -166,7 +166,7 @@ async fn test_service_inflight_provider_attempt_respects_shutdown() -> anyhow::R
     INFLIGHT_PROVIDER_ATTEMPTS.store(0, Ordering::SeqCst);
     INFLIGHT_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_provider_inflight_cancellation__")

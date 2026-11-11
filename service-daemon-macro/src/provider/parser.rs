@@ -8,18 +8,24 @@
 //!   `#[provider(Listen("0.0.0.0:8080"))]`,
 //!   `#[provider(Listen("0.0.0.0:8080"), env = "LISTEN_ADDR")]`,
 //!   `#[provider(UnixListen("/run/myapp/sock"))]`,
-//!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`
+//!   `#[provider(UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true)]`,
+//!   `#[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))]`,
+//!   `#[provider(NamedPipeConnect(r"\\.\pipe\peer-api"), eager = true)]`,
+//!   `#[provider(LocalIpcListen("myapp-api"))]`,
+//!   `#[provider(LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true)]`
 //! - **Default value**: `#[provider(8080)]`, `#[provider("mysql://localhost")]`,
 //!   `#[provider("mysql://localhost", env = "DB_URL")]`
 //!
 //! ## Two-phase parsing
 //!
-//! 1. **Phase 1 (Primary)**: Identify `ProviderKind` (Template, Value, or Empty)
-//!    and parse any parenthesized positional argument.
+//! 1. **Phase 1 (Primary)**: Identify `ProviderHead` (Template, DefaultExpr, or Empty)
+//!    and capture any parenthesized positional argument tokens.
 //! 2. **Phase 2 (Attributes)**: A single unified loop captures all trailing
 //!    named arguments (`env = "..."`, `capacity = N`). These are stored on
-//!    the outer `ProviderArgs` struct regardless of the kind.
+//!    `ProviderNamedAttrs` regardless of the head.
 
+use quote::ToTokens;
+use syn::parse::discouraged::Speculative;
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, Token};
 
@@ -33,25 +39,30 @@ const TEMPLATE_NAMES: &[&str] = &[
     "Listen",
     "UnixListen",
     "UnixConnect",
+    "NamedPipeListen",
+    "NamedPipeConnect",
+    "LocalIpcListen",
+    "LocalIpcConnect",
 ];
-
-/// Templates whose parenthesized argument is a string literal (path / address)
-/// rather than a Rust type. Determines which arm of phase-1 parsing runs.
-//
-// Why centralize: parser must decide between `LitStr` and `Type` parsing
-// before it knows what the template generator wants. Listing the addr-based
-// names in one place avoids a 3-way conditional and prevents drift when a
-// future template (e.g. `Open(Path)`) joins the family.
-const ADDR_TEMPLATE_NAMES: &[&str] = &["Listen", "UnixListen", "UnixConnect"];
 
 /// Returns `true` if the identifier matches a known template name.
 fn is_template_name(ident: &Ident) -> bool {
     TEMPLATE_NAMES.iter().any(|&name| ident == name)
 }
 
-/// Returns `true` if the template expects a `LitStr` (path/address) argument.
-fn template_takes_addr(ident: &Ident) -> bool {
-    ADDR_TEMPLATE_NAMES.iter().any(|&name| ident == name)
+fn unknown_provider_attr_error(key: &Ident, include_head_keys: bool) -> syn::Error {
+    let supported = if include_head_keys {
+        "default, template, env, capacity, eager"
+    } else {
+        "env, capacity, eager"
+    };
+    syn::Error::new(
+        key.span(),
+        format!(
+            "Unknown provider attribute '{}'. Supported: {}",
+            key, supported
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -60,57 +71,150 @@ fn template_takes_addr(ident: &Ident) -> bool {
 
 /// Parsed result of `#[provider(...)]` attributes.
 ///
-/// Shared named arguments (`env`, `capacity`) live on the outer struct.
-/// The `kind` field determines the core category (template vs value vs empty).
+/// The `head` field determines the core category while `named` carries shared
+/// named arguments (`env`, `capacity`, `eager`).
 #[derive(Debug)]
 pub struct ProviderArgs {
     /// Core category: empty, template, or value.
-    pub kind: ProviderKind,
-    /// Optional environment variable override (shared across all kinds).
-    pub env: Option<syn::LitStr>,
-    /// Optional capacity for queue-like templates.
-    pub capacity: Option<usize>,
-    /// Whether this provider should be initialized eagerly at daemon startup.
-    pub eager: bool,
+    pub head: ProviderHead,
+    /// Named provider attributes parsed after the optional head.
+    pub named: ProviderNamedAttrs,
 }
 
 /// The primary category of the provider.
 #[derive(Debug)]
-pub enum ProviderKind {
+pub enum ProviderHead {
     /// No attributes: `#[provider]`
     Empty,
 
     /// Template-based provider: `#[provider(Queue(String))]` or `#[provider(Notify)]`
     ///
     /// The macro will replace the struct body with the template's generated code.
-    Template {
+    BuiltinTemplate {
         /// The template identifier (e.g., `Queue`, `Notify`, `Event`, `Listen`).
         name: Ident,
-        /// Parenthesized argument, polymorphic: Type for Queue, LitStr for Listen.
+        /// Raw parenthesized argument tokens owned by the selected template.
         arg: Option<TemplateArg>,
     },
 
     /// Value-based provider: `#[provider(8080)]` or `#[provider("mysql://...")]`
     ///
     /// The macro generates a `Default` impl using this value.
-    Value {
+    DefaultExpr {
         /// The default value expression, or `None` for env-only providers.
         default_value: Option<syn::Expr>,
     },
 }
 
-/// Polymorphic template argument inside parentheses.
-///
-/// Different templates expect different argument types in the same
-/// syntactic position:
-/// - `Queue(String)` -> `TemplateArg::Type`
-/// - `Listen("0.0.0.0:8080")` -> `TemplateArg::Addr`
+/// Named provider attributes shared by default-expression and template heads.
+#[derive(Debug, Default)]
+pub struct ProviderNamedAttrs {
+    /// Optional environment variable override (shared across all kinds).
+    pub env: Option<StringTemplateArg>,
+    /// Optional capacity for queue-like templates.
+    pub capacity: Option<usize>,
+    /// Whether this provider should be initialized eagerly at daemon startup.
+    pub eager: bool,
+}
+
+/// Raw template argument tokens inside parentheses.
 #[derive(Debug)]
-pub enum TemplateArg {
-    /// A type argument: `Queue(String)`, `Queue(ComplexJob)`
-    Type(Box<syn::Type>),
-    /// A string literal address: `Listen("0.0.0.0:8080")`
-    Addr(syn::LitStr),
+pub struct TemplateArg {
+    /// The tokens inside the template parentheses.
+    pub tokens: proc_macro2::TokenStream,
+}
+
+/// A string-valued macro argument accepted by provider templates.
+///
+/// This deliberately accepts only string literals and paths to static string
+/// values. It does not accept general expressions such as `format!(...)` or
+/// function calls.
+#[derive(Debug, Clone)]
+pub enum StringTemplateArg {
+    Literal(syn::LitStr),
+    Path(syn::Path),
+}
+
+/// TCP listeners accept a port literal or the existing full address string.
+pub struct ListenArg(pub syn::LitStr);
+
+impl Parse for ListenArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::LitInt) {
+            let port: syn::LitInt = input.parse()?;
+            let value = port
+                .base10_parse::<u16>()
+                .map_err(|_| syn::Error::new(port.span(), "Listen port must be in 0..=65535"))?;
+            return Ok(Self(syn::LitStr::new(&value.to_string(), port.span())));
+        }
+        input.parse::<syn::LitStr>().map(Self)
+    }
+}
+
+impl StringTemplateArg {
+    pub fn to_static_str_expr(&self) -> proc_macro2::TokenStream {
+        match self {
+            Self::Literal(lit) => quote::quote! { #lit },
+            Self::Path(path) => quote::quote! {{
+                let value: &'static str = #path;
+                value
+            }},
+        }
+    }
+
+    pub fn to_owned_expr(&self) -> proc_macro2::TokenStream {
+        let value = self.to_static_str_expr();
+        quote::quote! { (#value).to_owned() }
+    }
+
+    pub fn literal_value(&self) -> Option<String> {
+        match self {
+            Self::Literal(lit) => Some(lit.value()),
+            Self::Path(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn value(&self) -> String {
+        self.literal_value()
+            .expect("test expected a string literal argument")
+    }
+}
+
+impl ToTokens for StringTemplateArg {
+    fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
+        match self {
+            Self::Literal(lit) => lit.to_tokens(tokens),
+            Self::Path(path) => path.to_tokens(tokens),
+        }
+    }
+}
+
+impl Parse for StringTemplateArg {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        if input.peek(syn::LitStr) {
+            return input.parse().map(Self::Literal);
+        }
+
+        if input.peek(Ident)
+            || input.peek(Token![::])
+            || input.peek(Token![crate])
+            || input.peek(Token![self])
+            || input.peek(Token![super])
+        {
+            let fork = input.fork();
+            let path = fork.parse::<syn::Path>()?;
+            if fork.is_empty() || fork.peek(Token![,]) {
+                input.advance_to(&fork);
+                return Ok(Self::Path(path));
+            }
+        }
+
+        Err(syn::Error::new(
+            input.span(),
+            "expected a string literal or a path to a `const &'static str`",
+        ))
+    }
 }
 
 fn parse_capacity_literal(lit: syn::LitInt) -> syn::Result<usize> {
@@ -157,6 +261,35 @@ fn set_eager(eager: &mut bool, eager_seen: &mut bool, key: &Ident, value: bool) 
     Ok(())
 }
 
+fn parse_template_head(input: ParseStream, name: Ident) -> syn::Result<ProviderHead> {
+    // Capture the parenthesized argument without interpreting it.
+    // Template-specific parsing belongs to the template codegen
+    // branch, not to the central provider head classifier.
+    let mut arg = None;
+    if input.peek(syn::token::Paren) {
+        let content;
+        syn::parenthesized!(content in input);
+        let tokens: proc_macro2::TokenStream = content.parse()?;
+        arg = Some(TemplateArg { tokens });
+    }
+
+    Ok(ProviderHead::BuiltinTemplate { name, arg })
+}
+
+fn parse_explicit_template_head(input: ParseStream) -> syn::Result<ProviderHead> {
+    let name: Ident = input.parse()?;
+    if !is_template_name(&name) {
+        return Err(syn::Error::new(
+            name.span(),
+            format!(
+                "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect, LocalIpcListen, LocalIpcConnect\n",
+                name
+            ),
+        ));
+    }
+    parse_template_head(input, name)
+}
+
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
@@ -165,8 +298,10 @@ fn set_eager(eager: &mut bool, eager_seen: &mut bool, key: &Ident, value: bool) 
 ///
 /// Grammar:
 ///   - Empty
-///   - `TemplateIdent` [`(` Type | LitStr `)`] [`,` NamedArg]*
-///   - `Ident` `=` Value [`,` NamedArg]*  (env-only shorthand)
+///   - `TemplateIdent` [`(` TokenStream `)`] [`,` NamedArg]*
+///   - `default` `=` Expr [`,` NamedArg]*
+///   - `template` `=` TemplateIdent [`(` TokenStream `)`] [`,` NamedArg]*
+///   - `Ident` `=` Value [`,` NamedArg]*  (env/eager-only shorthand)
 ///   - Literal [`,` NamedArg]*
 ///
 /// Named args: `env = "..."`, `capacity = N`
@@ -175,121 +310,92 @@ impl Parse for ProviderArgs {
         // Empty attributes: #[provider]
         if input.is_empty() {
             return Ok(ProviderArgs {
-                kind: ProviderKind::Empty,
-                env: None,
-                capacity: None,
-                eager: false,
+                head: ProviderHead::Empty,
+                named: ProviderNamedAttrs::default(),
             });
         }
 
         // == Phase 1: Identify the primary kind ==========================
 
-        let kind = if input.peek(Ident) {
+        let head = if input.peek(Ident) {
             let ident: Ident = input.fork().parse()?;
 
             if is_template_name(&ident) {
                 // Consume the identifier from the real stream
                 let name: Ident = input.parse()?;
-                let takes_addr = template_takes_addr(&name);
-
-                // Parse parenthesized argument:
-                // - Listen / UnixListen / UnixConnect: expects a string literal
-                //   address or path
-                // - Queue/others: expects a type
-                let mut arg = None;
-                if input.peek(syn::token::Paren) {
-                    let content;
-                    syn::parenthesized!(content in input);
-                    if takes_addr {
-                        arg = Some(TemplateArg::Addr(content.parse::<syn::LitStr>()?));
-                    } else {
-                        arg = Some(TemplateArg::Type(Box::new(content.parse::<syn::Type>()?)));
-                    }
-
-                    // Reject unexpected trailing tokens inside parentheses.
-                    // Named attributes like `env` must be placed outside:
-                    //   #[provider(Listen("addr"), env = "VAR")]
-                    if !content.is_empty() {
-                        return Err(syn::Error::new(
-                            content.span(),
-                            "Unexpected tokens inside template parentheses; \
-                             named attributes like `env` belong outside: \
-                             #[provider(Listen(\"addr\"), env = \"VAR\")]",
-                        ));
-                    }
-                }
-
-                ProviderKind::Template { name, arg }
+                parse_template_head(input, name)?
             } else if input.peek2(Token![=]) {
-                // Named-arg-only - e.g., `#[provider(env = "API_KEY")]`
+                // Named head or named-arg-only - e.g.,
+                // `#[provider(default = 8080)]`, `#[provider(template = Queue(String))]`,
+                // or `#[provider(env = "API_KEY")]`.
                 // Consume the key=value directly (no comma prefix).
                 let key: Ident = input.parse()?;
                 input.parse::<Token![=]>()?;
 
-                let mut env = None;
-                let mut capacity = None;
+                let mut named = ProviderNamedAttrs::default();
                 let mut capacity_span = None;
-                let mut eager = false;
                 let mut eager_seen = false;
-                match key.to_string().as_str() {
+                let head = match key.to_string().as_str() {
+                    "default" => ProviderHead::DefaultExpr {
+                        default_value: Some(input.parse::<syn::Expr>()?),
+                    },
+                    "template" => parse_explicit_template_head(input)?,
                     "env" => {
-                        set_once(&mut env, &key, "env", input.parse::<syn::LitStr>()?)?;
+                        set_once(
+                            &mut named.env,
+                            &key,
+                            "env",
+                            input.parse::<StringTemplateArg>()?,
+                        )?;
+                        ProviderHead::DefaultExpr {
+                            default_value: None,
+                        }
                     }
                     "capacity" => {
                         let lit: syn::LitInt = input.parse()?;
                         set_once(
-                            &mut capacity,
+                            &mut named.capacity,
                             &key,
                             "capacity",
                             parse_capacity_literal(lit)?,
                         )?;
                         capacity_span = Some(key.span());
+                        ProviderHead::DefaultExpr {
+                            default_value: None,
+                        }
                     }
                     "eager" => {
                         let value = parse_eager_literal(input, &key)?;
-                        set_eager(&mut eager, &mut eager_seen, &key, value)?;
+                        set_eager(&mut named.eager, &mut eager_seen, &key, value)?;
+                        ProviderHead::DefaultExpr {
+                            default_value: None,
+                        }
                     }
-                    other => {
-                        return Err(syn::Error::new(
-                            key.span(),
-                            format!(
-                                "Unknown provider attribute '{}'. Supported: env, capacity, eager",
-                                other
-                            ),
-                        ));
+                    _ => {
+                        return Err(unknown_provider_attr_error(&key, true));
                     }
-                }
+                };
 
                 // Continue with phase 2 for any remaining `, key = value` pairs
-                return Self::parse_trailing_attrs(
-                    input,
-                    ProviderKind::Value {
-                        default_value: None,
-                    },
-                    env,
-                    capacity,
-                    capacity_span,
-                    eager,
-                    eager_seen,
-                );
+                return Self::parse_trailing_attrs(input, head, named, capacity_span, eager_seen);
             } else {
                 // Not a template name - treat as an expression
                 // (e.g., a constant identifier used as a default value)
                 let default_value: syn::Expr = input.parse()?;
-                ProviderKind::Value {
+                ProviderHead::DefaultExpr {
                     default_value: Some(default_value),
                 }
             }
         } else {
             // Literal or expression - default value
             let default_value: syn::Expr = input.parse()?;
-            ProviderKind::Value {
+            ProviderHead::DefaultExpr {
                 default_value: Some(default_value),
             }
         };
 
         // == Phase 2: Core mapping logic =================================
-        Self::parse_trailing_attrs(input, kind, None, None, None, false, false)
+        Self::parse_trailing_attrs(input, head, ProviderNamedAttrs::default(), None, false)
     }
 }
 
@@ -301,11 +407,9 @@ impl ProviderArgs {
     /// entering the loop (used by the env-only branch).
     fn parse_trailing_attrs(
         input: ParseStream,
-        kind: ProviderKind,
-        mut env: Option<syn::LitStr>,
-        mut capacity: Option<usize>,
+        head: ProviderHead,
+        mut named: ProviderNamedAttrs,
         mut capacity_span: Option<proc_macro2::Span>,
-        mut eager: bool,
         mut eager_seen: bool,
     ) -> syn::Result<Self> {
         while input.peek(Token![,]) {
@@ -319,12 +423,17 @@ impl ProviderArgs {
 
             match key.to_string().as_str() {
                 "env" => {
-                    set_once(&mut env, &key, "env", input.parse::<syn::LitStr>()?)?;
+                    set_once(
+                        &mut named.env,
+                        &key,
+                        "env",
+                        input.parse::<StringTemplateArg>()?,
+                    )?;
                 }
                 "capacity" => {
                     let lit: syn::LitInt = input.parse()?;
                     set_once(
-                        &mut capacity,
+                        &mut named.capacity,
                         &key,
                         "capacity",
                         parse_capacity_literal(lit)?,
@@ -333,33 +442,22 @@ impl ProviderArgs {
                 }
                 "eager" => {
                     let value = parse_eager_literal(input, &key)?;
-                    set_eager(&mut eager, &mut eager_seen, &key, value)?;
+                    set_eager(&mut named.eager, &mut eager_seen, &key, value)?;
                 }
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!(
-                            "Unknown provider attribute '{}'. Supported: env, capacity, eager",
-                            other
-                        ),
-                    ));
+                _ => {
+                    return Err(unknown_provider_attr_error(&key, false));
                 }
             }
         }
 
-        if capacity.is_some() && matches!(kind, ProviderKind::Value { .. }) {
+        if named.capacity.is_some() && matches!(head, ProviderHead::DefaultExpr { .. }) {
             return Err(syn::Error::new(
                 capacity_span.unwrap_or_else(proc_macro2::Span::call_site),
                 "provider attribute `capacity` is only supported on Queue providers",
             ));
         }
 
-        Ok(ProviderArgs {
-            kind,
-            env,
-            capacity,
-            eager,
-        })
+        Ok(ProviderArgs { head, named })
     }
 }
 
@@ -368,18 +466,46 @@ mod tests {
     use super::*;
     use quote::quote;
 
+    #[test]
+    fn listen_port_arguments() {
+        for (input, expected) in [
+            (quote!(0), "0"),
+            (quote!(8080), "8080"),
+            (quote!(65535), "65535"),
+            (quote!("0080"), "0080"),
+            (quote!("127.0.0.1:0"), "127.0.0.1:0"),
+            (quote!("[::1]:0"), "[::1]:0"),
+        ] {
+            let arg = syn::parse2::<ListenArg>(input).unwrap();
+            assert_eq!(arg.0.value(), expected);
+        }
+        for input in [
+            quote!(65536),
+            quote!(-1),
+            quote!(1.5),
+            quote!(some_port()),
+            quote!(PORT),
+        ] {
+            assert!(syn::parse2::<ListenArg>(input).is_err());
+        }
+    }
+
     /// Helper: parse a token stream into ProviderArgs.
     fn parse_args(tokens: proc_macro2::TokenStream) -> syn::Result<ProviderArgs> {
         syn::parse2::<ProviderArgs>(tokens)
     }
 
+    fn parse_string_arg(tokens: proc_macro2::TokenStream) -> syn::Result<StringTemplateArg> {
+        syn::parse2::<StringTemplateArg>(tokens)
+    }
+
     #[test]
     fn empty_input_yields_empty_variant() {
         let args = parse_args(quote! {}).unwrap();
-        assert!(matches!(args.kind, ProviderKind::Empty));
-        assert!(args.env.is_none());
-        assert!(args.capacity.is_none());
-        assert!(!args.eager);
+        assert!(matches!(args.head, ProviderHead::Empty));
+        assert!(args.named.env.is_none());
+        assert!(args.named.capacity.is_none());
+        assert!(!args.named.eager);
     }
 
     // -- Template branch ----------------------------------------------------------
@@ -387,33 +513,35 @@ mod tests {
     #[test]
     fn notify_template_without_inner_type() {
         let args = parse_args(quote! { Notify }).unwrap();
-        match &args.kind {
-            ProviderKind::Template { name, arg } => {
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Notify");
                 assert!(arg.is_none());
             }
             _ => panic!("Expected Template variant"),
         }
-        assert!(args.env.is_none());
-        assert!(args.capacity.is_none());
-        assert!(!args.eager);
+        assert!(args.named.env.is_none());
+        assert!(args.named.capacity.is_none());
+        assert!(!args.named.eager);
     }
 
     #[test]
     fn event_template_is_recognized() {
         let args = parse_args(quote! { Event }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Template { name, .. } if name == "Event"));
+        assert!(
+            matches!(&args.head, ProviderHead::BuiltinTemplate { name, .. } if name == "Event")
+        );
     }
 
     #[test]
     fn queue_template_with_inner_type() {
         let args = parse_args(quote! { Queue(String) }).unwrap();
-        match &args.kind {
-            ProviderKind::Template { name, arg } => {
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Queue");
                 assert!(
-                    matches!(arg, Some(TemplateArg::Type(_))),
-                    "arg should be Some(Type) for Queue(String)"
+                    matches!(arg, Some(TemplateArg { .. })),
+                    "arg should be captured for Queue(String)"
                 );
             }
             _ => panic!("Expected Template variant"),
@@ -423,8 +551,21 @@ mod tests {
     #[test]
     fn queue_template_with_capacity() {
         let args = parse_args(quote! { Queue(String), capacity = 500 }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Template { .. }));
-        assert_eq!(args.capacity, Some(500));
+        assert!(matches!(&args.head, ProviderHead::BuiltinTemplate { .. }));
+        assert_eq!(args.named.capacity, Some(500));
+    }
+
+    #[test]
+    fn explicit_template_key_with_capacity() {
+        let args = parse_args(quote! { template = Queue(String), capacity = 500 }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "Queue");
+                assert!(matches!(arg, Some(TemplateArg { .. })));
+            }
+            _ => panic!("Expected explicit template head"),
+        }
+        assert_eq!(args.named.capacity, Some(500));
     }
 
     #[test]
@@ -439,7 +580,9 @@ mod tests {
     #[test]
     fn bqueue_alias_is_recognized() {
         let args = parse_args(quote! { BQueue(i32) }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Template { name, .. } if name == "BQueue"));
+        assert!(
+            matches!(&args.head, ProviderHead::BuiltinTemplate { name, .. } if name == "BQueue")
+        );
     }
 
     // -- Value branch -------------------------------------------------------------
@@ -447,8 +590,8 @@ mod tests {
     #[test]
     fn integer_literal_default() {
         let args = parse_args(quote! { 8080 }).unwrap();
-        match &args.kind {
-            ProviderKind::Value { default_value } => {
+        match &args.head {
+            ProviderHead::DefaultExpr { default_value } => {
                 assert!(
                     default_value.is_some(),
                     "default_value should be Some for literal"
@@ -456,21 +599,57 @@ mod tests {
             }
             _ => panic!("Expected Value variant"),
         }
-        assert!(args.env.is_none());
-        assert!(!args.eager);
+        assert!(args.named.env.is_none());
+        assert!(!args.named.eager);
     }
 
     #[test]
     fn string_literal_default() {
         let args = parse_args(quote! { "mysql://localhost" }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Value { .. }));
+        assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
     }
 
     #[test]
     fn string_default_with_env() {
         let args = parse_args(quote! { "fallback", env = "MY_VAR" }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Value { .. }));
-        assert_eq!(args.env.as_ref().unwrap().value(), "MY_VAR");
+        assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "MY_VAR");
+    }
+
+    #[test]
+    fn env_accepts_const_path() {
+        let args = parse_args(quote! { "fallback", env = crate::config::ENV_NAME }).unwrap();
+        assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
+        assert!(matches!(
+            args.named.env.as_ref().unwrap(),
+            StringTemplateArg::Path(_)
+        ));
+    }
+
+    #[test]
+    fn env_rejects_dynamic_expression() {
+        let err = parse_args(quote! { "fallback", env = format!("ENV") }).unwrap_err();
+
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn string_template_arg_rejects_dynamic_expression() {
+        let err = parse_string_arg(quote! { format!("ENV") }).unwrap_err();
+
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn explicit_default_key_with_env() {
+        let args = parse_args(quote! { default = "fallback", env = "MY_VAR" }).unwrap();
+        assert!(matches!(
+            &args.head,
+            ProviderHead::DefaultExpr {
+                default_value: Some(_)
+            }
+        ));
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "MY_VAR");
     }
 
     // -- Named-arg-only branch ----------------------------------------------------
@@ -478,8 +657,8 @@ mod tests {
     #[test]
     fn env_only_without_default() {
         let args = parse_args(quote! { env = "API_KEY" }).unwrap();
-        match &args.kind {
-            ProviderKind::Value { default_value } => {
+        match &args.head {
+            ProviderHead::DefaultExpr { default_value } => {
                 assert!(
                     default_value.is_none(),
                     "env-only should have None default_value"
@@ -487,17 +666,17 @@ mod tests {
             }
             _ => panic!("Expected Value variant with env-only"),
         }
-        assert_eq!(args.env.as_ref().unwrap().value(), "API_KEY");
-        assert!(!args.eager);
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "API_KEY");
+        assert!(!args.named.eager);
     }
 
     #[test]
     fn eager_bool_parses() {
         let args = parse_args(quote! { eager = true }).unwrap();
         assert!(
-            matches!(&args.kind, ProviderKind::Value { default_value } if default_value.is_none())
+            matches!(&args.head, ProviderHead::DefaultExpr { default_value } if default_value.is_none())
         );
-        assert!(args.eager);
+        assert!(args.named.eager);
     }
 
     // -- Unknown ident falls through to expression --------------------------------
@@ -506,7 +685,7 @@ mod tests {
     fn unknown_ident_treated_as_expression() {
         // A non-template ident (e.g., a constant) should parse as a Value expression
         let args = parse_args(quote! { MY_CONST }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Value { .. }));
+        assert!(matches!(&args.head, ProviderHead::DefaultExpr { .. }));
     }
 
     // -- Error cases ---------------------------------------------------------------
@@ -519,6 +698,18 @@ mod tests {
         assert!(
             err_msg.contains("Unknown provider attribute"),
             "Error message should mention unknown provider attribute, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn explicit_unknown_template_is_error() {
+        let result = parse_args(quote! { template = Custom(String) });
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unknown provider template"),
+            "Error message should mention unknown provider template, got: {}",
             err_msg
         );
     }
@@ -592,34 +783,34 @@ mod tests {
     #[test]
     fn listen_template_with_addr() {
         let args = parse_args(quote! { Listen("0.0.0.0:8080") }).unwrap();
-        match &args.kind {
-            ProviderKind::Template { name, arg } => {
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Listen");
                 match arg {
-                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "0.0.0.0:8080"),
-                    _ => panic!("Expected Addr arg"),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"0.0.0.0:8080\""),
+                    _ => panic!("Expected captured arg"),
                 }
             }
             _ => panic!("Expected Template variant"),
         }
-        assert!(args.env.is_none());
-        assert!(!args.eager);
+        assert!(args.named.env.is_none());
+        assert!(!args.named.eager);
     }
 
     #[test]
     fn listen_template_with_addr_and_env() {
         let args = parse_args(quote! { Listen("0.0.0.0:8080"), env = "LISTEN_ADDR" }).unwrap();
-        match &args.kind {
-            ProviderKind::Template { name, arg } => {
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "Listen");
                 match arg {
-                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "0.0.0.0:8080"),
-                    _ => panic!("Expected Addr arg"),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"0.0.0.0:8080\""),
+                    _ => panic!("Expected captured arg"),
                 }
             }
             _ => panic!("Expected Template variant with env"),
         }
-        assert_eq!(args.env.as_ref().unwrap().value(), "LISTEN_ADDR");
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "LISTEN_ADDR");
     }
 
     #[test]
@@ -635,17 +826,14 @@ mod tests {
     }
 
     #[test]
-    fn listen_template_env_inside_parens_is_error() {
-        // Old syntax `Listen("addr", env = "VAR")` should now be rejected.
-        // The correct form is `Listen("addr"), env = "VAR"` (outside parentheses).
-        let result = parse_args(quote! { Listen("0.0.0.0:8080", env = "LISTEN_ADDR") });
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("Unexpected tokens inside template parentheses"),
-            "Error should mention unexpected tokens inside parentheses, got: {}",
-            err_msg,
-        );
+    fn listen_template_captures_inner_named_tokens_for_template_validation() {
+        let args = parse_args(quote! { Listen("0.0.0.0:8080", env = "LISTEN_ADDR") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
+                assert!(arg.tokens.to_string().contains("env"));
+            }
+            _ => panic!("Expected captured template arg"),
+        }
     }
 
     // -- Cross-template tests (env on non-Listen templates) -----------------------
@@ -654,22 +842,24 @@ mod tests {
     fn notify_template_with_env_parses_ok() {
         // env is a shared attribute, should parse successfully even for Notify
         let args = parse_args(quote! { Notify, env = "SOME_VAR" }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Template { name, .. } if name == "Notify"));
-        assert_eq!(args.env.as_ref().unwrap().value(), "SOME_VAR");
+        assert!(
+            matches!(&args.head, ProviderHead::BuiltinTemplate { name, .. } if name == "Notify")
+        );
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "SOME_VAR");
     }
 
     #[test]
     fn queue_template_with_env_parses_ok() {
         let args = parse_args(quote! { Queue(String), env = "Q_VAR" }).unwrap();
-        assert!(matches!(&args.kind, ProviderKind::Template { .. }));
-        assert_eq!(args.env.as_ref().unwrap().value(), "Q_VAR");
+        assert!(matches!(&args.head, ProviderHead::BuiltinTemplate { .. }));
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "Q_VAR");
     }
 
     #[test]
     fn queue_template_with_capacity_and_env() {
         let args = parse_args(quote! { Queue(String), capacity = 200, env = "Q_VAR" }).unwrap();
-        assert_eq!(args.capacity, Some(200));
-        assert_eq!(args.env.as_ref().unwrap().value(), "Q_VAR");
+        assert_eq!(args.named.capacity, Some(200));
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "Q_VAR");
     }
 
     // -- UnixListen / UnixConnect template branches -------------------------------
@@ -677,12 +867,12 @@ mod tests {
     #[test]
     fn unix_listen_template_with_path() {
         let args = parse_args(quote! { UnixListen("/run/myapp/sock") }).unwrap();
-        match &args.kind {
-            ProviderKind::Template { name, arg } => {
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "UnixListen");
                 match arg {
-                    Some(TemplateArg::Addr(lit)) => assert_eq!(lit.value(), "/run/myapp/sock"),
-                    _ => panic!("Expected Addr arg for UnixListen"),
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"/run/myapp/sock\""),
+                    _ => panic!("Expected captured arg for UnixListen"),
                 }
             }
             _ => panic!("Expected Template variant"),
@@ -694,21 +884,143 @@ mod tests {
         let args =
             parse_args(quote! { UnixConnect("/run/peer/sock"), env = "PEER_SOCK", eager = true })
                 .unwrap();
-        match &args.kind {
-            ProviderKind::Template { name, arg } => {
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
                 assert_eq!(name.to_string(), "UnixConnect");
-                assert!(matches!(arg, Some(TemplateArg::Addr(_))));
+                assert!(matches!(arg, Some(TemplateArg { .. })));
             }
             _ => panic!("Expected Template variant"),
         }
-        assert_eq!(args.env.as_ref().unwrap().value(), "PEER_SOCK");
-        assert!(args.eager);
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_SOCK");
+        assert!(args.named.eager);
     }
 
     #[test]
-    fn unix_listen_env_inside_parens_is_error() {
-        // Parentheses must contain only the path literal; named attrs go outside.
-        let result = parse_args(quote! { UnixListen("/sock", env = "VAR") });
-        assert!(result.is_err());
+    fn unix_listen_template_captures_const_path_arg() {
+        let args = parse_args(quote! { UnixListen(crate::config::SOCKET_PATH) }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "UnixListen");
+                match arg {
+                    Some(arg) => {
+                        assert_eq!(arg.tokens.to_string(), "crate :: config :: SOCKET_PATH")
+                    }
+                    _ => panic!("Expected captured arg for UnixListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+    }
+
+    #[test]
+    fn unix_listen_captures_inner_named_tokens_for_template_validation() {
+        let args = parse_args(quote! { UnixListen("/sock", env = "VAR") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { arg: Some(arg), .. } => {
+                assert!(arg.tokens.to_string().contains("env"));
+            }
+            _ => panic!("Expected captured template arg"),
+        }
+    }
+
+    // -- NamedPipeListen / NamedPipeConnect template branches ---------------------
+
+    #[test]
+    fn named_pipe_listen_template_with_name() {
+        let args = parse_args(quote! { NamedPipeListen(r"\\.\pipe\myapp-api") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "NamedPipeListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "r\"\\\\.\\pipe\\myapp-api\""),
+                    _ => panic!("Expected captured arg for NamedPipeListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert!(args.named.env.is_none());
+        assert!(!args.named.eager);
+    }
+
+    #[test]
+    fn named_pipe_connect_template_with_name_env_eager() {
+        let args = parse_args(
+            quote! { NamedPipeConnect(r"\\.\pipe\peer-api"), env = "PEER_PIPE", eager = true },
+        )
+        .unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "NamedPipeConnect");
+                assert!(matches!(arg, Some(TemplateArg { .. })));
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_PIPE");
+        assert!(args.named.eager);
+    }
+
+    #[test]
+    fn named_pipe_listen_template_captures_const_path_arg() {
+        let args = parse_args(quote! { NamedPipeListen(crate::pipes::PIPE_NAME) }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "NamedPipeListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "crate :: pipes :: PIPE_NAME"),
+                    _ => panic!("Expected captured arg for NamedPipeListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+    }
+
+    // -- LocalIpcListen / LocalIpcConnect template branches ----------------------
+
+    #[test]
+    fn local_ipc_listen_template_with_name() {
+        let args = parse_args(quote! { LocalIpcListen("myapp-api") }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "LocalIpcListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "\"myapp-api\""),
+                    _ => panic!("Expected captured arg for LocalIpcListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert!(args.named.env.is_none());
+        assert!(!args.named.eager);
+    }
+
+    #[test]
+    fn local_ipc_connect_template_with_name_env_eager() {
+        let args =
+            parse_args(quote! { LocalIpcConnect("peer-api"), env = "PEER_IPC", eager = true })
+                .unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "LocalIpcConnect");
+                assert!(matches!(arg, Some(TemplateArg { .. })));
+            }
+            _ => panic!("Expected Template variant"),
+        }
+        assert_eq!(args.named.env.as_ref().unwrap().value(), "PEER_IPC");
+        assert!(args.named.eager);
+    }
+
+    #[test]
+    fn local_ipc_listen_template_captures_const_path_arg() {
+        let args = parse_args(quote! { LocalIpcListen(crate::ipc::NAME) }).unwrap();
+        match &args.head {
+            ProviderHead::BuiltinTemplate { name, arg } => {
+                assert_eq!(name.to_string(), "LocalIpcListen");
+                match arg {
+                    Some(arg) => assert_eq!(arg.tokens.to_string(), "crate :: ipc :: NAME"),
+                    _ => panic!("Expected captured arg for LocalIpcListen"),
+                }
+            }
+            _ => panic!("Expected Template variant"),
+        }
     }
 }

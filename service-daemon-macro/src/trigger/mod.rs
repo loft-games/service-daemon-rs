@@ -42,7 +42,7 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let scheduling_tokens = args.scheduling;
     let tags_tokens = args.tags;
 
-    // `extract_params(..., true)` uses the shared parser in trigger mode.
+    // `try_extract_trigger_params` uses the shared parser in trigger mode.
     // Here the shared payload lane is the real trigger payload semantics:
     // exactly one bare or `#[payload]` parameter may be accepted, while
     // Arc-based parameters are treated as framework-managed dependencies.
@@ -50,10 +50,14 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         clean_inputs,
         resolve_tokens,
         call_args,
-        param_entries,
+        mut param_entries,
         mut watcher_arms,
         di_idents,
-    } = crate::common::extract_params(sig, true);
+        ..
+    } = match crate::common::try_extract_trigger_params(sig) {
+        Ok(params) => params,
+        Err(err) => return TokenStream::from(err.to_compile_error()),
+    };
 
     let is_async = input.sig.asyncness.is_some();
     let call_expr = generate_call_expr(
@@ -66,7 +70,17 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     );
 
     // Triggers always watch their target for configuration changes,
-    // in addition to any DI dependency watch handles from extract_params.
+    // in addition to any DI dependency watch handles from trigger parameter extraction.
+    let target_type_str = quote!(#target_type).to_string().replace(' ', "");
+    param_entries.push(quote! {
+        service_daemon::__private::ServiceParam {
+            name: "__trigger_target",
+            type_name: #target_type_str,
+            type_id: std::any::TypeId::of::<#target_type>(),
+            kind: service_daemon::__private::ProviderDependencyKind::Snapshot,
+        }
+    });
+
     if is_watch_host {
         watcher_arms.push(quote! {
             watch_set.push(<#target_type as service_daemon::WatchableProvided>::watch_dependency());
@@ -103,13 +117,15 @@ pub fn trigger_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
         body,
     );
 
-    let wrapper_fn = crate::common::generate_wrapper_fn(&wrapper_name, &event_loop_call);
+    let wrapper_fn =
+        crate::common::generate_wrapper_fn(&wrapper_name, &param_entries, &event_loop_call);
 
     let registry_entry =
         crate::common::generate_static_registry_entry(crate::common::RegistryEntryInput {
             entry_name: &entry_name,
             fn_name_str: &fn_name_str,
             param_entries: &param_entries,
+            input_entry: &quote! { None },
             wrapper_name: &wrapper_name,
             watcher_ptr: &watcher_ptr,
             priority: &priority_tokens,

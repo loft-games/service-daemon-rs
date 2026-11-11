@@ -3,17 +3,81 @@
 //! This module generates providers for structs with automatic field injection.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote, quote_spanned};
+use quote::{quote, quote_spanned};
 use syn::ItemStruct;
+use syn::parse::Parser;
 use syn::spanned::Spanned;
 
 use super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
-use super::parser::{ProviderArgs, ProviderKind, TemplateArg};
+use super::parser::{ListenArg, ProviderArgs, ProviderHead, StringTemplateArg, TemplateArg};
 use super::templates::{
-    generate_broadcast_queue_template, generate_listen_template, generate_notify_template,
-    generate_unix_connect_template, generate_unix_listen_template,
+    generate_broadcast_queue_template, generate_listen_template,
+    generate_local_ipc_connect_template, generate_local_ipc_listen_template,
+    generate_named_pipe_connect_template, generate_named_pipe_listen_template,
+    generate_notify_template, generate_unix_connect_template, generate_unix_listen_template,
 };
 use crate::common::{WrapperKind, decompose_type};
+use crate::diagnostics::{compile_error_at, emit_unused_provider_template_arg_warning};
+
+fn parse_template_arg<T: syn::parse::Parse>(
+    template_name: &syn::Ident,
+    arg: &TemplateArg,
+) -> syn::Result<T> {
+    let parser = |input: syn::parse::ParseStream| {
+        let value = input.parse::<T>()?;
+        if !input.is_empty() {
+            return Err(syn::Error::new(
+                input.span(),
+                format!(
+                    "Unexpected tokens inside {template_name} template parentheses; \
+                     named attributes like `env` belong outside: \
+                     #[provider({template_name}(...), env = \"VAR\")]"
+                ),
+            ));
+        }
+        Ok(value)
+    };
+
+    parser.parse2(arg.tokens.clone())
+}
+
+fn parse_required_template_arg<T: syn::parse::Parse>(
+    name: &syn::Ident,
+    arg: Option<&TemplateArg>,
+    missing_message: &str,
+    help: &str,
+) -> syn::Result<T> {
+    let Some(arg) = arg else {
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{missing_message}\n\n  = help: {help}\n"),
+        ));
+    };
+
+    parse_template_arg(name, arg)
+}
+
+fn validate_local_ipc_literal(
+    template_name: &syn::Ident,
+    logical_name: &StringTemplateArg,
+) -> syn::Result<()> {
+    let Some(value) = logical_name.literal_value() else {
+        return Ok(());
+    };
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(syn::Error::new_spanned(
+            logical_name,
+            format!(
+                "{template_name} template requires a non-empty logical name containing only ASCII letters, digits, '.', '_', and '-'"
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// Attempts to generate a template-based provider if the args specify a known template.
 /// Returns `Some(TokenStream)` if a template was matched, `None` otherwise.
@@ -24,48 +88,53 @@ fn try_generate_template(
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
     provider_args: &ProviderArgs,
-) -> Option<TokenStream> {
-    let ProviderKind::Template { name, arg } = &provider_args.kind else {
-        return None;
+) -> syn::Result<Option<TokenStream>> {
+    let ProviderHead::BuiltinTemplate { name, arg } = &provider_args.head else {
+        return Ok(None);
     };
 
-    match name.to_string().as_str() {
+    let template = match name.to_string().as_str() {
         // Signal templates - no named arguments are useful
         "Notify" | "Event" => {
-            if provider_args.env.is_some() {
-                proc_macro_error2::emit_warning!(
-                    name,
-                    "Notify/Event template does not use `env`; it will be ignored"
-                );
+            if let Some(arg) = arg {
+                parse_template_arg::<syn::Type>(name, arg)?;
             }
-            if provider_args.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
-                    name,
-                    "Notify/Event template does not use `capacity`; it will be ignored"
-                );
+            if provider_args.named.env.is_some() {
+                emit_unused_provider_template_arg_warning!(name, "Notify/Event", "env");
+            }
+            if provider_args.named.capacity.is_some() {
+                emit_unused_provider_template_arg_warning!(name, "Notify/Event", "capacity");
             }
             Some(generate_notify_template(
                 struct_name,
                 vis,
                 attrs,
-                provider_args.eager,
+                provider_args.named.eager,
             ))
         }
         // Broadcast queue templates (fanout - all handlers receive the event)
         "BroadcastQueue" | "Queue" | "BQueue" => {
             let item_type = match arg {
-                Some(TemplateArg::Type(ty)) => (*ty).clone(),
+                Some(arg) => parse_required_template_arg::<syn::Type>(
+                    name,
+                    Some(arg),
+                    "Queue template requires an item type",
+                    "Usage: #[provider(Queue(String))]",
+                )?,
                 _ => syn::parse_quote!(String),
             };
-            let cap = match std::num::NonZeroUsize::new(provider_args.capacity.unwrap_or(100)) {
+            let cap = match std::num::NonZeroUsize::new(provider_args.named.capacity.unwrap_or(100))
+            {
                 Some(cap) => cap,
-                None => proc_macro_error2::abort!(name, "Queue capacity must be greater than zero"),
+                None => {
+                    return Err(syn::Error::new_spanned(
+                        name,
+                        "Queue capacity must be greater than zero",
+                    ));
+                }
             };
-            if provider_args.env.is_some() {
-                proc_macro_error2::emit_warning!(
-                    name,
-                    "Queue template does not use `env`; it will be ignored"
-                );
+            if provider_args.named.env.is_some() {
+                emit_unused_provider_template_arg_warning!(name, "Queue", "env");
             }
             Some(generate_broadcast_queue_template(
                 struct_name,
@@ -73,99 +142,180 @@ fn try_generate_template(
                 attrs,
                 &item_type,
                 cap,
-                provider_args.eager,
+                provider_args.named.eager,
             ))
         }
         // Listen template (TCP listener with FD cloning)
         "Listen" => {
-            let bind_addr = match arg {
-                Some(TemplateArg::Addr(lit)) => lit,
-                _ => {
-                    proc_macro_error2::abort!(
-                        name,
-                        "Listen template requires a bind address";
-                        help = r#"Usage: #[provider(Listen("0.0.0.0:8080"))]"#
-                    );
-                }
-            };
-            if provider_args.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
-                    name,
-                    "Listen template does not use `capacity`; it will be ignored"
-                );
+            let bind_addr = parse_required_template_arg::<ListenArg>(
+                name,
+                arg.as_ref(),
+                "Listen template requires a port or bind address",
+                "Usage: #[provider(Listen(8080))]",
+            )?;
+            if provider_args.named.capacity.is_some() {
+                emit_unused_provider_template_arg_warning!(name, "Listen", "capacity");
             }
             Some(generate_listen_template(
                 struct_name,
                 vis,
                 attrs,
-                bind_addr,
-                provider_args.env.as_ref(),
-                provider_args.eager,
+                &bind_addr.0,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
             ))
         }
         // UnixListen template (Unix domain socket listener with FD cloning)
         "UnixListen" => {
-            let bind_path = match arg {
-                Some(TemplateArg::Addr(lit)) => lit,
-                _ => {
-                    proc_macro_error2::abort!(
-                        name,
-                        "UnixListen template requires a bind path";
-                        help = r#"Usage: #[provider(UnixListen("/run/myapp/sock"))]"#
-                    );
-                }
-            };
-            if provider_args.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
-                    name,
-                    "UnixListen template does not use `capacity`; it will be ignored"
-                );
+            let bind_path = parse_required_template_arg::<StringTemplateArg>(
+                name,
+                arg.as_ref(),
+                "UnixListen template requires a bind path",
+                r#"Usage: #[provider(UnixListen("/run/myapp/sock"))] or #[provider(UnixListen(MY_SOCKET_PATH))]"#,
+            )?;
+            if provider_args.named.capacity.is_some() {
+                emit_unused_provider_template_arg_warning!(name, "UnixListen", "capacity");
             }
             Some(generate_unix_listen_template(
                 struct_name,
                 vis,
                 attrs,
-                bind_path,
-                provider_args.env.as_ref(),
-                provider_args.eager,
+                &bind_path,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
             ))
         }
-        // UnixConnect template (Unix domain socket client; reachability probe at init)
+        // UnixConnect template (Unix domain socket client; dials on connect()).
         "UnixConnect" => {
-            let connect_path = match arg {
-                Some(TemplateArg::Addr(lit)) => lit,
-                _ => {
-                    proc_macro_error2::abort!(
-                        name,
-                        "UnixConnect template requires a target path";
-                        help = r#"Usage: #[provider(UnixConnect("/run/peer/sock"))]"#
-                    );
-                }
-            };
-            if provider_args.capacity.is_some() {
-                proc_macro_error2::emit_warning!(
-                    name,
-                    "UnixConnect template does not use `capacity`; it will be ignored"
-                );
+            let connect_path = parse_required_template_arg::<StringTemplateArg>(
+                name,
+                arg.as_ref(),
+                "UnixConnect template requires a target path",
+                r#"Usage: #[provider(UnixConnect("/run/peer/sock"))] or #[provider(UnixConnect(MY_SOCKET_PATH))]"#,
+            )?;
+            if provider_args.named.capacity.is_some() {
+                emit_unused_provider_template_arg_warning!(name, "UnixConnect", "capacity");
             }
             Some(generate_unix_connect_template(
                 struct_name,
                 vis,
                 attrs,
-                connect_path,
-                provider_args.env.as_ref(),
-                provider_args.eager,
+                &connect_path,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
+        // Windows named pipe listener template
+        "NamedPipeListen" => {
+            let pipe_name = parse_required_template_arg::<StringTemplateArg>(
+                name,
+                arg.as_ref(),
+                "NamedPipeListen template requires a pipe name",
+                r#"Usage: #[provider(NamedPipeListen(r"\\.\pipe\myapp-api"))] or #[provider(NamedPipeListen(MY_PIPE_NAME))]"#,
+            )?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "NamedPipeListen template does not support `capacity`; \
+                     Windows named pipe providers only accept pipe name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_named_pipe_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                &pipe_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
+        // Windows named pipe client template
+        "NamedPipeConnect" => {
+            let pipe_name = parse_required_template_arg::<StringTemplateArg>(
+                name,
+                arg.as_ref(),
+                "NamedPipeConnect template requires a pipe name",
+                r#"Usage: #[provider(NamedPipeConnect(r"\\.\pipe\peer-api"))] or #[provider(NamedPipeConnect(MY_PIPE_NAME))]"#,
+            )?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "NamedPipeConnect template does not support `capacity`; \
+                     Windows named pipe providers only accept pipe name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_named_pipe_connect_template(
+                struct_name,
+                vis,
+                attrs,
+                &pipe_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
+        // Cross-platform local IPC listener template
+        "LocalIpcListen" => {
+            let logical_name = parse_required_template_arg::<StringTemplateArg>(
+                name,
+                arg.as_ref(),
+                "LocalIpcListen template requires a logical name",
+                r#"Usage: #[provider(LocalIpcListen("myapp-api"))] or #[provider(LocalIpcListen(MY_IPC_NAME))]"#,
+            )?;
+            validate_local_ipc_literal(name, &logical_name)?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "LocalIpcListen template does not support `capacity`; \
+                     local IPC providers only accept logical name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_local_ipc_listen_template(
+                struct_name,
+                vis,
+                attrs,
+                &logical_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
+            ))
+        }
+        // Cross-platform local IPC client template
+        "LocalIpcConnect" => {
+            let logical_name = parse_required_template_arg::<StringTemplateArg>(
+                name,
+                arg.as_ref(),
+                "LocalIpcConnect template requires a logical name",
+                r#"Usage: #[provider(LocalIpcConnect("peer-api"))] or #[provider(LocalIpcConnect(MY_IPC_NAME))]"#,
+            )?;
+            validate_local_ipc_literal(name, &logical_name)?;
+            if provider_args.named.capacity.is_some() {
+                return Err(syn::Error::new_spanned(
+                    name,
+                    "LocalIpcConnect template does not support `capacity`; \
+                     local IPC providers only accept logical name, `env`, and `eager`",
+                ));
+            }
+            Some(generate_local_ipc_connect_template(
+                struct_name,
+                vis,
+                attrs,
+                &logical_name,
+                provider_args.named.env.as_ref(),
+                provider_args.named.eager,
             ))
         }
         _ => {
             // Unknown template name - emit helpful error at the exact span
-            proc_macro_error2::abort!(
+            return Err(syn::Error::new_spanned(
                 name,
-                "Unknown provider template '{}'", name;
-                help = "Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect"
-            );
+                format!(
+                    "Unknown provider template '{}'\n\n  = help: Supported templates: Notify, Event, Queue, BQueue, BroadcastQueue, Listen, UnixListen, UnixConnect, NamedPipeListen, NamedPipeConnect, LocalIpcListen, LocalIpcConnect\n",
+                    name
+                ),
+            ));
         }
-    }
+    };
+
+    Ok(template)
 }
 
 /// Information about a single-element tuple struct.
@@ -208,7 +358,7 @@ impl TupleStructInfo {
 }
 
 /// Generates a provider for a struct with automatic field injection.
-pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenStream {
+pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> syn::Result<TokenStream> {
     let struct_name = &item.ident;
     let vis = &item.vis;
     let attrs = &item.attrs;
@@ -217,8 +367,8 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     let semi = &item.semi_token;
 
     // Template providers replace the normal struct-provider expansion.
-    if let Some(template_output) = try_generate_template(struct_name, vis, attrs, &args) {
-        return template_output;
+    if let Some(template_output) = try_generate_template(struct_name, vis, attrs, &args)? {
+        return Ok(template_output);
     }
 
     // Generate struct definition with proper syntax
@@ -247,14 +397,20 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
                 let field_name = field.ident.as_ref()?;
                 let (inner_type, wrapper) = decompose_type(&field.ty);
                 // Only Arc-wrapped fields are DI dependencies
-                wrapper.map(|_| {
+                wrapper.map(|wrapper| {
                     let field_name_str = field_name.to_string();
                     let type_str = quote!(#inner_type).to_string().replace(' ', "");
+                    let dependency_kind = match wrapper {
+                        WrapperKind::ArcRwLock(_, _) => quote! { RwLock },
+                        WrapperKind::ArcMutex(_, _) => quote! { Mutex },
+                        WrapperKind::Arc(_) => quote! { Snapshot },
+                    };
                     quote! {
                         service_daemon::__private::ServiceParam {
                             name: #field_name_str,
                             type_name: #type_str,
                             type_id: std::any::TypeId::of::<#inner_type>(),
+                            kind: service_daemon::__private::ProviderDependencyKind::#dependency_kind,
                         }
                     }
                 })
@@ -269,18 +425,14 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
     // two structs with the same name in different modules produce separate
     // statics. Within a single module, Rust forbids duplicate type names,
     // making name collisions impossible under normal usage.
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
 
     let type_tokens = quote! { #struct_name };
-    let eager = args.eager;
+    let eager = args.named.eager;
     let helper_style = struct_provider_helper_style(fields, &tuple_info, &args);
     let provider_origin = format!("#[provider] struct {struct_name}");
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &param_entries,
         eager,
@@ -300,7 +452,7 @@ pub fn generate_struct_provider(item: ItemStruct, args: ProviderArgs) -> TokenSt
         #provided_impl
     };
 
-    TokenStream::from(expanded)
+    Ok(TokenStream::from(expanded))
 }
 
 /// Generates the struct definition with proper syntax for different struct kinds.
@@ -364,18 +516,19 @@ fn generate_extra_traits(
 fn required_env_value_provider<'a>(
     tuple_info: &'a Option<TupleStructInfo>,
     provider_args: &'a ProviderArgs,
-) -> Option<(&'a syn::LitStr, &'a syn::Type, bool)> {
+) -> Option<(&'a StringTemplateArg, &'a syn::Type)> {
     let info = tuple_info.as_ref()?;
-    match &provider_args.kind {
-        ProviderKind::Value {
+    match &provider_args.head {
+        ProviderHead::DefaultExpr {
             default_value: None,
         } => {}
         _ => return None,
     }
     provider_args
+        .named
         .env
         .as_ref()
-        .map(|env| (env, &info.inner_type, info.is_string))
+        .map(|env| (env, &info.inner_type))
 }
 
 fn struct_provider_helper_style(
@@ -410,23 +563,25 @@ fn generate_default_impl(
     };
 
     // Extract default value expression from args.
-    let default_expr_opt = match &provider_args.kind {
-        ProviderKind::Value { default_value } => default_value.as_ref(),
+    let default_expr_opt = match &provider_args.head {
+        ProviderHead::DefaultExpr { default_value } => default_value.as_ref(),
         _ => None,
     };
     // Read env from the shared field.
-    let env_opt = provider_args.env.as_ref();
+    let env_opt = provider_args.named.env.as_ref();
 
     // Capacity on Value providers is semantically invalid - emit error.
-    if provider_args.capacity.is_some() {
-        proc_macro_error2::emit_error!(
+    let capacity_error = if provider_args.named.capacity.is_some() {
+        compile_error_at(
             struct_name,
-            "`capacity` is not supported on value providers; use a template like Queue instead"
-        );
-    }
+            "`capacity` is not supported on value providers; use a template like Queue instead",
+        )
+    } else {
+        quote! {}
+    };
 
     if required_env_value_provider(tuple_info, provider_args).is_some() {
-        return quote! {};
+        return capacity_error;
     }
 
     // Helper to wrap string literals with .to_owned() for String fields
@@ -445,39 +600,33 @@ fn generate_default_impl(
     };
 
     // Build the default expression
-    let default_body = if let Some(env_lit) = env_opt {
+    let default_body = if let Some(env_arg) = env_opt {
         // Use env var with fallback to default
-        let env_str = env_lit.value();
+        let env_expr = env_arg.to_static_str_expr();
 
         let Some(default_val) = default_expr_opt else {
             return quote! {};
         };
         let default_tokens = expand_value(default_val);
 
-        if info.is_string {
-            quote! {
-                std::env::var(#env_str).unwrap_or_else(|_| #default_tokens)
-            }
-        } else {
-            // Non-String type: parse the env var string into the target type.
-            // This enables `#[provider(8080, env = "PORT")] struct Port(pub i32)`.
-            let inner_ty = &info.inner_type;
-            quote! {
-                std::env::var(#env_str)
-                    .ok()
-                    .and_then(|v| v.parse::<#inner_ty>().ok())
-                    .unwrap_or_else(|| #default_tokens)
-            }
+        let parse_value = generate_env_value_parse(&info.inner_type);
+        quote! {
+            std::env::var(#env_expr)
+                .ok()
+                .and_then(|raw_value| #parse_value.and_then(std::result::Result::ok))
+                .unwrap_or_else(|| #default_tokens)
         }
     } else if let Some(default_val) = default_expr_opt {
         let default_tokens = expand_value(default_val);
         quote! { #default_tokens }
     } else {
         // No default specified, skip Default impl
-        return quote! {};
+        return capacity_error;
     };
 
     quote! {
+        #capacity_error
+
         impl Default for #struct_name {
             fn default() -> Self {
                 Self(#default_body)
@@ -486,21 +635,53 @@ fn generate_default_impl(
     }
 }
 
+/// Emit an optional parse result: empty input is missing, not a parse failure.
+/// TypeId handles aliases without downcasting or adding a public conversion trait.
+fn generate_env_value_parse(inner_type: &syn::Type) -> proc_macro2::TokenStream {
+    quote! {{
+        let value = if std::any::TypeId::of::<#inner_type>()
+            == std::any::TypeId::of::<std::string::String>()
+        {
+            raw_value.as_str()
+        } else {
+            raw_value.trim()
+        };
+        if value.is_empty() {
+            None
+        } else {
+            let value = if std::any::TypeId::of::<#inner_type>()
+                == std::any::TypeId::of::<bool>()
+            {
+                if value == "0" || value.eq_ignore_ascii_case("false")
+                    || value.eq_ignore_ascii_case("off")
+                    || value.eq_ignore_ascii_case("no")
+                {
+                    "false"
+                } else {
+                    "true"
+                }
+            } else {
+                value
+            };
+            Some(value.parse::<#inner_type>())
+        }
+    }}
+}
+
 fn generate_required_env_constructor(
     struct_name: &syn::Ident,
-    env_lit: &syn::LitStr,
+    env_arg: &StringTemplateArg,
     inner_type: &syn::Type,
-    is_string: bool,
     managed_errors: bool,
 ) -> proc_macro2::TokenStream {
-    let env_str = env_lit.value();
+    let env_expr = env_arg.to_static_str_expr();
     let struct_name_str = struct_name.to_string();
 
     let missing_error = if managed_errors {
         quote! {
             service_daemon::ProviderError::Fatal(format!(
                 "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
-                #env_str, #struct_name_str, #env_str
+                #env_expr, #struct_name_str, #env_expr
             ))
         }
     } else {
@@ -509,25 +690,18 @@ fn generate_required_env_constructor(
                 #struct_name_str,
                 format!(
                     "Required environment variable '{}' is not set (needed by provider '{}'). Set it or add a default: #[provider(\"...\", env = \"{}\")]",
-                    #env_str, #struct_name_str, #env_str
+                    #env_expr, #struct_name_str, #env_expr
                 ),
                 service_daemon::__private::ProviderInitSourceKind::EnvironmentMissing,
             )
         }
     };
 
-    if is_string {
-        return quote! {
-            let value = std::env::var(#env_str).map_err(|_| #missing_error)?;
-            Ok(std::sync::Arc::new(#struct_name(value)))
-        };
-    }
-
     let parse_error = if managed_errors {
         quote! {
             service_daemon::ProviderError::Fatal(format!(
                 "Environment variable '{}' for provider '{}' cannot be parsed: {}",
-                #env_str, #struct_name_str, e
+                #env_expr, #struct_name_str, e
             ))
         }
     } else {
@@ -536,16 +710,18 @@ fn generate_required_env_constructor(
                 #struct_name_str,
                 format!(
                     "Environment variable '{}' for provider '{}' cannot be parsed: {}",
-                    #env_str, #struct_name_str, e
+                    #env_expr, #struct_name_str, e
                 ),
                 service_daemon::__private::ProviderInitSourceKind::EnvironmentParse,
             )
         }
     };
 
+    let parse_value = generate_env_value_parse(inner_type);
     quote! {
-        let raw_value = std::env::var(#env_str).map_err(|_| #missing_error)?;
-        let value = raw_value.parse::<#inner_type>().map_err(|e| #parse_error)?;
+        let raw_value = std::env::var(#env_expr).map_err(|_| #missing_error)?;
+        let value = #parse_value.ok_or_else(|| #missing_error)?
+            .map_err(|e| #parse_error)?;
         Ok(std::sync::Arc::new(#struct_name(value)))
     }
 }
@@ -553,9 +729,9 @@ fn generate_required_env_constructor(
 /// Generates the constructor for the struct provider.
 ///
 /// Supports automatic injection for:
-/// - `Arc<T>` fields -> `<T as Provided>::resolve().await`
-/// - `Arc<RwLock<T>>` fields -> `<T as ManagedProvided>::resolve_rwlock().await`
-/// - `Arc<Mutex<T>>` fields -> `<T as ManagedProvided>::resolve_mutex().await`
+/// - `Arc<T>` fields -> ready snapshot dependency
+/// - `Arc<RwLock<T>>` fields -> ready tracked RwLock dependency
+/// - `Arc<Mutex<T>>` fields -> ready tracked Mutex dependency
 /// - Other fields -> `Default::default()`
 ///
 /// Uses `decompose_type` from `common` to handle Arc pattern matching consistently.
@@ -566,16 +742,8 @@ fn generate_constructor(
     provider_args: &ProviderArgs,
     managed_errors: bool,
 ) -> proc_macro2::TokenStream {
-    if let Some((env_lit, inner_type, is_string)) =
-        required_env_value_provider(tuple_info, provider_args)
-    {
-        return generate_required_env_constructor(
-            struct_name,
-            env_lit,
-            inner_type,
-            is_string,
-            managed_errors,
-        );
+    if let Some((env_lit, inner_type)) = required_env_value_provider(tuple_info, provider_args) {
+        return generate_required_env_constructor(struct_name, env_lit, inner_type, managed_errors);
     }
 
     match fields {
@@ -594,52 +762,39 @@ fn generate_constructor(
                         Some(WrapperKind::ArcRwLock(_, _)) => {
                             if managed_errors {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
-                                        .await
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_rwlock()
                                         .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock()
-                                        .await
-                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
-                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
-                                            e,
-                                        ))?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_rwlock()
+                                        .map_err(service_daemon::__private::ProviderInitFailure::from)?
                                 }
                             }
                         }
                         Some(WrapperKind::ArcMutex(_, _)) => {
                             if managed_errors {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
-                                        .await
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_mutex()
                                         .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_mutex()
-                                        .await
-                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
-                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
-                                            e,
-                                        ))?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_mutex()
+                                        .map_err(service_daemon::__private::ProviderInitFailure::from)?
                                 }
                             }
                         }
                         Some(WrapperKind::Arc(_)) => {
                             if managed_errors {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::ManagedProvided>::resolve_managed().await?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_snapshot()
+                                        .map_err(|e| service_daemon::ProviderError::Fatal(e.to_string()))?
                                 }
                             } else {
                                 quote! {
-                                    #field_name: <#inner_type as service_daemon::Provided>::resolve()
-                                        .await
-                                        .map_err(|e| service_daemon::__private::ProviderInitFailure::new(
-                                            service_daemon::__private::ProviderInitSourceKind::DependencyProvider,
-                                            e,
-                                        ))?
+                                    #field_name: <#inner_type as service_daemon::__private::ProviderDefinition>::ready_snapshot()
+                                        .map_err(service_daemon::__private::ProviderInitFailure::from)?
                                 }
                             }
                         }
@@ -673,5 +828,56 @@ fn generate_constructor(
                 Ok(std::sync::Arc::new(#struct_name::default()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::*;
+
+    #[test]
+    fn default_and_required_env_share_conversion() {
+        for ty in [
+            quote!(bool),
+            quote!(std::primitive::bool),
+            quote!(String),
+            quote!(u16),
+            quote!(Alias),
+        ] {
+            let item: ItemStruct = syn::parse2(quote!(struct Config(#ty);)).unwrap();
+            let info = TupleStructInfo::from_fields(&item.fields);
+            let inner: syn::Type = syn::parse2(ty).unwrap();
+            let parse = generate_env_value_parse(&inner).to_string();
+            let args: ProviderArgs =
+                syn::parse2(quote!(Default::default(), env = "CONFIG")).unwrap();
+            let default = generate_default_impl(&info, &args, &item.ident);
+            syn::parse2::<syn::ItemImpl>(default.clone()).unwrap();
+            assert!(default.to_string().contains(&parse));
+
+            let required_args: ProviderArgs = syn::parse2(quote!(env = "CONFIG")).unwrap();
+            let env = required_args.named.env.as_ref().unwrap();
+            for managed in [false, true] {
+                let constructor =
+                    generate_required_env_constructor(&item.ident, env, &inner, managed);
+                syn::parse2::<syn::Block>(quote!({ #constructor })).unwrap();
+                assert!(constructor.to_string().contains(&parse));
+                if managed {
+                    assert!(constructor.to_string().contains("ProviderError :: Fatal"));
+                } else {
+                    assert!(constructor.to_string().contains("EnvironmentMissing"));
+                    assert!(constructor.to_string().contains("EnvironmentParse"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn required_env_still_has_no_default_impl() {
+        let item: ItemStruct = syn::parse_quote!(
+            struct Config(bool);
+        );
+        let info = TupleStructInfo::from_fields(&item.fields);
+        let args: ProviderArgs = syn::parse2(quote!(env = "CONFIG")).unwrap();
+        assert!(generate_default_impl(&info, &args, &item.ident).is_empty());
     }
 }

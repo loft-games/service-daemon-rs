@@ -1,0 +1,16 @@
+[package]
+name = "high-priority-feature-contract"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+default = ["service-daemon/default"]
+high-priority = ["service-daemon/high-priority"]
+
+[dependencies]
+service-daemon = { path = "__SERVICE_DAEMON_PATH__", default-features = false }
+anyhow = "1.0.104"
+tracing = "0.1.44"

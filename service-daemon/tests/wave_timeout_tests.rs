@@ -46,7 +46,7 @@ async fn test_wave_spawn_timeout_allows_next_wave_to_start() -> anyhow::Result<(
     LOW_PRIORITY_STARTED.store(false, Ordering::SeqCst);
     WAVE_TIMELINE.lock().await.clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_wave_timeout__")

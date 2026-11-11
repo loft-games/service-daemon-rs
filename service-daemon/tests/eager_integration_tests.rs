@@ -1,3 +1,6 @@
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 use service_daemon::{
     DiagnosticProviderFailureBoundaryKind, DiagnosticProviderFailureKind,
     DiagnosticProviderFailureRuntimePhase, DiagnosticProviderFailureSourceKind, ProviderError,
@@ -238,7 +241,7 @@ async fn test_async_fn_eager_init() {
     // Reset state for test
     EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_eager_test")
@@ -266,7 +269,7 @@ async fn test_async_fn_eager_init() {
 async fn test_async_fn_eager_init_failure_triggers_shutdown() {
     EAGER_FAILURE_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_eager_failure_test")
@@ -303,67 +306,72 @@ async fn test_async_fn_eager_init_failure_triggers_shutdown() {
 
 #[tokio::test]
 async fn test_missing_env_public_helper_returns_fatal_error() {
-    assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
+    provider_context::run(async move {
+        assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
 
-    let result = MissingEnvToken::resolve().await;
-    match result {
-        Err(ProviderInitError::Fatal { provider, message }) => {
-            assert_eq!(provider, "MissingEnvToken");
-            assert!(
-                message.contains("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A"),
-                "expected missing env name in Fatal message, got: {}",
-                message
-            );
+        let result = MissingEnvToken::resolve().await;
+        match result {
+            Err(ProviderInitError::Fatal { provider, message }) => {
+                assert_eq!(provider, "MissingEnvToken");
+                assert!(
+                    message.contains("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A"),
+                    "expected missing env name in Fatal message, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected missing env Fatal, got {:?}", other),
         }
-        other => panic!("Expected missing env Fatal, got {:?}", other),
-    }
+    })
+    .await
 }
 
 #[tokio::test]
 async fn test_parse_env_public_helpers_preserve_error_boundary() {
     let _guard = set_test_env(PARSE_ENV_NAME, "not-a-u16");
-
-    let snapshot_result = ParseEnvToken::resolve().await;
-    match snapshot_result {
-        Err(ProviderInitError::Fatal { provider, message }) => {
-            assert_eq!(provider, "ParseEnvToken");
-            assert!(
-                message.contains(PARSE_ENV_NAME),
-                "expected parse env name in Fatal message, got: {}",
-                message
-            );
-            assert!(
-                message.contains("cannot be parsed"),
-                "expected parse failure in Fatal message, got: {}",
-                message
-            );
+    provider_context::run(async move {
+        let snapshot_result = ParseEnvToken::resolve().await;
+        match snapshot_result {
+            Err(ProviderInitError::Fatal { provider, message }) => {
+                assert_eq!(provider, "ParseEnvToken");
+                assert!(
+                    message.contains(PARSE_ENV_NAME),
+                    "expected parse env name in Fatal message, got: {}",
+                    message
+                );
+                assert!(
+                    message.contains("cannot be parsed"),
+                    "expected parse failure in Fatal message, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected parse env Fatal, got {:?}", other),
         }
-        other => panic!("Expected parse env Fatal, got {:?}", other),
-    }
 
-    let rwlock_result = ParseEnvToken::resolve_rwlock().await;
-    assert!(matches!(
-        rwlock_result,
-        Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
-    ));
+        let rwlock_result = ParseEnvToken::resolve_rwlock().await;
+        assert!(matches!(
+            rwlock_result,
+            Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
+        ));
 
-    let mutex_result = ParseEnvToken::resolve_mutex().await;
-    assert!(matches!(
-        mutex_result,
-        Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
-    ));
+        let mutex_result = ParseEnvToken::resolve_mutex().await;
+        assert!(matches!(
+            mutex_result,
+            Err(ProviderInitError::Fatal { provider, .. }) if provider == "ParseEnvToken"
+        ));
 
-    let managed_result = ParseEnvToken::resolve_managed().await;
-    match managed_result {
-        Err(ProviderError::Fatal(message)) => {
-            assert!(
-                message.contains(PARSE_ENV_NAME),
-                "expected parse env name in raw ProviderError, got: {}",
-                message
-            );
+        let managed_result = ParseEnvToken::resolve_managed().await;
+        match managed_result {
+            Err(ProviderError::Fatal(message)) => {
+                assert!(
+                    message.contains(PARSE_ENV_NAME),
+                    "expected parse env name in raw ProviderError, got: {}",
+                    message
+                );
+            }
+            other => panic!("Expected raw managed ProviderError::Fatal, got {:?}", other),
         }
-        other => panic!("Expected raw managed ProviderError::Fatal, got {:?}", other),
-    }
+    })
+    .await
 }
 
 #[tokio::test]
@@ -371,7 +379,7 @@ async fn test_missing_env_eager_provider_failure_triggers_shutdown() {
     assert!(std::env::var("SERVICE_DAEMON_RS_TEST_REQUIRED_ENV_MISSING_5B9D1F6A").is_err());
     MISSING_ENV_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_missing_env_failure_test")
@@ -390,7 +398,7 @@ async fn test_panicking_eager_provider_failure_triggers_shutdown() {
     PANICKING_EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
     PANICKING_EAGER_SERVICE_ENTERED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_panicking_eager_test")
@@ -409,7 +417,7 @@ async fn test_panicking_eager_provider_failure_triggers_shutdown() {
 async fn test_unreachable_eager_provider_is_not_initialized() {
     UNREACHABLE_EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_without_eager_dependency")
@@ -435,7 +443,7 @@ async fn test_reachable_eager_provider_dependency_initializes_before_service() {
     TRANSITIVE_PROVIDER_SAW_EAGER_DEP.store(false, Ordering::SeqCst);
     TRANSITIVE_SERVICE_SAW_EAGER_DEP.store(false, Ordering::SeqCst);
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_transitive_eager_dependency_test")
@@ -460,9 +468,12 @@ async fn test_reachable_eager_provider_dependency_initializes_before_service() {
 #[cfg(feature = "simulation")]
 #[tokio::test]
 async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
+    use service_daemon::MockContext;
+
     SIMULATION_EAGER_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let daemon = ServiceDaemon::builder()
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_simulation_eager_test")
@@ -472,7 +483,7 @@ async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
 
     assert!(!SIMULATION_EAGER_INIT_CALLED.load(Ordering::SeqCst));
 
-    daemon
+    simulation
         .run_for_duration(Duration::from_millis(100))
         .await
         .unwrap();
@@ -483,9 +494,12 @@ async fn test_run_for_duration_eager_init_matches_run_startup_boundary() {
 #[cfg(feature = "simulation")]
 #[tokio::test]
 async fn test_run_for_duration_eager_init_failure_returns_error() {
+    use service_daemon::MockContext;
+
     SIMULATION_EAGER_FAILURE_INIT_CALLED.store(false, Ordering::SeqCst);
 
-    let daemon = ServiceDaemon::builder()
+    let simulation = MockContext::builder()
+        .with_logging(false)
         .with_registry(
             service_daemon::Registry::builder()
                 .with_tag("stub_for_simulation_eager_failure_test")
@@ -495,7 +509,9 @@ async fn test_run_for_duration_eager_init_failure_returns_error() {
 
     assert!(!SIMULATION_EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
 
-    let result = daemon.run_for_duration(Duration::from_millis(100)).await;
+    let result = simulation
+        .run_for_duration(Duration::from_millis(100))
+        .await;
 
     assert!(SIMULATION_EAGER_FAILURE_INIT_CALLED.load(Ordering::SeqCst));
     assert!(result.is_err());

@@ -4,24 +4,37 @@ mod render;
 mod services;
 
 #[cfg(feature = "file-logging")]
+mod archive;
+
+#[cfg(feature = "file-logging")]
 mod file;
+
+#[cfg(feature = "file-logging")]
+mod file_config;
+
+#[cfg(feature = "file-logging")]
+mod rotation;
 
 pub use layer::DaemonLayer;
 pub use model::{LogBatchSizeError, MAX_LOG_BATCH_SIZE, set_log_batch_size};
 
 #[cfg(feature = "file-logging")]
-pub use file::{FileLogConfig, RotationPolicy, enable_file_logging};
+pub use file::{enable_file_logging, try_enable_file_logging};
+#[cfg(feature = "file-logging")]
+pub use file_config::{
+    FileLogArchiveConfig, FileLogCompression, FileLogConfig, FileLogConfigError, RotationPolicy,
+};
 
 use tracing_subscriber::prelude::*;
 
-/// One-line initialization: registers `DaemonLayer` + `EnvFilter` as the
-/// global tracing subscriber.
+/// Installs the global tracing subscriber for console and file logging.
 ///
-/// Reads the `RUST_LOG` environment variable for log-level configuration.
-/// Falls back to `"info"` if `RUST_LOG` is not set.
+/// With `RUST_LOG` unset, the console logs INFO and above; files log DEBUG and
+/// above. TRACE is disabled by default. Setting `RUST_LOG` applies the same
+/// `EnvFilter` directives to both outputs, including target and span filters.
 ///
-/// For custom subscriber stacks (e.g., adding Sentry or OpenTelemetry layers),
-/// compose your own subscriber using `DaemonLayer` directly:
+/// To add layers such as Sentry or OpenTelemetry, build a subscriber with
+/// [`DaemonLayer`] and your own filters. The filter below applies to both outputs:
 ///
 /// ```rust,ignore
 /// use service_daemon::DaemonLayer;
@@ -34,8 +47,7 @@ use tracing_subscriber::prelude::*;
 ///     .init();
 /// ```
 ///
-/// File logging is configured separately via `enable_file_logging()` and
-/// consumed by the independent `file_log_service`.
+/// Enable file output separately with `enable_file_logging()`.
 ///
 /// If a global tracing subscriber has already been set, this function logs a
 /// warning through the existing subscriber and leaves it unchanged. Use
@@ -65,13 +77,18 @@ pub fn init_logging() {
 /// }
 /// ```
 pub fn try_init_logging() -> Result<(), tracing_subscriber::util::TryInitError> {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let configured = std::env::var("RUST_LOG").ok();
+    let filter = |default| match &configured {
+        Some(directives) => tracing_subscriber::EnvFilter::try_new(directives)
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        None => tracing_subscriber::EnvFilter::new(default),
+    };
 
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(DaemonLayer)
-        .try_init()
+    let subscriber = tracing_subscriber::registry()
+        .with(layer::CaptureLayer::Console.with_filter(filter("info")));
+    #[cfg(feature = "file-logging")]
+    let subscriber = subscriber.with(layer::CaptureLayer::File.with_filter(filter("debug")));
+    subscriber.try_init()
 }
 
 #[cfg(test)]
@@ -83,7 +100,7 @@ mod tests {
     };
     use super::render::render_to_string;
     use super::*;
-    use crate::models::{ServiceId, service::InstanceId};
+    use crate::models::{ServiceInstanceId, service::TriggerInstanceId};
     use chrono::Utc;
     use std::borrow::Cow;
     use std::num::NonZeroUsize;
@@ -171,10 +188,10 @@ mod tests {
     fn make_event(
         level: LogLevel,
         message: &str,
-        service_id: Option<ServiceId>,
-        source_service_id: Option<ServiceId>,
+        service_instance_id: Option<ServiceInstanceId>,
+        source_service_instance_id: Option<ServiceInstanceId>,
         message_id: Option<Uuid>,
-        instance_id: Option<InstanceId>,
+        trigger_instance_id: Option<TriggerInstanceId>,
         error_chain: Option<&str>,
     ) -> LogEvent {
         LogEvent {
@@ -185,10 +202,10 @@ mod tests {
             module_path: None,
             file: None,
             line: None,
-            service_id,
-            source_service_id,
+            service_instance_id,
+            source_service_instance_id,
             message_id,
-            instance_id,
+            trigger_instance_id,
             error_chain: error_chain.map(|s| s.to_string()),
         }
     }
@@ -196,6 +213,61 @@ mod tests {
     // =======================================================================
     // 5A: ConsoleRenderer ANSI color output tests
     // =======================================================================
+
+    #[cfg(unix)]
+    #[test]
+    fn render_timestamp_respects_process_timezone() {
+        const CHILD_TZ: &str = "SD_LOG_RENDER_TEST_TZ";
+        if let Ok(zone) = std::env::var(CHILD_TZ) {
+            let mut event = make_event(LogLevel::Info, "timezone", None, None, None, None, None);
+            event.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-14T20:30:45.123Z")
+                .unwrap()
+                .with_timezone(&Utc);
+            let original = event.timestamp;
+            let output = render_to_string(&event);
+            let timestamp = output.split_whitespace().next().unwrap();
+            let expected = match zone.as_str() {
+                "UTC0" => "2026-09-14T20:30:45.123+00:00",
+                "CST-8" => "2026-09-15T04:30:45.123+08:00",
+                _ => panic!("unexpected test timezone: {zone}"),
+            };
+            assert_eq!(timestamp, expected);
+            assert_eq!(
+                chrono::DateTime::parse_from_rfc3339(timestamp).unwrap(),
+                original
+            );
+            assert_eq!(event.timestamp, original);
+            #[cfg(feature = "file-logging")]
+            {
+                let json: serde_json::Value =
+                    serde_json::from_str(&super::render::format_event_json(&event)).unwrap();
+                assert_eq!(json["timestamp"], "2026-09-14T20:30:45.123Z");
+            }
+            return;
+        }
+
+        // POSIX zones need no zoneinfo database. Each fresh process initializes
+        // its own local timezone, without mutating the parallel test runner.
+        for zone in ["UTC0", "CST-8"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "core::logging::tests::render_timestamp_respects_process_timezone",
+                    "--nocapture",
+                ])
+                .env("TZ", zone)
+                .env(CHILD_TZ, zone)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "timezone {zone}:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+    }
 
     #[test]
     fn render_info_level_contains_green_ansi_code() {
@@ -270,11 +342,12 @@ mod tests {
     // =======================================================================
 
     #[test]
-    fn render_includes_service_id_when_present() {
+    fn render_includes_service_instance_id_when_present() {
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(123));
         let event = make_event(
             LogLevel::Info,
             "msg",
-            Some(ServiceId::new(123)),
+            Some(service_instance_id),
             None,
             None,
             None,
@@ -282,34 +355,39 @@ mod tests {
         );
         let output = render_to_string(&event);
         assert!(
-            output.contains("service_id=svc#123"),
-            "output should contain service_id, got: {}",
+            output.contains(&format!("service_instance_id={service_instance_id}")),
+            "output should contain service_instance_id, got: {}",
             output
         );
     }
 
     #[test]
     fn render_includes_all_ids_when_present() {
-        let test_iid = InstanceId::new(ServiceId::new(3), 0);
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1));
+        let trigger_service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(3));
+        let test_iid = TriggerInstanceId::new(trigger_service_instance_id, 0);
         let msg_id = Uuid::parse_str("0195e342-8874-7065-a86d-3e6a457b0195").unwrap();
         let event = make_event(
             LogLevel::Info,
             "triggered",
-            Some(ServiceId::new(1)),
+            Some(service_instance_id),
             None,
             Some(msg_id),
             Some(test_iid),
             None,
         );
         let output = render_to_string(&event);
-        assert!(output.contains("service_id=svc#1"), "missing service_id");
+        assert!(
+            output.contains(&format!("service_instance_id={service_instance_id}")),
+            "missing service_instance_id"
+        );
         assert!(
             output.contains("message_id=0195e342-8874-7065-a86d-3e6a457b0195"),
             "missing message_id"
         );
         assert!(
-            output.contains("instance_id=svc#3:0"),
-            "missing instance_id, got: {}",
+            output.contains(&format!("trigger_instance_id={test_iid}")),
+            "missing trigger_instance_id, got: {}",
             output
         );
     }
@@ -338,16 +416,16 @@ mod tests {
         let event = make_event(LogLevel::Info, "init phase", None, None, None, None, None);
         let output = render_to_string(&event);
         assert!(
-            !output.contains("service_id="),
-            "should not contain service_id when None"
+            !output.contains("service_instance_id="),
+            "should not contain service_instance_id when None"
         );
         assert!(
             !output.contains("message_id="),
             "should not contain message_id when None"
         );
         assert!(
-            !output.contains("instance_id="),
-            "should not contain instance_id when None"
+            !output.contains("trigger_instance_id="),
+            "should not contain trigger_instance_id when None"
         );
         assert!(
             !output.contains("error="),
@@ -383,9 +461,12 @@ mod tests {
     }
 
     #[test]
-    fn daemon_layer_captures_service_id_from_span() {
+    fn daemon_layer_captures_service_instance_id_from_span() {
+        let service_instance_id = ServiceInstanceId::new(uuid::Uuid::from_u128(42));
+        let service_instance_id_field = service_instance_id.to_string();
         let events = collect_events_with_daemon_layer(|| {
-            let span = tracing::info_span!("service", service_id = "svc#42",);
+            let span =
+                tracing::info_span!("service", service_instance_id = service_instance_id_field);
             let _enter = span.enter();
             tracing::info!("svc_id_test_marker");
         });
@@ -396,9 +477,9 @@ mod tests {
             .expect("should have captured the event");
 
         assert_eq!(
-            event.service_id,
-            Some(ServiceId::new(42)),
-            "service_id should be extracted from Span"
+            event.service_instance_id,
+            Some(service_instance_id),
+            "service_instance_id should be extracted from Span"
         );
     }
 
@@ -406,16 +487,19 @@ mod tests {
     fn daemon_layer_captures_message_id_from_nested_span() {
         let msg_id_str = "0195e342-8874-7065-a86d-3e6a457b0195";
         let msg_id = Uuid::parse_str(msg_id_str).unwrap();
+        let outer_service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(1)).to_string();
+        let trigger_service_id = ServiceInstanceId::new(uuid::Uuid::from_u128(2));
+        let trigger_service_id_field = trigger_service_id.to_string();
 
         let events = collect_events_with_daemon_layer(|| {
-            let service_span = tracing::info_span!("service", service_id = "svc#1",);
+            let service_span =
+                tracing::info_span!("service", service_instance_id = outer_service_id);
             let _svc_enter = service_span.enter();
 
             let trigger_span = tracing::info_span!(
                 "trigger",
-                service_id = "svc#2",
+                service_instance_id = trigger_service_id_field,
                 message_id = msg_id_str,
-                instance_svc_id = 3u64,
                 instance_seq = 7u64,
             );
             let _trig_enter = trigger_span.enter();
@@ -428,20 +512,20 @@ mod tests {
             .expect("should have captured the event");
 
         assert_eq!(
-            event.service_id,
-            Some(ServiceId::new(2)),
-            "service_id should come from innermost span"
+            event.service_instance_id,
+            Some(trigger_service_id),
+            "service_instance_id should come from innermost span"
         );
         assert_eq!(
             event.message_id,
             Some(msg_id),
             "message_id should be extracted from trigger span"
         );
-        let expected_iid = InstanceId::new(ServiceId::new(3), 7);
+        let expected_iid = TriggerInstanceId::new(trigger_service_id, 7);
         assert_eq!(
-            event.instance_id,
+            event.trigger_instance_id,
             Some(expected_iid),
-            "instance_id should be reconstructed from numeric fields"
+            "trigger_instance_id should be reconstructed from span fields"
         );
     }
 
@@ -457,16 +541,16 @@ mod tests {
             .expect("should capture the event");
 
         assert!(
-            event.service_id.is_none(),
-            "service_id should be None outside span"
+            event.service_instance_id.is_none(),
+            "service_instance_id should be None outside span"
         );
         assert!(
             event.message_id.is_none(),
             "message_id should be None outside span"
         );
         assert!(
-            event.instance_id.is_none(),
-            "instance_id should be None outside span"
+            event.trigger_instance_id.is_none(),
+            "trigger_instance_id should be None outside span"
         );
     }
 
@@ -519,3 +603,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "file-logging"))]
+pub(crate) mod benchmarks;

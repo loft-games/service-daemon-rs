@@ -1,0 +1,12 @@
+[package]
+name = "example-provider-contract-shared"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+description = "Shared provider contract type and service used by the provider-contract example."
+
+[dependencies]
+anyhow = "1.0.104"
+service-daemon = { path = "../../../service-daemon" }
+tracing = "0.1.44"

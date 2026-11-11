@@ -12,12 +12,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, error, warn};
 
 use crate::core::context::{__run_service_scope, DaemonResources, ServiceIdentity};
+#[cfg(feature = "high-priority")]
+use crate::core::diagnostics::run_generation_runtime_probe;
 use crate::core::diagnostics::{
     GenerationDiagnosticsHandle, ShutdownBoundaryKind, ShutdownBoundaryOutcomeSnapshot,
-    ShutdownBoundaryResultKind, ShutdownResidualActionKind, run_generation_runtime_probe,
+    ShutdownBoundaryResultKind, ShutdownResidualActionKind,
 };
 use crate::core::provider_init::{ProviderRuntimePhase, with_provider_runtime_phase};
-use crate::models::{ServiceFn, ServiceId};
+use crate::models::{ServiceFn, ServiceInstanceId, ServiceInvocationContext};
 
 pub(super) type ServiceGenerationOutcome = Result<Result<(), Error>, Box<dyn Any + Send>>;
 const DEFAULT_ISOLATED_THREAD_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -106,11 +108,11 @@ pub(super) fn isolated_generation_error(
 }
 
 pub(super) struct ServiceGenerationParts {
-    pub(super) service_id: ServiceId,
+    pub(super) service_instance_id: ServiceInstanceId,
     pub(super) name: &'static str,
     pub(super) generation: u64,
     pub(super) run: ServiceFn,
-    pub(super) cancellation_token: CancellationToken,
+    pub(super) invocation_context: ServiceInvocationContext,
     pub(super) reload_token: CancellationToken,
     pub(super) resources: Arc<DaemonResources>,
     pub(super) diagnostics: GenerationDiagnosticsHandle,
@@ -121,11 +123,11 @@ fn run_scoped_service_generation(
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
     Box::pin(async move {
         let ServiceGenerationParts {
-            service_id,
+            service_instance_id,
             name,
             generation,
             run,
-            cancellation_token,
+            invocation_context,
             reload_token,
             resources,
             diagnostics,
@@ -133,8 +135,7 @@ fn run_scoped_service_generation(
         let span = tracing::info_span!(
             "service",
             name = %name,
-            service_id = %service_id,
-            service_id_num = service_id.value(),
+            service_instance_id = %service_instance_id,
             generation,
             runtime_lane = ?diagnostics.runtime_lane(),
         );
@@ -144,9 +145,9 @@ fn run_scoped_service_generation(
             ProviderRuntimePhase::ServiceGenerationResolve
         };
         let identity = ServiceIdentity::new_generation_with_diagnostics(
-            service_id,
+            service_instance_id,
             name,
-            cancellation_token.clone(),
+            invocation_context.cancellation_token(),
             reload_token,
             diagnostics,
         );
@@ -154,7 +155,7 @@ fn run_scoped_service_generation(
         __run_service_scope(identity, resources, || async move {
             with_provider_runtime_phase(
                 phase,
-                AssertUnwindSafe(run(cancellation_token).instrument(span)).catch_unwind(),
+                AssertUnwindSafe(run(invocation_context).instrument(span)).catch_unwind(),
             )
             .await
         })
@@ -196,7 +197,7 @@ pub(super) fn run_body_service_generation(
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
     Box::pin(async move {
         let name = parts.name;
-        let service_id = parts.service_id;
+        let service_instance_id = parts.service_instance_id;
         let generation = parts.generation;
         let handle = runtime.spawn(run_scoped_service_generation(parts));
         let guard = BodyTaskAbortGuard::new(handle);
@@ -206,7 +207,7 @@ pub(super) fn run_body_service_generation(
             Err(err) if err.is_panic() => {
                 error!(
                     service = %name,
-                    service_id = %service_id,
+                    service_instance_id = %service_instance_id,
                     generation,
                     error = ?err,
                     "Service body task panicked outside scoped generation"
@@ -216,7 +217,7 @@ pub(super) fn run_body_service_generation(
             Err(err) => {
                 warn!(
                     service = %name,
-                    service_id = %service_id,
+                    service_instance_id = %service_instance_id,
                     generation,
                     error = ?err,
                     "Service body task ended before reporting outcome"
@@ -252,9 +253,9 @@ pub(super) fn run_isolated_service_generation(
 ) -> BoxFuture<'static, ServiceGenerationOutcome> {
     Box::pin(async move {
         let name = parts.name;
-        let service_id = parts.service_id;
+        let service_instance_id = parts.service_instance_id;
         let generation = parts.generation;
-        let cancellation_token = parts.cancellation_token.clone();
+        let cancellation_token = parts.invocation_context.cancellation_token();
         let reload_token = parts.reload_token.clone();
         let permit = tokio::select! {
             permit = startup_permits.acquire_owned() => match permit {
@@ -297,19 +298,24 @@ pub(super) fn run_isolated_service_generation(
                 {
                     Ok(runtime) => {
                         drop(permit);
+                        #[cfg(feature = "high-priority")]
                         let probe_diagnostics = parts.diagnostics.clone();
                         runtime.block_on(async move {
+                            #[cfg(feature = "high-priority")]
                             let probe_token = CancellationToken::new();
+                            #[cfg(feature = "high-priority")]
                             let probe_handle = tokio::spawn(run_generation_runtime_probe(
                                 probe_diagnostics,
                                 probe_token.clone(),
                             ));
                             let outcome = run_scoped_service_generation(parts).await;
+                            #[cfg(feature = "high-priority")]
                             probe_token.cancel();
+                            #[cfg(feature = "high-priority")]
                             if let Err(err) = probe_handle.await {
                                 warn!(
                                     service = %name,
-                                    service_id = %service_id,
+                                    service_instance_id = %service_instance_id,
                                     generation,
                                     error = ?err,
                                     "Isolated runtime probe task ended unexpectedly"
@@ -367,13 +373,13 @@ pub(super) fn run_isolated_service_generation(
             IsolatedThreadJoinOutcome::Joined => {}
             IsolatedThreadJoinOutcome::TimedOut => warn!(
                 service = %name,
-                service_id = %service_id,
+                service_instance_id = %service_instance_id,
                 generation,
                 "Isolated service thread join timed out after outcome bridge completed"
             ),
             IsolatedThreadJoinOutcome::Panicked => warn!(
                 service = %name,
-                service_id = %service_id,
+                service_instance_id = %service_instance_id,
                 generation,
                 "Isolated service thread panicked while joining after outcome bridge completed"
             ),

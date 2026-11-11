@@ -1,0 +1,8 @@
+error: Multiple #[input] parameters detected. A service template can accept only one input parameter.
+
+         = help: Wrap multiple startup values in one struct and mark that single parameter with #[input].
+
+ --> tests/fail/38_service_multiple_inputs.rs:7:37
+  |
+7 | async fn worker(#[input] job: &Job, #[input] connection: &Connection) -> anyhow::Result<()> {
+  |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -8,6 +8,9 @@
 //! are used for state observation since test assertions run outside the
 //! service context.
 
+#[path = "../../../service-daemon/tests/support/provider_context.rs"]
+mod provider_context;
+
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
@@ -62,7 +65,7 @@ async fn startup_service_0() -> anyhow::Result<()> {
 async fn test_ordered_startup() -> anyhow::Result<()> {
     STARTUP_SEQ.lock().unwrap().clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_ordered_startup__")
@@ -136,7 +139,7 @@ async fn shutdown_service_100() -> anyhow::Result<()> {
 async fn test_ordered_shutdown() -> anyhow::Result<()> {
     SHUTDOWN_SEQ.lock().unwrap().clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(
             Registry::builder()
                 .with_tag("__test_ordered_shutdown__")
@@ -204,7 +207,7 @@ async fn test_shelf_persistence_on_crash() -> anyhow::Result<()> {
     CRASH_GENERATION.store(0, Ordering::SeqCst);
     *RECOVERED_VALUE.lock().unwrap() = None;
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__test_crash_shelf__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -265,7 +268,7 @@ async fn handshake_low_prio() -> anyhow::Result<()> {
 async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
     HANDSHAKE_LOG.lock().unwrap().clear();
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__test_handshake__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
@@ -300,44 +303,47 @@ async fn test_handshake_sync_behavior() -> anyhow::Result<()> {
 /// any service that holds `Arc<T>` (snapshot) rather than `Arc<RwLock<T>>`.
 #[tokio::test]
 async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
-    // Acquire the RwLock (promotes to managed state)
-    let lock = GlobalStats::resolve_rwlock().await;
-    let lock_clone = lock.clone();
+    provider_context::run(async move {
+        // Acquire the RwLock (promotes to managed state)
+        let lock = GlobalStats::resolve_rwlock().await;
+        let lock_clone = lock.clone();
 
-    let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let barrier_clone = barrier.clone();
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let barrier_clone = barrier.clone();
 
-    // Spawn a writer that holds the write lock for 300ms
-    let writer = tokio::spawn(async move {
-        let mut guard = lock_clone.write().await;
-        guard.last_status = "Locked".to_string();
-        barrier_clone.wait().await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    });
+        // Spawn a writer that holds the write lock for 300ms
+        let writer = tokio::spawn(async move {
+            let mut guard = lock_clone.write().await;
+            guard.last_status = "Locked".to_string();
+            barrier_clone.wait().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
 
-    // Wait for writer to acquire the lock
-    barrier.wait().await;
+        // Wait for writer to acquire the lock
+        barrier.wait().await;
 
-    // Snapshot read MUST NOT block despite the held write lock
-    let start = Instant::now();
-    let snapshot = GlobalStats::resolve().await;
-    let elapsed = start.elapsed();
+        // Snapshot read MUST NOT block despite the held write lock
+        let start = Instant::now();
+        let snapshot = GlobalStats::resolve().await;
+        let elapsed = start.elapsed();
 
-    assert!(
-        elapsed < Duration::from_millis(50),
-        "resolve() blocked for {:?} -- expected non-blocking",
-        elapsed
-    );
-    // Snapshot should see the DEFAULT value, not the locked value
-    assert_eq!(snapshot.last_status, "");
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "resolve() blocked for {:?} -- expected non-blocking",
+            elapsed
+        );
+        // Snapshot should see the DEFAULT value, not the locked value
+        assert_eq!(snapshot.last_status, "");
 
-    writer.await?;
+        writer.await?;
 
-    // After writer releases, next snapshot should see the updated value
-    let final_snapshot = GlobalStats::resolve().await;
-    assert_eq!(final_snapshot.last_status, "Locked");
+        // After writer releases, next snapshot should see the updated value
+        let final_snapshot = GlobalStats::resolve().await;
+        assert_eq!(final_snapshot.last_status, "Locked");
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 /// Verifies that an `async fn` provider with `Arc<T>` parameter injection
@@ -352,17 +358,20 @@ async fn test_zero_lockdown_reads() -> anyhow::Result<()> {
 /// this test will fail with a type error or incorrect output.
 #[tokio::test]
 async fn test_fn_provider_dependency_chain() -> anyhow::Result<()> {
-    // Resolve the async fn provider - this triggers the full dependency chain.
-    let conn_str = ConnectionString::resolve().await?;
+    provider_context::run(async move {
+        // Resolve the async fn provider - this triggers the full dependency chain.
+        let conn_str = ConnectionString::resolve().await?;
 
-    // The connection string should be assembled from Port(8080) + DbUrl("mysql://localhost")
-    assert_eq!(
-        conn_str.0, "mysql://localhost:8080",
-        "Async fn provider did not correctly resolve its Arc<T> dependencies. \
-         Expected 'mysql://localhost:8080' from Port(8080) + DbUrl(\"mysql://localhost\"), \
-         got '{}'",
-        conn_str.0
-    );
+        // The connection string should be assembled from Port(8080) + DbUrl("mysql://localhost")
+        assert_eq!(
+            conn_str.0, "mysql://localhost:8080",
+            "Async fn provider did not correctly resolve its Arc<T> dependencies. \
+             Expected 'mysql://localhost:8080' from Port(8080) + DbUrl(\"mysql://localhost\"), \
+             got '{}'",
+            conn_str.0
+        );
 
-    Ok(())
+        Ok(())
+    })
+    .await
 }

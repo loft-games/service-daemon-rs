@@ -1,5 +1,5 @@
-use proc_macro_error2::abort;
-use quote::{format_ident, quote, quote_spanned};
+use proc_macro2::{Ident, Span};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::Parser;
 use syn::{Attribute, FnArg, GenericArgument, Pat, PathArguments, Type, Visibility};
 
@@ -27,6 +27,8 @@ pub struct ExtractedParams {
     /// Used by trigger codegen to generate `let x = x.clone();` shadow
     /// bindings inside the per-event `Fn` closure.
     pub di_idents: Vec<syn::Ident>,
+    /// Optional template input descriptor for `#[service]`.
+    pub input_entry: Option<proc_macro2::TokenStream>,
 }
 
 /// Extracts the `sync_handler` flag from function attributes and returns
@@ -162,6 +164,8 @@ pub fn scope_inner_visibility(user_vis: &Visibility) -> proc_macro2::TokenStream
 /// Represents the shared parser classification for a function parameter.
 #[derive(Debug, Clone)]
 pub enum ParamIntent {
+    /// A service instance startup input declared with `#[input]`.
+    Input,
     /// A parameter routed through the shared payload lane.
     ///
     /// For `#[trigger]`, this is the actual trigger payload (optionally wrapped
@@ -198,11 +202,16 @@ pub fn analyze_param(arg: &FnArg) -> Option<(syn::Ident, ParamIntent)> {
     {
         let arg_name = pat_ident.ident.clone();
 
-        // 1. Check for explicit #[payload]
+        // 1. Check for explicit marker attributes
         let is_explicit_payload = arg_attrs.iter().any(|a| a.path().is_ident("payload"));
+        let is_explicit_input = arg_attrs.iter().any(|a| a.path().is_ident("input"));
 
         // 2. Analyze the type structure
         let (inner_type, wrapper) = decompose_type(ty);
+
+        if is_explicit_input {
+            return Some((arg_name, ParamIntent::Input));
+        }
 
         if is_explicit_payload {
             return Some((
@@ -277,7 +286,6 @@ pub(crate) fn decompose_type(ty: &Type) -> (&Type, Option<WrapperKind>) {
 
 /// Processes function parameters and generates the necessary tokens.
 struct ParamProcessor {
-    allow_payload: bool,
     clean_inputs: syn::punctuated::Punctuated<syn::FnArg, syn::token::Comma>,
     resolve_tokens: Vec<proc_macro2::TokenStream>,
     call_args: Vec<proc_macro2::TokenStream>,
@@ -285,12 +293,13 @@ struct ParamProcessor {
     watcher_arms: Vec<proc_macro2::TokenStream>,
     di_idents: Vec<syn::Ident>,
     payload_arg_name: Option<syn::Ident>,
+    input_arg_name: Option<syn::Ident>,
+    input_entry: Option<proc_macro2::TokenStream>,
 }
 
 impl ParamProcessor {
-    fn new(allow_payload: bool) -> Self {
+    fn new() -> Self {
         Self {
-            allow_payload,
             clean_inputs: syn::punctuated::Punctuated::new(),
             resolve_tokens: Vec::new(),
             call_args: Vec::new(),
@@ -298,72 +307,25 @@ impl ParamProcessor {
             watcher_arms: Vec::new(),
             di_idents: Vec::new(),
             payload_arg_name: None,
-        }
-    }
-
-    /// Processes a payload parameter.
-    ///
-    /// The framework now wraps every payload in `Arc<P>` internally.
-    /// This method generates the correct extraction code based on
-    /// whether the user's handler expects `Arc<T>` or bare `T`:
-    ///
-    /// - **`is_arc == true`**: user declared `Arc<T>` - pass the
-    ///   framework's `Arc` directly (zero-copy, no `Clone` needed).
-    /// - **`is_arc == false`**: user declared `T` - dereference the
-    ///   `Arc` and clone the data. Uses a descriptive trait call
-    ///   to produce a friendly compiler error if `T: Clone` is missing.
-    fn process_payload(&mut self, arg: &FnArg, arg_name: syn::Ident, is_arc: bool) {
-        if !self.allow_payload {
-            // `#[service]` and `#[trigger]` share the same parameter processor.
-            // Bare or `#[payload]` parameters arrive here because they use the
-            // shared payload classification lane. For services, that lane exists
-            // only so we can reject unsupported signatures with accurate wording;
-            // it does not mean services semantically support payloads.
-            abort!(
-                arg,
-                "#[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].";
-                help = "Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead."
-            );
-        }
-
-        if self.payload_arg_name.is_some() {
-            abort!(
-                arg,
-                "Multiple payload parameters detected. A trigger can accept only one payload parameter.";
-                help = "Keep one bare or #[payload] parameter and convert the others to Arc<T> dependencies."
-            );
-        }
-        self.payload_arg_name = Some(arg_name);
-
-        let mut clean_arg = arg.clone();
-        if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
-            attrs.retain(|a| !a.path().is_ident("payload"));
-        }
-        self.clean_inputs.push(clean_arg);
-
-        if is_arc {
-            // User wants Arc<T> - pass the framework's Arc pointer
-            // directly. This is a zero-copy path and does NOT require
-            // the inner type to implement Clone.
-            self.call_args.push(quote! { payload });
-        } else {
-            // User wants bare T - must clone out of the Arc.
-            // Uses a descriptive helper to produce a clear compiler
-            // error when T does not implement Clone.
-            self.call_args
-                .push(quote! { service_daemon::__private::trigger_clone_payload(&*payload) });
+            input_arg_name: None,
+            input_entry: None,
         }
     }
 
     /// Processes a dependency parameter.
-    fn process_dependency(
+    fn try_process_dependency(
         &mut self,
         arg_name: syn::Ident,
         inner_type: Box<Type>,
         wrapper: WrapperKind,
-    ) {
+    ) -> syn::Result<()> {
         let arg_name_str = arg_name.to_string();
         let type_str = quote!(#inner_type).to_string().replace(' ', "");
+        let dependency_kind = match wrapper {
+            WrapperKind::Arc(_) => quote! { Snapshot },
+            WrapperKind::ArcRwLock(_, _) => quote! { RwLock },
+            WrapperKind::ArcMutex(_, _) => quote! { Mutex },
+        };
 
         self.watcher_arms.push(quote! {
             watch_set.push(<#inner_type as service_daemon::WatchableProvided>::watch_dependency());
@@ -372,55 +334,53 @@ impl ParamProcessor {
         match wrapper {
             WrapperKind::Arc(arc_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::Provided>::resolve().await?;
+                    let #arg_name = <#inner_type as service_daemon::__private::ProviderDefinition>::ready_snapshot()?;
                 });
-                self.clean_inputs.push(
-                    syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
+                let clean_arg = syn::parse2(
+                    quote_spanned! { arc_span => #arg_name: std::sync::Arc<#inner_type> },
+                )
+                .map_err(|e| {
+                    syn::Error::new_spanned(
+                        &arg_name,
+                        format!("Internal macro error parsing Arc dependency: {}", e),
                     )
-                    .unwrap_or_else(|e| {
-                        abort!(
-                            arg_name,
-                            format!("Internal macro error parsing Arc dependency: {}", e)
-                        )
-                    }),
-                );
+                })?;
+                self.clean_inputs.push(clean_arg);
             }
             WrapperKind::ArcRwLock(arc_span, rwlock_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_rwlock().await?;
+                    let #arg_name = <#inner_type as service_daemon::__private::ProviderDefinition>::ready_rwlock()?;
                 });
                 let rw_path = quote_spanned! { rwlock_span => service_daemon::RwLock<#inner_type> };
-                self.clean_inputs.push(
+                let clean_arg =
                     syn::parse2(quote_spanned! { arc_span => #arg_name: std::sync::Arc<#rw_path> })
-                        .unwrap_or_else(|e| {
-                            abort!(
-                                arg_name,
+                        .map_err(|e| {
+                            syn::Error::new_spanned(
+                                &arg_name,
                                 format!(
                                     "Internal macro error parsing Arc<RwLock> dependency: {}",
                                     e
-                                )
+                                ),
                             )
-                        }),
-                );
+                        })?;
+                self.clean_inputs.push(clean_arg);
             }
             WrapperKind::ArcMutex(arc_span, mutex_span) => {
                 self.resolve_tokens.push(quote! {
-                    let #arg_name = <#inner_type as service_daemon::ManagedProvided>::resolve_mutex().await?;
+                    let #arg_name = <#inner_type as service_daemon::__private::ProviderDefinition>::ready_mutex()?;
                 });
                 let mutex_path =
                     quote_spanned! { mutex_span => service_daemon::Mutex<#inner_type> };
-                self.clean_inputs.push(
-                    syn::parse2(
-                        quote_spanned! { arc_span => #arg_name: std::sync::Arc<#mutex_path> },
+                let clean_arg = syn::parse2(
+                    quote_spanned! { arc_span => #arg_name: std::sync::Arc<#mutex_path> },
+                )
+                .map_err(|e| {
+                    syn::Error::new_spanned(
+                        &arg_name,
+                        format!("Internal macro error parsing Arc<Mutex> dependency: {}", e),
                     )
-                    .unwrap_or_else(|e| {
-                        abort!(
-                            arg_name,
-                            format!("Internal macro error parsing Arc<Mutex> dependency: {}", e)
-                        )
-                    }),
-                );
+                })?;
+                self.clean_inputs.push(clean_arg);
             }
         }
 
@@ -431,32 +391,171 @@ impl ParamProcessor {
                 name: #arg_name_str,
                 type_name: #type_str,
                 type_id: std::any::TypeId::of::<#inner_type>(),
+                kind: service_daemon::__private::ProviderDependencyKind::#dependency_kind,
             }
         });
+
+        Ok(())
     }
 
-    /// Processes a single parameter.
-    fn process_param(&mut self, arg: &FnArg) {
-        if let Some((arg_name, intent)) = analyze_param(arg) {
-            match intent {
-                ParamIntent::Payload { is_arc } => {
-                    self.process_payload(arg, arg_name, is_arc);
-                }
-                ParamIntent::Dependency {
-                    inner_type,
-                    wrapper,
-                } => {
-                    self.process_dependency(arg_name, inner_type, wrapper);
-                }
-            }
-            return;
+    /// Processes a single service parameter without depending on proc-macro
+    /// diagnostic side effects. This is the migration path for `#[service]`.
+    fn try_process_service_param(&mut self, arg: &FnArg) -> syn::Result<()> {
+        let Some((arg_name, intent)) = analyze_param(arg) else {
+            return Err(service_param_error(
+                arg,
+                "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.",
+                "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies.",
+            ));
+        };
+
+        match intent {
+            ParamIntent::Input => self.try_process_input_param(arg, arg_name),
+            ParamIntent::Payload { .. } => Err(service_param_error(
+                arg,
+                "#[service] parameters must be framework-managed dependencies wrapped as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. Payload parameters are only supported by #[trigger].",
+                "Wrap service dependencies in Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>>. If you intended to handle an event payload, use #[trigger] instead.",
+            )),
+            ParamIntent::Dependency {
+                inner_type,
+                wrapper,
+            } => self.try_process_dependency(arg_name, inner_type, wrapper),
+        }
+    }
+
+    fn try_process_input_param(&mut self, arg: &FnArg, arg_name: syn::Ident) -> syn::Result<()> {
+        if self.input_arg_name.is_some() {
+            return Err(service_param_error(
+                arg,
+                "Multiple #[input] parameters detected. A service template can accept only one input parameter.",
+                "Wrap multiple startup values in one struct and mark that single parameter with #[input].",
+            ));
         }
 
-        abort!(
-            arg,
-            "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.";
-            help = "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies. Use one bare parameter only when defining a trigger payload."
+        let FnArg::Typed(pat_type) = arg else {
+            return Err(service_param_error(
+                arg,
+                "#[input] can only be used on typed service parameters.",
+                "Use #[input] value: &YourInputType.",
+            ));
+        };
+
+        let Type::Reference(input_ref) = &*pat_type.ty else {
+            return Err(service_param_error(
+                arg,
+                "#[input] parameters must be immutable shared references.",
+                "Use #[input] value: &YourInputType. Pass owned input to ServiceHandle::create(input) or ServiceHandle::start(input).",
+            ));
+        };
+        if input_ref.mutability.is_some() {
+            return Err(service_param_error(
+                arg,
+                "#[input] parameters must be immutable shared references.",
+                "Use #[input] value: &YourInputType, not &mut YourInputType.",
+            ));
+        }
+        if input_ref.lifetime.is_some() {
+            return Err(syn::Error::new_spanned(
+                &input_ref.lifetime,
+                "#[input] parameters must use lifetime elision.\n\n  = help: Use #[input] value: &YourInputType. The framework borrows input from the instance record for each service generation.\n",
+            ));
+        }
+        let input_type = &input_ref.elem;
+        let (_, wrapper) = decompose_type(input_type);
+        if wrapper.is_some() {
+            return Err(service_param_error(
+                arg,
+                "#[input] parameters must be immutable shared references to owned instance input and cannot be Arc dependencies.",
+                "Use #[input] value: &YourInputType. Keep provider dependencies as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> without #[input].",
+            ));
+        }
+        if pat_type.attrs.iter().any(|a| a.path().is_ident("payload")) {
+            return Err(service_param_error(
+                arg,
+                "#[input] cannot be combined with #[payload].",
+                "Use #[input] for service template startup input. #[payload] is only for trigger handlers.",
+            ));
+        }
+
+        let mut clean_arg = arg.clone();
+        if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
+            attrs.retain(|a| !a.path().is_ident("input"));
+        }
+        self.clean_inputs.push(clean_arg);
+
+        let arg_name_str = arg_name.to_string();
+        let service_invocation = service_invocation_ident();
+        let input_binding = Ident::new(
+            &format!("__service_daemon_input_{}", arg_name),
+            Span::mixed_site(),
         );
+        let type_str = quote!(#input_type).to_string().replace(' ', "");
+        self.resolve_tokens.push(quote! {
+            let #input_binding = #service_invocation
+                .input::<#input_type>(#arg_name_str)?;
+        });
+        self.call_args.push(quote! {
+            #input_binding.as_ref()
+        });
+        self.input_arg_name = Some(arg_name);
+        self.input_entry = Some(quote! {
+            Some(service_daemon::__private::ServiceInputDescriptor {
+                name: #arg_name_str,
+                type_name: #type_str,
+                type_id: std::any::TypeId::of::<#input_type>(),
+            })
+        });
+        Ok(())
+    }
+
+    /// Processes a single trigger parameter without depending on proc-macro
+    /// diagnostic side effects. This is the migration path for `#[trigger]`.
+    fn try_process_trigger_param(&mut self, arg: &FnArg) -> syn::Result<()> {
+        let Some((arg_name, intent)) = analyze_param(arg) else {
+            return Err(trigger_param_error(
+                arg,
+                "Unsupported parameter type. Framework-managed dependencies must use Arc wrappers.",
+                "Use Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> for dependencies. Use one bare parameter only when defining a trigger payload.",
+            ));
+        };
+
+        match intent {
+            ParamIntent::Input => Err(trigger_param_error(
+                arg,
+                "#[input] is only supported by #[service].",
+                "Use #[payload] for trigger payloads.",
+            )),
+            ParamIntent::Payload { is_arc } => {
+                if self.payload_arg_name.is_some() {
+                    return Err(trigger_param_error(
+                        arg,
+                        "Multiple payload parameters detected. A trigger can accept only one payload parameter.",
+                        "Keep one bare or #[payload] parameter and convert the others to Arc<T> dependencies.",
+                    ));
+                }
+                self.payload_arg_name = Some(arg_name);
+
+                let mut clean_arg = arg.clone();
+                if let syn::FnArg::Typed(syn::PatType { attrs, .. }) = &mut clean_arg {
+                    attrs.retain(|a| !a.path().is_ident("payload"));
+                }
+                self.clean_inputs.push(clean_arg);
+
+                if is_arc {
+                    self.call_args.push(quote! { payload });
+                } else {
+                    self.call_args.push(
+                        quote! { service_daemon::__private::trigger_clone_payload(&*payload) },
+                    );
+                }
+
+                Ok(())
+            }
+            ParamIntent::Dependency {
+                inner_type,
+                wrapper,
+            } => self.try_process_dependency(arg_name, inner_type, wrapper),
+        }
     }
 
     /// Consumes the processor and returns the extracted parameters.
@@ -468,22 +567,35 @@ impl ParamProcessor {
             param_entries: self.param_entries,
             watcher_arms: self.watcher_arms,
             di_idents: self.di_idents,
+            input_entry: self.input_entry,
         }
     }
 }
 
-/// Extracts parameters from the function signature using the shared parser.
-///
-/// Both `#[service]` and `#[trigger]` use this function. The `allow_payload`
-/// flag determines whether the shared payload lane is accepted as real trigger
-/// payload semantics or reused as the rejection path for unsupported service
-/// signatures.
-pub fn extract_params(sig: &syn::Signature, allow_payload: bool) -> ExtractedParams {
-    let mut processor = ParamProcessor::new(allow_payload);
+fn service_param_error(arg: &FnArg, message: &str, help: &str) -> syn::Error {
+    syn::Error::new_spanned(arg, format!("{message}\n\n  = help: {help}\n"))
+}
+
+fn trigger_param_error(arg: &FnArg, message: &str, help: &str) -> syn::Error {
+    syn::Error::new_spanned(arg, format!("{message}\n\n  = help: {help}\n"))
+}
+
+/// Extracts service parameters with stable `syn::Error` diagnostics.
+pub fn try_extract_service_params(sig: &syn::Signature) -> syn::Result<ExtractedParams> {
+    let mut processor = ParamProcessor::new();
     for arg in &sig.inputs {
-        processor.process_param(arg);
+        processor.try_process_service_param(arg)?;
     }
-    processor.finish()
+    Ok(processor.finish())
+}
+
+/// Extracts trigger parameters with stable `syn::Error` diagnostics.
+pub fn try_extract_trigger_params(sig: &syn::Signature) -> syn::Result<ExtractedParams> {
+    let mut processor = ParamProcessor::new();
+    for arg in &sig.inputs {
+        processor.try_process_trigger_param(arg)?;
+    }
+    Ok(processor.finish())
 }
 
 // -----------------------------------------------------------------------------
@@ -595,6 +707,102 @@ impl TagsList {
     }
 }
 
+/// Common named attributes shared by `#[service]` and `#[trigger]`.
+#[derive(Debug)]
+pub struct CommonEntryAttrs {
+    pub priority: proc_macro2::TokenStream,
+    pub scheduling: proc_macro2::TokenStream,
+    pub tags: proc_macro2::TokenStream,
+}
+
+impl Default for CommonEntryAttrs {
+    fn default() -> Self {
+        Self {
+            priority: quote!(50),
+            scheduling: quote!(service_daemon::ServiceScheduling::Standard),
+            tags: quote!(&[]),
+        }
+    }
+}
+
+impl syn::parse::Parse for CommonEntryAttrs {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let mut attrs = Self::default();
+        let tokens: proc_macro2::TokenStream = input.parse()?;
+        syn::meta::parser(|meta| attrs.parse_meta_for_service(meta)).parse2(tokens)?;
+        Ok(attrs)
+    }
+}
+
+impl CommonEntryAttrs {
+    pub fn parse_meta_for_service(
+        &mut self,
+        meta: syn::meta::ParseNestedMeta<'_>,
+    ) -> syn::Result<()> {
+        self.parse_meta_for("service", meta)
+    }
+
+    pub fn parse_meta_for_trigger(
+        &mut self,
+        meta: syn::meta::ParseNestedMeta<'_>,
+    ) -> syn::Result<()> {
+        self.parse_meta_for("trigger", meta)
+    }
+
+    pub fn parse_meta_for(
+        &mut self,
+        attr_kind: &str,
+        meta: syn::meta::ParseNestedMeta<'_>,
+    ) -> syn::Result<()> {
+        if meta.path.is_ident("priority") {
+            let value: syn::Expr = meta.value()?.parse()?;
+            self.priority = quote!(#value);
+            return Ok(());
+        }
+
+        if meta.path.is_ident("scheduling") {
+            let ident: syn::Ident = meta.value()?.parse()?;
+            self.scheduling = parse_scheduling_policy(&ident)?;
+            return Ok(());
+        }
+
+        if meta.path.is_ident("tags") {
+            let tag_list: TagsList = meta.value()?.parse()?;
+            self.tags = tag_list.to_tokens();
+            return Ok(());
+        }
+
+        let attr_name = meta.path.get_ident().map_or_else(
+            || meta.path.to_token_stream().to_string(),
+            ToString::to_string,
+        );
+        Err(syn::Error::new_spanned(
+            meta.path,
+            format!(
+                "Unknown {} attribute '{}'. Supported: {}",
+                attr_kind, attr_name, "priority, scheduling, tags"
+            ),
+        ))
+    }
+}
+
+pub fn parse_optional_named_tail(
+    input: syn::parse::ParseStream,
+    handle: impl FnMut(syn::meta::ParseNestedMeta<'_>) -> syn::Result<()>,
+) -> syn::Result<()> {
+    if !input.peek(syn::Token![,]) {
+        return Ok(());
+    }
+
+    input.parse::<syn::Token![,]>()?;
+    if input.is_empty() {
+        return Ok(());
+    }
+
+    let tokens: proc_macro2::TokenStream = input.parse()?;
+    syn::meta::parser(handle).parse2(tokens)
+}
+
 // -----------------------------------------------------------------------------
 // Componentized Codegen Helpers (Unified Service/Trigger logic)
 // -----------------------------------------------------------------------------
@@ -653,6 +861,7 @@ pub struct RegistryEntryInput<'a> {
     pub entry_name: &'a syn::Ident,
     pub fn_name_str: &'a str,
     pub param_entries: &'a [proc_macro2::TokenStream],
+    pub input_entry: &'a proc_macro2::TokenStream,
     pub wrapper_name: &'a syn::Ident,
     pub watcher_ptr: &'a proc_macro2::TokenStream,
     pub priority: &'a proc_macro2::TokenStream,
@@ -665,6 +874,7 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
     let entry_name = input.entry_name;
     let fn_name_str = input.fn_name_str;
     let param_entries = input.param_entries;
+    let input_entry = input.input_entry;
     let wrapper_name = input.wrapper_name;
     let watcher_ptr = input.watcher_ptr;
     let priority = input.priority;
@@ -680,6 +890,7 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
             name: #fn_name_str,
             module: module_path!(),
             params: &[#(#param_entries),*],
+            input: #input_entry,
             wrapper: #wrapper_name,
             watcher: #watcher_ptr,
             priority: #priority,
@@ -692,18 +903,31 @@ pub fn generate_static_registry_entry(input: RegistryEntryInput) -> proc_macro2:
 /// Generates a standard asynchronous wrapper function.
 pub fn generate_wrapper_fn(
     wrapper_name: &syn::Ident,
+    param_entries: &[proc_macro2::TokenStream],
     content: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
+    let service_invocation = service_invocation_ident();
     quote! {
         /// Auto-generated wrapper - resolves dependencies and executes logic
         pub fn #wrapper_name(
-            token: service_daemon::__private::tokio_util::sync::CancellationToken,
+            #service_invocation: service_daemon::__private::ServiceInvocationContext,
         ) -> service_daemon::__private::futures::future::BoxFuture<'static, anyhow::Result<()>> {
             Box::pin(async move {
+                let token = #service_invocation.cancellation_token();
+                service_daemon::__private::prepare_provider_params(
+                    &[#(#param_entries),*],
+                    service_daemon::RestartPolicy::default(),
+                    token.clone(),
+                )
+                .await?;
                 #content
             })
         }
     }
+}
+
+fn service_invocation_ident() -> Ident {
+    Ident::new("__service_daemon_invocation", Span::mixed_site())
 }
 
 #[cfg(test)]

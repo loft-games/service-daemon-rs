@@ -8,10 +8,10 @@ process appears to "start and immediately exit". Always follow `run().await`
 with `wait().await?` (or some other call that blocks the task) to keep the
 daemon alive.
 
-## Dropping the `ServiceDaemon` while you still need it
+## Dropping the daemon handle while you still need it
 
-The daemon owns the supervision tasks. Letting it go out of scope shuts the
-system down. Keep it bound (e.g. `let mut daemon = ...;`) for the whole lifetime
+The daemon handle owns the supervision tasks. Letting it go out of scope shuts
+the system down. Keep it bound (e.g. `let daemon = ...;`) for the whole lifetime
 of the process.
 
 ## A misspelled or missing tag silently selects nothing
@@ -19,6 +19,13 @@ of the process.
 Tag filtering does not error on unknown tags. `with_tag("wbe")` (typo) just
 matches zero services, so the daemon comes up empty. If "nothing runs", check
 the tag spelling against the `#[service(tags = [...])]` declarations first.
+
+## Expecting selected service templates to auto-start
+
+Tag selection includes `#[service]` definitions that declare `#[input]`, but those
+definitions start with zero instances. This is intentional: they are service
+templates. Resolve a `ServiceHandle` and call `create(input)` or `start(input)` to
+materialize runtime instances.
 
 ## Priority inversion between a service and its dependency
 
@@ -30,9 +37,10 @@ after — its dependents.
 
 ## Reaching for `run_for_duration` in a production binary
 
-`run_for_duration` is gated behind `#[cfg(feature = "simulation")]`. It will not
-compile in a normal build and is not meant for production — it auto-shuts-down
-after the duration. Use it only in tests; use `run()` + `wait()` everywhere else.
+Bounded test runs live on `MockContext` / `SimulationHandle` behind the
+`simulation` feature. They will not compile in a normal production build and
+auto-shut down after the duration. Use them only in tests; use `run()` + `wait()`
+everywhere else.
 
 ## Forgetting the async runtime
 

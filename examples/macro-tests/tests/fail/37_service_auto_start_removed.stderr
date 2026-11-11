@@ -1,0 +1,5 @@
+error: Unknown service attribute 'auto_start'. Supported: priority, scheduling, tags
+ --> tests/fail/37_service_auto_start_removed.rs:3:11
+  |
+3 | #[service(auto_start = false)]
+  |           ^^^^^^^^^^

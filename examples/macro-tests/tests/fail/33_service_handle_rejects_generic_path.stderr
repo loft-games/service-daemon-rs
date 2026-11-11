@@ -1,0 +1,5 @@
+error: service_handle! expects a plain service function path
+ --> tests/fail/33_service_handle_rejects_generic_path.rs:2:51
+  |
+2 |     let _ = service_daemon::service_handle!(worker::<u8>);
+  |                                                   ^^^^^^

@@ -1,9 +1,10 @@
 //! Unix domain socket provider templates.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
 
 use super::super::impls::{HelperStyle, ProvidedImplConfig, generate_provided_impl};
+use super::super::parser::StringTemplateArg;
 use super::context::has_clone_derive;
 
 // ---------------------------------------------------------------------------
@@ -15,14 +16,18 @@ use super::context::has_clone_derive;
 //
 // Unix listen/connect templates share this path resolution. TCP listen keeps
 // its own address resolution so this split does not alter TCP expansion.
-fn unix_path_addr_expr(addr: &syn::LitStr, env: Option<&syn::LitStr>) -> proc_macro2::TokenStream {
-    if let Some(env_lit) = env {
-        let env_str = env_lit.value();
+fn unix_path_addr_expr(
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
+) -> proc_macro2::TokenStream {
+    let fallback = addr.to_owned_expr();
+    if let Some(env_arg) = env {
+        let env_expr = env_arg.to_static_str_expr();
         quote! {
-            std::env::var(#env_str).unwrap_or_else(|_| #addr.to_owned())
+            std::env::var(#env_expr).unwrap_or_else(|_| #fallback)
         }
     } else {
-        quote! { #addr.to_owned() }
+        fallback
     }
 }
 
@@ -65,8 +70,8 @@ pub(in crate::provider) fn generate_unix_listen_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -79,10 +84,6 @@ pub(in crate::provider) fn generate_unix_listen_template(
     let addr_expr = unix_path_addr_expr(addr, env);
     let compile_error_guard = unix_only_compile_error_guard("UnixListen");
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
 
     // Detect-and-unlink preamble + bind + set_nonblocking. Used by both the
@@ -200,7 +201,7 @@ pub(in crate::provider) fn generate_unix_listen_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
@@ -270,23 +271,26 @@ pub(in crate::provider) fn generate_unix_listen_template(
             /// multiple services or reload generations to accept on the
             /// same physical path concurrently.
             //
-            // Keep the API symmetric with UnixConnect::connect.
-            //
             // We explicitly set_nonblocking(true) on the cloned FD because
             // POSIX dup() is not guaranteed to inherit O_NONBLOCK across libc
             // implementations, so relying on inheritance is not portable.
-            pub async fn try_get(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixListener> {
+            pub fn get(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixListener> {
                 let cloned = self.0.try_clone()?;
                 cloned.set_nonblocking(true)?;
                 service_daemon::__private::tokio::net::UnixListener::from_std(cloned)
             }
 
-            /// Accept one connection from the configured Unix socket.
-            pub async fn accept(&self) -> std::io::Result<(
+            async fn accept_raw(&self) -> std::io::Result<(
                 service_daemon::__private::tokio::net::UnixStream,
                 service_daemon::__private::tokio::net::unix::SocketAddr,
             )> {
-                self.try_get().await?.accept().await
+                self.get()?.accept().await
+            }
+
+            /// Accept one connection as a platform-neutral local IPC stream.
+            pub async fn accept(&self) -> std::io::Result<service_daemon::IpcStream> {
+                let (stream, _) = self.accept_raw().await?;
+                Ok(service_daemon::IpcStream::Unix(stream))
             }
 
             /// Returns the local address this socket is bound to.
@@ -313,8 +317,8 @@ pub(in crate::provider) fn generate_unix_connect_template(
     struct_name: &syn::Ident,
     vis: &syn::Visibility,
     attrs: &[syn::Attribute],
-    addr: &syn::LitStr,
-    env: Option<&syn::LitStr>,
+    addr: &StringTemplateArg,
+    env: Option<&StringTemplateArg>,
     eager: bool,
 ) -> TokenStream {
     let struct_name_str = struct_name.to_string();
@@ -327,42 +331,7 @@ pub(in crate::provider) fn generate_unix_connect_template(
     let addr_expr = unix_path_addr_expr(addr, env);
     let compile_error_guard = unix_only_compile_error_guard("UnixConnect");
 
-    let singleton_name = format_ident!(
-        "__PROVIDER_SINGLETON_{}",
-        struct_name.to_string().to_uppercase()
-    );
     let type_tokens = quote! { #struct_name };
-
-    // ConnectionRefused / NotFound / ConnectionAborted: peer is starting up.
-    // Retryable.
-    //   - ConnectionRefused: peer hasn't called accept() yet
-    //   - NotFound: peer hasn't created the socket file yet
-    //   - ConnectionAborted: peer accepted but immediately closed (init race)
-    // PermissionDenied: EACCES on the path -- a permissions issue is not a
-    // transient state, the operator has to fix it. Fatal.
-    let probe_and_classify = quote! {
-        // One-shot probe stream is created and immediately dropped. The
-        // sole purpose is reachability validation; we do not store it.
-        let _probe = service_daemon::__private::tokio::net::UnixStream::connect(&path)
-            .await
-            .map_err(|e| {
-                let msg = format!(
-                    "Provider '{}' failed to probe Unix socket '{}': {}",
-                    #struct_name_str, path, e
-                );
-                match e.kind() {
-                    std::io::ErrorKind::ConnectionRefused
-                    | std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::Interrupted
-                    | std::io::ErrorKind::TimedOut => {
-                        service_daemon::ProviderError::Retryable(msg)
-                    }
-                    _ => service_daemon::ProviderError::Fatal(msg),
-                }
-            })?;
-        drop(_probe);
-    };
 
     // Framework path: init_fallible provides retry/backoff/timeout. The
     // returned Arc<Self> caches only the path; subsequent try_connect()
@@ -385,7 +354,7 @@ pub(in crate::provider) fn generate_unix_connect_template(
 
     let provided_impl = generate_provided_impl(ProvidedImplConfig {
         type_tokens: &type_tokens,
-        singleton_name: &singleton_name,
+        item_attrs: &[],
         user_span: struct_name.span(),
         param_entries: &[],
         eager,
@@ -423,7 +392,6 @@ pub(in crate::provider) fn generate_unix_connect_template(
         impl #struct_name {
             pub async fn try_new() -> std::result::Result<Self, service_daemon::ProviderError> {
                 let path = #addr_expr;
-                #probe_and_classify
                 Ok(Self {
                     path: std::sync::Arc::new(std::path::PathBuf::from(path)),
                 })
@@ -439,9 +407,9 @@ pub(in crate::provider) fn generate_unix_connect_template(
                 service_daemon::__private::tokio::net::UnixStream::connect(&*self.path).await
             }
 
-            /// Open a fresh connection to the configured Unix socket.
-            pub async fn connect(&self) -> std::io::Result<service_daemon::__private::tokio::net::UnixStream> {
-                self.try_connect().await
+            /// Open a fresh connection as a platform-neutral local IPC stream.
+            pub async fn connect(&self) -> std::io::Result<service_daemon::IpcStream> {
+                self.try_connect().await.map(service_daemon::IpcStream::Unix)
             }
 
             /// Returns the configured socket path.

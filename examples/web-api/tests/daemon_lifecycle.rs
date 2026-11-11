@@ -4,7 +4,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn daemon_shutdown_records_diagnostics() -> anyhow::Result<()> {
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_restart_policy(RestartPolicy::for_testing())
         .build();
     let cancel = daemon.cancel_token();

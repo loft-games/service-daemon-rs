@@ -1,7 +1,5 @@
-use axum::Router;
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
-use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::models::api::request::{CreateItemRequest, PatchItemRequest};
@@ -10,13 +8,12 @@ use crate::services::api::{
     HttpApiState, create_item_record, get_item_record, list_item_records, patch_item_record,
 };
 
-pub fn router() -> (Router<HttpApiState>, OpenApi) {
+pub fn router() -> OpenApiRouter<HttpApiState> {
     OpenApiRouter::new()
         .routes(routes!(list_items))
         .routes(routes!(create_item))
         .routes(routes!(get_item))
         .routes(routes!(patch_item))
-        .split_for_parts()
 }
 
 #[utoipa::path(

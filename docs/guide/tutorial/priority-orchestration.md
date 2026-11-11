@@ -59,7 +59,7 @@ Priority decides *when* something starts and stops. Scheduling decides *where* t
 | Mode | Best for | Tradeoff |
 | :--- | :--- | :--- |
 | `Standard` | Most services and triggers | Uses the host Tokio runtime; this is the default and should be your first choice. |
-| `HighPriority` | Short, cooperative, latency-sensitive work | Uses a framework-owned high-priority runtime lane. It is not an overflow pool for ordinary work. |
+| `HighPriority` | Short, cooperative, latency-sensitive work | Uses framework-owned high-priority runtime shards. The daemon can add conservative capacity, but it is not an overflow pool for ordinary work. |
 | `Isolated` | Blocking adapters, thread-affine integrations, deterministic hot loops | Uses a private OS thread and private Tokio runtime for each generation, so it costs more resources. |
 
 ```rust,ignore
@@ -98,7 +98,7 @@ async fn urgent_job_worker(job: Job) -> anyhow::Result<()> {
 `Standard` is the default.
 
 - Use it for normal async services and triggers.
-- It runs on the Tokio runtime that calls `ServiceDaemon::run()`.
+- It runs on the Tokio runtime that calls the daemon handle's `run()`.
 - Prefer this unless you have a concrete reason to declare another mode.
 
 ```rust,ignore
@@ -110,11 +110,12 @@ async fn admin_service() -> anyhow::Result<()> {
 
 ### `HighPriority`
 
-`HighPriority` is for work that should avoid contention with the default body lane but still behaves like normal cooperative async Rust.
+`HighPriority` requires the opt-in `high-priority` Cargo feature. It is for work that should avoid contention with the default body lane while remaining cooperative async Rust. The daemon can adjust its resources when a service's observed sleep latency degrades, and stops repeated interventions that provide little benefit. See [Diagnostics](../diagnostics.md) for the feature and observation boundaries; this is not a hard-real-time guarantee.
 
 - Good for watchdogs, latency-sensitive queues, and small coordination tasks.
 - Not a way to make CPU-heavy or blocking code safe.
-- Not an automatic overflow pool; a body enters this lane only when you declare `scheduling = HighPriority`.
+- Not a cross-mode overflow pool; a body enters this lane only when you declare `scheduling = HighPriority`.
+- Existing futures are not migrated. Placement changes happen only when a new generation starts. If the policy requests rollover, the service must observe the reload signal at a safe point and preserve any needed state with normal framework tools such as the Shelf.
 
 ```rust,ignore
 #[service(scheduling = HighPriority)]
@@ -122,6 +123,11 @@ async fn watchdog_service() -> anyhow::Result<()> {
     Ok(())
 }
 ```
+
+There is no macro attribute or daemon builder knob for tuning the automatic
+HighPriority placement loop. Treat `HighPriority` as a framework-managed
+cooperative lane. Services are reloadable by default; keep business state and
+in-flight work restart-safe using the normal lifecycle tools.
 
 ### `Isolated`
 

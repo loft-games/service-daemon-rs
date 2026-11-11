@@ -1,0 +1,8 @@
+error: #[input] parameters must be immutable shared references to owned instance input and cannot be Arc dependencies.
+
+         = help: Use #[input] value: &YourInputType. Keep provider dependencies as Arc<T>, Arc<RwLock<T>>, or Arc<Mutex<T>> without #[input].
+
+ --> tests/fail/39_service_input_arc_dependency.rs:6:17
+  |
+6 | async fn worker(#[input] job: &std::sync::Arc<Job>) -> anyhow::Result<()> {
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

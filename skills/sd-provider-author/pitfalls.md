@@ -39,7 +39,11 @@ the framework.
 ## Named attributes inside template parentheses
 
 `#[provider(Listen("addr", env = "VAR"))]` is a compile error. Named attributes go
-outside: `#[provider(Listen("addr"), env = "VAR")]`.
+outside: `#[provider(Listen(8080), env = "VAR")]`.
+
+Port-only `Listen(8080)` (or env `8080`) binds all IPv4 interfaces, not just
+localhost. Use a full loopback address for local-only services. Unlike value
+providers, an empty `Listen` env override is invalid and does not use the default.
 
 ## `capacity` on the wrong form
 
@@ -49,5 +53,27 @@ value provider is a compile error.
 ## Env-only provider with a missing variable
 
 `#[provider(env = "API_KEY")]` (no default) fails initialization if the env var is
-absent. Provide a default (`#[provider("fallback", env = "API_KEY")]`) when the
+absent or empty (after trimming for non-String types). Provide a default
+(`#[provider("fallback", env = "API_KEY")]`) when the
 value is optional.
+
+## Bool environment values
+
+`false`, `off`, `no` (ASCII case-insensitive), and `0` mean false after trimming.
+Every other nonempty string means true. Empty
+or whitespace-only bool input uses the default, or fails if no default exists.
+
+## Missing daemon context
+
+There is no root provider cache. Resolve through injected service/trigger
+parameters or from a daemon-scoped body. Fallible helpers report missing context;
+direct `Arc` helpers and watch builders panic before provider initialization.
+`eager` changes startup timing only. Never infer ownership from `service_handle!`
+tokens; a helper extraction must not affect provider lifetime.
+
+## Candidate library not linked into the final target
+
+`#[provider_impl]` emits a link-time registry entry, but Rust does not link a
+library target that the final binary or integration test never references. A
+`Cargo.toml` dependency is not enough. Add `use implementation_crate as _;` to
+each final target that relies on those candidates.

@@ -5,29 +5,83 @@
 Generated code constructs these; the runtime reads them. Changing a field means
 updating **both** the struct and every macro that emits it.
 
-`ServiceEntry` (service.rs:210) — emitted by `#[service]` and `#[trigger]`:
+`ServiceEntry` — emitted by `#[service]` and `#[trigger]`:
 
 ```rust
 pub struct ServiceEntry {
     pub name: &'static str,
     pub module: &'static str,
     pub params: &'static [ServiceParam],
-    pub wrapper: fn(CancellationToken) -> BoxFuture<'static, anyhow::Result<()>>,
+    pub input: Option<ServiceInputDescriptor>,
+    pub wrapper: fn(ServiceInvocationContext) -> BoxFuture<'static, anyhow::Result<()>>,
     pub watcher: Option<fn() -> ProviderDependencyWatchSet>,
     pub priority: u8,
-  pub scheduling: ServiceScheduling,
+    pub scheduling: ServiceScheduling,
     pub tags: &'static [&'static str],
 }
 ```
 
-`ProviderEntry` (service.rs:326) — emitted by `#[provider]`. Unlike `ServiceEntry`
-it carries **no** wrapper or priority; its job is dependency metadata for graph
-analysis (Provider→Provider edges, cycle detection) plus the `eager` opt-in. Fields
-begin with `name` and `module` (the defining module path).
+`input: None` means the selected service auto-starts one instance during daemon
+startup. `input: Some(ServiceInputDescriptor { ... })` marks a service template:
+the registry selects the definition, but callers must create runtime instances via
+`ServiceHandle::create(input)` or `ServiceHandle::start(input)`.
+The runtime validates the supplied type against the descriptor before registering
+the instance; non-template services accept only unit input for manual dynamic
+creation.
 
-Both slices are re-exported for consumers at `service-daemon/src/lib.rs:117` and
+`ProviderEntry` — emitted by `#[provider]` and `#[provider_contract]`:
+
+```rust
+pub struct ProviderEntry {
+    pub name: &'static str,
+    pub module: &'static str,
+    pub type_id: TypeId,
+    pub params: &'static [ServiceParam],
+    pub eager: bool,
+    pub init: fn(
+        RestartPolicy,
+        CancellationToken,
+    ) -> BoxFuture<'static, Result<(), ProviderInitError>>,
+}
+```
+
+Unlike `ServiceEntry`, providers do not carry a service wrapper or priority. The
+entry owns provider metadata for graph analysis (`type_id`, Provider->Provider
+edges), the eager-init flag, and the type-erased initializer used by startup
+preflight/provider scoping.
+
+`ProviderCandidateEntry` — emitted by `#[provider_impl]`:
+
+```rust
+pub struct ProviderCandidateEntry {
+    pub name: &'static str,
+    pub module: &'static str,
+    pub output_type_id: TypeId,
+    pub output_type_name: &'static str,
+    pub provider_type_id: TypeId,
+    pub priority: u8,
+    pub params: &'static [ServiceParam],
+    pub init: fn(...) -> BoxFuture<'static, Result<Arc<dyn Any + Send + Sync>, ProviderCandidateInitError>>,
+}
+```
+
+`#[provider_contract]` emits a normal `ProviderEntry` for the shared output type
+and generates `ProviderContract` plus the usual provider capability traits.
+`#[provider_impl]` emits only a candidate entry keyed by the contract output
+`TypeId`; it must not generate `Provided` on the returned type. All provider
+instances are daemon-local. Do not infer ownership from function-body tokens
+or generate a static provider instance cache.
+
+`ProviderCandidateInitError::Failed` boxes the hidden `ProviderInitFailure`, not
+the public `ProviderInitError`. Keep that carrier intact through candidate
+selection so fatal, panic, cancellation, and retry diagnostics reach the normal
+provider boundary. Candidate timeout may be recorded and then advance; zero
+candidates and exhaustion use `UserProviderFatal`.
+
+These registry entries are re-exported for consumers at `service-daemon/src/lib.rs:117` and
 `service-daemon/src/models/mod.rs:22` (`SERVICE_REGISTRY`, `PROVIDER_REGISTRY`,
-`ServiceEntry`, `ProviderEntry`, `ServiceFn`, `ServiceParam`).
+`PROVIDER_CANDIDATE_REGISTRY`, `ServiceEntry`, `ProviderEntry`,
+`ProviderCandidateEntry`, `ServiceFn`, `ServiceParam`).
 
 ### Linkme platform contract monitoring
 
@@ -65,19 +119,60 @@ Macro behavior is verified with **trybuild** (`trybuild = "1.0.116"`):
   `02_service_rejects_payload.rs`, `11_only_provided_cannot_inject_managed.rs`),
   each paired with a `.stderr` snapshot of the expected diagnostic.
 
-When you add or change a compile error, add/Update the matching `tests/fail/`
+When you add or change a compile error, add/update the matching `tests/fail/`
 fixture and refresh its `.stderr` (trybuild can regenerate it; review the diff).
 Run with `cargo test -p example-macro-tests`.
 
+For `#[provider_contract]`, cover default/explicit `eager` parsing in macro unit
+tests and keep pass/fail fixtures for accepted booleans, duplicate keys, unknown
+keys, and malformed values.
+
+### Scheduling feature contract
+
+Scheduling feature changes additionally require:
+
+```bash
+cargo test -p service-daemon --test high_priority_feature_contract_tests
+```
+
+This creates an independent downstream workspace and checks direct enum use,
+`#[service]`, and `#[trigger]` with HighPriority disabled/enabled. Keep the
+runtime variant feature-gated; the emitted reference enforces the boundary.
+Do not emit consumer-local feature checks that assume the consumer uses the
+same feature names, or rely only on the macro-test example (which enables HP).
+
 ## 4. Where macro behavior is documented
 
+Value/env conversion belongs in `provider/struct_gen.rs`, shared by default and
+required-env constructors (including raw managed errors). Keep underlying-type
+handling alias-safe: preserve String whitespace, trim non-strings, distinguish
+empty/missing from parse failures, and apply the documented bool false-token
+rule. Run `cargo test -p service-daemon-macro env_tests` and
+`cargo test -p service-daemon --test provider_env_contract_tests`; the latter
+isolates env values and provider caches per subprocess across snapshot, managed,
+RwLock, and Mutex paths. Do not apply these value rules to socket templates.
+
+TCP `Listen` has its own port/address contract: `ListenArg` in `provider/parser.rs`
+accepts integer ports and string literals; `provider/templates/listen.rs`
+normalizes trimmed port-only defaults/env values to `0.0.0.0:<port>` and preserves
+full addresses. Keep invalid/empty overrides fatal, not default fallback.
+Validate with `listen_port_arguments` macro unit tests, `provider_macro_cases`
+compile tests, and `listen_port_contract_tests` runtime integration tests.
+
 - `docs/architecture/macro-expansion.md` — what `#[service]`/`#[trigger]`/
-  `#[provider]` generate (the authoritative internal explanation).
+  `#[provider]`, `#[provider_contract]`, and `#[provider_impl]` generate (the
+  authoritative internal explanation).
 - `docs/development/extending-framework.md` — maintainer guidance for extending
   the framework, including the macro seams.
 
 ## 5. Error reporting
 
-The crate uses `proc_macro_error2` (`#[proc_macro_error]` on each entry). Emit
-user-facing diagnostics with spanned errors so the message points at the offending
-token, not the whole item — the `tests/fail/*.stderr` snapshots assert on these.
+The crate owns diagnostics through `service-daemon-macro/src/diagnostics.rs`,
+`syn::Result` control flow, and generated `compile_error!` tokens. Emit
+user-facing diagnostics with spanned errors so the message points at the
+offending token, not the whole item — the `tests/fail/*.stderr` snapshots assert
+on these.
+
+Rust stable does not expose proc-macro warnings. The local facade keeps
+provider-template warning call sites classified, but the stable backend is a
+no-op that preserves the previous behavior.

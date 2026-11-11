@@ -4,7 +4,7 @@ This guide explains how `ServiceDaemon` ensures application stability through au
 
 ## 1. Automatic Restarts: Exponential Backoff & Jitter
 
-Services that fail (return `Err`) are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues. Clean `Ok(())` exits also start a new generation and restart immediately, without advancing the backoff counter.
+Services that fail (return `Err`) are automatically restarted with exponential backoff and **randomized jitter** to prevent thundering herd issues. A service generation that returns `Ok(())` without a shutdown or reload control signal also starts a new generation through `RestartPolicy`, because services are expected to keep running until controlled shutdown, reload, or fatal termination.
 
 ```rust
 use service_daemon::{ServiceDaemon, RestartPolicy};
@@ -17,7 +17,7 @@ let policy = RestartPolicy::builder()
     .jitter_factor(0.1) // 10% randomization
     .build();
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_restart_policy(policy)
     .build();
 daemon.run().await;
@@ -27,7 +27,7 @@ daemon.wait().await?;
 ### 1.1. Backoff, Jitter & Restart Storm Protection
 The framework uses a unified `BackoffController` to manage retry delays, consecutive failure counts, and interruption-aware waiting. This ensures that both standard services and trigger handlers follow the same resilience policy.
 
-Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service failures happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, clean `Ok(())` exits still restart immediately, and reload/shutdown signals still interrupt restart waits.
+Service supervisors also apply an internal restart-storm guard for pathological service failure loops. When repeated backoff-eligible service terminations happen inside a short window, the supervisor may extend the effective restart delay. This guard is internal and conservative: services still retry indefinitely unless they return `ServiceError::Fatal`, service generations that return `Ok(())` without a shutdown or reload control signal restart through `RestartPolicy`, and reload/shutdown signals still interrupt restart waits.
 
 > [!NOTE]
 > **Internal Architecture**: For the `BackoffController` state machine, restart-storm guard, and self-healing reset logic, see [Architecture: Lifecycle Management - Backoff Internals](../architecture/lifecycle-management.md#15-backoffcontroller-internals).
@@ -38,7 +38,7 @@ The framework uses a **two-tier retry design** that reflects the fundamentally d
 
 | Layer | Retry Behavior | How to Stop |
 | :--- | :--- | :--- |
-| **Service** | Restarts forever; failures use backoff plus an internal storm guard, clean exits restart immediately without backoff | Return `ServiceError::Fatal` from the service function |
+| **Service** | Restarts forever; recoverable errors, panics, and uncontrolled `Ok(())` exits use `RestartPolicy` backoff plus an internal storm guard; reloads restart immediately | Return `ServiceError::Fatal` from the service function |
 | **Lazy Provider** | Resolves on demand during service runtime | Return `ProviderError::Fatal` from the provider, which triggers daemon shutdown |
 | **Trigger dispatch** | A handler failure is retried inside the current dispatch; retry exhaustion becomes a recoverable trigger-service generation failure | Set `trigger_max_retries` on the `RestartPolicy` to bound each dispatch |
 
@@ -58,7 +58,7 @@ let policy = RestartPolicy::builder()
     .trigger_max_retries(5) // Give up after 5 consecutive failures
     .build();
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_restart_policy(policy)
     .build();
 ```
@@ -91,12 +91,15 @@ async fn license_checker() -> anyhow::Result<()> {
 
 When a provider's initialization fails, the daemon distinguishes transient errors from terminal provider-init boundary failures. User provider functions opt into this behavior by returning `Result<T, ProviderError>`; framework-generated providers can also produce `ProviderInitError` for required environment variables, parse failures, dependency-provider failures, panic translation, timeout, cancellation, and eager dependency-graph defense errors.
 
-### 2.1. Provider Error Mapping: Retryable vs Fatal
+### 2.1. Provider Error Mapping: Retryable, Fatal, and Unavailable
 
 When a provider fails to initialize, it can influence the daemon's behavior by returning specific error variants:
 
 - **Retryable**: the daemon retries initialization with provider-init backoff until `RestartPolicy::provider_init_timeout` expires. If the timeout expires, the terminal boundary error is `ProviderInitError::Timeout`.
 - **Fatal**: the daemon does not retry the provider. The terminal boundary error is `ProviderInitError::Fatal`, and the supervisor requests daemon shutdown for lazy failures or aborts startup for eager failures.
+- **Unavailable**: in a `#[provider_impl]` candidate, the runtime tries the next
+  candidate for the same `#[provider_contract]`. In an ordinary `#[provider]`,
+  there is no fallback candidate, so the runtime treats it as fatal.
 
 Provider retry/backoff is separate from service-generation restart/backoff. A provider-init terminal error bypasses the normal service restart loop; it is recorded as a provider-init lifecycle exit and does not synthesize a restart decision.
 
@@ -132,26 +135,101 @@ The probe-then-unlink path emits a `tracing::warn!` event with `provider` and `p
 
 ### 2.4. UnixConnect Strategy (Unix Domain Socket Client)
 
-The `UnixConnect` template performs **one connectivity probe at provider init time** and discards the result. The probe serves two purposes:
-
-1. With `eager = true`, it blocks the system startup wave until the peer is reachable. Use this for adapter-style daemons that depend on a sidecar / supervisor that must be up before our own services start.
-2. Fail-fast on misconfiguration: a typo in the path becomes `Fatal` at init time rather than at the first `connect()` somewhere in the hot path.
-
-Peer servers will observe a single `accept()` followed by an instant close from the probe -- this is normal and any reasonable server already handles port-scanner / health-probe traffic the same way.
+The `UnixConnect` template is a lightweight endpoint handle. Provider
+initialization resolves the configured path and stores it; it does not open a
+reachability probe. This keeps server-side accept loops free of framework-owned
+probe connections.
 
 | OS Error | Strategy | Reason |
 | :--- | :--- | :--- |
-| `ConnectionRefused` | **Retryable** | Peer hasn't called `accept()` yet (peer is starting up). |
-| `NotFound` | **Retryable** | Peer hasn't created the socket file yet (peer init in progress). |
-| `ConnectionAborted` | **Retryable** | Peer accepted but immediately closed -- a startup race. |
-| `Interrupted`, `TimedOut` | **Retryable** | System signal during connect. |
-| `PermissionDenied` | **Fatal** | EACCES on the path -- a permissions issue is not a transient state. |
-| `InvalidInput` | **Fatal** | Path too long. |
+| `ConnectionRefused` | Runtime `io::Error` from `connect().await?` | Peer has not accepted connections yet. |
+| `NotFound` | Runtime `io::Error` from `connect().await?` | Peer has not created the socket file yet, or the configured path is wrong. |
+| `ConnectionAborted` | Runtime `io::Error` from `connect().await?` | Peer accepted and closed before the caller used the stream. |
+| `Interrupted`, `TimedOut` | Runtime `io::Error` from `connect().await?` | System interruption or timeout during connect. |
+| `PermissionDenied` | Runtime `io::Error` from `connect().await?` | EACCES on the path. |
+| `InvalidInput` | Runtime `io::Error` from `connect().await?` | Path too long or otherwise invalid for the OS. |
 
 > [!IMPORTANT]
-> `NotFound` is **Retryable** for `UnixConnect` (peer is starting) but **Fatal** for `UnixListen` (parent directory missing). The same `io::ErrorKind` carries different meaning depending on which side of the connection you are.
+> `NotFound` is a runtime connection error for `UnixConnect` but **Fatal** for
+> `UnixListen` when it means the listener's parent directory is missing. The
+> same `io::ErrorKind` still carries different meaning depending on which side
+> of the connection you are.
 
-After init succeeds, `connect().await?` opens a fresh independent `tokio::net::UnixStream` on each call. `try_connect().await?` remains available as the explicitly named lower-level helper. The framework intentionally does not pool -- UDS connections are local and cheap to recreate.
+`connect().await?` opens a fresh independent `service_daemon::IpcStream` on each
+call. `try_connect().await?` remains available as the explicitly named
+lower-level helper for code that needs the raw Tokio `UnixStream`. The framework
+intentionally does not pool -- UDS connections are local and cheap to recreate.
+
+### 2.5. NamedPipeListen Strategy (Windows Named Pipe Server)
+
+The `NamedPipeListen` template is Windows-only and uses Tokio's
+`tokio::net::windows::named_pipe::ServerOptions`. It validates local-only names
+at runtime: the path must begin with `\\.\pipe\` and must have a non-empty
+suffix. Remote pipe paths are rejected as fatal configuration errors.
+
+The first server instance is created with `reject_remote_clients(true)` and
+`first_pipe_instance(true)`. That first-instance flag is the ownership check: if
+another server already owns the pipe name, Windows reports a permission-style
+create failure and the framework treats it as **Fatal**. Later instances created
+by the listener manager do not use `first_pipe_instance(true)`.
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| Initial first-instance collision | **Fatal** | Another server already owns the pipe name; retrying would hide a deployment ownership conflict. |
+| Invalid or remote pipe name | **Fatal** | The provider contract is local-only `\\.\pipe\...`. |
+| `Interrupted`, `TimedOut` during create | **Retryable** | Transient system interruption while creating the server instance. |
+| Other create/configuration/access errors | **Fatal** | The operator or configuration must change. |
+
+`accept().await?` receives connected `NamedPipeServer`s from a lazily started
+listener manager. The manager owns the pending instance, creates the next
+instance after each connection, and retries runtime replacement-create failures
+with short backoff. A successful `accept()` means the returned server end is
+connected and ready for business logic; it does not require replacement creation
+to have succeeded first. Provider-init classification still applies to
+initialization, while runtime pending-create failures are manager recovery events
+unless the manager stops.
+
+### 2.6. NamedPipeConnect Strategy (Windows Named Pipe Client)
+
+The `NamedPipeConnect` template stores only the local pipe name. Initialization
+validates the pipe name form and does not dial the peer. Runtime dialing happens
+inside `connect().await?`.
+
+| OS Error | Strategy | Reason |
+| :--- | :--- | :--- |
+| `NotFound` | Runtime `io::Error` from `connect().await?` | The peer has not created the named pipe yet. |
+| Raw OS `ERROR_PIPE_BUSY` (`231`) | Retried inside `connect().await?` for a short bounded window | The pipe exists, but every server instance is currently occupied. |
+| `Interrupted`, `TimedOut` | Runtime `io::Error` from `connect().await?` | Transient system interruption during open. |
+| `PermissionDenied` | Runtime `io::Error` from `connect().await?` | Access or security configuration is wrong, including denied local access. |
+| Invalid or remote pipe name | **Fatal at provider init** | The provider contract is local-only `\\.\pipe\...`. |
+| Other configuration/access errors | Runtime `io::Error` from `connect().await?` | Unknown Windows pipe failures remain visible to the caller. |
+
+Each `connect().await?` opens a fresh independent `service_daemon::IpcStream`.
+The helper retries short `ERROR_PIPE_BUSY` windows internally, so example code
+does not need a Windows-specific busy-loop for normal listener replenishment.
+
+### 2.7. LocalIpc Strategy (Cross-platform Logical Local IPC)
+
+`LocalIpcListen` and `LocalIpcConnect` validate a logical name first, then map it
+to the platform-native local IPC endpoint. Literal logical names are rejected at
+macro expansion if they are empty or contain anything outside ASCII letters,
+digits, `.`, `_`, and `-`. Environment overrides are checked during provider
+initialization and produce `ProviderError::Fatal` when invalid.
+
+On Unix, the provider creates the `service-daemon-rs` runtime directory under
+`XDG_RUNTIME_DIR` or, when that is unavailable, under `std::env::temp_dir()`.
+Listener startup then follows the `UnixListen` stale-socket cleanup and
+live-process refusal strategy, while connector startup only resolves the logical
+name and platform endpoint.
+
+On Windows, the provider maps the logical name to
+`\\.\pipe\service-daemon-rs-<name>`. Listener startup follows the
+`NamedPipeListen` local-only first-instance ownership strategy, while connector
+startup validates the logical name and stores the mapped pipe name.
+
+The runtime `accept().await?` and `connect().await?` methods return
+`service_daemon::IpcStream` values. Platform transport failures are returned as
+raw `std::io::Error`s from those calls.
 
 ## 3. Advanced Resilience: Wave Timeouts
 

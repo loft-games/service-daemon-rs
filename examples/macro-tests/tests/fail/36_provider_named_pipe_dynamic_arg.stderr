@@ -1,0 +1,5 @@
+error: expected a string literal or a path to a `const &'static str`
+ --> tests/fail/36_provider_named_pipe_dynamic_arg.rs:8:28
+  |
+8 | #[provider(NamedPipeListen(pipe_name()))]
+  |                            ^^^^^^^^^

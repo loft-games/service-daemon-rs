@@ -20,6 +20,8 @@ Good signals to adopt:
 - You have startup ordering / readiness dependencies between background tasks.
 - You wire shared resources (listeners, clients, config) through ad-hoc globals.
 - You want config/state changes to reload dependent tasks.
+- You need daemon-managed dynamic worker instances with per-instance input, or
+  latency-sensitive cooperative workers that fit `HighPriority` runtime policy.
 
 Weak signals (probably don't migrate yet):
 
@@ -30,7 +32,11 @@ Weak signals (probably don't migrate yet):
 ## How to migrate (incremental — one task at a time)
 
 **1. A long-running loop becomes a `#[service]`.** Keep the loop body; replace the
-spawn/supervise glue with the macro. Dependencies are injected as `Arc<T>`.
+spawn/supervise glue with the macro. Dependencies are injected as `Arc<T>`. If the
+old system dynamically starts many copies with per-instance config, model it as a
+service template with one `#[input] cfg: &Cfg` parameter. Expose its
+daemon-bound `ServiceHandle` from a provider, then create/start instances with
+`create(cfg)` / `start(cfg)`.
 
 ```rust
 use std::time::Duration;
@@ -50,7 +56,8 @@ async fn heartbeat(cfg: Arc<AppConfig>) -> anyhow::Result<()> {
 
 **2. Shared resources become `#[provider]`s** injected as `Arc<T>`. For fallible
 init (sockets, clients), return `Result<T, ProviderError>` and classify failures as
-`Fatal` (no retry, fail fast) vs `Retryable` (retry with backoff). See the
+`Fatal` (no retry, fail fast), `Retryable` (retry with backoff), and
+contract-candidate `Unavailable` fallback. See the
 `sd-provider-author` skill if installed.
 
 **3. Event sources become `#[trigger]`s** — channels/queues (`Queue`), timers
@@ -61,7 +68,7 @@ non-blocking (it brings services up and returns); `wait()` is what keeps the
 process alive. Binding `daemon` matters — dropping it tears everything down.
 
 ```rust
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_registry(registry) // optional: omit to run every discovered service
     .build();
 daemon.run().await; // spawns services wave by wave, returns immediately
@@ -72,6 +79,15 @@ daemon.wait().await?; // blocks until SIGINT / SIGTERM / Ctrl+C
 runs high→low in waves and shutdown runs low→high. A service signals readiness with
 `service_daemon::done()` (or implicitly via the first `is_shutdown()`/`sleep()`
 call). State that must survive a restart goes on the daemon's per-service Shelf.
+For cooperative latency-sensitive workers, enable the dependency's `high-priority`
+feature, declare `scheduling = HighPriority`, and let the daemon manage resources
+internally. It observes real framework-aware sleep drift, evaluates the same
+metric after reload, and pauses low-benefit interventions. It does not infer all
+business latency, require extra instrumentation, or promise a hard real-time SLA.
+All services are reloadable; authors own progress restoration across generations.
+Do not use
+HighPriority for blocking loops; use `Isolated` when a body needs a private
+thread/runtime boundary.
 
 ## Don't
 
@@ -89,7 +105,8 @@ one and follow the order:
 | Step | Skill | What it covers |
 | :--- | :--- | :--- |
 | Wrap a loop as a service | `sd-service-author` | `#[service]` shape, readiness `done()`, interruptible `sleep`, restart semantics. |
-| Turn shared resources into providers | `sd-provider-author` | `#[provider]`, lazy vs `eager`, `ProviderError::Fatal` vs `Retryable`, DI forms. |
+| Model on-demand workers | `sd-service-author` + `sd-daemon-bootstrap` | `#[input]` service templates, `service_handle!`, and `ServiceHandle::create/start`. |
+| Turn shared resources into providers | `sd-provider-author` | `#[provider]`, `#[provider_contract]`, lazy vs `eager`, `ProviderError` classification, DI forms. |
 | React to events / timers / changes | `sd-trigger-author` | `#[trigger]` host families: `Queue` / `Cron` / `Signal` / `Watch`. |
 | Share mutable state, persist across restart | `sd-state-management` | `Arc<RwLock<T>>`, `Watch` notifications, the keyed Shelf. |
 | Assemble and run `main()` | `sd-daemon-bootstrap` | builder, tag-filtered `Registry`, `run()` vs `wait()`, priority waves. |

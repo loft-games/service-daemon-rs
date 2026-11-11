@@ -13,7 +13,12 @@ members = [
     "examples/diagnostics",
     "examples/scheduling",
     "examples/unix-domain-socket",
+    "examples/named-pipe",
+    "examples/local-ipc",
     "examples/web-api",
     "examples/controller-bridge",
+    "examples/on-demand",
+    "examples/provider-contract/shared",
+    "examples/provider-contract/app",
 ]
 resolver = "2"

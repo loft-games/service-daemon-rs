@@ -19,7 +19,7 @@ async fn file_logging_appender_init_failure_degrades_to_console_only() -> anyhow
         "test-app",
     ));
 
-    let mut daemon = ServiceDaemon::builder()
+    let daemon = ServiceDaemon::builder()
         .with_registry(Registry::builder().with_tag("__file_log__").build())
         .with_restart_policy(RestartPolicy::for_testing())
         .build();

@@ -1,0 +1,5 @@
+error: expected boolean literal
+ --> tests/fail/49_provider_contract_malformed_eager.rs:4:29
+  |
+4 | #[provider_contract(eager = "true")]
+  |                             ^^^^^^

@@ -1,6 +1,6 @@
 use crate::models::{PROVIDER_REGISTRY, ProviderInitError};
 
-use super::ServiceDaemon;
+use super::DaemonInstanceInner;
 use super::provider_graph::validate_dependency_graph;
 use super::runtime::{PreparedRuntimes, RuntimePreparationError};
 
@@ -10,7 +10,7 @@ pub(super) enum StartupPreflightError {
     Runtime(RuntimePreparationError),
 }
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn run_startup_preflight(
         &mut self,
     ) -> Result<PreparedRuntimes, StartupPreflightError> {

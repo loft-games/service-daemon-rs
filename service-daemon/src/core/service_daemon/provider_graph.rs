@@ -7,16 +7,20 @@ use petgraph::{
 };
 
 use crate::core::context::__run_daemon_resources_scope;
+use crate::core::provider_executor::prepare_eager_provider_params;
 use crate::core::provider_init::{
     ProviderInitBoundaryContext, ProviderInitBoundaryKind, ProviderInitFailure,
     ProviderInitSourceKind, ProviderRuntimePhase, provider_init_failure_into_error,
     with_provider_runtime_phase,
 };
-use crate::models::{PROVIDER_REGISTRY, ProviderEntry, ProviderInitError, ServiceDescription};
+use crate::models::{
+    PROVIDER_CANDIDATE_REGISTRY, PROVIDER_REGISTRY, ProviderDependencyKind, ProviderEntry,
+    ProviderInitError, ServiceDescription, ServiceParam,
+};
 
-use super::ServiceDaemon;
+use super::DaemonInstanceInner;
 
-impl ServiceDaemon {
+impl DaemonInstanceInner {
     pub(super) async fn eager_init_reachable_providers(&self) -> Result<(), ProviderInitError> {
         let mut providers_by_id: HashMap<TypeId, &'static ProviderEntry> = HashMap::new();
         for entry in PROVIDER_REGISTRY.iter() {
@@ -57,99 +61,29 @@ impl ServiceDaemon {
             return Ok(());
         }
 
-        // 4) Toposort reachable provider DAG to get a deterministic init order.
-        // Nodes are provider TypeIds; edges are dep -> provider.
-        let mut graph = DiGraph::<TypeId, ()>::new();
-        let mut nodes: HashMap<TypeId, NodeIndex> = HashMap::new();
-
-        for type_id in reachable.iter().copied() {
-            if providers_by_id.contains_key(&type_id) {
-                nodes
-                    .entry(type_id)
-                    .or_insert_with(|| graph.add_node(type_id));
-            }
-        }
-
-        for (&type_id, entry) in providers_by_id.iter() {
-            if !reachable.contains(&type_id) {
-                continue;
-            }
-            let Some(&provider_node) = nodes.get(&type_id) else {
-                continue;
-            };
-            for dependency in entry.params {
-                if !reachable.contains(&dependency.type_id) {
-                    continue;
-                }
-                if let Some(&dependency_node) = nodes.get(&dependency.type_id) {
-                    graph.add_edge(dependency_node, provider_node, ());
-                }
-            }
-        }
-
-        // Cycles are pre-checked by validate_dependency_graph() in run();
-        // if we still land in Err here, report it as a Fatal init error
-        // rather than panicking, as a defense-in-depth measure.
-        let order = match toposort(&graph, None) {
-            Ok(order) => order,
-            Err(err) => {
-                let offending = providers_by_id
-                    .iter()
-                    .find_map(|(type_id, provider)| {
-                        (*type_id == graph[err.node_id()]).then_some(provider.name)
-                    })
-                    .unwrap_or("<unknown>");
-                return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::with_phase(
-                        offending,
-                        ProviderRuntimePhase::FrameworkValidation,
-                        ProviderInitBoundaryKind::FrameworkValidation,
-                    ),
-                    ProviderInitFailure::fatal(
-                        offending,
-                        "Circular provider dependency reached eager_init; \
-                              this should have been caught by validate_dependency_graph"
-                            .to_owned(),
-                        ProviderInitSourceKind::FrameworkGraphValidation,
-                    ),
-                ));
-            }
-        };
-
-        // 5) Execute init in order, only for eager providers.
-        let eager_ids: HashSet<TypeId> = eager_targets
+        let eager_params: Vec<ServiceParam> = eager_targets
             .iter()
-            .map(|provider| provider.type_id)
-            .collect();
-        for node in order {
-            let type_id = graph[node];
-            if !eager_ids.contains(&type_id) {
-                continue;
-            }
-            let Some(entry) = providers_by_id.get(&type_id).copied() else {
-                return Err(provider_init_failure_into_error(
-                    ProviderInitBoundaryContext::with_phase(
-                        "<unknown>",
-                        ProviderRuntimePhase::StartupEagerInit,
-                        ProviderInitBoundaryKind::FrameworkValidation,
-                    ),
-                    ProviderInitFailure::fatal(
-                        "<unknown>",
-                        "provider missing from eager initialization graph".to_owned(),
-                        ProviderInitSourceKind::FrameworkEagerInit,
-                    ),
-                ));
-            };
-            let resources = self.resources.clone();
-            __run_daemon_resources_scope(resources, || async {
-                with_provider_runtime_phase(
-                    ProviderRuntimePhase::StartupEagerInit,
-                    (entry.init)(self.restart_policy, self.cancellation_token.clone()),
-                )
-                .await
+            .map(|provider| ServiceParam {
+                name: "<eager>",
+                type_name: provider.name,
+                type_id: provider.type_id,
+                kind: ProviderDependencyKind::Snapshot,
             })
-            .await?;
-        }
+            .collect();
+
+        let resources = self.resources.clone();
+        __run_daemon_resources_scope(resources, || async {
+            with_provider_runtime_phase(
+                ProviderRuntimePhase::StartupEagerInit,
+                prepare_eager_provider_params(
+                    &eager_params,
+                    self.restart_policy,
+                    self.cancellation_token.clone(),
+                ),
+            )
+            .await
+        })
+        .await?;
 
         Ok(())
     }
@@ -174,7 +108,21 @@ pub(super) fn validate_dependency_graph<'a>(
     services: &[ServiceDescription],
     providers: impl IntoIterator<Item = &'a ProviderEntry>,
 ) -> Result<(), ProviderInitError> {
+    validate_dependency_graph_with_candidates(
+        services,
+        providers,
+        PROVIDER_CANDIDATE_REGISTRY.iter(),
+    )
+}
+
+fn validate_dependency_graph_with_candidates<'a, 'b>(
+    services: &[ServiceDescription],
+    providers: impl IntoIterator<Item = &'a ProviderEntry>,
+    candidates: impl IntoIterator<Item = &'b crate::models::ProviderCandidateEntry>,
+) -> Result<(), ProviderInitError> {
     let providers: Vec<&ProviderEntry> = providers.into_iter().collect();
+    let candidates: Vec<&crate::models::ProviderCandidateEntry> =
+        candidates.into_iter().collect();
 
     let mut graph = DiGraph::<&str, ()>::new();
     let mut service_nodes: HashMap<&str, NodeIndex> = HashMap::new();
@@ -200,7 +148,7 @@ pub(super) fn validate_dependency_graph<'a>(
             .entry(provider.type_id)
             .or_insert_with(|| graph.add_node(provider.name));
 
-        for param in provider.params {
+        for param in structural_provider_dependencies(provider, &candidates) {
             let dependency_node = *type_nodes
                 .entry(param.type_id)
                 .or_insert_with(|| graph.add_node(param.type_name));
@@ -225,12 +173,10 @@ pub(super) fn validate_dependency_graph<'a>(
                 }
             }
             for provider in &providers {
-                if !provider.params.is_empty() {
-                    let dependency_names: Vec<&str> = provider
-                        .params
-                        .iter()
-                        .map(|param| param.type_name)
-                        .collect();
+                let params = structural_provider_dependencies(provider, &candidates);
+                if !params.is_empty() {
+                    let dependency_names: Vec<&str> =
+                        params.iter().map(|param| param.type_name).collect();
                     tracing::info!(
                         provider = %provider.name,
                         dependencies = ?dependency_names,
@@ -275,5 +221,130 @@ pub(super) fn validate_dependency_graph<'a>(
                 ),
             ))
         }
+    }
+}
+
+fn structural_provider_dependencies(
+    provider: &ProviderEntry,
+    candidates: &[&crate::models::ProviderCandidateEntry],
+) -> Vec<&'static ServiceParam> {
+    let mut params: Vec<&'static ServiceParam> = provider.params.iter().collect();
+    params.extend(
+        candidates
+            .iter()
+            .filter(|candidate| candidate.output_type_id == provider.type_id)
+            .flat_map(|candidate| candidate.params.iter()),
+    );
+    params
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_dependency_graph_with_candidates;
+    use crate::core::provider_init::ProviderInitFailure;
+
+    use crate::models::{
+        ProviderCandidateEntry, ProviderCandidateInitError, ProviderDependencyKind,
+        ProviderEntry, ProviderInitError, RestartPolicy, ServiceParam,
+    };
+    use futures::future::BoxFuture;
+    use std::any::{Any, TypeId};
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone)]
+    struct CandidateCycleA;
+
+    #[derive(Clone)]
+    struct CandidateCycleB;
+
+    struct CandidateCycleIdentity;
+
+    fn provider_init(
+        _policy: RestartPolicy,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<'static, Result<(), ProviderInitError>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn candidate_init(
+        _policy: RestartPolicy,
+        _cancel: CancellationToken,
+    ) -> BoxFuture<
+        'static,
+        Result<Arc<dyn Any + Send + Sync>, ProviderCandidateInitError>,
+    > {
+        Box::pin(async {
+            Err(ProviderCandidateInitError::Failed(Box::new(
+                ProviderInitFailure::fatal(
+                    "candidate_cycle",
+                    "not executed by graph validation".to_owned(),
+                    crate::core::provider_init::ProviderInitSourceKind::UserProviderFatal,
+                ),
+            )))
+        })
+    }
+
+    #[test]
+    fn candidate_dependency_edges_still_participate_in_cycle_detection() {
+        let a_dependency: &'static [ServiceParam] = Box::leak(
+            vec![ServiceParam {
+                name: "a",
+                type_name: "CandidateCycleA",
+                type_id: TypeId::of::<CandidateCycleA>(),
+                kind: ProviderDependencyKind::Snapshot,
+            }]
+            .into_boxed_slice(),
+        );
+        let b_dependency: &'static [ServiceParam] = Box::leak(
+            vec![ServiceParam {
+                name: "b",
+                type_name: "CandidateCycleB",
+                type_id: TypeId::of::<CandidateCycleB>(),
+                kind: ProviderDependencyKind::Snapshot,
+            }]
+            .into_boxed_slice(),
+        );
+        let contract = ProviderEntry {
+            name: "CandidateCycleA",
+            module: module_path!(),
+            type_id: TypeId::of::<CandidateCycleA>(),
+            params: &[],
+            eager: false,
+            init: provider_init,
+            init_eager: provider_init,
+            init_rwlock: provider_init,
+            init_mutex: provider_init,
+        };
+        let dependency = ProviderEntry {
+            name: "CandidateCycleB",
+            module: module_path!(),
+            type_id: TypeId::of::<CandidateCycleB>(),
+            params: a_dependency,
+            eager: false,
+            init: provider_init,
+            init_eager: provider_init,
+            init_rwlock: provider_init,
+            init_mutex: provider_init,
+        };
+        let candidate = ProviderCandidateEntry {
+            name: "candidate_cycle_impl",
+            module: module_path!(),
+            output_type_id: TypeId::of::<CandidateCycleA>(),
+            output_type_name: "CandidateCycleA",
+            provider_type_id: TypeId::of::<CandidateCycleIdentity>(),
+            priority: 50,
+            params: b_dependency,
+            init: candidate_init,
+        };
+
+        let error = validate_dependency_graph_with_candidates(
+            &[],
+            [&contract, &dependency],
+            [&candidate],
+        )
+        .expect_err("candidate dependency edge should complete the provider cycle");
+
+        assert!(matches!(error, ProviderInitError::Fatal { .. }));
     }
 }

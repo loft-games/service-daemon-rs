@@ -16,7 +16,7 @@ It earns its keep when your application has more than one long-running concern. 
 ## Why choose service-daemon?
 
 *   **Declarative orchestration** -- Describe services, triggers, providers, and their relationships with attributes like `#[service]` or `#[trigger(Cron(CleanupSchedule))]`, where trigger targets are provider types. No manual service list or ad hoc spawn supervision in `main`.
-*   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, scheduling lanes (`Standard`, `HighPriority`, `Isolated`), restart policies, graceful signal handling, early-binding TCP/Unix listeners -- the glue you'd otherwise rewrite per project.
+*   **Production patterns built in** -- Exponential backoff with jitter, wave-based startup/shutdown by priority, scheduling lanes (`Standard`, opt-in `HighPriority` via the `high-priority` feature, `Isolated`), restart policies, graceful signal handling, early-binding TCP/Unix listeners -- the glue you'd otherwise rewrite per project.
 *   **Type-safe dependency injection** -- Resolved by Rust's type system. No runtime container, no string keys, no reflection. Discovery is linker-level via `linkme`.
 *   **Causal observability** -- UUID v7 message IDs propagate across services automatically. Optional **Mermaid** topology export visualizes the running system.
 *   **Testable by design** -- A feature-gated `MockContext` lets you simulate async behavior and state transitions in a controlled sandbox without spinning up the full daemon.
@@ -50,12 +50,22 @@ pub async fn heartbeat_service(port: Arc<Port>) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 3. Build and run the daemon
-    let mut daemon = ServiceDaemon::builder().build();
+    let daemon = ServiceDaemon::builder().build();
     daemon.run().await;
     daemon.wait().await?;
     Ok(())
 }
 ```
+
+## Logging filters
+
+With `RUST_LOG` unset, `init_logging()` and `try_init_logging()` log INFO and
+above to the console and DEBUG and above to files. TRACE is disabled by default.
+File output requires the `file-logging` feature and `enable_file_logging(...)`.
+
+Set `RUST_LOG` to filter both outputs. For example, `RUST_LOG=info` excludes
+DEBUG from files too. See [Diagnostics & Logs](docs/guide/diagnostics.md) for
+file setup, target and span filters, and custom subscribers.
 
 ## Get Started
 
@@ -80,11 +90,20 @@ The `examples/` directory contains focused examples organized by use case:
 | **triggers** | Decoupled event-driven handlers (Cron, Queue, Watch) | `cargo run -p example-triggers` |
 | **logging** | File-based JSON log persistence (`file-logging` feature) | `cargo run -p example-logging` |
 | **diagnostics** | Behavioral Topology and Mermaid export (`diagnostics` feature) | `cargo run -p example-diagnostics` |
+| **on-demand** | Dynamic service instances with periodic `start`, `stop`, and `remove` | `cargo run -p example-on-demand` |
 | **web-api** | Axum HTTP API with explicit CORS, OpenAPI docs, request envelopes, graceful shutdown, and maintenance triggers | `cargo run -p example-web-api` |
 | **controller-bridge** | Simulated controller bridge: fake transport, framing, protobuf, bounded command correlation, custom `TriggerHost`, and status watch side effects | `cargo run -p example-controller-bridge` |
+| **provider-contract** | Shared provider type and service with app-local prioritized fallback implementations | `cargo run -p example-provider-contract` |
 | **scheduling** | `Standard`, `HighPriority`, and `Isolated` runtime lanes for services | `cargo run -p examples-scheduling` |
+| **local-ipc** | Cross-platform logical-name local IPC over Unix sockets or Windows named pipes | `cargo run -p example-local-ipc` |
 | **unix-domain-socket** | Unix socket listener and connector pair | `cargo run -p example-unix-domain-socket` |
+| **named-pipe** | Windows named pipe listener and connector pair | `cargo run -p example-named-pipe` |
 | **simulation** | `MockContext` for unit testing (`simulation` feature) | `cargo test -p example-simulation` |
+
+Examples demonstrate framework topology. They are not production deployment
+templates; see
+[Security and Deployment Contract](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/security-deployment.md)
+for security and operations boundaries.
 
 > **Important**: Do NOT mix `is_shutdown()` polling (minimal) with `state()` lifecycle matching (complete) in the same service. These are two independent control-flow paradigms.
 
@@ -120,6 +139,8 @@ Documentation is split by audience.
 For contributors maintaining release validation and framework internals.
 
 - [Release Validation](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/release-validation.md) -- Feature-to-test matrix, linkme platform smoke coverage, dependency baseline, and example layers.
+- [Macro Attribute Normalization](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/macro-attribute-normalization.md) -- Maintainer contract for proc-macro parser cleanup without public syntax churn.
+- [Windows Named Pipe Provider Contract](https://github.com/loft-games/service-daemon-rs/blob/master/docs/development/windows-named-pipe-provider.md) -- Maintainer design for Windows local IPC provider templates and their `LocalIpc` facade boundary.
 
 For contribution workflow and development notes, use the repository [Contributing tab](https://github.com/loft-games/service-daemon-rs?tab=contributing-ov-file).
 

@@ -1,11 +1,11 @@
+#![cfg(unix)]
+#[path = "support/provider_context.rs"]
+mod provider_context;
+
 // End-to-end test: UnixListen and UnixConnect cooperating on the same path.
 //
-// This test exercises the documented two-modal interaction:
-//   1. Peer servers will observe an accept() followed by an instant close
-//      from UnixConnect's init-time probe. The application-layer accept loop
-//      must therefore tolerate "connect-then-close" patterns.
-//   2. After the probe, UnixConnect::connect() opens a fresh independent stream
-//      for actual business traffic.
+// This test exercises the common interaction: the listener accepts one stream
+// and the connector opens one fresh business connection.
 //
 // The test does NOT spin up a full ServiceDaemon -- it directly resolves
 // both providers and drives accept/connect manually. This keeps the test
@@ -13,8 +13,6 @@
 // in a separate examples-based smoke test.
 //
 // Windows-handoff note: `#![cfg(unix)]`-gated; not compiled on Windows.
-
-#![cfg(unix)]
 
 use service_daemon::{ManagedProvided, provider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -59,67 +57,49 @@ pub struct RtClient;
 // accept().await while the main task was inside the client's connect().
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_unix_listen_connect_roundtrip() {
-    let path = "target/sd-uds-rt.sock";
-    let _guard = prepare_socket_path(path);
+    provider_context::run(async move {
+        let path = "target/sd-uds-rt.sock";
+        let _guard = prepare_socket_path(path);
 
-    // Bring up the listener provider FIRST, so the path exists before the
-    // client provider's init-probe runs. Without this ordering the client
-    // would have to retry through NotFound until init_fallible's backoff
-    // catches the late bind -- functional but slower than necessary for a
-    // tight roundtrip test.
-    let server = <RtServer as ManagedProvided>::resolve_managed()
-        .await
-        .expect("RtServer resolve failed");
-
-    // Spawn the server-side accept loop. It expects exactly two connections:
-    //   1. The probe from RtClient's init-time UnixStream::connect, which is
-    //      dropped immediately.
-    //   2. The real roundtrip stream from connect().
-    let server_task = tokio::spawn(async move {
-        // Connection 1: probe from UnixConnect init. We accept it and drop
-        // it. The peer (UnixConnect) drops its end immediately too.
-        let (probe, _) = server
-            .accept()
+        let server = <RtServer as ManagedProvided>::resolve_managed()
             .await
-            .expect("Failed to accept the init-time probe connection");
-        drop(probe);
+            .expect("RtServer resolve failed");
 
-        // Connection 2: the actual business traffic.
-        let (mut sock, _) = server
-            .accept()
+        let server_task = tokio::spawn(async move {
+            let mut sock = server
+                .accept()
+                .await
+                .expect("Failed to accept the real roundtrip connection");
+
+            let mut buf = [0u8; 5];
+            sock.read_exact(&mut buf)
+                .await
+                .expect("Server read_exact failed");
+            sock.write_all(b"world")
+                .await
+                .expect("Server write_all failed");
+            buf
+        });
+
+        let client = <RtClient as ManagedProvided>::resolve_managed()
             .await
-            .expect("Failed to accept the real roundtrip connection");
+            .expect("RtClient resolve failed");
 
-        let mut buf = [0u8; 5];
-        sock.read_exact(&mut buf)
+        let mut conn = client.connect().await.expect("RtClient.connect failed");
+
+        conn.write_all(b"hello")
             .await
-            .expect("Server read_exact failed");
-        sock.write_all(b"world")
+            .expect("Client write_all failed");
+
+        let mut response = [0u8; 5];
+        conn.read_exact(&mut response)
             .await
-            .expect("Server write_all failed");
-        buf
-    });
+            .expect("Client read_exact failed");
 
-    // Resolve the client provider. This performs the init-time probe (which
-    // the server task accepts as connection #1).
-    let client = <RtClient as ManagedProvided>::resolve_managed()
-        .await
-        .expect("RtClient resolve failed");
+        assert_eq!(&response, b"world", "client should receive 'world'");
 
-    // Open the real roundtrip stream (connection #2).
-    let mut conn = client.connect().await.expect("RtClient.connect failed");
-
-    conn.write_all(b"hello")
-        .await
-        .expect("Client write_all failed");
-
-    let mut response = [0u8; 5];
-    conn.read_exact(&mut response)
-        .await
-        .expect("Client read_exact failed");
-
-    assert_eq!(&response, b"world", "client should receive 'world'");
-
-    let received = server_task.await.expect("Server task panicked");
-    assert_eq!(&received, b"hello", "server should receive 'hello'");
+        let received = server_task.await.expect("Server task panicked");
+        assert_eq!(&received, b"hello", "server should receive 'hello'");
+    })
+    .await
 }

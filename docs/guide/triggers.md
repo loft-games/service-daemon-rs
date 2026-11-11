@@ -108,7 +108,13 @@ Triggers also support the same static `scheduling` declaration as services. The 
 async fn urgent_worker(item: Task) -> anyhow::Result<()> { ... }
 ```
 
-Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. `HighPriority` is not an overflow pool for ordinary triggers; a trigger uses that lane only when its source declaration asks for it. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed.
+Use `Standard` by default, `HighPriority` for latency-sensitive trigger dispatch, and `Isolated` only when the trigger loop body needs a dedicated OS thread and private Tokio runtime. Enable `high-priority` in the runtime dependency's Cargo features before using the HighPriority declaration; without it this example fails to compile. `HighPriority` is not an overflow pool for ordinary triggers; a trigger uses that lane only when its source declaration asks for it. `Isolated` trigger bodies still report outcomes through the daemon supervisor, so reload, restart/backoff, and shutdown coordination remain daemon-managed.
+
+Runtime shard intervention is separate from trigger dispatch concurrency scaling.
+The initial HighPriority feedback path uses valid framework-aware ServiceSleep
+observations, not queue backlog or handler throughput. Do not add artificial
+sleeps to handlers to drive policy. See [Diagnostics](diagnostics.md) for the
+observation limits and reload responsibilities.
 
 ## 4. Parameter Mapping Rules
 
@@ -122,9 +128,9 @@ Services and triggers emit events by calling provider instance methods directly 
 
 The framework's `TriggerRunner` automatically manages the **Causal Identity** for every dispatched event:
 1.  **Message ID** (UUID v7): A time-ordered, globally unique ID for the event.
-2.  **Source ID**: The `ServiceId` of the service that originally fired the event.
-3.  **Service ID**: The `ServiceId` of the current trigger handler.
-4.  **Instance Seq**: A monotonic sequence number for the current invocation.
+2.  **Source service instance ID**: The `ServiceInstanceId` of the service instance that originally fired the event.
+3.  **Current service instance ID**: The `ServiceInstanceId` of the current trigger handler.
+4.  **Instance sequence**: A monotonic sequence number for the current invocation.
 
 This 4-tuple identity supports log correlation and trace reconstruction.
 
@@ -176,7 +182,7 @@ let scaling = ScalingPolicy::builder()
     .scale_cooldown(Duration::from_secs(30))
     .build();
 
-let mut daemon = ServiceDaemon::builder()
+let daemon = ServiceDaemon::builder()
     .with_trigger_config(scaling)
     .build();
 ```
@@ -220,7 +226,7 @@ trigger generation ends.
 
 Custom `TriggerHost::run_as_service` implementations that bypass the default
 runner should construct contexts with `TriggerContext::new(...)` and pass the
-current service id and generation.
+current service instance ID and generation.
 
 ---
 

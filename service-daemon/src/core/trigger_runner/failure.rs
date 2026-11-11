@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::models::service::ServiceId;
+use crate::models::service::ServiceInstanceId;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,7 +38,7 @@ impl fmt::Display for TriggerDispatchFailureKind {
 pub(crate) struct TriggerDispatchFailure {
     kind: TriggerDispatchFailureKind,
     trigger_name: &'static str,
-    service_id: ServiceId,
+    service_instance_id: ServiceInstanceId,
     instance_seq: Option<u64>,
     message_id: Option<Uuid>,
     reason: String,
@@ -48,7 +48,7 @@ impl TriggerDispatchFailure {
     pub(crate) fn new(
         kind: TriggerDispatchFailureKind,
         trigger_name: &'static str,
-        service_id: ServiceId,
+        service_instance_id: ServiceInstanceId,
         instance_seq: Option<u64>,
         message_id: Option<Uuid>,
         reason: impl Into<String>,
@@ -56,7 +56,7 @@ impl TriggerDispatchFailure {
         Self {
             kind,
             trigger_name,
-            service_id,
+            service_instance_id,
             instance_seq,
             message_id,
             reason: reason.into(),
@@ -71,8 +71,8 @@ impl TriggerDispatchFailure {
         self.trigger_name
     }
 
-    pub(crate) fn service_id(&self) -> ServiceId {
-        self.service_id
+    pub(crate) fn service_instance_id(&self) -> ServiceInstanceId {
+        self.service_instance_id
     }
 
     pub(crate) fn instance_seq(&self) -> Option<u64> {
