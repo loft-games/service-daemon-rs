@@ -176,6 +176,28 @@ fn marker_persisted(directory: &Path, prefix: &str, marker: &str) -> anyhow::Res
     Ok(false)
 }
 
+async fn wait_for_size_records(directory: &Path, prefix: &str, marker: &str) -> anyhow::Result<()> {
+    let description = format!(
+        "record drain and archive cleanup in {}",
+        directory.display()
+    );
+    let mut records_persisted = false;
+    wait_until(&description, || {
+        if !records_persisted {
+            records_persisted = marker_persisted(directory, prefix, marker)?;
+        }
+        // Gzip publication and source deletion are separate archive steps.
+        // Wait for cleanup before shutdown can leave both copies to count.
+        Ok(records_persisted
+            && matching(directory, ".segment.")?.iter().all(|fragment| {
+                fragment
+                    .extension()
+                    .is_some_and(|extension| extension == "gz")
+            }))
+    })
+    .await
+}
+
 fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
     let mut config = match mode {
         "default" => FileLogConfig {
@@ -277,11 +299,15 @@ fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
                 }
                 tracing::info!(target: "file_logging.archive.integration", "{drain_marker}");
             }
-            let marker_wait = format!("marker {drain_marker} in {}", directory.display());
-            wait_until(&marker_wait, || {
-                marker_persisted(directory, &prefix, &drain_marker)
-            })
-            .await?;
+            if mode == "size" {
+                wait_for_size_records(directory, &prefix, &drain_marker).await?;
+            } else {
+                let marker_wait = format!("marker {drain_marker} in {}", directory.display());
+                wait_until(&marker_wait, || {
+                    marker_persisted(directory, &prefix, &drain_marker)
+                })
+                .await?;
+            }
             if archive_count > 0 {
                 // Graceful shutdown is bounded and may leave recoverable work.
                 // These normal-completion cases must finish before shutdown.
@@ -487,6 +513,38 @@ fn size_rotation_keeps_each_queued_json_record_intact() -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    fs::remove_dir_all(directory)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn size_record_drain_waits_for_archive_source_cleanup() -> anyhow::Result<()> {
+    let directory = temporary_directory("size-drain");
+    fs::create_dir_all(&directory)?;
+    let active = directory.join("latest.log");
+    let drain_marker = "size-drain-marker";
+    fs::write(
+        &active,
+        format!("{}\n", serde_json::json!({ "message": drain_marker })),
+    )?;
+    let fragment = directory.join("latest.segment.2020-01-01-01-00-00.1.log");
+    let body = "{\"message\":\"archive_test_marker { index=0 }\"}\n";
+    fs::write(&fragment, body)?;
+    write_old_gzip_fragment(&fragment.with_extension("log.gz"), body)?;
+
+    // Publication precedes source cleanup. A persisted drain marker alone
+    // does not make it safe to count both raw and compressed fragments.
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            wait_for_size_records(&directory, "latest.log", drain_marker),
+        )
+        .await
+        .is_err(),
+        "drain finished while the source and its archive were both present"
+    );
+    fs::remove_file(fragment)?;
+    wait_for_size_records(&directory, "latest.log", drain_marker).await?;
     fs::remove_dir_all(directory)?;
     Ok(())
 }
