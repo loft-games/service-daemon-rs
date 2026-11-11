@@ -603,3 +603,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "file-logging"))]
+pub(crate) mod benchmarks;

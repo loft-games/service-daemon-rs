@@ -28,7 +28,7 @@ workspace tests still own example, integration, and platform coverage.
 | `simulation` | Test-only sandbox utilities. | `cargo check -p example-simulation`, `cargo test --workspace --all-features`, `cargo clippy --workspace --all-features`. | `example-simulation`. |
 | `diagnostics` | Diagnostic topology collection, independent of HighPriority. | `cargo check -p example-diagnostics`, `cargo test --workspace --all-features`, diagnostics unit coverage for shutdown topology tracing. | `example-diagnostics`. |
 | `high-priority` | Opt-in execution mode, probes, advisory and feedback-driven intervention. | `cargo test -p service-daemon --features high-priority`, `cargo test -p service-daemon --test high_priority_feature_contract_tests`; independent downstream off/on compile matrix. | Scheduling and macro-test examples. |
-| `file-logging` | Best-effort JSON file persistence, time rotation, and feature-gated gzip archive maintenance. | `cargo check -p example-logging`, `cargo test --workspace --all-features`, `cargo test -p service-daemon --features file-logging`. | `example-logging`. |
+| `file-logging` | Best-effort JSON persistence, elapsed/calendar and size rotation, and three-stage gzip archival. | `cargo check -p example-logging`, `cargo test --workspace --all-features`, `cargo test -p service-daemon --features file-logging`. | `example-logging`. |
 
 Do not expand this into a full pairwise feature matrix unless a real
 combination-specific gap appears. The current release baseline is default,
@@ -611,7 +611,7 @@ Current baseline notes:
 - Default features include `cron`, which enables `tokio-cron-scheduler`.
 - No-default-features removes `tokio-cron-scheduler` but still uses `tokio`
   with `full` and `tracing`.
-- All-features adds `tracing-appender`, `serde_json`, and the pure-Rust `flate2`
+- All-features adds `tracing-appender`, `serde_json`, `sha2`, and the pure-Rust `flate2`
   gzip backend through `file-logging`; `simulation` and `diagnostics` do not
   currently add external dependencies.
 - `cargo deny --locked check` is the CI dependency-policy gate.
@@ -766,20 +766,54 @@ well:
 
 ```bash
 cargo test -p service-daemon --features file-logging --lib core::logging::
+cargo test -p service-daemon --features file-logging --test file_log_config_tests
 cargo test -p service-daemon --features file-logging --test file_logging_archive_tests
 ```
 
-These cover fixed active filenames, the first write after UTC daily/hourly
-boundaries, closing before rename and archive handoff, collision-safe rotated
-names, restart period inference from modification time, and shutdown preserving
-the active file. Archive checks cover gzip round trips, the three-fragment
-threshold, strict 24-hour/30-day age boundaries, failed publication and recovery,
-queue saturation, and bounded shutdown. Integration tests launch independent
-daemon processes to verify startup maintenance, repacking, repeat startup,
-custom prefixes with and without extensions, legacy archive compatibility,
-`None`, and `Never`. Windows MSVC CI runs the same integration target plus
-Windows-specific file-sharing tests
-from the library suite; a Linux pass does not establish Windows behavior.
+The suites cover:
+
+| Tests | Coverage |
+|---|---|
+| `logging::rotation` | Whole records, size/time boundaries, partial writes, jitter, restart deadlines and local starting dates. |
+| `logging::archive` | Compression levels, daily/monthly readiness, volume content/order, preemption, publication/cleanup failures, legacy migration and corrupt inputs. |
+| `logging::file` | Wakeups, write errors, cancellation and the two-second shutdown window. |
+| `file_log_config_tests` | Defaults, validation and process-global setup errors. |
+| `file_logging_archive_tests` | Subprocess lifecycle, local timezone with UTC JSON, custom names, `None` and `Never`. |
+
+Jitter cases check persisted samples, old v2 adoption, progress by other dates or
+months during a wait, and sources held across delayed volumes. They advance test
+deadlines instead of sleeping for 30 minutes. Processing fixtures disable archive
+delays.
+
+Run benchmarks and full-size fixtures separately:
+
+```bash
+cargo bench -p service-daemon --features file-logging --bench framework -- file_logging
+cargo test -p service-daemon --release --features file-logging --lib logging_performance -- --ignored --nocapture
+# Exact 100MiB rotation boundary.
+cargo test -p service-daemon --release --features file-logging --lib core::logging::benchmarks::logging_scale_100mib -- --ignored --exact --nocapture
+# About 2GiB of input; needs sufficient disk space and several minutes.
+cargo test -p service-daemon --release --features file-logging --lib logging_scale_100mib_and_1gib -- --ignored --nocapture
+```
+
+[Benchmark results](logging-performance.md) include size-counting overhead,
+rotation latency, compression time/size, archive throughput and process RSS.
+Record the toolchain, hardware, filesystem and cache conditions for comparisons.
+
+Before migration, copy the entire log directory, including hidden state. Run
+migration and repeated-start recovery on the copy, compare decoded content, and
+keep the original for rollback. Run only one pipeline against a directory.
+
+Check these transaction rules when changing archive code:
+
+- Finish and sync gzip output before saving its pending checksum and input range.
+- Publish and sync the output before committing it in the manifest.
+- Delete a source only after every covering volume is committed; keep the manifest.
+- On recovery, verify output checksums before cleanup and resume from the last
+  committed decompressed cursor.
+
+Windows MSVC CI owns the handle-sharing, rename and recovery checks. Linux tests
+cannot verify those Windows behaviors.
 
 Also confirm that the linkme platform smoke jobs are either green or, for the
 Windows GNU XFAIL job, still failing in the expected no-workaround direction.
@@ -792,12 +826,11 @@ Before cutting a release that changes deployment-facing behavior, review
 - framework logs still do not promise automatic secret redaction;
 - file logging still degrades to console-only when the appender cannot
   initialize, and remains documented as best-effort operational logging;
-- file logging writes to `latest.log` and rotates to `latest.YYYY-MM-DD.log`
-  before background gzip; shutdown preserves the active file, existing rotations
-  are not overwritten, and legacy archives remain discoverable;
-- closed rotations are source-preserving on failure, same-day compaction uses the
-  fixed three-fragment/24-hour threshold, and no automatic retention deletion
-  is promised;
+- file logging defaults to elapsed 8h ±5% or 100MiB rotation, preserves complete
+  lines and the active file at shutdown, and migrates legacy names;
+- three-stage compression uses independent configurable levels, daily processing
+  waits for day closure, monthly volumes are independently readable, source cleanup
+  follows durable publication, and no automatic retention deletion is promised;
 - Unix socket examples and docs do not present shared `/tmp` paths as
   production-safe;
 - TCP listener examples default to loopback unless the text explicitly discusses
