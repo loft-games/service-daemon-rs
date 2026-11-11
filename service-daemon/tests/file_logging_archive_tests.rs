@@ -22,6 +22,7 @@ use tracing_subscriber::prelude::*;
 const CHILD_MODE: &str = "SD_FILE_LOG_ARCHIVE_CHILD";
 const CHILD_DIR: &str = "SD_FILE_LOG_ARCHIVE_DIR";
 const TEST_NAME: &str = "file_logging_archive_lifecycle";
+const SIZE_DRAIN_MARKER: &str = "archive_size_drain_marker";
 const SERVICE_INSTANCE_ID: &str = "019fe746-6158-7403-82c9-ac72cad515ec";
 const SOURCE_SERVICE_INSTANCE_ID: &str = "019fe746-6158-7403-82c9-ac6ccaa91ef5";
 const MESSAGE_ID: &str = "019fe746-6158-7403-82c9-ac8b7e502cb3";
@@ -112,6 +113,30 @@ fn assert_active_markers(path: &Path, expected_count: usize) -> anyhow::Result<(
     Ok(())
 }
 
+async fn wait_for_size_records(path: &Path) -> anyhow::Result<()> {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let contents = match fs::read_to_string(path) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error.into()),
+            };
+            // A snapshot can end in a partially written line. Only a complete
+            // marker proves the FIFO writer reached all preceding records.
+            if contents
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|value| value["message"] == SIZE_DRAIN_MARKER)
+            {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("file log drain marker did not reach {}", path.display()))?
+}
+
 fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
     let mut config = match mode {
         "default" => FileLogConfig {
@@ -175,11 +200,21 @@ fn run_child_scenario(mode: &str, directory: &Path) -> anyhow::Result<()> {
             let _entered = span.enter();
             let count = if mode == "size" { 40 } else { 1 };
             for index in 0..count { tracing::info!(target: "file_logging.archive.integration", index, "archive_test_marker"); }
+            if mode == "size" {
+                tracing::info!(target: "file_logging.archive.integration", "{SIZE_DRAIN_MARKER}");
+            }
         }
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Rotation syncs its journal and files. A fixed sleep can leave queued
+        // records behind the appender's bounded shutdown wait on slow disks.
+        let persisted = if mode == "size" {
+            wait_for_size_records(&directory.join("latest.log")).await
+        } else {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok(())
+        };
         daemon.shutdown();
         daemon.wait().await?;
-        Ok::<(), anyhow::Error>(())
+        persisted
     })
 }
 
@@ -327,7 +362,8 @@ fn none_rotates_without_archiving_and_never_disables_both_conditions() -> anyhow
 fn size_rotation_keeps_each_queued_json_record_intact() -> anyhow::Result<()> {
     let directory = temporary_directory("size");
     fs::create_dir_all(&directory)?;
-    assert_child_success(&run_child("size", &directory));
+    let output = run_child("size", &directory);
+    assert_child_success(&output);
     let fragments = matching(&directory, ".segment.")?;
     assert!(fragments.len() > 1);
     let mut markers = 0;
@@ -350,7 +386,13 @@ fn size_rotation_keeps_each_queued_json_record_intact() -> anyhow::Result<()> {
             }
         }
     }
-    assert_eq!(markers, 40);
+    assert_eq!(
+        markers,
+        40,
+        "child stdout:\n{}\nchild stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     fs::remove_dir_all(directory)?;
     Ok(())
 }
