@@ -59,14 +59,12 @@ maintainer release gates. Record diagnostics output contract changes, file
 logging failure semantics, linkme platform smoke coverage, and new release
 validation documentation under `[Unreleased]`.
 
-For file logging changes, describe the user-visible contract rather than the
-implementation sequence: fixed active `latest.log`, dated
-`latest.YYYY-MM-DD.log` rotations, `.log.gz` / `.merged.log.gz` archives,
-`FileLogCompression`, closing before rename, collision preservation, restart
-period recovery, legacy archive discovery, source preservation on archive
-failure, fixed compaction and repack thresholds, and the absence of automatic
-retention deletion. Keep the
-entry under `[Unreleased]` until the next tagged release.
+For file logging changes, record the changed defaults and APIs, including
+struct-literal and exhaustive-match breakage. State changes to filenames, time
+semantics, archive cleanup or migration when they affect deployment. Put usage
+and configuration details in `docs/guide/diagnostics.md`; keep implementation and
+validation details in their respective architecture and development pages.
+Keep unreleased changes under `[Unreleased]`.
 
 ## Cutting a release
 

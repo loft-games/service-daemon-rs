@@ -46,24 +46,20 @@ a strong audit trail:
   tamper resistance are deployment responsibilities. The framework does not
   delete old archives by count or age.
 
-The default active file is `logs/latest.log`, and the sink writes both framework
-and application events. The first write after a UTC day boundary renames the
-closed file to `latest.YYYY-MM-DD.log`; background gzip adds `.gz`. Shutdown
-leaves the active file in place, and restart identifies its period from the
-nonempty file's modification time. Preserve that timestamp when restoring the
-active file. Custom prefixes are complete active filenames, and rotation inserts
-the timestamp before their extension. Existing rotations are kept, with numbered
-names for subsequent files from the same period.
+Each active file must have one program owner. Give separate processes distinct
+log directories or prefixes. External rotation and truncation are unsupported.
 
-`FileLogCompression::None` leaves rotated files uncompressed
-for deployments that delegate archival to an external tool. `RotationPolicy::Never`
-does not create rotated archives. If several processes share one directory,
-configure distinct prefixes or directories to avoid competing for the same files.
-Startup archive maintenance still recognizes the previous `latest.log.YYYY-MM-DD`
-layout; deployments may contain both layouts during migration. Update file
-shipping globs to include `latest.log` and the new `latest.*.log` / `latest.*.log.gz`
-names while retaining any legacy globs for existing archives. The writer does
-not automatically reopen a file renamed by an external rotation tool.
+Back up the whole directory, including the active sidecar and
+`.service-daemon-archive-v2/`. These files hold deadlines and recovery state.
+Before upgrading, test migration on a directory copy and retain the original for
+rollback. Keep legacy shipping globs alongside the new `segment`, `daily` and
+`monthly` patterns; custom prefixes preserve their extensions.
+
+`FileLogCompression::None` leaves rotated files uncompressed.
+`RotationPolicy::Never` disables rotation and archive maintenance. Sources are
+removed after their archive outputs are published. Archives are not deleted by
+age or count. See [file logging](../guide/diagnostics.md#file-logging) for defaults,
+configuration, filenames and error handling.
 
 For audit-grade logging, deploy an external log pipeline with explicit
 durability, access control, retention, and monitoring guarantees.

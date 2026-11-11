@@ -84,21 +84,17 @@ See `docs/guide/diagnostics.md` for target and span filters and file logging set
 
 ## File logging
 
-When the `file-logging` feature is enabled, call `init_logging()` and then
-`enable_file_logging(...)` before `run()`. `FileLogConfig::default()` writes
-framework and application events to `logs/latest.log`. The first write after a
-UTC day boundary closes and renames that file to `latest.YYYY-MM-DD.log`, then
-compresses it in the background as `latest.YYYY-MM-DD.log.gz`. Shutdown leaves
-the active file in place; restart uses its modification time to resume the same
-period or rotate an older nonempty file before appending. A custom `file_prefix`
-is the complete active filename; rotation inserts the period before its
-extension. Existing rotations use numbered collision names and are not replaced.
-Same-day merging uses `latest.YYYY-MM-DD.merged.log.gz`; maintenance also
-recognizes the old `latest.log.YYYY-MM-DD` layout. Use
-`FileLogCompression::None` when an external archive pipeline owns compression;
-`RotationPolicy::Never` disables rotation and archive maintenance. The framework
-does not delete old archives by count or age. Processes sharing a directory must
-choose distinct directories or explicit prefixes.
+Enable `file-logging`, call `init_logging()`, then configure
+`try_enable_file_logging(FileLogConfig::default())?` before `run()`.
+`enable_file_logging()` is the stderr-reporting wrapper.
+
+Use [the diagnostics guide](../../docs/guide/diagnostics.md#file-logging) for
+rotation, compression, jitter settings and filenames. Keep the default example
+short; show field overrides only when the application needs them.
+
+The active file needs one writer. Keep hidden state files with backups and test
+migration on a directory copy. `None` skips compression; `Never` disables rotation
+and archive maintenance. The framework does not delete old archives.
 
 ## Companions
 

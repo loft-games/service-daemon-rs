@@ -40,7 +40,7 @@ size with `set_log_batch_size()`, up to `MAX_LOG_BATCH_SIZE`.
 The following SYSTEM-priority services consume these events:
 
 - **`log_service`** (tag: `__log__`): Renders events to stderr with ANSI colors.
-- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time-based rotation policy and optional background gzip archiving.
+- **`file_log_service`** (tag: `__file_log__`, feature-gated: `file-logging`): Persists events as JSON lines with the configured time/size rotation policy and optional background gzip archiving.
 - **`topology_collector`** (feature-gated: `diagnostics`): Aggregates causal edges between services for real-time behavioral mapping.
 
 Both logging services drain events in batches. Events sent only to files do not
@@ -100,93 +100,130 @@ tracing_subscriber::registry()
     .init();
 ```
 
-**File logging** - configured independently:
+### File logging
+
+Enable the `file-logging` feature, then configure the file sink before starting
+the daemon:
 
 ```rust
-use service_daemon::{FileLogConfig, enable_file_logging};
+use service_daemon::{FileLogConfig, try_enable_file_logging};
 
-// Write to latest.log, with daily rotation and background gzip archives.
-enable_file_logging(FileLogConfig::default());
+try_enable_file_logging(FileLogConfig::default())?;
 ```
 
-The file sink contains both framework and application events. It writes to
-`logs/latest.log`. On the first write after a UTC day boundary, it closes that
-file, renames it to the period it belonged to (for example,
-`latest.2026-10-19.log`), and opens a new `latest.log`. The closed file is then
-compressed in the background as `latest.2026-10-19.log.gz`. Crossing a time
-boundary without another write does not rotate the file; shutdown also leaves
-the active `latest.log` in place.
+Framework and application events are written as JSON lines to `logs/latest.log`.
+The file rotates before the next record would exceed 100MiB (104,857,600 bytes),
+or on the first write after its elapsed-time deadline. The default deadline is
+8 hours with ±5% jitter: 7h36m–8h24m. Each new file gets a new deadline, including
+files opened after size rotation. A record larger than 100MiB stays in one piece.
 
-`file_prefix` is the complete active filename. For example,
-`FileLogConfig::new("logs", "application.log")` writes to `application.log` and
-rotates to `application.YYYY-MM-DD.log`. A name without an extension, such as
-`my-app`, rotates to `my-app.YYYY-MM-DD`. Existing rotations are never
-overwritten: another rotation for the same period uses a numbered name such as
-`latest.2026-10-19.1.log`.
+An idle file stays open until the next write. Startup rotates an expired,
+nonempty file; shutdown leaves the active file in place. Restart restores the
+saved deadline. File size is read once on open, then counted as bytes are written.
 
-On restart, the writer uses a nonempty active file's modification time to
-identify its UTC period. It appends to the same-period file, or rotates an older
-file before writing new events. Avoid changing the active file's modification
-time when preserving logs across restarts.
+### Compression and archives
 
-Compression can be disabled when an external log pipeline owns archival:
+| Stage | Default gzip level | When it runs |
+| :--- | :--- | :--- |
+| Fragment | 1 | After rotation closes the file. |
+| Daily | 6 | At least 24 hours after the starting date ends, once all active fragments for that date have closed. A single fragment also gets recompressed. |
+| Monthly | 9 | After the natural month ends and all discovered fragments for that month have reached daily archives. |
+
+Dates use the container OS timezone. A fragment belongs to the date on which it
+started, even if it contains records from after midnight. JSON timestamps stay
+in UTC. `Daily` and `Hourly` rotation also use local calendar boundaries.
+
+Daily and monthly archives are decompressed and recompressed at their configured
+levels. Monthly output is split into independent gzip files targeting 1GiB
+(1,073,741,824 compressed bytes). Volumes end at line boundaries; a long record
+or codec buffering can make a volume larger than the target.
+
+Daily and monthly jobs each add a random delay of 0–30 minutes after becoming
+eligible. Each subsequent monthly volume adds another independently sampled
+0–30 minute delay after the preceding volume is published. The first volume uses
+only the monthly start delay. These delays spread archive work across instances;
+fragment compression starts immediately.
+
+| Field in `FileLogConfig.archive` | Maximum random delay | Default |
+| :--- | :--- | :--- |
+| `daily_start_jitter` | Before a daily job | 30 minutes |
+| `monthly_start_jitter` | Before a monthly job's first volume | 30 minutes |
+| `monthly_volume_jitter` | Between monthly volumes | 30 minutes |
+
+Set a field to `Duration::ZERO` to disable that delay. Deadlines survive restart
+without resampling; an expired deadline resumes immediately. New settings apply
+to new archive transactions. Existing transactions keep their saved deadlines
+and volume-delay setting.
+
+For example, keep the rotation defaults and set different archive delays:
 
 ```rust
-use service_daemon::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
+use std::time::Duration;
+use service_daemon::{FileLogConfig, try_enable_file_logging};
 
-let config = FileLogConfig {
-    rotation: RotationPolicy::Hourly,
-    compression: FileLogCompression::None,
-    ..FileLogConfig::new("logs", "my-app")
-};
-enable_file_logging(config);
+let mut config = FileLogConfig::new("logs", "application.log");
+config.archive.daily_start_jitter = Duration::from_secs(10 * 60);
+config.archive.monthly_start_jitter = Duration::from_secs(30 * 60);
+config.archive.monthly_volume_jitter = Duration::from_secs(5 * 60);
+try_enable_file_logging(config)?;
 ```
 
-`FileLogCompression::Gzip` is the default. With hourly rotation, the first write
-after a UTC hour boundary rotates to `latest.YYYY-MM-DD-HH.log`; compression
-adds `.gz`. At least three same-day gzip fragments whose modification times are
-more than 24 hours old are combined into `latest.YYYY-MM-DD.merged.log.gz`.
-Daily rotation normally produces one fragment per date, so it does not reach
-this merge threshold.
+Other settings are on `FileLogConfig`: `rotation`, `rotation_jitter` and
+`max_file_size` (`None` disables size rotation). Its `archive` field also holds
+`fragment_compression_level`, `daily_compression_level`,
+`monthly_compression_level`, `daily_archive_delay` and `monthly_volume_size`.
+Gzip levels accept 0–9. `rotation_jitter` is a finite ratio in `[0, 1)` and applies
+only to `Interval(Duration)` rotation.
 
-Merging concatenates gzip members and creates
-`latest.YYYY-MM-DD.merged.log.gz.needs-repack`. Once the marker is more than
-30 days old, repacking recompresses the merged contents into one gzip stream
-and removes the marker. Use a decoder that reads all gzip members when
-extracting an archive that has not yet been repacked.
+`FileLogCompression::None` keeps rotation and skips compression and merging.
+`RotationPolicy::Never` disables both rotation and archive maintenance. Archives
+are not deleted by age or count.
 
-The writer hands off a rotation only after closing it. Archive work is retried
-at startup and during background maintenance, and shutdown allows a bounded
-drain. Failed or unfinished work keeps recoverable inputs for the next run.
-There is currently no automatic age- or count-based retention deletion.
+### Filenames and recovery
 
-Startup maintenance also recognizes older `latest.log.YYYY-MM-DD` rotations
-and their `.gz` / `.merged.gz` archives. It can resume their archive maintenance
-without renaming existing archives to the new filename layout.
+With the default prefix, files look like this:
 
-`RotationPolicy::Never` keeps one file and performs no archive work. When
-multiple processes share a directory, configure distinct directories or
-prefixes explicitly; the default `latest.log` is intended for one process per
-log directory. External compression or rotation deployments can select
-`FileLogCompression::None`; the sink does not automatically reopen a file
-renamed by external `logrotate`.
+| File | Example |
+| :--- | :--- |
+| Active | `latest.log` |
+| Closed fragment | `latest.segment.2026-11-11-10-30-00.1.log`, then `.log.gz` |
+| Daily archive | `latest.daily.2026-11-11.1.log.gz` |
+| Monthly volume | `latest.monthly.2026-11.part0001.log.gz` |
 
-If the file appender cannot be initialized, for example because the configured
-path is not writable or is not a directory, the file logging service logs a
-warning and degrades to console logging only. It does not fail daemon startup
-and does not hot-restart the SYSTEM logging service. Deployments that require
-audit-grade file persistence should validate the log directory with an external
-startup check or operational probe.
+`file_prefix` is the complete active filename. Custom extensions are preserved;
+filenames without extensions stay extensionless. Late historical input creates
+additional daily batches or monthly volumes. Completed archives are not rewritten.
 
-The console and file sinks intentionally use different presentations of the same
-`LogEvent`. Console output is a human-oriented line: it uses the local timezone,
-ANSI level colors, and flattened `key=value` fields. File output is a machine
-oriented JSON serialization and keeps the event timestamp in UTC. Removing ANSI
-codes from the console line would still leave a display format rather than a
-stable JSON schema, so the two sinks share the captured event but not the final
-renderer.
+Back up the whole log directory, including `.latest.log.active.json` and
+`.service-daemon-archive-v2/`. They contain the deadlines and recovery state.
+Sources are kept until their output files have been published; a source spanning
+several volumes stays until all of those volumes are complete. Failed jobs keep
+their inputs for retry. Shutdown allows two seconds for archive work, then leaves
+unfinished and future scheduled jobs for the next startup.
 
-Each file contains one JSON object per line with these keys:
+Legacy daily/hourly names, multi-member gzip files and `.needs-repack` markers
+are imported automatically. Dates in legacy names are preserved. Natural-month
+archives replace the old 30-day repack. Test an upgrade on a full directory copy
+and keep the original for rollback; older binaries cannot recover the new state.
+See [the archive implementation](../architecture/internal-overview.md#file-archive-processing)
+for transaction and scheduling details.
+
+### Errors and output format
+
+`try_enable_file_logging()` returns configuration errors and rejects repeated
+setup. `enable_file_logging()` prints those errors to stderr. If opening the
+appender fails, the service warns and continues with console logging. It does
+not fail daemon startup or restart the SYSTEM logging service.
+
+File logging is best-effort. A full queue can drop records; write errors and
+broadcast lag are reported on stderr, with cumulative counters where available.
+For required audit persistence, use an external log pipeline with its own
+startup, durability and retention checks. Each active log file must have a single
+program owner; external rotation or truncation is not supported.
+
+Console output uses local timestamps, ANSI colors and flattened fields. File
+output serializes the same `LogEvent` as JSON, with UTC timestamps and no ANSI
+codes. Each line has these keys:
 
 | Key | JSON shape | Presence |
 | :--- | :--- | :--- |
@@ -199,24 +236,9 @@ Each file contains one JSON object per line with these keys:
 | `line` | integer or `null` | always |
 | `service_instance_id`, `source_service_instance_id`, `message_id`, `trigger_instance_id`, `error_chain` | typed JSON value | omitted when unavailable |
 
-The file sink remains best-effort. It does not block tracing producers when its
-background queue is full; dropped lines, background file-write errors, and
-broadcast lag are reported on stderr with cumulative counters where available.
+### Log batch size
 
-Custom rotation and compression can be configured via the struct fields:
-
-```rust
-use service_daemon::{FileLogCompression, FileLogConfig, RotationPolicy, enable_file_logging};
-
-let config = FileLogConfig {
-    rotation: RotationPolicy::Hourly,
-    compression: FileLogCompression::Gzip,
-    ..FileLogConfig::new("logs", "my-app")
-};
-enable_file_logging(config);
-```
-
-**Log batch size** - controls both drain cycle size and queue capacity:
+The batch size controls the drain cycle and queue capacity:
 
 ```rust
 use std::num::NonZeroUsize;

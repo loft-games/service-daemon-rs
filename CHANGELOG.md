@@ -7,15 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-alpha.6] - 2026-11-11
+
 ### Added
 
-- **File Log Compression and Archive Chain**: Added `FileLogCompression::Gzip`
-  (the default) and `FileLogCompression::None`, background gzip archiving for
-  closed rotations, same-day fragment compaction after three fragments older
-  than 24 hours, and delayed `.needs-repack` maintenance for merged archives.
-  Archives use `latest.YYYY-MM-DD.log.gz` and
-  `latest.YYYY-MM-DD.merged.log.gz` by default, contain framework and application
-  logs, and preserve the source rotation for retry on failure.
+- **File Archives**: Added background gzip compression with separate levels for
+  fragments (1), daily archives (6), and natural-month archives (9). Daily
+  archives wait at least 24 hours after day end. Monthly volumes target 1GiB
+  compressed, preserve complete lines, and decompress independently. Interrupted
+  work can resume; legacy files are imported without replacing completed archives.
+  `FileLogCompression::None` disables compression and archiving while retaining
+  rotation.
+
+- **File Logging Configuration**: Added `FileLogArchiveConfig` for compression
+  levels, archive limits, and delays. Its `daily_start_jitter`,
+  `monthly_start_jitter`, and `monthly_volume_jitter` settings independently add
+  0–30 minutes of random delay by default; zero disables each delay. Added
+  `try_enable_file_logging()` and `FileLogConfigError` for fallible setup.
 
 - **Provider Contracts and Fallback Implementations**: Added
   `#[provider_contract]` for shared injectable output types and
@@ -61,18 +69,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same level, target, and span filters to both outputs. Custom `DaemonLayer`
   subscribers keep their configured filters.
 
-- **File Logging Configuration**: Removed the `max_log_files` count-based
-  cleanup setting. `RotationPolicy::Never` performs no archive maintenance, and
-  file logging no longer promises automatic retention deletion; retention and
-  multi-process directory separation remain deployment responsibilities.
+- **File Logging Rotation (breaking)**: Replaced default daily rotation with
+  elapsed 8h ±5% or 100MiB, whichever comes first. Size rotation resets the timer;
+  records remain intact. `FileLogConfig` gains `compression`, `max_file_size`,
+  `rotation_jitter`, and `archive`; `RotationPolicy` gains `Interval(Duration)`.
+  Update struct literals and exhaustive enum matches. `Never` disables all
+  rotation and archiving. `enable_file_logging()` now reports invalid or repeated
+  setup on stderr.
 
-- **File Logging Rotation**: Log events now append to a fixed active file,
-  `logs/latest.log` by default. The first write in a new UTC day or hour closes
-  and renames the previous file with the period before its extension, such as
-  `latest.2026-10-19.log`; same-period collisions use numbered filenames.
-  Custom prefixes are complete active filenames. Shutdown preserves the active
-  file, restart identifies its period from its modification time, and archive
-  maintenance recognizes older filenames without renaming existing archives.
+- **Log Filenames and Dates (breaking)**: The default active path changes from
+  `logs/daemon.YYYY-MM-DD` to `logs/latest.log`. Closed files use `segment`,
+  `daily`, and `monthly` markers; update log shipping patterns. Custom prefixes
+  are now complete active filenames. Archive dates and `Daily`/`Hourly` boundaries
+  use OS local time instead of UTC. JSON timestamps remain UTC, and dates in
+  legacy filenames are preserved.
 
 - **Daemon-local Provider Ownership (breaking)**: All generated provider instances,
   including eager providers and provider contracts, now belong to the current
@@ -99,6 +109,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Proc-macro Diagnostics**: Removed the `proc-macro-error2` dependency and routed macro errors through the repository-owned diagnostics facade while preserving stable compile-error output.
 - **Release Validation Gates**: Added `cargo deny --locked check` dependency-policy gating, restored `example-web-api` to policy checks after updating its Swagger UI dependency, documented the reviewed `cargo audit -D warnings` exception, and separated Windows local IPC provider checks into clearly named CI/manual gates.
 - **UnixListen Helper API**: Renamed the generated `try_get().await?` listener-clone helper to synchronous `get()?`, matching the TCP `Listen` template and removing the alpha-era `try_get` surface.
+
+### Removed
+
+- **Automatic Log Retention**: Removed `FileLogConfig::max_log_files` and the
+  default 30-file retention limit. Historical logs are no longer deleted by age
+  or count; configure retention outside the framework. Archive processing removes
+  its inputs only after their replacement archives are safely published.
 
 ### Fixed
 

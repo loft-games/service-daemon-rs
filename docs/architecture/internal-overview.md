@@ -199,21 +199,11 @@ The main internal modules are:
   - `layer.rs`: `DaemonLayer` and span field extraction. It captures causal context (UUIDv7 message IDs, UUID-backed service instance IDs, and trigger instance IDs) for asynchronous tracing.
   - `render.rs`: Console and feature-gated JSON rendering. Console timestamps convert the captured UTC instant to the process-local timezone and include its numeric offset; the event model and JSON serialization remain UTC.
   - `services.rs`: Console log drain service.
-  - `file.rs`: Feature-gated file logging configuration and JSON drain. The writer
-    owns one fixed active filename (`latest.log` by default); the first write in
-    a new UTC period closes and renames it before opening the next active file.
-    Rotation inserts the period before the extension (`latest.YYYY-MM-DD.log`),
-    with numbered collisions rather than overwrites. Restart recovers the active
-    period from a nonempty file's modification time; shutdown keeps that file
-    unarchived. Only closed rotations are handed to the bounded archive worker.
-  - `archive.rs`: Closed-file gzip archiving, same-day fragment compaction,
-    delayed `.needs-repack` maintenance, startup recovery, and source-preserving
-    retry handling. New archives append `.gz` to a rotation and use
-    `latest.YYYY-MM-DD.merged.log.gz` for same-day merges. Startup maintenance
-    also recognizes the previous `latest.log.YYYY-MM-DD` naming layout without
-    renaming existing archives. Legacy and new-format fragments compact
-    separately; each group is ordered by period and numeric collision sequence.
-    Archive maintenance is internal and has no retention-delete policy.
+  - `file_config.rs`: Public rotation and archive settings, defaults and validation.
+  - `file.rs`: Sends complete JSON records to the writer and manages the archive thread.
+  - `rotation.rs`: Counts written bytes, checks rotation deadlines, and journals file renames.
+  - `archive.rs`: Compresses fragments and builds daily and monthly archives.
+  - `archive/legacy.rs`: Recovers old concatenation transactions before migration.
   - **Allocation behavior**: Uses 1-byte enums for levels and `Cow<'static, str>` for metadata. Tracing IDs use UUID-backed service instance fields and numeric sequence fields instead of heap-allocated composite strings.
 - **`core/triggers.rs`**: Built-in trigger hosts (Cron, Queues, Watchers). Each host manages its own resource lifecycle via `setup` and `handle_step`.
 - **`core/diagnostics.rs`**: Internal observation store for generation, service, and lane aggregates. Public APIs receive only distilled read-only snapshots.
@@ -234,6 +224,45 @@ The main internal modules are:
   - **Simulation helpers**: `MockContext` test utilities are compiled only when the simulation feature is enabled.
 - **`core/provider_scope.rs`**: Internal provider ownership layer for daemon slots, simulation overrides, and slot-aware reload propagation.
 - **`core/managed_state.rs`**: Managed state and change tracking.
+
+### File archive processing
+
+The writer reads file size on open and counts successful writes afterward. It
+checks time and size before writing a complete record. During interval rotation,
+`Instant` tracks elapsed time; the active sidecar saves the sampled wall-clock
+deadline, starting local date, identity and sequence. The rename journal closes
+the old handle before moving the file and records the next active state.
+
+One archive thread runs fragment compression before daily recompression, then
+monthly recompression. Jobs yield between data blocks of at most 64KiB. A rotation
+notification triggers discovery; a 60-second scan picks up missed notifications.
+Failed candidates have separate retry deadlines.
+
+Daily/monthly start delays and delays between monthly volumes are sampled
+independently and saved in the transaction manifest. Runtime waits use `Instant`.
+Restart restores the remaining wall-clock wait, capped at the saved maximum.
+Expired waits run immediately. Old v2 transactions missing these fields sample
+once on discovery. Waiting transactions leave the stage slot free; a paused
+monthly job retains its reader so another month can run without reopening it.
+
+Each v2 manifest records input identities, output ranges, SHA-256 checksums and
+cleanup progress. Publication follows this order:
+
+1. Finish the gzip stream and sync the temporary file.
+2. Save the pending output's name, checksum and input range.
+3. Rename the output into place and sync the directory.
+4. Commit the output in the manifest, then remove fully covered sources.
+
+Recovery verifies published and pending output checksums before cleanup. An
+unfinished volume is rebuilt from the last committed decompressed cursor.
+Committed volumes are reused. A source spanning volumes stays until every
+covering volume is published. Completed manifests remain for recovery and filename
+reservation. Late input gets a new daily batch or monthly volume.
+
+Legacy recovery finishes old concatenation transactions before importing their
+inputs. Discovery accepts old Daily/Hourly names regardless of the current
+rotation policy, and preserves their named dates. Migration also accepts
+multi-member gzip archives and `.needs-repack` markers.
 
 ## 5. Lifecycle & Status Plane
 
