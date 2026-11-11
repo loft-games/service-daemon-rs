@@ -11,8 +11,10 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn state_with_limit(max_items: usize) -> HttpApiState {
-    let mut config = ExampleConfig::default();
-    config.max_items = max_items;
+    let config = ExampleConfig {
+        max_items,
+        ..ExampleConfig::default()
+    };
     HttpApiState::new(
         Arc::new(config),
         Arc::new(example_web_api::providers::SharedExampleState::default()),
