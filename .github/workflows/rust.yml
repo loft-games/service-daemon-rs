@@ -45,6 +45,8 @@ jobs:
         run: cargo check -p example-diagnostics
       - name: Rust Check No Default Features
         run: cargo check -p service-daemon --no-default-features
+      - name: Test linkme artifact discovery
+        run: python3 -B -m unittest discover -s .github/scripts -p 'test_linkme_smoke_binary.py'
 
   benchmarks:
     name: Framework benchmarks

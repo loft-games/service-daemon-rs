@@ -4,35 +4,14 @@ set -euo pipefail
 target="${1:-host}"
 host_triple="$(rustc -vV | sed -n 's/^host: //p')"
 if [[ "$target" == "host" || -z "$target" ]]; then
-  deps_dir="target/release/deps"
   inspect_target="$host_triple"
 else
-  deps_dir="target/${target}/release/deps"
   inspect_target="$target"
 fi
 
-is_test_binary_candidate() {
-  case "$1" in
-    *.d | *.pdb | *.rlib | *.rmeta | *.lib | *.exp | *.ilk)
-      return 1
-      ;;
-  esac
-  return 0
-}
-
-binary=""
-for path in "$deps_dir"/linkme_smoke-* "$deps_dir"/linkme_smoke-*.exe; do
-  [[ -f "$path" ]] || continue
-  is_test_binary_candidate "$path" || continue
-  if [[ -z "$binary" || "$path" -nt "$binary" ]]; then
-    binary="$path"
-  fi
-done
-
-if [[ -z "$binary" ]]; then
-  echo "Could not find linkme_smoke test binary under ${deps_dir}" >&2
-  exit 1
-fi
+# Cargo's artifact layout can change; use its JSON executable field instead.
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+binary="$(python3 "$script_dir/linkme_smoke_binary.py" "${target:-host}")"
 
 objdump="${LLVM_OBJDUMP:-}"
 if [[ -z "$objdump" ]]; then

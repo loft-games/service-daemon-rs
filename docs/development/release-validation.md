@@ -659,6 +659,11 @@ cargo test -p service-daemon --release --test linkme_smoke
 bash .github/scripts/check-linkme-registry-sections host
 ```
 
+The inspection script requires Python 3. It resolves the executable through
+`cargo test --no-run --message-format=json-render-diagnostics`, including cached artifacts, rather
+than assuming a Cargo output directory. Keep the same target and `RUSTFLAGS` as
+the preceding smoke test; the Windows GNU job must retain its workaround flags.
+
 Required platform signals:
 
 | Platform family | CI shape | Meaning |

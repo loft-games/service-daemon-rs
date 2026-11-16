@@ -41,30 +41,20 @@ jobs:
         run: |
           $ErrorActionPreference = "Continue"
           $artifact = "artifacts/linkme-msvc"
-          $deps = "target/x86_64-pc-windows-msvc/release/deps"
-
-          if (Test-Path $deps) {
-            Get-ChildItem $deps -Filter "linkme_smoke-*" |
-              Copy-Item -Destination $artifact -Force
-
-            Get-ChildItem $deps -Filter "linkme_smoke-*" |
-              Select-Object FullName, Length, LastWriteTime |
-              Format-List |
-              Out-File "$artifact/linkme-smoke-files.txt" -Encoding utf8
-          } else {
-            "Missing deps directory: $deps" |
-              Out-File "$artifact/linkme-smoke-files.txt" -Encoding utf8
-          }
-
-          $binary = Get-ChildItem $deps -Filter "linkme_smoke-*.exe" -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-
-          if ($null -eq $binary) {
-            "Could not find linkme_smoke test binary under $deps" |
+          $binaryPath = python3 .github/scripts/linkme_smoke_binary.py x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) {
+            "Could not resolve linkme_smoke executable through Cargo" |
               Out-File "$artifact/no-binary-found.txt" -Encoding utf8
-            exit 0
+            exit 1
           }
+          $binary = Get-Item -LiteralPath $binaryPath -ErrorAction Stop
+          $files = Get-ChildItem -LiteralPath $binary.Directory.FullName |
+            Where-Object { $_.BaseName -eq $binary.BaseName }
+          $files | Copy-Item -Destination $artifact -Force
+          $files |
+            Select-Object FullName, Length, LastWriteTime |
+            Format-List |
+            Out-File "$artifact/linkme-smoke-files.txt" -Encoding utf8
 
           Get-FileHash $binary.FullName |
             Format-List |
