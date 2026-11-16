@@ -54,7 +54,6 @@ note: required by a bound in `service_daemon::__private::init_fallible`
  --> $WORKSPACE/service-daemon/src/core/provider_init.rs
   |
   | pub async fn init_fallible<T, Init, Fut>(
-  |              ------------- required by a bound in this function
 ...
   |     Fut: Future<Output = Result<T, ProviderError>> + Send,
   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `init_fallible`
