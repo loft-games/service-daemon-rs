@@ -294,15 +294,36 @@ async fn observe_high_priority_shard_ping_once_with_control_delay(
 
     let start = Instant::now();
     let (sender, receiver) = oneshot::channel();
-    let mut ping = Some(shard_runtime.spawn(async move {
+    let ping = shard_runtime.spawn(async move {
         let _ = sender.send(start.elapsed());
-    }));
+    });
     let timeout_sleep = tokio::time::sleep(timeout);
     tokio::pin!(timeout_sleep);
     if !control_receiver_delay.is_zero() {
         tokio::time::sleep(control_receiver_delay).await;
     }
 
+    receive_high_priority_shard_ping(
+        receiver,
+        ping,
+        timeout_sleep.as_mut(),
+        timeout,
+        token,
+        pending_ping,
+    )
+    .await
+}
+
+#[cfg(feature = "high-priority")]
+async fn receive_high_priority_shard_ping(
+    receiver: oneshot::Receiver<Duration>,
+    ping: tokio::task::JoinHandle<()>,
+    timeout_sleep: std::pin::Pin<&mut tokio::time::Sleep>,
+    timeout: Duration,
+    token: &CancellationToken,
+    pending_ping: &mut Option<tokio::task::JoinHandle<()>>,
+) -> SleepObservation {
+    let mut ping = Some(ping);
     let (reason, elapsed) = tokio::select! {
         biased;
         received = receiver => {
@@ -314,7 +335,7 @@ async fn observe_high_priority_shard_ping_once_with_control_delay(
                 Err(_) => (SleepExitReason::ProbeCancelled, Duration::ZERO),
             }
         }
-        _ = &mut timeout_sleep => {
+        _ = timeout_sleep => {
             if let Some(ping) = ping.take() {
                 ping.abort();
                 *pending_ping = Some(ping);
@@ -1900,34 +1921,37 @@ mod tests {
         shard_runtime.shutdown_background();
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    #[tokio::test]
     #[cfg(feature = "high-priority")]
     async fn high_priority_shard_ping_prefers_ready_receiver_over_ready_timeout() {
-        let shard_runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(1)
-            .thread_name("test-hp-ping-biased")
-            .build()
-            .expect("test shard runtime should build");
+        let (sender, receiver) = oneshot::channel();
+        let sender_elapsed = Duration::from_millis(25);
+        sender
+            .send(sender_elapsed)
+            .expect("receiver should remain open");
+        let ping = tokio::spawn(async {});
         let token = CancellationToken::new();
         let mut pending_ping = None;
+        let timeout = Duration::from_millis(10);
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+        timeout_sleep.as_mut().await;
 
-        let observation = observe_high_priority_shard_ping_once_with_control_delay(
-            shard_runtime.handle(),
-            Duration::from_millis(10),
+        // Both branches are ready. A sender latency above the timeout still
+        // identifies the receiver branch without assuming OS scheduling speed.
+        let observation = receive_high_priority_shard_ping(
+            receiver,
+            ping,
+            timeout_sleep.as_mut(),
+            timeout,
             &token,
             &mut pending_ping,
-            Duration::from_millis(50),
         )
         .await;
 
         assert_eq!(observation.reason, SleepExitReason::Completed);
-        assert!(
-            observation.elapsed < Duration::from_millis(10),
-            "biased select should consume the ready receiver instead of reporting timeout"
-        );
+        assert_eq!(observation.elapsed, sender_elapsed);
         assert!(pending_ping.is_none());
-        shard_runtime.shutdown_background();
     }
 
     #[test]
