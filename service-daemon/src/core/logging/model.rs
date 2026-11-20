@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 #[cfg(feature = "file-logging")]
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
@@ -81,7 +81,7 @@ impl fmt::Display for LogLevel {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "file-logging", derive(Serialize, Deserialize))]
 pub struct LogEvent {
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     pub level: LogLevel,
     pub target: Cow<'static, str>,
     pub message: String,
@@ -197,7 +197,7 @@ mod tests {
         );
         let trigger_instance_id = TriggerInstanceId::new(service_instance_id, 42);
         let event = LogEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             level: LogLevel::Info,
             target: Cow::Borrowed("test"),
             message: "serialized identity".to_string(),

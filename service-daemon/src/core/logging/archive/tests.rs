@@ -43,12 +43,13 @@ impl Drop for Fixture {
     }
 }
 fn now(day: &str) -> SystemTime {
-    NaiveDate::parse_from_str(day, "%Y-%m-%d")
+    Date::strptime("%Y-%m-%d", day)
         .unwrap()
-        .and_hms_opt(12, 0, 0)
+        .at(12, 0, 0, 0)
+        .to_zoned_datetime(TimeZone::UTC)
         .unwrap()
-        .and_utc()
-        .into()
+        .try_into()
+        .unwrap()
 }
 fn read(path: &Path) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -1025,6 +1026,49 @@ fn damaged_existing_legacy_source_retains_both_source_and_backup_for_recovery() 
 
 #[cfg(unix)]
 #[test]
+fn local_day_end_preserves_midnight_gaps_folds_and_skipped_days() {
+    const FLAG: &str = "SD_LOG_TEST_DAY_END_CASE";
+    let cases = [
+        ("UTC0", "2020-01-01", "2020-01-02T00:00:00Z"),
+        ("America/Sao_Paulo", "2018-11-03", "2018-11-04T03:00:00Z"),
+        ("America/Havana", "2020-10-31", "2020-11-01T05:00:00Z"),
+        ("Pacific/Apia", "2011-12-29", "2011-12-30T10:00:00Z"),
+    ];
+    if let Ok(index) = std::env::var(FLAG) {
+        let (_, day, expected) = cases[index.parse::<usize>().unwrap()];
+        let day = Date::strptime("%Y-%m-%d", day).unwrap();
+        let expected: SystemTime = expected
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(local_day_end(day), Some(expected));
+        return;
+    }
+    // A fresh process isolates each TZ from the parallel test runner's cache.
+    for (index, (zone, _, _)) in cases.iter().enumerate() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "core::logging::archive::tests::local_day_end_preserves_midnight_gaps_folds_and_skipped_days",
+                "--nocapture",
+            ])
+            .env("TZ", zone)
+            .env(FLAG, index.to_string())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "timezone {zone}:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn daily_grace_is_elapsed_time_across_os_dst_change() {
     const FLAG: &str = "SD_LOG_TEST_DAILY_GRACE_DST";
     if std::env::var_os(FLAG).is_none() {
@@ -1048,9 +1092,11 @@ fn daily_grace_is_elapsed_time_across_os_dst_change() {
     let fixture = Fixture::new();
     fixture.gzip("latest.2020-03-07.log.gz", b"before DST\n");
     let mut store = fixture.store();
-    let before: SystemTime = chrono::DateTime::parse_from_rfc3339("2020-03-09T00:30:00-04:00")
+    let before: SystemTime = "2020-03-09T00:30:00-04:00"
+        .parse::<jiff::Timestamp>()
         .unwrap()
-        .into();
+        .try_into()
+        .unwrap();
     assert!(drain(&mut store, before).is_empty());
     assert!(fixture.files(".daily.").is_empty());
     store.request();

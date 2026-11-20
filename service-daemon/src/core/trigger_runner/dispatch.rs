@@ -1,7 +1,7 @@
 use anyhow::Result;
-use chrono::Utc;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
+use jiff::Timestamp;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -371,7 +371,7 @@ impl<P: Send + Sync + 'static> TriggerRunner<P> {
                     TriggerMessage {
                         message_id: ctx.message_id,
                         source_service_instance_id: ctx.source_service_instance_id,
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         payload: ctx.payload,
                     },
                 );

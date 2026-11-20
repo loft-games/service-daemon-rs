@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use chrono::Utc;
+use jiff::Timestamp;
 use tracing::{Event, Subscriber, field};
 use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
@@ -164,7 +164,7 @@ where
             extract_span_ids(&ctx, event);
 
         let log_event = Arc::new(LogEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             level: LogLevel::from_tracing(metadata.level()),
             target: Cow::Borrowed(metadata.target()),
             message,

@@ -101,7 +101,7 @@ mod tests {
     use super::render::render_to_string;
     use super::*;
     use crate::models::{ServiceInstanceId, service::TriggerInstanceId};
-    use chrono::Utc;
+    use jiff::Timestamp;
     use std::borrow::Cow;
     use std::num::NonZeroUsize;
     use std::sync::{Arc, OnceLock};
@@ -195,7 +195,7 @@ mod tests {
         error_chain: Option<&str>,
     ) -> LogEvent {
         LogEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             level,
             target: Cow::Borrowed("test::target"),
             message: message.to_string(),
@@ -214,15 +214,39 @@ mod tests {
     // 5A: ConsoleRenderer ANSI color output tests
     // =======================================================================
 
+    #[cfg(feature = "file-logging")]
+    #[test]
+    fn json_timestamps_preserve_utc_instants_and_nanoseconds() {
+        for (input, expected) in [
+            ("2026-09-14T20:30:45Z", "2026-09-14T20:30:45Z"),
+            ("2026-09-15T04:30:45.123+08:00", "2026-09-14T20:30:45.123Z"),
+            ("2026-09-14T20:30:45.123456Z", "2026-09-14T20:30:45.123456Z"),
+            (
+                "2026-09-14T20:30:45.123456789Z",
+                "2026-09-14T20:30:45.123456789Z",
+            ),
+        ] {
+            let mut event = make_event(LogLevel::Info, "timestamp", None, None, None, None, None);
+            event.timestamp = input.parse().unwrap();
+            let mut json = serde_json::to_value(&event).unwrap();
+            assert_eq!(json["timestamp"], expected);
+            let restored: LogEvent = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(restored.timestamp, event.timestamp);
+
+            // Existing JSONL files can contain an explicit numeric UTC offset.
+            json["timestamp"] = serde_json::json!(input);
+            let restored: LogEvent = serde_json::from_value(json).unwrap();
+            assert_eq!(restored.timestamp, event.timestamp);
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn render_timestamp_respects_process_timezone() {
         const CHILD_TZ: &str = "SD_LOG_RENDER_TEST_TZ";
         if let Ok(zone) = std::env::var(CHILD_TZ) {
             let mut event = make_event(LogLevel::Info, "timezone", None, None, None, None, None);
-            event.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-14T20:30:45.123Z")
-                .unwrap()
-                .with_timezone(&Utc);
+            event.timestamp = "2026-09-14T20:30:45.123Z".parse().unwrap();
             let original = event.timestamp;
             let output = render_to_string(&event);
             let timestamp = output.split_whitespace().next().unwrap();
@@ -232,10 +256,7 @@ mod tests {
                 _ => panic!("unexpected test timezone: {zone}"),
             };
             assert_eq!(timestamp, expected);
-            assert_eq!(
-                chrono::DateTime::parse_from_rfc3339(timestamp).unwrap(),
-                original
-            );
+            assert_eq!(timestamp.parse::<Timestamp>().unwrap(), original);
             assert_eq!(event.timestamp, original);
             #[cfg(feature = "file-logging")]
             {

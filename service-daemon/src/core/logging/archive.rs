@@ -3,8 +3,12 @@ use super::{
     file_config::FileLogConfig,
     rotation::{active_date, pending_fragment, save_json, sync_directory},
 };
-use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
+use jiff::{
+    Span, ZonedDateTime,
+    civil::{Date, DateTime},
+    tz::{AmbiguousOffset, TimeZone},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -19,14 +23,19 @@ use std::{
 const BLOCK: usize = 64 * 1024;
 pub(super) const SCAN_INTERVAL: Duration = Duration::from_secs(60);
 
-fn local_day_end(day: NaiveDate) -> Option<SystemTime> {
-    let midnight = day.succ_opt()?.and_hms_opt(0, 0, 0)?;
-    // Delegate offsets to the OS timezone, including gaps at local midnight.
+fn local_day_end(day: Date) -> Option<SystemTime> {
+    let midnight = day.tomorrow().ok()?.at(0, 0, 0, 0);
+    let timezone = TimeZone::system();
+    // Preserve local-calendar boundaries: advance through midnight gaps and
+    // use the later instant for a repeated midnight, as the previous Local
+    // implementation did. Archive grace remains elapsed wall-clock time.
     (0..=1440).find_map(|minutes| {
-        Local
-            .from_local_datetime(&midnight.checked_add_signed(chrono::Duration::minutes(minutes))?)
-            .earliest()
-            .map(Into::into)
+        let datetime = midnight.checked_add(Span::new().minutes(minutes)).ok()?;
+        let ambiguous = timezone.to_ambiguous_timestamp(datetime);
+        if matches!(ambiguous.offset(), AmbiguousOffset::Gap { .. }) {
+            return None;
+        }
+        ambiguous.later().ok()?.try_into().ok()
     })
 }
 
@@ -182,10 +191,8 @@ impl Manifest {
                 valid
             });
         let date_valid = match self.stage {
-            Stage::Monthly => {
-                NaiveDate::parse_from_str(&format!("{}-01", self.date), "%Y-%m-%d").is_ok()
-            }
-            _ => NaiveDate::parse_from_str(&self.date, "%Y-%m-%d").is_ok(),
+            Stage::Monthly => Date::strptime("%Y-%m-%d", format!("{}-01", self.date)).is_ok(),
+            _ => Date::strptime("%Y-%m-%d", &self.date).is_ok(),
         };
         if self.version != 2
             || !component(&self.id)
@@ -623,7 +630,7 @@ impl Job {
 #[derive(Clone)]
 struct Candidate {
     name: String,
-    day: NaiveDate,
+    day: Date,
     stage: Stage,
     gzip: bool,
     order: (String, u64),
@@ -699,14 +706,14 @@ impl ArchiveStore {
                 false,
             )
         };
-        let day = NaiveDate::parse_from_str(period.get(..10)?, "%Y-%m-%d").ok()?;
+        let day = Date::strptime("%Y-%m-%d", period.get(..10)?).ok()?;
         let period = period.strip_suffix(".merged").unwrap_or(period);
         let (order, sequence) = match period.rsplit_once('.') {
             Some((head, value)) => (head, value.parse::<u64>().ok().filter(|value| *value > 0)?),
             None => (period, 0),
         };
         if segment {
-            chrono::NaiveDateTime::parse_from_str(order, "%Y-%m-%d-%H-%M-%S").ok()?;
+            DateTime::strptime("%Y-%m-%d-%H-%M-%S", order).ok()?;
             if sequence == 0 {
                 return None;
             }
@@ -715,7 +722,7 @@ impl ArchiveStore {
                 return None;
             }
         } else if order.len() != 10 {
-            chrono::NaiveDateTime::parse_from_str(&format!("{order}:00"), "%Y-%m-%d-%H:%M").ok()?;
+            DateTime::strptime("%Y-%m-%d-%H:%M", format!("{order}:00")).ok()?;
         }
         let order = order.to_owned();
         Some(Candidate {
@@ -909,8 +916,8 @@ impl ArchiveStore {
                 self.jobs[index] = Some(job);
             }
         }
-        let active_day = active_date(&self.config)?
-            .and_then(|date| NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok());
+        let active_day =
+            active_date(&self.config)?.and_then(|date| Date::strptime("%Y-%m-%d", date).ok());
         let mut candidates = Vec::new();
         for entry in fs::read_dir(&self.directory)? {
             let entry = entry?;
@@ -946,8 +953,8 @@ impl ArchiveStore {
             )?;
             self.jobs[0] = Some(Job::load(&self.directory, path)?);
         }
-        let local: DateTime<Local> = now.into();
-        let mut days = BTreeMap::<NaiveDate, Vec<Candidate>>::new();
+        let local = ZonedDateTime::try_from(now).map_err(io::Error::other)?;
+        let mut days = BTreeMap::<Date, Vec<Candidate>>::new();
         for item in &candidates {
             if item.stage == Stage::Daily {
                 days.entry(item.day).or_default().push(item.clone());
@@ -994,7 +1001,7 @@ impl ArchiveStore {
         for item in &candidates {
             if item.stage == Stage::Monthly {
                 months
-                    .entry(item.day.format("%Y-%m").to_string())
+                    .entry(item.day.strftime("%Y-%m").to_string())
                     .or_default()
                     .push(item.clone());
             }
@@ -1007,11 +1014,11 @@ impl ArchiveStore {
                     || blocked
                         .iter()
                         .filter_map(|name| self.parse(name))
-                        .any(|item| item.day.format("%Y-%m").to_string() == month)
-                    || month >= local.format("%Y-%m").to_string()
-                    || active_day.is_some_and(|day| day.format("%Y-%m").to_string() == month)
+                        .any(|item| item.day.strftime("%Y-%m").to_string() == month)
+                    || month >= local.strftime("%Y-%m").to_string()
+                    || active_day.is_some_and(|day| day.strftime("%Y-%m").to_string() == month)
                     || candidates.iter().any(|item| {
-                        item.day.format("%Y-%m").to_string() == month
+                        item.day.strftime("%Y-%m").to_string() == month
                             && item.stage != Stage::Monthly
                     })
                     || manifests

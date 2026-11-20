@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Timestamp Types (breaking)**: Replaced direct Chrono usage with Jiff.
+  Public runtime snapshots, `TriggerMessage`, and `LogEvent` now use
+  `jiff::Timestamp` instead of `chrono::DateTime<Utc>`. JSON timestamps remain
+  RFC 3339 UTC strings; console timestamps, rotation, and archive dates retain
+  their local-time semantics. The optional cron scheduler still depends on
+  Chrono transitively.
+
 ## [0.1.0-alpha.6] - 2026-11-11
 
 ### Added

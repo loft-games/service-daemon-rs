@@ -11,8 +11,8 @@ use crate::models::{
 };
 #[cfg(feature = "high-priority")]
 use crate::models::{HighPriorityRuntimeShardSnapshot, HighPriorityShardId};
-use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use jiff::Timestamp;
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
@@ -39,11 +39,11 @@ impl From<&ServiceInstanceRecord> for ServiceRuntimeMetadata {
 struct ServiceRuntimeState {
     generation: u64,
     restart_count: u64,
-    last_started_at: Option<DateTime<Utc>>,
-    last_stopped_at: Option<DateTime<Utc>>,
+    last_started_at: Option<Timestamp>,
+    last_stopped_at: Option<Timestamp>,
     last_error: Option<String>,
     current_backoff: Option<Duration>,
-    healthy_since: Option<DateTime<Utc>>,
+    healthy_since: Option<Timestamp>,
     #[cfg(feature = "high-priority")]
     high_priority_shard_id: Option<HighPriorityShardId>,
 }
@@ -84,9 +84,9 @@ impl ServiceRuntimeRecord {
 
 #[derive(Debug, Default)]
 struct TriggerRuntimeTimeline {
-    last_event_at: Option<DateTime<Utc>>,
-    last_success_at: Option<DateTime<Utc>>,
-    last_error_at: Option<DateTime<Utc>>,
+    last_event_at: Option<Timestamp>,
+    last_success_at: Option<Timestamp>,
+    last_error_at: Option<Timestamp>,
     last_error: Option<String>,
     lagged_count: Option<u64>,
     dropped_count: Option<u64>,
@@ -175,32 +175,32 @@ pub(crate) struct TriggerRuntimeFactsHandle {
 impl TriggerRuntimeFactsHandle {
     pub(crate) fn record_dispatched(&self) {
         self.record.dispatched_total.fetch_add(1, Ordering::Relaxed);
-        self.record.timeline.lock().last_event_at = Some(Utc::now());
+        self.record.timeline.lock().last_event_at = Some(Timestamp::now());
     }
 
     pub(crate) fn record_completed(&self) {
         self.record.completed_total.fetch_add(1, Ordering::Relaxed);
-        self.record.timeline.lock().last_success_at = Some(Utc::now());
+        self.record.timeline.lock().last_success_at = Some(Timestamp::now());
     }
 
     pub(crate) fn record_failed(&self, message: impl Into<String>) {
         self.record.failed_total.fetch_add(1, Ordering::Relaxed);
         let mut timeline = self.record.timeline.lock();
-        timeline.last_error_at = Some(Utc::now());
+        timeline.last_error_at = Some(Timestamp::now());
         timeline.last_error = Some(message.into());
     }
 
     pub(crate) fn record_retry(&self, message: impl Into<String>) {
         self.record.retry_total.fetch_add(1, Ordering::Relaxed);
         let mut timeline = self.record.timeline.lock();
-        timeline.last_error_at = Some(Utc::now());
+        timeline.last_error_at = Some(Timestamp::now());
         timeline.last_error = Some(message.into());
     }
 }
 
 pub(crate) struct RuntimeFactsStore {
     daemon_id: DaemonInstanceId,
-    start_time: DateTime<Utc>,
+    start_time: Timestamp,
     start_instant: Instant,
     services: DashMap<ServiceInstanceId, Arc<ServiceRuntimeRecord>>,
     triggers: DashMap<ServiceInstanceId, Arc<TriggerRuntimeRecord>>,
@@ -222,7 +222,7 @@ impl RuntimeFactsStore {
     pub(crate) fn new_for_daemon(daemon_id: DaemonInstanceId) -> Self {
         Self {
             daemon_id,
-            start_time: Utc::now(),
+            start_time: Timestamp::now(),
             start_instant: Instant::now(),
             services: DashMap::new(),
             triggers: DashMap::new(),
@@ -259,7 +259,7 @@ impl RuntimeFactsStore {
             trigger_count: self.triggers.len(),
             #[cfg(feature = "high-priority")]
             high_priority_shards: self.high_priority_shard_snapshots(),
-            generated_at: Utc::now(),
+            generated_at: Timestamp::now(),
         }
     }
 
@@ -306,7 +306,7 @@ impl RuntimeFactsStore {
         };
         let mut state = record.state.lock();
         state.generation = generation;
-        state.last_started_at = Some(Utc::now());
+        state.last_started_at = Some(Timestamp::now());
         state.current_backoff = None;
         state.healthy_since = None;
         record_status_facts(&mut state, status);
@@ -425,17 +425,17 @@ impl RuntimeFactsStore {
 fn record_status_facts(state: &mut ServiceRuntimeState, status: &ServiceStatus) {
     match status {
         ServiceStatus::Healthy => {
-            state.healthy_since.get_or_insert_with(Utc::now);
+            state.healthy_since.get_or_insert_with(Timestamp::now);
             state.current_backoff = None;
         }
         ServiceStatus::Recovering(message) => {
             state.healthy_since = None;
             state.last_error = Some(message.clone());
-            state.last_stopped_at = Some(Utc::now());
+            state.last_stopped_at = Some(Timestamp::now());
         }
         ServiceStatus::Terminated => {
             state.healthy_since = None;
-            state.last_stopped_at = Some(Utc::now());
+            state.last_stopped_at = Some(Timestamp::now());
             state.current_backoff = None;
         }
         ServiceStatus::Initializing | ServiceStatus::Restoring => {
@@ -447,7 +447,7 @@ fn record_status_facts(state: &mut ServiceRuntimeState, status: &ServiceStatus) 
         }
         ServiceStatus::ShuttingDown => {
             state.healthy_since = None;
-            state.last_stopped_at.get_or_insert_with(Utc::now);
+            state.last_stopped_at.get_or_insert_with(Timestamp::now);
         }
     }
 }
@@ -462,7 +462,7 @@ fn readiness_from_services(services: Vec<ServiceRuntimeSnapshot>) -> ReadinessSn
         shutting_down: Vec::new(),
         terminated: Vec::new(),
         recent_errors: Vec::new(),
-        generated_at: Utc::now(),
+        generated_at: Timestamp::now(),
     };
 
     for service in services {
@@ -512,7 +512,7 @@ mod tests {
         let snapshot = |id, workers| HighPriorityRuntimeShardSnapshot {
             shard_id: HighPriorityShardId(id),
             worker_threads: workers,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             active_generations: 0,
             assigned_instances: 0,
             pressure_state: crate::models::HighPriorityShardPressureState::Nominal,

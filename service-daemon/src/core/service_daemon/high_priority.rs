@@ -3,8 +3,8 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use chrono::{DateTime, Utc};
 use dashmap::{DashMap, DashSet};
+use jiff::Timestamp;
 use tokio::runtime::{Handle, Runtime};
 
 use crate::models::policy::HighPriorityRuntimeControl;
@@ -58,7 +58,7 @@ pub(crate) struct HighPriorityPlacementDecision {
 pub(super) struct HighPriorityShardHandle {
     pub shard_id: HighPriorityShardId,
     pub worker_threads: usize,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     pub handle: Handle,
 }
 
@@ -90,7 +90,7 @@ impl HighPriorityRuntimePoolState {
             .push(HighPriorityShardHandle {
                 shard_id: HighPriorityShardId(0),
                 worker_threads: 1,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 handle: Handle::current(),
             });
         state.record_pressure(
@@ -519,7 +519,7 @@ impl HighPriorityRuntimePool {
             .push(HighPriorityShardHandle {
                 shard_id,
                 worker_threads,
-                created_at: Utc::now(),
+                created_at: Timestamp::now(),
                 handle,
             });
         #[cfg(test)]
@@ -735,7 +735,7 @@ mod tests {
         state.shards.write().unwrap().push(HighPriorityShardHandle {
             shard_id: HighPriorityShardId(1),
             worker_threads: 1,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
             handle: Handle::current(),
         });
         state.select_generation(service_id, 1).unwrap();

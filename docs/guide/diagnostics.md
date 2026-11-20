@@ -223,7 +223,9 @@ program owner; external rotation or truncation is not supported.
 
 Console output uses local timestamps, ANSI colors and flattened fields. File
 output serializes the same `LogEvent` as JSON, with UTC timestamps and no ANSI
-codes. Each line has these keys:
+codes. `LogEvent::timestamp` uses `jiff::Timestamp`; its JSON representation
+remains an RFC 3339 UTC string with up to nanosecond precision. Each line has
+these keys:
 
 | Key | JSON shape | Presence |
 | :--- | :--- | :--- |
@@ -336,6 +338,13 @@ identity, declared scheduling, lifecycle status, generation, restart count, and
 recent lifecycle timing/error facts. `ReadinessSnapshot` groups services by
 status and carries recent errors. It does not compute an `is_ready` or degraded
 verdict; applications map the grouped facts to their own readiness contract.
+
+Wall-clock timestamps in runtime snapshots and `TriggerMessage` use
+`jiff::Timestamp`. When migrating from `chrono::DateTime<Utc>`, update explicit
+type annotations and use `jiff::Timestamp::now()` to capture the current instant.
+For local calendar access, convert a timestamp with
+`to_zoned_datetime(jiff::tz::TimeZone::system())`. Uptime and elapsed durations
+continue to use `std::time::Duration`.
 
 Trigger handlers can read self-scoped pressure without receiving a daemon-wide handle:
 

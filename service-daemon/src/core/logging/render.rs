@@ -53,8 +53,8 @@ pub(super) fn render_to_buf(event: &LogEvent, buf: &mut String) {
         "{} {}{:<5}{} [{}] {}",
         event
             .timestamp
-            .with_timezone(&chrono::Local)
-            .format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
+            .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z"),
         color,
         event.level.as_str(),
         reset,
@@ -118,10 +118,7 @@ pub(super) fn format_event_json(event: &LogEvent) -> String {
     serde_json::to_string(event).unwrap_or_else(|_| {
         format!(
             r#"{{"level":"{}","time":"{}","target":"{}","msg":"{}"}}"#,
-            event.level,
-            event.timestamp.to_rfc3339(),
-            event.target,
-            event.message
+            event.level, event.timestamp, event.target, event.message
         )
     })
 }

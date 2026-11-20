@@ -42,8 +42,8 @@
 //! users can write `#[trigger(Notify(MySignal))]` instead of
 //! `#[trigger(SignalHost(MySignal))]`.
 
-use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
+use jiff::Timestamp;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
@@ -111,7 +111,7 @@ pub struct TriggerMessage<P> {
     /// The `ServiceInstanceId` of the service that published this message.
     pub source_service_instance_id: ServiceInstanceId,
     /// Timestamp when the message was created.
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     /// The business payload carried by this message.
     ///
     /// Wrapped in `Arc` at the framework level so that the retry host
@@ -448,7 +448,7 @@ mod tests {
         let message = TriggerMessage {
             message_id: Uuid::now_v7(),
             source_service_instance_id: ServiceInstanceId::new(uuid::Uuid::from_u128(7)),
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             payload: Arc::new("payload"),
         };
 

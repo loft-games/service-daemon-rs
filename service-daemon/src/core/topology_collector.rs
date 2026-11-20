@@ -206,7 +206,7 @@ pub(crate) fn record_topology_edge_for_test(source: ServiceInstanceId, target: S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use std::borrow::Cow;
     use uuid::Uuid;
 
@@ -218,7 +218,7 @@ mod tests {
 
         // Event with both service_instance_id and source_service_instance_id
         let event = LogEvent {
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             level: LogLevel::Info,
             target: Cow::Borrowed("test"),
             message: "trigger fired".to_string(),

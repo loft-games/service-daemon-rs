@@ -3,7 +3,10 @@ use super::{
     archive::rotated_log_name,
     file_config::{FileLogConfig, RotationPolicy},
 };
-use chrono::{DateTime, Local, Timelike};
+use jiff::{
+    ZonedDateTime,
+    civil::{Date, DateTime},
+};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -105,8 +108,8 @@ impl ActiveState {
     fn validate(&self) -> io::Result<()> {
         if self.id.is_empty()
             || self.sequence == 0
-            || chrono::NaiveDate::parse_from_str(&self.date, "%Y-%m-%d").is_err()
-            || chrono::NaiveDateTime::parse_from_str(&self.stamp, "%Y-%m-%d-%H-%M-%S").is_err()
+            || Date::strptime("%Y-%m-%d", &self.date).is_err()
+            || DateTime::strptime("%Y-%m-%d-%H-%M-%S", &self.stamp).is_err()
             || self.pending.is_some() != self.next.is_some()
             || self.pending.as_ref().is_some_and(|name| {
                 name.is_empty()
@@ -125,7 +128,7 @@ impl ActiveState {
         Ok(())
     }
     fn new(config: &FileLogConfig, now: SystemTime) -> io::Result<Self> {
-        let local: DateTime<Local> = now.into();
+        let local = ZonedDateTime::try_from(now).map_err(io::Error::other)?;
         let deadline = match config.rotation {
             RotationPolicy::Interval(base) => Some(
                 now.checked_add(sampled_interval(base, config.rotation_jitter))
@@ -138,8 +141,8 @@ impl ActiveState {
             sequence: 1,
             started: now,
             deadline,
-            date: local.format("%Y-%m-%d").to_string(),
-            stamp: local.format("%Y-%m-%d-%H-%M-%S").to_string(),
+            date: local.strftime("%Y-%m-%d").to_string(),
+            stamp: local.strftime("%Y-%m-%d-%H-%M-%S").to_string(),
             pending: None,
             next: None,
         })
@@ -219,7 +222,7 @@ impl RotatingFileWriter {
             rollback: None,
             state_dirty: false,
         };
-        if writer.time_due(now) && bytes > 0 {
+        if writer.time_due(now)? && bytes > 0 {
             writer.rotate(now)?;
         }
         Ok(writer)
@@ -244,21 +247,22 @@ impl RotatingFileWriter {
                     .min(maximum)
         })
     }
-    fn time_due(&self, now: SystemTime) -> bool {
-        match self.config.rotation {
+    fn time_due(&self, now: SystemTime) -> io::Result<bool> {
+        Ok(match self.config.rotation {
             RotationPolicy::Never => false,
             RotationPolicy::Interval(_) => {
                 self.deadline.is_some_and(|value| Instant::now() >= value)
             }
             policy => {
-                let current: DateTime<Local> = now.into();
-                let initial: DateTime<Local> = self.state.started.into();
-                current.date_naive() > initial.date_naive()
+                let current = ZonedDateTime::try_from(now).map_err(io::Error::other)?;
+                let initial =
+                    ZonedDateTime::try_from(self.state.started).map_err(io::Error::other)?;
+                current.date() > initial.date()
                     || (policy == RotationPolicy::Hourly
-                        && current.date_naive() == initial.date_naive()
+                        && current.date() == initial.date()
                         && current.hour() > initial.hour())
             }
-        }
+        })
     }
     fn target(&self) -> io::Result<(PathBuf, u64)> {
         let directory = Path::new(&self.config.directory);
@@ -383,7 +387,7 @@ impl RotatingFileWriter {
             .is_some_and(|limit| self.bytes.saturating_add(buffer.len() as u64) > limit);
         if self.config.rotation != RotationPolicy::Never
             && self.bytes > 0
-            && (self.time_due(now) || size_due)
+            && (self.time_due(now)? || size_due)
         {
             // A failed rotation must never append to an archived or missing handle.
             if let Err(error) = self.rotate(now) {
@@ -659,9 +663,13 @@ mod tests {
     fn interval_uses_monotonic_time_and_bounds_clock_changes_on_restart() {
         let config = config();
         let mut writer = writer(&config);
-        assert!(!writer.time_due(SystemTime::now() + Duration::from_secs(365 * 86400)));
+        assert!(
+            !writer
+                .time_due(SystemTime::now() + Duration::from_secs(365 * 86400))
+                .unwrap()
+        );
         writer.deadline = Some(Instant::now() - Duration::from_secs(1));
-        assert!(writer.time_due(SystemTime::UNIX_EPOCH));
+        assert!(writer.time_due(SystemTime::UNIX_EPOCH).unwrap());
         let restored =
             RotatingFileWriter::monotonic_deadline(&config, &writer.state, SystemTime::UNIX_EPOCH)
                 .unwrap();
@@ -823,13 +831,13 @@ mod tests {
 
     #[test]
     fn interval_fragment_keeps_its_starting_local_date_across_midnight() {
-        use chrono::TimeZone;
         let config = config();
-        let start: SystemTime = Local
-            .with_ymd_and_hms(2020, 1, 1, 23, 59, 0)
-            .earliest()
+        let start: SystemTime = jiff::civil::date(2020, 1, 1)
+            .at(23, 59, 0, 0)
+            .to_zoned_datetime(jiff::tz::TimeZone::system())
             .unwrap()
-            .into();
+            .try_into()
+            .unwrap();
         let mut writer = RotatingFileWriter::new(
             &config,
             Arc::new(Mutex::new(None)),

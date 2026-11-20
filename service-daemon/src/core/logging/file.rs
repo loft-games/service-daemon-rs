@@ -482,7 +482,7 @@ mod tests {
     #[tokio::test]
     async fn full_wakeup_queue_preserves_sources_and_shutdown_rescans() {
         let (directory, config) = fixture();
-        let stamp = chrono::Local::now().format("%Y-%m-%d-%H-%M-%S");
+        let stamp = jiff::ZonedDateTime::now().strftime("%Y-%m-%d-%H-%M-%S");
         let name = format!("latest.segment.{stamp}.1.log");
         fs::write(directory.path().join(&name), b"closed\n").unwrap();
         fs::write(directory.path().join("latest.log"), b"active\n").unwrap();

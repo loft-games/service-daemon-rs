@@ -7,7 +7,7 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use uuid::Uuid;
 
 use super::service::{ServiceInstanceId, ServiceScheduling, ServiceStatus};
@@ -94,7 +94,7 @@ pub struct HighPriorityRuntimeShardSnapshot {
     /// Tokio worker threads owned by this shard.
     pub worker_threads: usize,
     /// Wall-clock creation time.
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// Currently running service generations assigned to this shard.
     pub active_generations: usize,
     /// Service instances last assigned to this shard.
@@ -110,7 +110,7 @@ pub struct DaemonRuntimeSnapshot {
     /// Stable identifier for this daemon resource instance.
     pub daemon_id: DaemonInstanceId,
     /// Creation time of the daemon resources.
-    pub start_time: DateTime<Utc>,
+    pub start_time: Timestamp,
     /// Monotonic elapsed time since creation.
     pub uptime: Duration,
     /// Whether daemon shutdown has been requested.
@@ -123,7 +123,7 @@ pub struct DaemonRuntimeSnapshot {
     #[cfg(feature = "high-priority")]
     pub high_priority_shards: Vec<HighPriorityRuntimeShardSnapshot>,
     /// Snapshot generation time.
-    pub generated_at: DateTime<Utc>,
+    pub generated_at: Timestamp,
 }
 
 /// Runtime facts for one managed service.
@@ -145,11 +145,11 @@ pub struct ServiceRuntimeSnapshot {
     /// Restarts scheduled after generation exits.
     pub restart_count: u64,
     /// Lifecycle timeline for the latest observed generation.
-    pub last_started_at: Option<DateTime<Utc>>,
-    pub last_stopped_at: Option<DateTime<Utc>>,
+    pub last_started_at: Option<Timestamp>,
+    pub last_stopped_at: Option<Timestamp>,
     pub last_error: Option<String>,
     pub current_backoff: Option<Duration>,
-    pub healthy_since: Option<DateTime<Utc>>,
+    pub healthy_since: Option<Timestamp>,
 }
 
 /// Error summary carried by a facts-only readiness snapshot.
@@ -188,7 +188,7 @@ pub struct ReadinessSnapshot {
     /// Recent daemon-observed service error summaries.
     pub recent_errors: Vec<ReadinessServiceError>,
     /// Wall-clock time when this snapshot was generated.
-    pub generated_at: DateTime<Utc>,
+    pub generated_at: Timestamp,
 }
 
 /// Pressure and dispatch facts for one trigger service.
@@ -211,9 +211,9 @@ pub struct TriggerPressureSnapshot {
     pub failed_total: u64,
     pub retry_total: u64,
     /// Recent dispatch timeline.
-    pub last_event_at: Option<DateTime<Utc>>,
-    pub last_success_at: Option<DateTime<Utc>>,
-    pub last_error_at: Option<DateTime<Utc>>,
+    pub last_event_at: Option<Timestamp>,
+    pub last_success_at: Option<Timestamp>,
+    pub last_error_at: Option<Timestamp>,
     pub last_error: Option<String>,
     /// Optional streaming pressure counters, when the host can report them.
     pub lagged_count: Option<u64>,

@@ -1,6 +1,6 @@
 use anyhow::Error;
-use chrono::Utc;
 use futures::future::BoxFuture;
+use jiff::Timestamp;
 use tracing::{Instrument, info, warn};
 
 use crate::core::context;
@@ -199,7 +199,7 @@ impl<P: Send + Sync + 'static> TriggerInterceptor<P> for RetryInterceptor {
                     TriggerMessage {
                         message_id,
                         source_service_instance_id,
-                        timestamp: Utc::now(),
+                        timestamp: Timestamp::now(),
                         payload: payload.clone(),
                     },
                 );
